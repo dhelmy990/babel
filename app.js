@@ -332,6 +332,201 @@ function cleanGraphOnLoad() {
     }
 }
 
+// ============================================
+// EDGE ANIMATION (Gradient Flash)
+// ============================================
+
+const edgeAnimationState = {
+    startTime: Date.now(),
+    cycleDuration: 2000 // 2 seconds
+};
+
+function updateEdgeAnimation(obj, start, end, link) {
+    // Clear previous children
+    while (obj.children.length > 0) {
+        obj.remove(obj.children[0]);
+    }
+
+    // Calculate edge vector
+    const startVec = new THREE.Vector3(start.x, start.y, start.z);
+    const endVec = new THREE.Vector3(end.x, end.y, end.z);
+    const edgeVec = endVec.clone().sub(startVec);
+    const edgeLength = edgeVec.length();
+
+    if (edgeLength < 0.1) return; // Skip very short edges
+
+    // Get node colors for gradient
+    const sourceNode = state.babels.find(b => b.id === (link.source.id || link.source));
+    const targetNode = state.babels.find(b => b.id === (link.target.id || link.target));
+    const sourceColor = new THREE.Color(sourceNode?.color || '#666666');
+    const targetColor = new THREE.Color(targetNode?.color || '#666666');
+
+    // Create dim base line
+    const baseGeometry = new THREE.BufferGeometry().setFromPoints([startVec, endVec]);
+    const baseMaterial = new THREE.LineBasicMaterial({
+        color: 0x444444,
+        transparent: true,
+        opacity: 0.4
+    });
+    const baseLine = new THREE.Line(baseGeometry, baseMaterial);
+    obj.add(baseLine);
+
+    // Calculate flash position (0 to 1 along the edge)
+    const elapsed = (Date.now() - edgeAnimationState.startTime) % edgeAnimationState.cycleDuration;
+    const flashProgress = elapsed / edgeAnimationState.cycleDuration;
+
+    // Create gradient flash segments
+    const flashLength = 0.3; // Flash covers 30% of edge length
+    const flashStart = flashProgress - flashLength / 2;
+    const flashEnd = flashProgress + flashLength / 2;
+
+    // Only draw flash if it's on the edge (0 to 1)
+    if (flashEnd > 0 && flashStart < 1) {
+        const clampedStart = Math.max(0, flashStart);
+        const clampedEnd = Math.min(1, flashEnd);
+
+        const numSegments = 10;
+        const positions = [];
+        const colors = [];
+
+        for (let i = 0; i <= numSegments; i++) {
+            const t = clampedStart + (clampedEnd - clampedStart) * (i / numSegments);
+            const pos = startVec.clone().lerp(endVec, t);
+            positions.push(pos.x, pos.y, pos.z);
+
+            // Interpolate color along the whole edge, not just flash
+            const colorT = t;
+            const color = sourceColor.clone().lerp(targetColor, colorT);
+
+            // Fade alpha at edges of flash
+            const flashLocalT = (t - clampedStart) / (clampedEnd - clampedStart);
+            const alpha = Math.sin(flashLocalT * Math.PI); // Smooth fade
+
+            colors.push(color.r, color.g, color.b);
+        }
+
+        const flashGeometry = new THREE.BufferGeometry();
+        flashGeometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+        flashGeometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+
+        const flashMaterial = new THREE.LineBasicMaterial({
+            vertexColors: true,
+            transparent: true,
+            opacity: 0.9,
+            linewidth: 2
+        });
+
+        const flashLine = new THREE.Line(flashGeometry, flashMaterial);
+        obj.add(flashLine);
+    }
+}
+
+
+// ============================================
+// LEVEL CIRCLES (DAG Hierarchy Visualization)
+// ============================================
+
+let levelCirclesGroup = null;
+
+function updateLevelCircles() {
+    const scene = Graph.scene();
+
+    // Remove old circles
+    if (levelCirclesGroup) {
+        scene.remove(levelCirclesGroup);
+    }
+
+    levelCirclesGroup = new THREE.Group();
+    levelCirclesGroup.name = 'levelCircles';
+
+    // Get current node positions from the graph
+    const graphData = Graph.graphData();
+    if (!graphData.nodes || graphData.nodes.length === 0) return;
+
+    // Group nodes by Y level (DAG rank)
+    const levelMap = new Map();
+    const tolerance = 5; // Y positions within this range are same level
+
+    graphData.nodes.forEach(node => {
+        if (node.y === undefined) return;
+
+        // Find existing level or create new one
+        let foundLevel = null;
+        for (const [levelY, nodes] of levelMap) {
+            if (Math.abs(node.y - levelY) < tolerance) {
+                foundLevel = levelY;
+                break;
+            }
+        }
+
+        if (foundLevel !== null) {
+            levelMap.get(foundLevel).push(node);
+        } else {
+            levelMap.set(node.y, [node]);
+        }
+    });
+
+    // Draw a circle for each level
+    levelMap.forEach((nodes, levelY) => {
+        if (nodes.length < 1) return;
+
+        // Calculate center and radius of the circle
+        let centerX = 0, centerZ = 0;
+        let maxDist = 0;
+
+        nodes.forEach(node => {
+            centerX += node.x || 0;
+            centerZ += node.z || 0;
+        });
+        centerX /= nodes.length;
+        centerZ /= nodes.length;
+
+        // Find max distance from center (radius)
+        nodes.forEach(node => {
+            const dist = Math.sqrt(
+                Math.pow((node.x || 0) - centerX, 2) +
+                Math.pow((node.z || 0) - centerZ, 2)
+            );
+            maxDist = Math.max(maxDist, dist);
+        });
+
+        // Add padding to radius
+        const radius = Math.max(maxDist + 15, 20);
+
+        // Create dashed circle
+        const segments = 64;
+        const circleGeometry = new THREE.BufferGeometry();
+        const positions = [];
+
+        for (let i = 0; i <= segments; i++) {
+            const theta = (i / segments) * Math.PI * 2;
+            positions.push(
+                centerX + Math.cos(theta) * radius,
+                levelY,
+                centerZ + Math.sin(theta) * radius
+            );
+        }
+
+        circleGeometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+
+        // Dashed line material
+        const circleMaterial = new THREE.LineDashedMaterial({
+            color: 0xffffff,
+            transparent: true,
+            opacity: 0.2,
+            dashSize: 3,
+            gapSize: 2
+        });
+
+        const circle = new THREE.Line(circleGeometry, circleMaterial);
+        circle.computeLineDistances(); // Required for dashed lines
+
+        levelCirclesGroup.add(circle);
+    });
+
+    scene.add(levelCirclesGroup);
+}
+
 // App state
 const state = {
     babels: [],
@@ -367,7 +562,6 @@ const Graph = ForceGraph3D()(graphContainer)
     .backgroundColor('#0a0a0a')
     .nodeThreeObject(node => {
         const group = new THREE.Group();
-
         // Determine color based on state
         let color = node.color || '#1a5276';
         if (state.deleteWarningBabel && state.deleteWarningBabel.id === node.id) {
@@ -420,11 +614,19 @@ const Graph = ForceGraph3D()(graphContainer)
         return group;
     })
     .nodeLabel(node => node.title || 'Untitled')
-    .linkWidth(link => link.isMutual ? 3 : 1)
-    .linkColor(link => link.isMutual ? '#ffffff' : '#666666')
-    .linkDirectionalParticles(link => link.isMutual ? 0 : 4)
-    .linkDirectionalParticleSpeed(0.005)
-    .linkDirectionalParticleWidth(2)
+    .linkWidth(0) // We'll use custom link objects
+    .linkColor(() => 'rgba(0,0,0,0)') // Hide default links
+    .linkThreeObjectExtend(true)
+    .linkThreeObject(link => {
+        // Create custom animated gradient edge
+        const group = new THREE.Group();
+        group.userData.link = link;
+        return group;
+    })
+    .linkPositionUpdate((obj, { start, end }, link) => {
+        // Update the custom edge with gradient flash animation
+        updateEdgeAnimation(obj, start, end, link);
+    })
     .onNodeClick(handleNodeClick)
     .onNodeRightClick(handleNodeRightClick)
     .onBackgroundClick(handleBackgroundClick)
@@ -434,19 +636,62 @@ const Graph = ForceGraph3D()(graphContainer)
         console.log('Background right-clicked - preserving comparison state');
     })
     .enableNodeDrag(true)
+    .onNodeDrag((node, translate) => {
+        // Store original Y position when drag starts
+        if (node.__originalY === undefined) {
+            node.__originalY = node.y;
+        }
+        // During drag, keep node fixed at drag position
+        node.fx = node.x;
+        node.fy = node.y;
+        node.fz = node.z;
+    })
     .onNodeDragEnd(node => {
-        // Release node back to physics
+        const originalY = node.__originalY;
+        node.__originalY = undefined; // Clear for next drag
+
+        // Release X and Z immediately
         node.fx = undefined;
-        node.fy = undefined;
         node.fz = undefined;
+
+        // Keep Y fixed at current position temporarily
+        node.fy = node.y;
+
+        // Smoothly return to original Y position
+        if (originalY !== undefined) {
+            // Animate back to original Y over time
+            const startY = node.y;
+            const startTime = Date.now();
+            const duration = 500; // 500ms to return
+
+            function animateReturn() {
+                const elapsed = Date.now() - startTime;
+                const progress = Math.min(elapsed / duration, 1);
+                // Ease-out curve
+                const eased = 1 - Math.pow(1 - progress, 3);
+
+                node.fy = startY + (originalY - startY) * eased;
+
+                if (progress < 1) {
+                    requestAnimationFrame(animateReturn);
+                }
+            }
+            requestAnimationFrame(animateReturn);
+        }
     })
     .dagMode('bu')
-    .dagLevelDistance(20)
-    .linkDirectionalArrowLength(link => link.isMutual ? 0 : 3.5)
-    .linkDirectionalArrowRelPos(1)
+    .dagLevelDistance(40)
+    .d3AlphaDecay(0.05) // Faster cooldown to prevent flying
+    .d3VelocityDecay(0.4) // More friction/damping
+    .d3Force('charge', d3.forceManyBody().strength(-30).distanceMax(100)) // Weaker repulsion
+    .d3Force('link', d3.forceLink().strength(0.2)) // Gentler link force
     .onDagError(() => {
         // DAG layout failed (likely due to cycles), fall back gracefully
         console.warn('DAG layout error - graph may have cycles');
+    })
+    .onEngineStop(() => {
+        // DAG layout complete, draw level circles
+        updateLevelCircles();
     });
 
 // ============================================
@@ -461,6 +706,44 @@ function init() {
     setupEventListeners();
     updateGraph();
     updateHintText();
+    startEdgeAnimationLoop();
+}
+
+// Continuous animation loop for edge flash effects
+function startEdgeAnimationLoop() {
+    let lastCircleUpdate = 0;
+    const circleUpdateInterval = 2000; // Update circles every 2 seconds
+
+    function animate(timestamp) {
+        requestAnimationFrame(animate);
+
+        // Update every frame for smooth animation
+        const scene = Graph.scene();
+        if (!scene) return;
+
+        // Find and update all edge groups
+        scene.traverse(obj => {
+            if (obj.userData && obj.userData.link) {
+                const link = obj.userData.link;
+                // Get current positions from the link's source and target nodes
+                const source = link.source;
+                const target = link.target;
+
+                if (source && target && source.x !== undefined && target.x !== undefined) {
+                    const start = { x: source.x, y: source.y, z: source.z };
+                    const end = { x: target.x, y: target.y, z: target.z };
+                    updateEdgeAnimation(obj, start, end, link);
+                }
+            }
+        });
+
+        // Periodically update level circles to track node movement
+        if (timestamp - lastCircleUpdate > circleUpdateInterval) {
+            updateLevelCircles();
+            lastCircleUpdate = timestamp;
+        }
+    }
+    requestAnimationFrame(animate);
 }
 
 function setupLighting() {
@@ -805,6 +1088,10 @@ function updateGraph() {
 
     console.log('Updating graph - nodes:', graphData.nodes.length, 'links:', graphData.links.length);
     Graph.graphData(graphData);
+
+    // Update level circles quickly (don't wait for physics to settle)
+    setTimeout(updateLevelCircles, 500);
+    setTimeout(updateLevelCircles, 1500);
 }
 
 function updateHintText() {
