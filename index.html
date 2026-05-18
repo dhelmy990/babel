@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Babel - Knowledge Graph</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div id="graph-container"></div>
+
+    <!-- Hint text for empty state -->
+    <div id="hint-text">Hold R to create your first babel</div>
+
+    <!-- Creation animation overlay -->
+    <div id="creation-overlay">
+        <div id="creation-circle"></div>
+    </div>
+
+    <!-- Creation form -->
+    <div id="creation-form" class="form-panel">
+        <h2>New Babel</h2>
+        <div class="form-group">
+            <label for="babel-title">Title</label>
+            <input type="text" id="babel-title" placeholder="Enter title...">
+        </div>
+        <div class="form-group">
+            <label for="babel-description">Description</label>
+            <textarea id="babel-description" rows="4" placeholder="Enter description..."></textarea>
+        </div>
+        <div class="form-group">
+            <label>Color</label>
+            <div id="color-palette" class="color-palette"></div>
+        </div>
+        <div class="form-group">
+            <label>Similar Babels</label>
+            <div id="similar-babels" class="babel-chips"></div>
+        </div>
+        <div class="form-actions">
+            <button id="create-babel-btn" class="btn-primary">Create</button>
+            <button id="cancel-create-btn" class="btn-secondary">Cancel</button>
+        </div>
+    </div>
+
+    <!-- Comparison/Edit mode overlay -->
+    <div id="comparison-overlay">
+        <div id="comparison-blur"></div>
+        <div id="comparison-content">
+            <div id="babel-panel-left" class="babel-panel">
+                <div class="babel-sphere"></div>
+                <div class="babel-core">
+                    <input type="text" class="babel-edit-title" placeholder="Title">
+                    <textarea class="babel-edit-description" rows="3" placeholder="Description"></textarea>
+                </div>
+            </div>
+            <div id="edge-indicator">
+                <div class="edge-arrow left-to-right"></div>
+                <div class="edge-arrow right-to-left"></div>
+            </div>
+            <div id="babel-panel-right" class="babel-panel">
+                <div class="babel-sphere"></div>
+                <div class="babel-core">
+                    <input type="text" class="babel-edit-title" placeholder="Title">
+                    <textarea class="babel-edit-description" rows="3" placeholder="Description"></textarea>
+                </div>
+            </div>
+        </div>
+        <button id="comparison-done-btn" class="btn-primary">Done</button>
+    </div>
+
+    <!-- Edit mode overlay (single babel) -->
+    <div id="edit-overlay">
+        <div id="edit-blur"></div>
+        <div id="edit-content">
+            <div id="edit-babel-panel" class="babel-panel">
+                <div class="babel-sphere"></div>
+                <div class="babel-core">
+                    <input type="text" id="edit-title" class="babel-edit-title" placeholder="Title">
+                    <textarea id="edit-description" class="babel-edit-description" rows="3" placeholder="Description"></textarea>
+                    <div class="form-group">
+                        <label>Color</label>
+                        <div id="edit-color-palette" class="color-palette"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <button id="edit-done-btn" class="btn-primary">Done</button>
+    </div>
+
+    <!-- Save toast -->
+    <div id="save-toast">Saved</div>
+
+    <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+    <script src="https://unpkg.com/d3@7"></script>
+    <script src="https://unpkg.com/3d-force-graph@1.73.0/dist/3d-force-graph.min.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
