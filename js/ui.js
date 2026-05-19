@@ -22,6 +22,7 @@ const UI = {
         renderer: null,
         sphere: null,
         innerSphere: null,
+        texture: null,
         animationId: null
     },
 
@@ -53,7 +54,6 @@ const UI = {
             editColorPalette: document.getElementById('edit-color-palette'),
             editHelpBtn: document.getElementById('edit-help-btn'),
             editShortcutsPopup: document.getElementById('edit-shortcuts-popup'),
-            editSaveIndicator: document.getElementById('edit-save-indicator'),
             editBabel3d: document.getElementById('edit-babel-3d')
         };
     },
@@ -103,6 +103,9 @@ const UI = {
 
     /**
      * Initialize 3D babel preview with wedge cutout
+     * - Wedge stays fixed facing camera
+     * - Texture rotates to simulate planet rotation
+     * - Visible interior (not black void)
      */
     initPreview(color) {
         const container = this.elements.editBabel3d;
@@ -111,16 +114,16 @@ const UI = {
         // Clean up existing preview
         this.cleanupPreview();
 
-        const width = container.clientWidth || 250;
-        const height = container.clientHeight || 250;
+        const width = container.clientWidth || 400;
+        const height = container.clientHeight || 400;
 
         // Create scene
         this.preview.scene = new THREE.Scene();
-        this.preview.scene.background = new THREE.Color(0x111111);
+        this.preview.scene.background = new THREE.Color(0x0a0a0a);
 
         // Create camera
         this.preview.camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000);
-        this.preview.camera.position.z = 12;
+        this.preview.camera.position.z = 10;
 
         // Create renderer
         this.preview.renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -129,9 +132,11 @@ const UI = {
         container.innerHTML = '';
         container.appendChild(this.preview.renderer.domElement);
 
-        // Create outer sphere with wedge cutout using custom geometry
-        const outerGeometry = this.createWedgeSphereGeometry(4, 64, Math.PI * 0.25);
+        // Create outer sphere with wedge cutout - geometry stays FIXED
+        const outerGeometry = this.createWedgeSphereGeometry(4, 64, Math.PI * 0.35);
         const texture = Rendering.createPlanetTexture(color);
+        texture.wrapS = THREE.RepeatWrapping;
+        texture.wrapT = THREE.RepeatWrapping;
         const outerMaterial = new THREE.MeshStandardMaterial({
             map: texture,
             side: THREE.DoubleSide
@@ -139,26 +144,35 @@ const UI = {
         this.preview.sphere = new THREE.Mesh(outerGeometry, outerMaterial);
         this.preview.scene.add(this.preview.sphere);
 
-        // Create inner dark sphere (hollow interior visible through wedge)
-        const innerGeometry = new THREE.SphereGeometry(3.9, 64, 64);
-        const innerMaterial = new THREE.MeshBasicMaterial({
-            color: 0x050505,
-            side: THREE.BackSide
+        // Create inner sphere for visible hollow interior (dark grey, not black)
+        const innerGeometry = new THREE.SphereGeometry(3.85, 64, 64);
+        const innerMaterial = new THREE.MeshStandardMaterial({
+            color: 0x1a1a1a,
+            side: THREE.BackSide,
+            roughness: 0.9
         });
         this.preview.innerSphere = new THREE.Mesh(innerGeometry, innerMaterial);
         this.preview.scene.add(this.preview.innerSphere);
 
-        // Add lighting
-        const ambientLight = new THREE.AmbientLight(0x404040, 0.8);
+        // Add lighting - brighter to illuminate interior
+        const ambientLight = new THREE.AmbientLight(0x606060, 1.0);
         this.preview.scene.add(ambientLight);
 
-        const mainLight = new THREE.DirectionalLight(0xffffff, 1.2);
+        const mainLight = new THREE.DirectionalLight(0xffffff, 1.0);
         mainLight.position.set(5, 5, 5);
         this.preview.scene.add(mainLight);
 
-        const fillLight = new THREE.DirectionalLight(0x6688cc, 0.4);
+        const fillLight = new THREE.DirectionalLight(0x6688cc, 0.5);
         fillLight.position.set(-5, -3, -5);
         this.preview.scene.add(fillLight);
+
+        // Interior point light to illuminate the hollow
+        const interiorLight = new THREE.PointLight(0x444444, 0.8, 10);
+        interiorLight.position.set(0, 0, 0);
+        this.preview.scene.add(interiorLight);
+
+        // Store texture reference for rotation animation
+        this.preview.texture = texture;
 
         // Start animation loop
         this.animatePreview();
@@ -208,14 +222,21 @@ const UI = {
     updatePreviewColor(color) {
         if (!this.preview.sphere) return;
 
-        // Create new texture with new color
+        // Create new texture with new color, preserve rotation settings
         const texture = Rendering.createPlanetTexture(color);
+        texture.wrapS = THREE.RepeatWrapping;
+        texture.wrapT = THREE.RepeatWrapping;
+        // Copy current offset from old texture
+        if (this.preview.texture) {
+            texture.offset.copy(this.preview.texture.offset);
+        }
         this.preview.sphere.material.map = texture;
         this.preview.sphere.material.needsUpdate = true;
+        this.preview.texture = texture;
     },
 
     /**
-     * Animate the preview (auto-rotate)
+     * Animate the preview (texture rotation - geometry stays fixed)
      */
     animatePreview() {
         if (!this.preview.renderer || !this.preview.scene || !this.preview.camera) return;
@@ -223,12 +244,9 @@ const UI = {
         const animate = () => {
             this.preview.animationId = requestAnimationFrame(animate);
 
-            // Slow auto-rotation
-            if (this.preview.sphere) {
-                this.preview.sphere.rotation.y += 0.005;
-            }
-            if (this.preview.innerSphere) {
-                this.preview.innerSphere.rotation.y += 0.005;
+            // Rotate texture offset instead of geometry (wedge stays facing camera)
+            if (this.preview.texture) {
+                this.preview.texture.offset.x += 0.001;
             }
 
             this.preview.renderer.render(this.preview.scene, this.preview.camera);
@@ -263,9 +281,17 @@ const UI = {
             this.preview.innerSphere = null;
         }
 
+        if (this.preview.texture) {
+            this.preview.texture.dispose();
+            this.preview.texture = null;
+        }
+
         this.preview.scene = null;
         this.preview.camera = null;
     },
+
+    // Track if Quill blots have been registered
+    blotsRegistered: false,
 
     /**
      * Initialize Quill editor with custom keyboard shortcuts
@@ -275,8 +301,17 @@ const UI = {
             return; // Already initialized
         }
 
-        // Register custom highlight format
         const Inline = Quill.import('blots/inline');
+        const Embed = Quill.import('blots/embed');
+
+        // Only register blots once
+        if (this.blotsRegistered) {
+            this.createQuillInstance();
+            return;
+        }
+        this.blotsRegistered = true;
+
+        // Register custom highlight format
         class HighlightBlot extends Inline {
             static create() {
                 const node = super.create();
@@ -288,6 +323,67 @@ const UI = {
         HighlightBlot.tagName = 'mark';
         Quill.register(HighlightBlot);
 
+        // YouTube embed blot - inline pill
+        class YouTubeBlot extends Embed {
+            static create(value) {
+                const node = super.create();
+                node.setAttribute('data-url', value.url);
+                node.setAttribute('contenteditable', 'false');
+                node.innerHTML = `<span class="youtube-embed-icon">▶</span><span class="youtube-embed-label">YouTube</span>`;
+                node.onclick = () => {
+                    navigator.clipboard.writeText(value.url);
+                    node.style.borderColor = '#4a9eff';
+                    setTimeout(() => { node.style.borderColor = ''; }, 500);
+                };
+                return node;
+            }
+            static value(node) {
+                return { url: node.getAttribute('data-url') };
+            }
+        }
+        YouTubeBlot.blotName = 'youtube';
+        YouTubeBlot.tagName = 'span';
+        YouTubeBlot.className = 'youtube-embed';
+        Quill.register(YouTubeBlot);
+
+        // PDF embed blot - inline pill
+        class PDFBlot extends Embed {
+            static create(value) {
+                const node = super.create();
+                node.setAttribute('data-url', value.url);
+                node.setAttribute('data-filename', value.filename);
+                node.setAttribute('contenteditable', 'false');
+                const shortName = value.filename.length > 15
+                    ? value.filename.substring(0, 12) + '...' + value.filename.slice(-4)
+                    : value.filename;
+                node.innerHTML = `<span class="pdf-embed-icon">PDF</span><span class="pdf-embed-label">${shortName}</span>`;
+                node.onclick = () => {
+                    if (value.url) {
+                        window.open(value.url, '_blank');
+                    }
+                };
+                return node;
+            }
+            static value(node) {
+                return {
+                    url: node.getAttribute('data-url'),
+                    filename: node.getAttribute('data-filename')
+                };
+            }
+        }
+        PDFBlot.blotName = 'pdf';
+        PDFBlot.tagName = 'span';
+        PDFBlot.className = 'pdf-embed';
+        Quill.register(PDFBlot);
+
+        // Create the Quill instance
+        this.createQuillInstance();
+    },
+
+    /**
+     * Create Quill instance and set up event handlers
+     */
+    createQuillInstance() {
         this.editor = new Quill('#edit-editor', {
             theme: 'snow',
             placeholder: 'Start writing...',
@@ -445,75 +541,30 @@ const UI = {
     },
 
     /**
-     * Embed YouTube video as a card
+     * Embed YouTube video as inline pill
      */
     embedYouTube(url) {
         const videoId = this.getYouTubeID(url);
         if (!videoId) return;
 
-        const thumbnailUrl = `https://img.youtube.com/vi/${videoId}/mqdefault.jpg`;
-
-        // Insert custom embed HTML
+        // Insert using Quill's embed API (click handler is in the blot)
         const range = this.editor.getSelection(true);
-        const embedHtml = `
-            <div class="youtube-embed" data-url="${url}" contenteditable="false">
-                <img class="youtube-embed-thumbnail" src="${thumbnailUrl}" alt="Video thumbnail">
-                <div class="youtube-embed-info">
-                    <div class="youtube-embed-title">YouTube Video</div>
-                    <div class="youtube-embed-url">${url}</div>
-                </div>
-            </div>
-        `;
-
-        this.editor.clipboard.dangerouslyPasteHTML(range.index, embedHtml);
-
-        // Add click handler to copy URL
-        setTimeout(() => {
-            const embeds = this.editor.root.querySelectorAll('.youtube-embed');
-            embeds.forEach(embed => {
-                embed.onclick = () => {
-                    navigator.clipboard.writeText(embed.dataset.url);
-                    this.showSaveIndicator('Link copied!');
-                };
-            });
-        }, 100);
+        this.editor.insertEmbed(range.index, 'youtube', { url }, 'user');
+        this.editor.setSelection(range.index + 1);
     },
 
     /**
-     * Embed PDF file
+     * Embed PDF file as inline pill
      * TODO: Later - store in IndexedDB with device ID
      */
     embedPDF(file) {
-        const reader = new FileReader();
-        reader.onload = () => {
-            // For now, just show the card with file info
-            // Later: Store in IndexedDB and generate local URI
-            const range = this.editor.getSelection(true);
-            const embedHtml = `
-                <div class="pdf-embed" data-filename="${file.name}" contenteditable="false">
-                    <div class="pdf-embed-icon">PDF</div>
-                    <div class="pdf-embed-info">
-                        <div class="pdf-embed-filename">${file.name}</div>
-                        <div class="pdf-embed-meta">${(file.size / 1024).toFixed(1)} KB</div>
-                    </div>
-                </div>
-            `;
+        // Create object URL for the file (temporary, for this session)
+        const fileUrl = URL.createObjectURL(file);
 
-            this.editor.clipboard.dangerouslyPasteHTML(range.index, embedHtml);
-
-            // TODO: Store file in IndexedDB
-            // For now, just show placeholder behavior
-            setTimeout(() => {
-                const embeds = this.editor.root.querySelectorAll('.pdf-embed');
-                embeds.forEach(embed => {
-                    embed.onclick = () => {
-                        // TODO: Open from IndexedDB storage
-                        this.showSaveIndicator('PDF storage coming soon');
-                    };
-                });
-            }, 100);
-        };
-        reader.readAsDataURL(file);
+        // Insert using Quill's embed API (click handler is in the blot)
+        const range = this.editor.getSelection(true);
+        this.editor.insertEmbed(range.index, 'pdf', { url: fileUrl, filename: file.name }, 'user');
+        this.editor.setSelection(range.index + 1);
     },
 
     /**
@@ -574,7 +625,7 @@ const UI = {
     },
 
     /**
-     * Trigger auto-save with debounce
+     * Trigger auto-save with debounce (silent - no indicator)
      */
     triggerAutoSave() {
         if (this.autoSaveTimer) {
@@ -583,7 +634,6 @@ const UI = {
 
         this.autoSaveTimer = setTimeout(() => {
             this.saveCurrentBabel();
-            this.showSaveIndicator('Saved');
         }, 2000); // 2 second debounce
     },
 
@@ -599,20 +649,6 @@ const UI = {
         babel.color = State.selectedColor;
 
         Persistence.save();
-    },
-
-    /**
-     * Show save indicator
-     */
-    showSaveIndicator(text = 'Saved') {
-        const indicator = this.elements.editSaveIndicator;
-        if (indicator) {
-            indicator.textContent = text;
-            indicator.classList.add('visible');
-            setTimeout(() => {
-                indicator.classList.remove('visible');
-            }, 2000);
-        }
     },
 
     /**

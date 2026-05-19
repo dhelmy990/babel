@@ -14,7 +14,6 @@ const Persistence = {
 
         try {
             localStorage.setItem(Config.storage.key, JSON.stringify(data));
-            UI.showSaveToast();
             console.log('Graph saved');
             return true;
         } catch (e) {

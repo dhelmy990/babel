@@ -613,21 +613,26 @@ body {
     display: flex;
     flex-direction: column;
     align-items: center;
-    justify-content: center;
+    justify-content: flex-start;
     padding: 2rem;
-    gap: 2rem;
+    gap: 1.5rem;
 }
 
 #edit-babel-3d {
-    width: 250px;
-    height: 250px;
+    width: 100%;
+    max-width: 500px;
+    aspect-ratio: 1;
+    flex: 1;
+    max-height: calc(100% - 80px);
     border-radius: 8px;
-    background: #111;
+    background: #0a0a0a;
     overflow: hidden;
 }
 
 #edit-babel-3d canvas {
     display: block;
+    width: 100% !important;
+    height: 100% !important;
     border-radius: 8px;
 }
 
@@ -635,26 +640,14 @@ body {
     justify-content: center;
 }
 
-/* Footer with Done button */
+/* Footer with Done button - centered */
 #edit-footer {
     display: flex;
     align-items: center;
-    justify-content: flex-end;
-    gap: 1rem;
+    justify-content: center;
     padding: 1rem 2rem;
     border-top: 1px solid #333;
     background: #0a0a0a;
-}
-
-.save-indicator {
-    color: #666;
-    font-size: 0.85rem;
-    opacity: 0;
-    transition: opacity 0.3s ease;
-}
-
-.save-indicator.visible {
-    opacity: 1;
 }
 
 .btn-done {
@@ -727,89 +720,78 @@ body {
     text-align: center;
 }
 
-/* YouTube embed card */
+/* YouTube embed - inline pill */
+#edit-editor .ql-editor .youtube-embed,
 .youtube-embed {
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-    background: #1a1a1a;
-    border: 1px solid #333;
-    border-radius: 8px;
-    padding: 0.75rem;
-    margin: 1rem 0;
+    display: inline-flex !important;
+    align-items: center !important;
+    gap: 0.35rem;
+    background: #252525 !important;
+    border: 1px solid #555 !important;
+    border-radius: 4px !important;
+    padding: 0.2rem 0.6rem !important;
+    margin: 0 0.2rem;
     cursor: pointer;
-    transition: background 0.15s ease;
-}
-
-.youtube-embed:hover {
-    background: #222;
-}
-
-.youtube-embed-thumbnail {
-    width: 120px;
-    height: 68px;
-    background: #333;
-    border-radius: 4px;
-    object-fit: cover;
-}
-
-.youtube-embed-info {
-    flex: 1;
-}
-
-.youtube-embed-title {
-    font-weight: 500;
-    margin-bottom: 0.25rem;
-}
-
-.youtube-embed-url {
+    transition: background 0.15s ease, border-color 0.15s ease;
     font-size: 0.8rem;
-    color: #888;
+    vertical-align: baseline;
+    line-height: 1.4;
 }
 
-/* PDF embed card */
-.pdf-embed {
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-    background: #1a1a1a;
-    border: 1px solid #333;
-    border-radius: 8px;
-    padding: 0.75rem;
-    margin: 1rem 0;
-    cursor: pointer;
-    transition: background 0.15s ease;
+#edit-editor .ql-editor .youtube-embed:hover,
+.youtube-embed:hover {
+    background: #333 !important;
+    border-color: #ff4444 !important;
 }
 
-.pdf-embed:hover {
-    background: #222;
-}
-
-.pdf-embed-icon {
-    width: 48px;
-    height: 48px;
-    background: #c41e3a;
-    border-radius: 4px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: #fff;
-    font-weight: 700;
+.youtube-embed-icon {
+    color: #ff4444;
     font-size: 0.75rem;
 }
 
-.pdf-embed-info {
-    flex: 1;
-}
-
-.pdf-embed-filename {
-    font-weight: 500;
-    margin-bottom: 0.25rem;
-}
-
-.pdf-embed-meta {
+.youtube-embed-label {
+    color: #ddd;
+    white-space: nowrap;
     font-size: 0.8rem;
-    color: #888;
+}
+
+/* PDF embed - inline pill */
+#edit-editor .ql-editor .pdf-embed,
+.pdf-embed {
+    display: inline-flex !important;
+    align-items: center !important;
+    gap: 0.35rem;
+    background: #252525 !important;
+    border: 1px solid #555 !important;
+    border-radius: 4px !important;
+    padding: 0.2rem 0.6rem !important;
+    margin: 0 0.2rem;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease;
+    font-size: 0.8rem;
+    vertical-align: baseline;
+    line-height: 1.4;
+}
+
+#edit-editor .ql-editor .pdf-embed:hover,
+.pdf-embed:hover {
+    background: #333 !important;
+    border-color: #ff6666 !important;
+}
+
+.pdf-embed-icon {
+    color: #ff6666;
+    font-weight: 700;
+    font-size: 0.7rem;
+    background: #3a1a1a;
+    padding: 0.1rem 0.25rem;
+    border-radius: 2px;
+}
+
+.pdf-embed-label {
+    color: #ddd;
+    white-space: nowrap;
+    font-size: 0.8rem;
 }
 
 /* Babel link chip */
