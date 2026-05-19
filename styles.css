@@ -450,3 +450,406 @@ body {
 #physics-paused.visible {
     display: block;
 }
+
+/* ============================================
+   EDIT MODE - Split Layout
+   ============================================ */
+
+#edit-overlay {
+    background: #0a0a0a;
+}
+
+#edit-overlay.active {
+    display: flex;
+    flex-direction: column;
+}
+
+#edit-split-container {
+    display: flex;
+    width: 100%;
+    height: calc(100% - 60px);
+    min-height: 0;
+}
+
+/* Left panel - Text Editor */
+#edit-left-panel {
+    flex: 1;
+    min-width: 400px;
+    max-width: 50%;
+    display: flex;
+    flex-direction: column;
+    padding: 2rem;
+    border-right: 1px solid #333;
+    position: relative;
+}
+
+.edit-title-input {
+    width: 100%;
+    padding: 1rem;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid #333;
+    color: #fff;
+    font-size: 2rem;
+    font-weight: 600;
+    margin-bottom: 1.5rem;
+}
+
+.edit-title-input:focus {
+    outline: none;
+    border-bottom-color: #4a9eff;
+}
+
+.edit-title-input::placeholder {
+    color: #555;
+}
+
+#edit-editor-container {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+}
+
+#edit-editor {
+    height: 100%;
+    color: #fff;
+    font-size: 1rem;
+    line-height: 1.6;
+}
+
+/* Quill editor overrides for dark theme */
+#edit-editor .ql-editor {
+    padding: 0;
+    font-family: inherit;
+    font-size: 1rem;
+    line-height: 1.6;
+    color: #fff;
+}
+
+#edit-editor .ql-editor.ql-blank::before {
+    color: #555;
+    font-style: normal;
+}
+
+#edit-editor .ql-editor p {
+    margin-bottom: 1rem;
+}
+
+#edit-editor .ql-editor h1 {
+    font-size: 1.75rem;
+    font-weight: 600;
+    margin-bottom: 1rem;
+    color: #fff;
+}
+
+#edit-editor .ql-editor h2 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    margin-bottom: 0.875rem;
+    color: #fff;
+}
+
+#edit-editor .ql-editor h3 {
+    font-size: 1.25rem;
+    font-weight: 600;
+    margin-bottom: 0.75rem;
+    color: #fff;
+}
+
+#edit-editor .ql-editor ul,
+#edit-editor .ql-editor ol {
+    padding-left: 1.5rem;
+    margin-bottom: 1rem;
+}
+
+#edit-editor .ql-editor code {
+    background: #1a1a1a;
+    padding: 0.2rem 0.4rem;
+    border-radius: 4px;
+    font-family: 'Monaco', 'Menlo', monospace;
+    font-size: 0.9em;
+}
+
+#edit-editor .ql-editor pre {
+    background: #1a1a1a;
+    padding: 1rem;
+    border-radius: 8px;
+    margin-bottom: 1rem;
+    overflow-x: auto;
+}
+
+#edit-editor .ql-editor pre code {
+    background: none;
+    padding: 0;
+}
+
+#edit-editor .ql-editor mark,
+#edit-editor .ql-editor .ql-highlight {
+    background: rgba(255, 230, 0, 0.3);
+    padding: 0.1rem 0.2rem;
+    border-radius: 2px;
+}
+
+#edit-editor .ql-editor s {
+    text-decoration: line-through;
+    color: #888;
+}
+
+/* Hide Quill toolbar (we use keyboard shortcuts) */
+.ql-toolbar {
+    display: none !important;
+}
+
+.ql-container {
+    border: none !important;
+    font-family: inherit !important;
+}
+
+/* Right panel - 3D Babel View */
+#edit-right-panel {
+    flex: 1;
+    min-width: 300px;
+    max-width: 50%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 2rem;
+    gap: 2rem;
+}
+
+#edit-babel-3d {
+    width: 250px;
+    height: 250px;
+    border-radius: 8px;
+    background: #111;
+    overflow: hidden;
+}
+
+#edit-babel-3d canvas {
+    display: block;
+    border-radius: 8px;
+}
+
+#edit-right-panel .color-palette {
+    justify-content: center;
+}
+
+/* Footer with Done button */
+#edit-footer {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 1rem;
+    padding: 1rem 2rem;
+    border-top: 1px solid #333;
+    background: #0a0a0a;
+}
+
+.save-indicator {
+    color: #666;
+    font-size: 0.85rem;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+}
+
+.save-indicator.visible {
+    opacity: 1;
+}
+
+.btn-done {
+    flex: none;
+    padding: 0.75rem 2rem;
+}
+
+/* Help button and shortcuts popup */
+.edit-help-btn {
+    position: absolute;
+    bottom: 1rem;
+    left: 1rem;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: #333;
+    border: none;
+    color: #888;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.edit-help-btn:hover {
+    background: #444;
+    color: #fff;
+}
+
+.shortcuts-popup {
+    position: absolute;
+    bottom: 3.5rem;
+    left: 1rem;
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 1rem;
+    min-width: 220px;
+    display: none;
+    z-index: 10;
+}
+
+.shortcuts-popup.visible {
+    display: block;
+}
+
+.shortcuts-title {
+    font-weight: 600;
+    margin-bottom: 0.75rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid #333;
+}
+
+.shortcut-row {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.25rem 0;
+    font-size: 0.85rem;
+    color: #aaa;
+}
+
+.shortcut-key {
+    background: #333;
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
+    font-family: monospace;
+    font-size: 0.8rem;
+    color: #fff;
+    min-width: 80px;
+    text-align: center;
+}
+
+/* YouTube embed card */
+.youtube-embed {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 0.75rem;
+    margin: 1rem 0;
+    cursor: pointer;
+    transition: background 0.15s ease;
+}
+
+.youtube-embed:hover {
+    background: #222;
+}
+
+.youtube-embed-thumbnail {
+    width: 120px;
+    height: 68px;
+    background: #333;
+    border-radius: 4px;
+    object-fit: cover;
+}
+
+.youtube-embed-info {
+    flex: 1;
+}
+
+.youtube-embed-title {
+    font-weight: 500;
+    margin-bottom: 0.25rem;
+}
+
+.youtube-embed-url {
+    font-size: 0.8rem;
+    color: #888;
+}
+
+/* PDF embed card */
+.pdf-embed {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 0.75rem;
+    margin: 1rem 0;
+    cursor: pointer;
+    transition: background 0.15s ease;
+}
+
+.pdf-embed:hover {
+    background: #222;
+}
+
+.pdf-embed-icon {
+    width: 48px;
+    height: 48px;
+    background: #c41e3a;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    font-weight: 700;
+    font-size: 0.75rem;
+}
+
+.pdf-embed-info {
+    flex: 1;
+}
+
+.pdf-embed-filename {
+    font-weight: 500;
+    margin-bottom: 0.25rem;
+}
+
+.pdf-embed-meta {
+    font-size: 0.8rem;
+    color: #888;
+}
+
+/* Babel link chip */
+.babel-link {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.9em;
+    cursor: pointer;
+    transition: opacity 0.15s ease;
+}
+
+.babel-link:hover {
+    opacity: 0.8;
+}
+
+/* Responsive: Stack vertically on small screens */
+@media (max-width: 900px) {
+    #edit-split-container {
+        flex-direction: column;
+    }
+
+    #edit-left-panel {
+        max-width: 100%;
+        min-width: 0;
+        border-right: none;
+        border-bottom: 1px solid #333;
+        flex: none;
+        height: 50%;
+    }
+
+    #edit-right-panel {
+        max-width: 100%;
+        min-width: 0;
+        flex: 1;
+    }
+
+    #edit-babel-3d {
+        width: 150px;
+        height: 150px;
+    }
+}

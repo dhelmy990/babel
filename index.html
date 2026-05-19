@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Babel - Knowledge Graph</title>
     <link rel="stylesheet" href="styles.css">
+    <!-- Quill Editor (Tiptap requires bundler, Quill works via CDN) -->
+    <link href="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.snow.css" rel="stylesheet">
 </head>
 <body>
     <div id="graph-container"></div>
@@ -68,23 +70,41 @@
         <button id="comparison-done-btn" class="btn-primary">Done</button>
     </div>
 
-    <!-- Edit mode overlay (single babel) -->
+    <!-- Edit mode overlay (single babel) - Split layout -->
     <div id="edit-overlay">
-        <div id="edit-blur"></div>
-        <div id="edit-content">
-            <div id="edit-babel-panel" class="babel-panel">
-                <div class="babel-sphere"></div>
-                <div class="babel-core">
-                    <input type="text" id="edit-title" class="babel-edit-title" placeholder="Title">
-                    <textarea id="edit-description" class="babel-edit-description" rows="3" placeholder="Description"></textarea>
-                    <div class="form-group">
-                        <label>Color</label>
-                        <div id="edit-color-palette" class="color-palette"></div>
-                    </div>
+        <div id="edit-split-container">
+            <!-- Left side: Text Editor -->
+            <div id="edit-left-panel">
+                <input type="text" id="edit-title" class="edit-title-input" placeholder="Title...">
+                <div id="edit-editor-container">
+                    <div id="edit-editor"></div>
+                </div>
+                <!-- Help icon for shortcuts -->
+                <button id="edit-help-btn" class="edit-help-btn" title="Keyboard shortcuts">?</button>
+                <div id="edit-shortcuts-popup" class="shortcuts-popup">
+                    <div class="shortcuts-title">Keyboard Shortcuts</div>
+                    <div class="shortcut-row"><span class="shortcut-key">Ctrl+B</span> Bold</div>
+                    <div class="shortcut-row"><span class="shortcut-key">Ctrl+I</span> Italic</div>
+                    <div class="shortcut-row"><span class="shortcut-key">Ctrl+Shift+S</span> Strikethrough</div>
+                    <div class="shortcut-row"><span class="shortcut-key">Ctrl+H</span> Highlight</div>
+                    <div class="shortcut-row"><span class="shortcut-key">Ctrl++</span> Heading up</div>
+                    <div class="shortcut-row"><span class="shortcut-key">Ctrl+-</span> Heading down</div>
+                    <div class="shortcut-row"><span class="shortcut-key">Ctrl+Shift+L</span> Bullet list</div>
+                    <div class="shortcut-row"><span class="shortcut-key">Ctrl+Shift+C</span> Code block</div>
+                    <div class="shortcut-row"><span class="shortcut-key">@</span> Link babel</div>
                 </div>
             </div>
+            <!-- Right side: 3D Babel View (placeholder for now) -->
+            <div id="edit-right-panel">
+                <div id="edit-babel-3d"></div>
+                <div id="edit-color-palette" class="color-palette"></div>
+            </div>
         </div>
-        <button id="edit-done-btn" class="btn-primary">Done</button>
+        <!-- Footer with Done button and save indicator -->
+        <div id="edit-footer">
+            <span id="edit-save-indicator" class="save-indicator">Saved</span>
+            <button id="edit-done-btn" class="btn-primary btn-done">Done</button>
+        </div>
     </div>
 
     <!-- Save toast -->
@@ -93,6 +113,7 @@
     <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
     <script src="https://unpkg.com/d3@7"></script>
     <script src="https://unpkg.com/3d-force-graph@1.73.0/dist/3d-force-graph.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.js"></script>
 
     <script src="js/config.js"></script>
     <script src="js/state.js"></script>

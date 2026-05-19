@@ -6,6 +6,32 @@ const UI = {
     // DOM element references (set during init)
     elements: {},
 
+    // Quill editor instance
+    editor: null,
+
+    // Auto-save timer
+    autoSaveTimer: null,
+
+    // Current heading level for cycling (0 = normal, 1-3 = h1-h3)
+    currentHeadingLevel: 0,
+
+    // 3D Preview state
+    preview: {
+        scene: null,
+        camera: null,
+        renderer: null,
+        sphere: null,
+        innerSphere: null,
+        animationId: null
+    },
+
+    /**
+     * Helper: Safely check if element has a class (null-safe)
+     */
+    hasClass(element, className) {
+        return element?.classList?.contains(className) ?? false;
+    },
+
     /**
      * Initialize DOM element references
      */
@@ -21,7 +47,14 @@ const UI = {
             comparisonOverlay: document.getElementById('comparison-overlay'),
             editOverlay: document.getElementById('edit-overlay'),
             saveToast: document.getElementById('save-toast'),
-            editPalette: document.getElementById('edit-color-palette')
+            // New edit mode elements
+            editTitle: document.getElementById('edit-title'),
+            editEditor: document.getElementById('edit-editor'),
+            editColorPalette: document.getElementById('edit-color-palette'),
+            editHelpBtn: document.getElementById('edit-help-btn'),
+            editShortcutsPopup: document.getElementById('edit-shortcuts-popup'),
+            editSaveIndicator: document.getElementById('edit-save-indicator'),
+            editBabel3d: document.getElementById('edit-babel-3d')
         };
     },
 
@@ -29,35 +62,557 @@ const UI = {
      * Setup color palette swatches
      */
     setupColorPalette() {
-        const { colorPalette, editPalette } = this.elements;
+        const { colorPalette, editColorPalette } = this.elements;
 
         // Creation palette
-        colorPalette.innerHTML = '';
-        Config.colors.bright.forEach((color, index) => {
-            const swatch = this.createColorSwatch(color, index === 0, colorPalette);
-            colorPalette.appendChild(swatch);
-        });
+        if (colorPalette) {
+            colorPalette.innerHTML = '';
+            Config.colors.bright.forEach((color, index) => {
+                const swatch = this.createColorSwatch(color, index === 0, colorPalette, 'creation');
+                colorPalette.appendChild(swatch);
+            });
+        }
 
         // Edit palette
-        editPalette.innerHTML = '';
-        Config.colors.bright.forEach((color, index) => {
-            const swatch = this.createColorSwatch(color, false, editPalette);
-            editPalette.appendChild(swatch);
-        });
+        if (editColorPalette) {
+            editColorPalette.innerHTML = '';
+            Config.colors.bright.forEach((color, index) => {
+                const swatch = this.createColorSwatch(color, false, editColorPalette, 'edit');
+                editColorPalette.appendChild(swatch);
+            });
+        }
     },
 
-    createColorSwatch(color, selected, palette) {
+    createColorSwatch(color, selected, palette, mode) {
         const swatch = document.createElement('div');
         swatch.className = 'color-swatch' + (selected ? ' selected' : '');
         swatch.style.backgroundColor = color;
         swatch.addEventListener('click', () => {
-            const index = Config.colors.bright.indexOf(color);
             State.selectedColor = color;
-            palette.querySelectorAll('.color-swatch').forEach((s, i) => {
-                s.classList.toggle('selected', i === index);
+            palette.querySelectorAll('.color-swatch').forEach((s) => {
+                s.classList.toggle('selected', s.style.backgroundColor === color);
             });
+            // Update 3D preview color in edit mode
+            if (mode === 'edit') {
+                this.updatePreviewColor(color);
+                this.triggerAutoSave();
+            }
         });
         return swatch;
+    },
+
+    /**
+     * Initialize 3D babel preview with wedge cutout
+     */
+    initPreview(color) {
+        const container = this.elements.editBabel3d;
+        if (!container) return;
+
+        // Clean up existing preview
+        this.cleanupPreview();
+
+        const width = container.clientWidth || 250;
+        const height = container.clientHeight || 250;
+
+        // Create scene
+        this.preview.scene = new THREE.Scene();
+        this.preview.scene.background = new THREE.Color(0x111111);
+
+        // Create camera
+        this.preview.camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000);
+        this.preview.camera.position.z = 12;
+
+        // Create renderer
+        this.preview.renderer = new THREE.WebGLRenderer({ antialias: true });
+        this.preview.renderer.setSize(width, height);
+        this.preview.renderer.setPixelRatio(window.devicePixelRatio);
+        container.innerHTML = '';
+        container.appendChild(this.preview.renderer.domElement);
+
+        // Create outer sphere with wedge cutout using custom geometry
+        const outerGeometry = this.createWedgeSphereGeometry(4, 64, Math.PI * 0.25);
+        const texture = Rendering.createPlanetTexture(color);
+        const outerMaterial = new THREE.MeshStandardMaterial({
+            map: texture,
+            side: THREE.DoubleSide
+        });
+        this.preview.sphere = new THREE.Mesh(outerGeometry, outerMaterial);
+        this.preview.scene.add(this.preview.sphere);
+
+        // Create inner dark sphere (hollow interior visible through wedge)
+        const innerGeometry = new THREE.SphereGeometry(3.9, 64, 64);
+        const innerMaterial = new THREE.MeshBasicMaterial({
+            color: 0x050505,
+            side: THREE.BackSide
+        });
+        this.preview.innerSphere = new THREE.Mesh(innerGeometry, innerMaterial);
+        this.preview.scene.add(this.preview.innerSphere);
+
+        // Add lighting
+        const ambientLight = new THREE.AmbientLight(0x404040, 0.8);
+        this.preview.scene.add(ambientLight);
+
+        const mainLight = new THREE.DirectionalLight(0xffffff, 1.2);
+        mainLight.position.set(5, 5, 5);
+        this.preview.scene.add(mainLight);
+
+        const fillLight = new THREE.DirectionalLight(0x6688cc, 0.4);
+        fillLight.position.set(-5, -3, -5);
+        this.preview.scene.add(fillLight);
+
+        // Start animation loop
+        this.animatePreview();
+    },
+
+    /**
+     * Create sphere geometry with a wedge (pie slice) removed
+     */
+    createWedgeSphereGeometry(radius, segments, wedgeAngle) {
+        const geometry = new THREE.SphereGeometry(radius, segments, segments);
+        const positions = geometry.attributes.position;
+        const indices = [];
+        const originalIndex = geometry.index.array;
+
+        // Keep faces that aren't in the wedge
+        for (let i = 0; i < originalIndex.length; i += 3) {
+            const idx1 = originalIndex[i];
+            const idx2 = originalIndex[i + 1];
+            const idx3 = originalIndex[i + 2];
+
+            // Check if any vertex of the face is in the wedge
+            let inWedge = false;
+            for (const idx of [idx1, idx2, idx3]) {
+                const x = positions.getX(idx);
+                const z = positions.getZ(idx);
+                const angle = Math.atan2(z, x);
+
+                // Wedge is centered around positive X axis
+                if (angle > -wedgeAngle / 2 && angle < wedgeAngle / 2 && x > 0) {
+                    inWedge = true;
+                    break;
+                }
+            }
+
+            if (!inWedge) {
+                indices.push(idx1, idx2, idx3);
+            }
+        }
+
+        geometry.setIndex(indices);
+        return geometry;
+    },
+
+    /**
+     * Update preview sphere color
+     */
+    updatePreviewColor(color) {
+        if (!this.preview.sphere) return;
+
+        // Create new texture with new color
+        const texture = Rendering.createPlanetTexture(color);
+        this.preview.sphere.material.map = texture;
+        this.preview.sphere.material.needsUpdate = true;
+    },
+
+    /**
+     * Animate the preview (auto-rotate)
+     */
+    animatePreview() {
+        if (!this.preview.renderer || !this.preview.scene || !this.preview.camera) return;
+
+        const animate = () => {
+            this.preview.animationId = requestAnimationFrame(animate);
+
+            // Slow auto-rotation
+            if (this.preview.sphere) {
+                this.preview.sphere.rotation.y += 0.005;
+            }
+            if (this.preview.innerSphere) {
+                this.preview.innerSphere.rotation.y += 0.005;
+            }
+
+            this.preview.renderer.render(this.preview.scene, this.preview.camera);
+        };
+
+        animate();
+    },
+
+    /**
+     * Clean up 3D preview
+     */
+    cleanupPreview() {
+        if (this.preview.animationId) {
+            cancelAnimationFrame(this.preview.animationId);
+            this.preview.animationId = null;
+        }
+
+        if (this.preview.renderer) {
+            this.preview.renderer.dispose();
+            this.preview.renderer = null;
+        }
+
+        if (this.preview.sphere) {
+            this.preview.sphere.geometry.dispose();
+            this.preview.sphere.material.dispose();
+            this.preview.sphere = null;
+        }
+
+        if (this.preview.innerSphere) {
+            this.preview.innerSphere.geometry.dispose();
+            this.preview.innerSphere.material.dispose();
+            this.preview.innerSphere = null;
+        }
+
+        this.preview.scene = null;
+        this.preview.camera = null;
+    },
+
+    /**
+     * Initialize Quill editor with custom keyboard shortcuts
+     */
+    initEditor() {
+        if (this.editor) {
+            return; // Already initialized
+        }
+
+        // Register custom highlight format
+        const Inline = Quill.import('blots/inline');
+        class HighlightBlot extends Inline {
+            static create() {
+                const node = super.create();
+                node.style.backgroundColor = 'rgba(255, 230, 0, 0.3)';
+                return node;
+            }
+        }
+        HighlightBlot.blotName = 'highlight';
+        HighlightBlot.tagName = 'mark';
+        Quill.register(HighlightBlot);
+
+        this.editor = new Quill('#edit-editor', {
+            theme: 'snow',
+            placeholder: 'Start writing...',
+            modules: {
+                toolbar: false, // No toolbar - keyboard shortcuts only
+                keyboard: {
+                    bindings: {
+                        // Override default behaviors
+                    }
+                }
+            }
+        });
+
+        // Custom keyboard shortcuts
+        this.setupEditorShortcuts();
+
+        // Auto-save on content change
+        this.editor.on('text-change', () => {
+            this.triggerAutoSave();
+        });
+
+        // Handle paste for YouTube/PDF detection
+        this.editor.root.addEventListener('paste', (e) => {
+            this.handlePaste(e);
+        });
+
+        // Handle @ for babel linking
+        this.editor.on('text-change', (delta, oldDelta, source) => {
+            if (source === 'user') {
+                this.checkForBabelMention();
+            }
+        });
+    },
+
+    /**
+     * Setup custom keyboard shortcuts for the editor
+     */
+    setupEditorShortcuts() {
+        const editor = this.editor;
+
+        // Helper to apply format to selection
+        const toggleFormat = (format, value = true) => {
+            const range = editor.getSelection();
+            if (range) {
+                const currentFormat = editor.getFormat(range);
+                editor.format(format, !currentFormat[format]);
+            }
+        };
+
+        // Listen for keyboard events on the editor
+        editor.root.addEventListener('keydown', (e) => {
+            // Ctrl+B - Bold
+            if (e.ctrlKey && e.key === 'b') {
+                e.preventDefault();
+                toggleFormat('bold');
+            }
+            // Ctrl+I - Italic
+            else if (e.ctrlKey && e.key === 'i') {
+                e.preventDefault();
+                toggleFormat('italic');
+            }
+            // Ctrl+Shift+S - Strikethrough
+            else if (e.ctrlKey && e.shiftKey && e.key === 'S') {
+                e.preventDefault();
+                toggleFormat('strike');
+            }
+            // Ctrl+H - Highlight
+            else if (e.ctrlKey && e.key === 'h') {
+                e.preventDefault();
+                toggleFormat('highlight');
+            }
+            // Ctrl+Shift+L - Bullet list
+            else if (e.ctrlKey && e.shiftKey && e.key === 'L') {
+                e.preventDefault();
+                toggleFormat('list', 'bullet');
+            }
+            // Ctrl+Shift+C - Code block
+            else if (e.ctrlKey && e.shiftKey && e.key === 'C') {
+                e.preventDefault();
+                toggleFormat('code-block');
+            }
+            // Ctrl++ (Ctrl+=) - Heading up (increase)
+            else if (e.ctrlKey && (e.key === '=' || e.key === '+')) {
+                e.preventDefault();
+                this.cycleHeading(1);
+            }
+            // Ctrl+- - Heading down (decrease)
+            else if (e.ctrlKey && e.key === '-') {
+                e.preventDefault();
+                this.cycleHeading(-1);
+            }
+        });
+    },
+
+    /**
+     * Cycle heading level: normal -> h1 -> h2 -> h3 -> normal (wraps)
+     */
+    cycleHeading(direction) {
+        const range = this.editor.getSelection();
+        if (!range) return;
+
+        const format = this.editor.getFormat(range);
+        let currentLevel = 0;
+        if (format.header) {
+            currentLevel = format.header;
+        }
+
+        // Cycle: 0 -> 1 -> 2 -> 3 -> 0 (direction = 1)
+        // Or: 0 -> 3 -> 2 -> 1 -> 0 (direction = -1)
+        let newLevel = currentLevel + direction;
+        if (newLevel > 3) newLevel = 0;
+        if (newLevel < 0) newLevel = 3;
+
+        this.editor.format('header', newLevel === 0 ? false : newLevel);
+    },
+
+    /**
+     * Handle paste events for YouTube/PDF auto-detection
+     */
+    handlePaste(e) {
+        // Check for files (PDF)
+        const files = e.clipboardData?.files;
+        if (files && files.length > 0) {
+            for (const file of files) {
+                if (file.type === 'application/pdf') {
+                    e.preventDefault();
+                    this.embedPDF(file);
+                    return;
+                }
+            }
+        }
+
+        // Check for YouTube URL in text
+        const text = e.clipboardData?.getData('text/plain');
+        if (text && this.isYouTubeURL(text)) {
+            e.preventDefault();
+            this.embedYouTube(text);
+        }
+    },
+
+    /**
+     * Check if URL is a YouTube URL
+     */
+    isYouTubeURL(url) {
+        const youtubeRegex = /^(https?:\/\/)?(www\.)?(youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)[\w-]+/;
+        return youtubeRegex.test(url);
+    },
+
+    /**
+     * Extract YouTube video ID from URL
+     */
+    getYouTubeID(url) {
+        const match = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([\w-]+)/);
+        return match ? match[1] : null;
+    },
+
+    /**
+     * Embed YouTube video as a card
+     */
+    embedYouTube(url) {
+        const videoId = this.getYouTubeID(url);
+        if (!videoId) return;
+
+        const thumbnailUrl = `https://img.youtube.com/vi/${videoId}/mqdefault.jpg`;
+
+        // Insert custom embed HTML
+        const range = this.editor.getSelection(true);
+        const embedHtml = `
+            <div class="youtube-embed" data-url="${url}" contenteditable="false">
+                <img class="youtube-embed-thumbnail" src="${thumbnailUrl}" alt="Video thumbnail">
+                <div class="youtube-embed-info">
+                    <div class="youtube-embed-title">YouTube Video</div>
+                    <div class="youtube-embed-url">${url}</div>
+                </div>
+            </div>
+        `;
+
+        this.editor.clipboard.dangerouslyPasteHTML(range.index, embedHtml);
+
+        // Add click handler to copy URL
+        setTimeout(() => {
+            const embeds = this.editor.root.querySelectorAll('.youtube-embed');
+            embeds.forEach(embed => {
+                embed.onclick = () => {
+                    navigator.clipboard.writeText(embed.dataset.url);
+                    this.showSaveIndicator('Link copied!');
+                };
+            });
+        }, 100);
+    },
+
+    /**
+     * Embed PDF file
+     * TODO: Later - store in IndexedDB with device ID
+     */
+    embedPDF(file) {
+        const reader = new FileReader();
+        reader.onload = () => {
+            // For now, just show the card with file info
+            // Later: Store in IndexedDB and generate local URI
+            const range = this.editor.getSelection(true);
+            const embedHtml = `
+                <div class="pdf-embed" data-filename="${file.name}" contenteditable="false">
+                    <div class="pdf-embed-icon">PDF</div>
+                    <div class="pdf-embed-info">
+                        <div class="pdf-embed-filename">${file.name}</div>
+                        <div class="pdf-embed-meta">${(file.size / 1024).toFixed(1)} KB</div>
+                    </div>
+                </div>
+            `;
+
+            this.editor.clipboard.dangerouslyPasteHTML(range.index, embedHtml);
+
+            // TODO: Store file in IndexedDB
+            // For now, just show placeholder behavior
+            setTimeout(() => {
+                const embeds = this.editor.root.querySelectorAll('.pdf-embed');
+                embeds.forEach(embed => {
+                    embed.onclick = () => {
+                        // TODO: Open from IndexedDB storage
+                        this.showSaveIndicator('PDF storage coming soon');
+                    };
+                });
+            }, 100);
+        };
+        reader.readAsDataURL(file);
+    },
+
+    /**
+     * Check for @ babel mention
+     * TODO: Later - implement recommendations for neighbor/nested babels
+     */
+    checkForBabelMention() {
+        const range = this.editor.getSelection();
+        if (!range) return;
+
+        const text = this.editor.getText();
+        const cursorPos = range.index;
+
+        // Find @ before cursor
+        let atPos = -1;
+        for (let i = cursorPos - 1; i >= 0; i--) {
+            if (text[i] === '@') {
+                atPos = i;
+                break;
+            }
+            if (text[i] === ' ' || text[i] === '\n') {
+                break;
+            }
+        }
+
+        if (atPos >= 0) {
+            // Show babel selector popup
+            // For now: just show "No babels found" as per requirements
+            // TODO: Later - implement getRecommendedBabels() for neighbor/nested babels
+            this.showBabelSelector(atPos);
+        }
+    },
+
+    /**
+     * Show babel selector popup
+     * Returns empty for now - will implement neighbor/nested babel recommendations later
+     */
+    showBabelSelector(atPosition) {
+        // TODO: Implement popup UI
+        // For now, the recommendation function returns empty array
+        const recommendations = this.getRecommendedBabels();
+
+        if (recommendations.length === 0) {
+            // Show "No babels found" briefly
+            // This would be a popup near the cursor
+            console.log('No babels found'); // Placeholder
+        }
+    },
+
+    /**
+     * Get recommended babels for @ linking
+     * TODO: Later - return neighbor babels or babels inside current babel
+     * For now, returns empty array
+     */
+    getRecommendedBabels() {
+        // Future: return babels that are neighbors (connected) or nested inside current babel
+        return [];
+    },
+
+    /**
+     * Trigger auto-save with debounce
+     */
+    triggerAutoSave() {
+        if (this.autoSaveTimer) {
+            clearTimeout(this.autoSaveTimer);
+        }
+
+        this.autoSaveTimer = setTimeout(() => {
+            this.saveCurrentBabel();
+            this.showSaveIndicator('Saved');
+        }, 2000); // 2 second debounce
+    },
+
+    /**
+     * Save current babel data
+     */
+    saveCurrentBabel() {
+        const babel = State.editingBabel;
+        if (!babel) return;
+
+        babel.title = this.elements.editTitle.value.trim() || 'Untitled';
+        babel.description = this.editor ? this.editor.root.innerHTML : '';
+        babel.color = State.selectedColor;
+
+        Persistence.save();
+    },
+
+    /**
+     * Show save indicator
+     */
+    showSaveIndicator(text = 'Saved') {
+        const indicator = this.elements.editSaveIndicator;
+        if (indicator) {
+            indicator.textContent = text;
+            indicator.classList.add('visible');
+            setTimeout(() => {
+                indicator.classList.remove('visible');
+            }, 2000);
+        }
     },
 
     /**
@@ -83,34 +638,66 @@ const UI = {
                 callbacks.save();
             }
         });
+
+        // Help button toggle
+        const helpBtn = this.elements.editHelpBtn;
+        const shortcutsPopup = this.elements.editShortcutsPopup;
+        if (helpBtn && shortcutsPopup) {
+            helpBtn.addEventListener('click', () => {
+                shortcutsPopup.classList.toggle('visible');
+            });
+            // Close popup when clicking outside
+            document.addEventListener('click', (e) => {
+                if (!helpBtn.contains(e.target) && !shortcutsPopup.contains(e.target)) {
+                    shortcutsPopup.classList.remove('visible');
+                }
+            });
+        }
+
+        // Title auto-save
+        const editTitle = this.elements.editTitle;
+        if (editTitle) {
+            editTitle.addEventListener('input', () => {
+                this.triggerAutoSave();
+            });
+        }
     },
 
     handleKeyDown(e, callbacks) {
+        const { comparisonOverlay, editOverlay, creationForm } = this.elements;
+
+        // Allow typing in editor
+        if (this.hasClass(editOverlay, 'active')) {
+            // In edit mode, only handle Escape
+            if (e.key === 'Escape') {
+                callbacks.closeEdit();
+            }
+            return;
+        }
+
         if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
             if (e.key === 'Escape') e.target.blur();
-            if (e.key === 'Enter' && this.elements.creationForm.classList.contains('active')) {
+            if (e.key === 'Enter' && this.hasClass(creationForm, 'active')) {
                 e.preventDefault();
                 callbacks.createBabel();
             }
             return;
         }
 
-        const { comparisonOverlay, editOverlay, creationForm } = this.elements;
-
         switch (e.key.toLowerCase()) {
             case 'r':
                 if (!State.isCreating &&
-                    !comparisonOverlay.classList.contains('active') &&
-                    !editOverlay.classList.contains('active')) {
+                    !this.hasClass(comparisonOverlay, 'active') &&
+                    !this.hasClass(editOverlay, 'active')) {
                     callbacks.startCreation();
                 }
                 break;
             case 'escape':
-                if (creationForm.classList.contains('active')) {
+                if (this.hasClass(creationForm, 'active')) {
                     callbacks.cancelCreation();
-                } else if (comparisonOverlay.classList.contains('active')) {
+                } else if (this.hasClass(comparisonOverlay, 'active')) {
                     callbacks.closeComparison();
-                } else if (editOverlay.classList.contains('active')) {
+                } else if (this.hasClass(editOverlay, 'active')) {
                     callbacks.closeEdit();
                 } else if (State.selectedBabel) {
                     callbacks.deselectBabel();
@@ -119,15 +706,15 @@ const UI = {
             case 'delete':
             case 'backspace':
                 if (State.selectedBabel &&
-                    !comparisonOverlay.classList.contains('active') &&
-                    !editOverlay.classList.contains('active')) {
+                    !this.hasClass(comparisonOverlay, 'active') &&
+                    !this.hasClass(editOverlay, 'active')) {
                     callbacks.handleDelete();
                 }
                 break;
             case 'e':
                 if (State.selectedBabel &&
-                    !comparisonOverlay.classList.contains('active') &&
-                    !editOverlay.classList.contains('active')) {
+                    !this.hasClass(comparisonOverlay, 'active') &&
+                    !this.hasClass(editOverlay, 'active')) {
                     callbacks.openEdit(State.selectedBabel);
                 }
                 break;
@@ -168,8 +755,8 @@ const UI = {
         creationCircle.style.width = size + 'px';
         creationCircle.style.height = size + 'px';
 
-        const colorIndex = Math.floor((elapsed / 300) % Config.colors.dark.length);
-        creationCircle.style.backgroundColor = Config.colors.dark[colorIndex];
+        const colorIndex = Math.floor((elapsed / 300) % Config.colors.bright.length);
+        creationCircle.style.backgroundColor = Config.colors.bright[colorIndex];
 
         if (progress >= 1) {
             this.showCreationForm();
@@ -325,44 +912,72 @@ const UI = {
     },
 
     /**
-     * Edit mode
+     * Edit mode - New split layout
      */
     openEdit(babel) {
         State.editingBabel = babel;
-        const panel = document.getElementById('edit-babel-panel');
-
-        panel.querySelector('.babel-sphere').style.backgroundColor = babel.color;
-        document.getElementById('edit-title').value = babel.title;
-        document.getElementById('edit-description').value = babel.description;
-
-        const colorIndex = Config.colors.bright.indexOf(babel.color);
-        this.elements.editPalette.querySelectorAll('.color-swatch').forEach((s, i) => {
-            s.classList.toggle('selected', i === colorIndex);
-        });
         State.selectedColor = babel.color;
 
+        // Initialize editor if not already done
+        this.initEditor();
+
+        // Set title
+        this.elements.editTitle.value = babel.title || '';
+
+        // Set editor content
+        if (this.editor) {
+            this.editor.root.innerHTML = babel.description || '';
+        }
+
+        // Setup color palette and select current color
+        this.setupColorPalette();
+        const colorPalette = this.elements.editColorPalette;
+        if (colorPalette) {
+            colorPalette.querySelectorAll('.color-swatch').forEach((swatch) => {
+                swatch.classList.toggle('selected', swatch.style.backgroundColor === babel.color);
+            });
+        }
+
+        // Show edit overlay
         this.elements.editOverlay.classList.add('active');
 
+        // Initialize 3D preview after overlay is visible
         setTimeout(() => {
-            panel.classList.add('open');
-        }, Config.ui.panelAnimationDelay);
+            this.initPreview(babel.color);
+        }, 50);
+
+        // Focus title after a brief delay
+        setTimeout(() => {
+            this.elements.editTitle.focus();
+        }, 100);
     },
 
     closeEdit(callback) {
-        const babel = State.editingBabel;
-        if (babel) {
-            babel.title = document.getElementById('edit-title').value.trim() || 'Untitled';
-            babel.description = document.getElementById('edit-description').value.trim();
-            babel.color = State.selectedColor;
+        // Save before closing
+        this.saveCurrentBabel();
+
+        // Clear auto-save timer
+        if (this.autoSaveTimer) {
+            clearTimeout(this.autoSaveTimer);
+            this.autoSaveTimer = null;
         }
 
-        const panel = document.getElementById('edit-babel-panel');
-        panel.classList.remove('open');
+        // Clean up 3D preview
+        this.cleanupPreview();
 
-        setTimeout(() => {
-            this.elements.editOverlay.classList.remove('active');
-            State.editingBabel = null;
-            if (callback) callback();
-        }, Config.ui.panelCloseDelay);
+        // Close shortcuts popup if open
+        if (this.elements.editShortcutsPopup) {
+            this.elements.editShortcutsPopup.classList.remove('visible');
+        }
+
+        // Hide overlay
+        this.elements.editOverlay.classList.remove('active');
+
+        // Clear texture cache so main graph shows updated colors
+        Rendering.textureCache.clear();
+
+        State.editingBabel = null;
+
+        if (callback) callback();
     }
 };
