@@ -104,16 +104,16 @@ const Editor = {
         PDFBlot.className = 'pdf-embed';
         Quill.register(PDFBlot);
 
-        // ── Image (block embed, served via local-file:// protocol) ────────────
+        // ── Image (block embed, loaded via file:// — same origin as app) ────────
         class ImageBlot extends BlockEmbed {
             static create(value) {
                 const node = super.create();
                 node.setAttribute('data-path', value.path);
                 node.setAttribute('contenteditable', 'false');
                 const img = document.createElement('img');
-                img.src = 'local-file://' + value.path.replace(/\\/g, '/');
+                img.src = 'file://' + value.path.replace(/\\/g, '/');
                 img.draggable = false;
-                img.alt = value.path.split(/[\\/]/).pop();
+                img.alt = '';
                 node.appendChild(img);
                 return node;
             }
@@ -270,9 +270,9 @@ const Editor = {
     },
 
     async embedPDF(file) {
+        const range = this.editor.getSelection(true);
         let filePath = file.path || '';
         if (!filePath && window.electronAPI) {
-            // No path from clipboard — save a copy to userData/pdfs/
             const ext = file.name.split('.').pop() || 'pdf';
             const buf = await file.arrayBuffer();
             const result = await window.electronAPI.saveFile(buf, 'pdfs', ext);
@@ -280,23 +280,21 @@ const Editor = {
         } else if (!filePath) {
             filePath = URL.createObjectURL(file);
         }
-        const range = this.editor.getSelection(true);
         this.editor.insertEmbed(range.index, 'pdf', { path: filePath, filename: file.name }, 'user');
         this.editor.setSelection(range.index + 1);
     },
 
     async embedImage(file) {
         if (!window.electronAPI) return;
+        const range = this.editor.getSelection(true);
         let filePath = file.path || '';
         if (!filePath) {
-            // Screenshot or copied image data — save to userData/images/
             const ext = (file.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
             const buf = await file.arrayBuffer();
             const result = await window.electronAPI.saveFile(buf, 'images', ext);
             if (!result.success) return;
             filePath = result.path;
         }
-        const range = this.editor.getSelection(true);
         this.editor.insertEmbed(range.index, 'local-image', { path: filePath }, 'user');
         this.editor.setSelection(range.index + 1);
     },
