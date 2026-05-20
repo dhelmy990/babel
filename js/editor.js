@@ -3,27 +3,18 @@
 // ============================================
 
 const Editor = {
-    // Quill editor instance
     editor: null,
-
-    // Auto-save timer handle
     autoSaveTimer: null,
-
-    // Current heading level for cycling (0 = normal, 1-3 = h1-h3)
     currentHeadingLevel: 0,
-
-    // Track if Quill blots have been registered
     blotsRegistered: false,
+    _missingFileModal: null,
 
-    /**
-     * Initialize Quill editor with custom blots and keyboard shortcuts.
-     * Safe to call multiple times — skips if already initialized.
-     */
     initEditor() {
         if (this.editor) return;
 
         const Inline = Quill.import('blots/inline');
         const Embed = Quill.import('blots/embed');
+        const BlockEmbed = Quill.import('blots/block/embed');
 
         if (this.blotsRegistered) {
             this.createQuillInstance();
@@ -31,6 +22,7 @@ const Editor = {
         }
         this.blotsRegistered = true;
 
+        // ── Highlight ─────────────────────────────────────────────────────────
         class HighlightBlot extends Inline {
             static create() {
                 const node = super.create();
@@ -42,24 +34,15 @@ const Editor = {
         HighlightBlot.tagName = 'mark';
         Quill.register(HighlightBlot);
 
+        // ── URL link (inline pill) ────────────────────────────────────────────
         class LinkBlot extends Embed {
             static create(value) {
                 const node = super.create();
                 node.setAttribute('data-url', value.url);
                 node.setAttribute('contenteditable', 'false');
-
-
                 const domain = value.url.replace(/^(https?:\/\/)?(www\.)?/, '').split('/')[0];
                 const faviconUrl = `https://www.google.com/s2/favicons?sz=32&domain=${domain}`;
-                
-                // Truncate the domain to use as a fallback title for now
-                const displayTitle = "link";
-                // Construct the internal HTML structure
-                const iconHtml = `<img src="${faviconUrl}" alt="" style="width: 16px; height: 16px; vertical-align: middle; margin-right: 6px; border-radius: 2px;" />`;
-                node.innerHTML = `${iconHtml}<span class="link-embed-label">${displayTitle}</span>`;
-                node.onhover = () => {
-                    node.style.borderColor = '#0076fcff';
-                };
+                node.innerHTML = `<img src="${faviconUrl}" alt="" style="width:16px;height:16px;vertical-align:middle;margin-right:6px;border-radius:2px;"><span class="link-embed-label">link</span>`;
                 node.onclick = () => {
                     setTimeout(() => { node.style.borderColor = ''; }, 500);
                     window.open(value.url, '_blank', 'noopener,noreferrer');
@@ -75,25 +58,44 @@ const Editor = {
         LinkBlot.className = 'link-embed';
         Quill.register(LinkBlot);
 
+        // ── PDF (inline pill, opens local file) ───────────────────────────────
         class PDFBlot extends Embed {
             static create(value) {
                 const node = super.create();
-                node.setAttribute('data-url', value.url);
-                node.setAttribute('data-filename', value.filename);
+                // Support old 'url' key from before Electron migration
+                const filePath = value.path || value.url || '';
+                node.setAttribute('data-path', filePath);
                 node.setAttribute('contenteditable', 'false');
-                const shortName = value.filename.length > 15
-                    ? value.filename.substring(0, 12) + '...' + value.filename.slice(-4)
-                    : value.filename;
+
+                const filename = value.filename || filePath.split(/[\\/]/).pop() || 'Document';
+                const shortName = filename.length > 15
+                    ? filename.substring(0, 12) + '...' + filename.slice(-4)
+                    : filename;
                 node.innerHTML = `<span class="pdf-embed-icon">PDF</span><span class="pdf-embed-label">${shortName}</span>`;
-                node.onclick = () => {
-                    if (value.url) window.open(value.url, '_blank');
-                };
+
+                node.addEventListener('click', async (e) => {
+                    e.stopPropagation();
+                    const p = node.getAttribute('data-path');
+                    if (!p) return;
+                    // blob: URLs are in-memory fallbacks — open directly, no existence check
+                    if (p.startsWith('blob:')) { window.open(p, '_blank'); return; }
+                    if (window.electronAPI) {
+                        const exists = await window.electronAPI.checkFileExists(p);
+                        if (exists) {
+                            window.electronAPI.openFile(p);
+                        } else {
+                            Editor.showMissingFileModal(node);
+                        }
+                    } else {
+                        window.open(p, '_blank');
+                    }
+                });
                 return node;
             }
             static value(node) {
                 return {
-                    url: node.getAttribute('data-url'),
-                    filename: node.getAttribute('data-filename')
+                    path: node.getAttribute('data-path'),
+                    filename: node.querySelector('.pdf-embed-label')?.textContent || ''
                 };
             }
         }
@@ -102,12 +104,31 @@ const Editor = {
         PDFBlot.className = 'pdf-embed';
         Quill.register(PDFBlot);
 
+        // ── Image (block embed, served via local-file:// protocol) ────────────
+        class ImageBlot extends BlockEmbed {
+            static create(value) {
+                const node = super.create();
+                node.setAttribute('data-path', value.path);
+                node.setAttribute('contenteditable', 'false');
+                const img = document.createElement('img');
+                img.src = 'local-file://' + value.path.replace(/\\/g, '/');
+                img.draggable = false;
+                img.alt = value.path.split(/[\\/]/).pop();
+                node.appendChild(img);
+                return node;
+            }
+            static value(node) {
+                return { path: node.getAttribute('data-path') };
+            }
+        }
+        ImageBlot.blotName = 'local-image';
+        ImageBlot.tagName = 'div';
+        ImageBlot.className = 'image-embed';
+        Quill.register(ImageBlot);
+
         this.createQuillInstance();
     },
 
-    /**
-     * Create the Quill instance and wire its event handlers.
-     */
     createQuillInstance() {
         this.editor = new Quill('#edit-editor', {
             theme: 'snow',
@@ -124,41 +145,36 @@ const Editor = {
             this.triggerAutoSave();
         });
 
-        // Capture phase fires before Quill's bubbling paste handler, so
-        // stopImmediatePropagation prevents Quill from inserting the raw URL text.
-        this.editor.root.addEventListener('paste', (e) => {
-            this.handlePaste(e);
-        }, true);
-
-        this.editor.root.addEventListener('click', (e) => {
-            const ytEmbed = e.target.closest('.youtube-embed');
-            if (ytEmbed) {
-                const url = ytEmbed.getAttribute('data-url');
-                if (url) {
-                    navigator.clipboard.writeText(url);
-                    window.open(url, '_blank', 'noopener,noreferrer');
-                    ytEmbed.style.borderColor = '#4a9eff';
-                    setTimeout(() => { ytEmbed.style.borderColor = ''; }, 500);
-                }
-                return;
-            }
-
-            const pdfEmbed = e.target.closest('.pdf-embed');
-            if (pdfEmbed) {
-                const url = pdfEmbed.getAttribute('data-url');
-                if (url) window.open(url, '_blank');
-                return;
-            }
-        });
-
         this.editor.on('text-change', (delta, oldDelta, source) => {
             if (source === 'user') this.checkForBabelMention();
         });
+
+        // Capture phase fires before Quill's paste handler
+        this.editor.root.addEventListener('paste', (e) => {
+            this.handlePaste(e);
+        }, true);  // capture phase — fires before Quill's paste handler
+
+        // Drag-and-drop for images and PDFs
+        this.editor.root.addEventListener('dragover', (e) => {
+            if (e.dataTransfer.types.includes('Files')) e.preventDefault();
+        });
+
+        this.editor.root.addEventListener('drop', (e) => {
+            e.preventDefault();
+            const files = e.dataTransfer.files;
+            for (const file of files) {
+                if (file.type.startsWith('image/')) {
+                    this.embedImage(file);
+                    return;
+                }
+                if (file.type === 'application/pdf') {
+                    this.embedPDF(file);
+                    return;
+                }
+            }
+        });
     },
 
-    /**
-     * Bind keyboard shortcuts onto the Quill root element.
-     */
     setupEditorShortcuts() {
         const editor = this.editor;
 
@@ -199,10 +215,6 @@ const Editor = {
         });
     },
 
-    /**
-     * Cycle heading level at the current selection (0 → 1 → 2 → 3 → 0).
-     * direction: 1 = increase level number, -1 = decrease.
-     */
     cycleHeading(direction) {
         const range = this.editor.getSelection();
         if (!range) return;
@@ -217,11 +229,6 @@ const Editor = {
         this.editor.format('header', newLevel === 0 ? false : newLevel);
     },
 
-    /**
-     * Handle paste events: auto-embed YouTube URLs and PDFs.
-     * Registered in capture phase so it fires before Quill's handler.
-     * stopImmediatePropagation prevents Quill from inserting raw text.
-     */
     handlePaste(e) {
         const text = e.clipboardData?.getData('text/plain')?.trim();
         if (text && this.isURL(text)) {
@@ -237,7 +244,13 @@ const Editor = {
                 if (file.type === 'application/pdf') {
                     e.preventDefault();
                     e.stopImmediatePropagation();
-                    this.embedPDF(file);
+                    this.embedPDF(file); // async, intentionally not awaited here
+                    return;
+                }
+                if (file.type.startsWith('image/')) {
+                    e.preventDefault();
+                    e.stopImmediatePropagation();
+                    this.embedImage(file); // async, intentionally not awaited here
                     return;
                 }
             }
@@ -256,21 +269,90 @@ const Editor = {
         this.editor.setSelection(range.index + 1);
     },
 
-    /**
-     * Embed a PDF File as an inline pill.
-     * TODO: store in IndexedDB with device ID for persistence across sessions.
-     */
-    embedPDF(file) {
-        const fileUrl = URL.createObjectURL(file);
+    async embedPDF(file) {
+        let filePath = file.path || '';
+        if (!filePath && window.electronAPI) {
+            // No path from clipboard — save a copy to userData/pdfs/
+            const ext = file.name.split('.').pop() || 'pdf';
+            const buf = await file.arrayBuffer();
+            const result = await window.electronAPI.saveFile(buf, 'pdfs', ext);
+            filePath = result.success ? result.path : URL.createObjectURL(file);
+        } else if (!filePath) {
+            filePath = URL.createObjectURL(file);
+        }
         const range = this.editor.getSelection(true);
-        this.editor.insertEmbed(range.index, 'pdf', { url: fileUrl, filename: file.name }, 'user');
+        this.editor.insertEmbed(range.index, 'pdf', { path: filePath, filename: file.name }, 'user');
         this.editor.setSelection(range.index + 1);
     },
 
-    /**
-     * Detect @ trigger and open babel selector.
-     * TODO: implement neighbor/nested babel recommendations.
-     */
+    async embedImage(file) {
+        if (!window.electronAPI) return;
+        let filePath = file.path || '';
+        if (!filePath) {
+            // Screenshot or copied image data — save to userData/images/
+            const ext = (file.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
+            const buf = await file.arrayBuffer();
+            const result = await window.electronAPI.saveFile(buf, 'images', ext);
+            if (!result.success) return;
+            filePath = result.path;
+        }
+        const range = this.editor.getSelection(true);
+        this.editor.insertEmbed(range.index, 'local-image', { path: filePath }, 'user');
+        this.editor.setSelection(range.index + 1);
+    },
+
+    showMissingFileModal(node) {
+        this.hideMissingFileModal();
+
+        const modal = document.createElement('div');
+        modal.className = 'missing-file-modal';
+        modal.innerHTML = `
+            <div class="missing-file-text">File not found</div>
+            <button class="missing-file-locate">Locate File</button>
+        `;
+
+        const rect = node.getBoundingClientRect();
+        modal.style.left = rect.left + 'px';
+        modal.style.top = (rect.bottom + 6) + 'px';
+
+        modal.querySelector('.missing-file-locate').addEventListener('click', async () => {
+            const result = await window.electronAPI.locateFile([
+                { name: 'PDF', extensions: ['pdf'] }
+            ]);
+            if (result.success) {
+                node.setAttribute('data-path', result.path);
+                const label = node.querySelector('.pdf-embed-label');
+                if (label) {
+                    const filename = result.path.split(/[\\/]/).pop();
+                    label.textContent = filename.length > 15
+                        ? filename.substring(0, 12) + '...' + filename.slice(-4)
+                        : filename;
+                }
+                Editor.triggerAutoSave();
+            }
+            this.hideMissingFileModal();
+        });
+
+        document.body.appendChild(modal);
+        this._missingFileModal = modal;
+
+        // Close on outside click
+        const closeOnOutside = (e) => {
+            if (!modal.contains(e.target) && e.target !== node) {
+                this.hideMissingFileModal();
+                document.removeEventListener('click', closeOnOutside);
+            }
+        };
+        setTimeout(() => document.addEventListener('click', closeOnOutside), 0);
+    },
+
+    hideMissingFileModal() {
+        if (this._missingFileModal) {
+            this._missingFileModal.remove();
+            this._missingFileModal = null;
+        }
+    },
+
     checkForBabelMention() {
         const range = this.editor.getSelection();
         if (!range) return;
@@ -287,36 +369,22 @@ const Editor = {
         if (atPos >= 0) this.showBabelSelector(atPos);
     },
 
-    /**
-     * Show babel selector popup at atPosition.
-     * TODO: implement popup UI with real recommendations.
-     */
     showBabelSelector(atPosition) {
         const recommendations = this.getRecommendedBabels();
         if (recommendations.length === 0) {
-            console.log('No babels found'); // placeholder
+            console.log('No babels found');
         }
     },
 
-    /**
-     * Returns recommended babels for @ linking.
-     * TODO: return neighbor/nested babels.
-     */
     getRecommendedBabels() {
         return [];
     },
 
-    /**
-     * Debounce auto-save by 2 seconds (silent — no visible indicator).
-     */
     triggerAutoSave() {
         if (this.autoSaveTimer) clearTimeout(this.autoSaveTimer);
         this.autoSaveTimer = setTimeout(() => this.saveCurrentBabel(), 2000);
     },
 
-    /**
-     * Flush current editor content into State and persist.
-     */
     saveCurrentBabel() {
         const babel = State.editingBabel;
         if (!babel) return;
