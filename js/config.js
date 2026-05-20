@@ -36,7 +36,6 @@ const Config = {
     animation: {
         edgeFlashDuration: 2000,      // 2 seconds per flash cycle
         edgeFlashLength: 0.3,          // Flash covers 30% of edge
-        levelCircleUpdateInterval: 2000,
         dragReturnDuration: 500        // 500ms to return after drag
     },
 
@@ -93,14 +92,9 @@ const Config = {
 };
 
 // Freeze config to prevent accidental modification
-Object.freeze(Config);
-Object.freeze(Config.colors);
-Object.freeze(Config.graph);
-Object.freeze(Config.physics);
-Object.freeze(Config.animation);
-Object.freeze(Config.node);
-Object.freeze(Config.edge);
-Object.freeze(Config.levelCircle);
-Object.freeze(Config.lighting);
-Object.freeze(Config.ui);
-Object.freeze(Config.storage);
+for (const key of Object.keys(Config)) {
+    if (typeof Config[key] === 'object' && Config[key] !== null) {
+        Object.freeze(Config[key]);
+    }
+}
+Object.freeze(Config); // Don't forget to freeze the top-level parent too!

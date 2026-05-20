@@ -26,14 +26,15 @@ js/
   level-circles.js  DAG hierarchy circles + drag animation
   animation.js      Edge flash animation + main render loop
   persistence.js    localStorage save/load, JSON export/import
-  ui.js             DOM wiring, overlays, Quill editor, CustomEvent dispatch
+  editor.js         Quill editor: blot registration, shortcuts, embeds, auto-save
+  ui.js             DOM wiring, overlays, color palette, CustomEvent dispatch
   app.js            Graph init, node interaction handlers, event listeners
 ```
 
 Scripts load in this exact order (each can rely on everything before it):
 
 ```
-config → state → graph-utils → rendering → level-circles → animation → persistence → ui → app
+config → state → graph-utils → rendering → level-circles → animation → persistence → editor → ui → app
 ```
 
 ---
@@ -63,7 +64,7 @@ Key sections:
 
 ### `State` (`js/state.js`)
 
-The single source of truth for all runtime data. Modules read and mutate State — it is a mutable global singleton, not a reactive store.
+The single source of truth for all runtime data. Modules read and mutate State — it is a mutable global singleton, not a reactive store. You have to manually tell the UI to re-render after changing a value.
 
 **Data:**
 
@@ -200,9 +201,50 @@ Serializes and deserializes the graph to/from `localStorage` under `Config.stora
 
 ---
 
+### `Editor` (`js/editor.js`)
+
+Owns all Quill editor concerns: blot registration, instance creation, keyboard shortcuts, paste handling, auto-save, and persistence of the currently open babel. **Reads `UI.elements.editTitle`** for the title field value, and reads `State.editingBabel` / `State.selectedColor` when saving.
+
+**Properties:**
+
+| Property | Purpose |
+|----------|---------|
+| `Editor.editor` | The live `Quill` instance (null until first `openEdit`) |
+| `Editor.autoSaveTimer` | `setTimeout` handle for the 2-second debounce |
+| `Editor.blotsRegistered` | Guard so Quill blots are registered only once |
+
+**Methods:**
+
+| Method | What it does |
+|--------|-------------|
+| `initEditor()` | Registers custom blots (first call only), then creates the Quill instance. Safe to call repeatedly. |
+| `createQuillInstance()` | Creates the `Quill` object, wires `text-change`, paste, click, and `@`-mention handlers. |
+| `setupEditorShortcuts()` | Attaches `keydown` listener on the Quill root for Ctrl+B/I/H/+/- etc. |
+| `cycleHeading(direction)` | Rotates heading level at selection: 0→1→2→3→0. `direction` 1 = increase, -1 = decrease. |
+| `handlePaste(e)` | Intercepts paste events to auto-embed PDFs and YouTube URLs. |
+| `embedYouTube(url)` | Inserts a `YouTubeBlot` pill at the current cursor position. |
+| `embedPDF(file)` | Creates an object URL for the file and inserts a `PDFBlot` pill. |
+| `checkForBabelMention()` | Scans backwards from cursor for `@`, calls `showBabelSelector` if found. |
+| `showBabelSelector(atPosition)` | Stub — will show a popup with `getRecommendedBabels()` results. |
+| `getRecommendedBabels()` | Returns `[]` for now; will return neighbor/nested babels. |
+| `triggerAutoSave()` | Debounces `saveCurrentBabel()` by 2 seconds. |
+| `saveCurrentBabel()` | Reads title from `UI.elements.editTitle`, HTML from `Editor.editor`, color from `State.selectedColor`, writes into `State.editingBabel`, calls `Persistence.save()`. |
+
+**Custom Quill blots** (registered once on first `initEditor` call):
+
+| Blot | Tag | Behaviour |
+|------|-----|-----------|
+| `HighlightBlot` | `<mark>` | Yellow background highlight |
+| `YouTubeBlot` | `<span class="youtube-embed">` | Inline pill; click copies URL to clipboard |
+| `PDFBlot` | `<span class="pdf-embed">` | Inline pill; click opens file URL in new tab |
+
+**Babel mention (`@`):** Partially implemented. Typing `@` triggers `checkForBabelMention` → `showBabelSelector` → `getRecommendedBabels` (returns `[]`).
+
+---
+
 ### `UI` (`js/ui.js`)
 
-Owns all DOM interaction: overlay lifecycle, color palette, Quill editor initialization, the 3D edit-mode preview, and keyboard/button event handling. Communicates back to `app.js` exclusively via `CustomEvent`s dispatched on `document`.
+Owns all DOM interaction: overlay lifecycle, color palette, the 3D edit-mode preview, and keyboard/button event handling. Delegates all Quill editor concerns to `Editor`. Communicates back to `app.js` exclusively via `CustomEvent`s dispatched on `document`.
 
 **Events fired by UI:**
 
@@ -228,21 +270,11 @@ Owns all DOM interaction: overlay lifecycle, color palette, Quill editor initial
 | `showCreationForm()` | Transitions from hold animation into the creation form panel. |
 | `openComparison()` | Populates and shows the comparison overlay for `State.comparisonBabels[0]` and `[1]`. |
 | `closeComparison()` | Saves inline edits, animates panels closed, fires `babel:comparison-closed`. |
-| `openEdit(babel)` | Sets `State.editingBabel`, loads content into Quill and title field, shows edit overlay, initializes 3D preview. |
-| `closeEdit()` | Saves babel, cleans up preview, fires `babel:edit-closed`. |
-| `initEditor()` | Registers custom Quill blots (highlight, youtube, pdf) once, then creates the Quill instance. |
+| `openEdit(babel)` | Sets `State.editingBabel`, calls `Editor.initEditor()`, loads content into editor and title field, shows edit overlay, initializes 3D preview. |
+| `closeEdit()` | Calls `Editor.saveCurrentBabel()`, cancels auto-save timer, cleans up preview, fires `babel:edit-closed`. |
 | `initPreview(color)` | Delegates to `Rendering.createPreview`; stores the returned handle in `UI.preview`. |
 | `updatePreviewColor(color)` | Calls `UI.preview.updateColor(color)`. |
 | `cleanupPreview()` | Calls `UI.preview.destroy()`. |
-| `triggerAutoSave()` | Debounces `saveCurrentBabel()` by 2 seconds. |
-| `saveCurrentBabel()` | Reads title, Quill HTML, and selected color into `State.editingBabel`, then calls `Persistence.save()`. |
-
-**Quill custom blots:**
-- `HighlightBlot` — `<mark>` with yellow background
-- `YouTubeBlot` — inline pill that copies URL to clipboard on click
-- `PDFBlot` — inline pill that opens the file URL in a new tab on click
-
-**Babel mention (`@`):** Partially implemented. Typing `@` in the editor detects the trigger and calls `showBabelSelector`, which currently returns an empty recommendation list.
 
 ---
 

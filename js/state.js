@@ -23,9 +23,6 @@ const State = {
     deleteWarningBabel: null,
     deleteWarningTimeout: null,
 
-    // Physics state
-    isPhysicsPaused: false,
-
     // Methods
     reset() {
         this.babels = [];
@@ -36,7 +33,6 @@ const State = {
         this.isCreating = false;
         this.selectedSimilarBabels = [];
         this.deleteWarningBabel = null;
-        this.isPhysicsPaused = false;
     },
 
     addBabel(babel) {
