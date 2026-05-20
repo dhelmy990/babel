@@ -720,36 +720,34 @@ body {
     text-align: center;
 }
 
-/* YouTube embed - inline pill */
-#edit-editor .ql-editor .youtube-embed,
-.youtube-embed {
+
+
+/* Link embed - inline pill */
+#edit-editor .ql-editor .link-embed,
+.link-embed {
     display: inline-flex !important;
     align-items: center !important;
     gap: 0.35rem;
-    background: #252525 !important;
-    border: 1px solid #555 !important;
+    background: #1a1f2e !important;
+    border: 1px solid #2a3a5a !important;
     border-radius: 4px !important;
     padding: 0.2rem 0.6rem !important;
     margin: 0 0.2rem;
     cursor: pointer;
-    transition: background 0.15s ease, border-color 0.15s ease;
+    transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
     font-size: 0.8rem;
     vertical-align: baseline;
     line-height: 1.4;
 }
 
-#edit-editor .ql-editor .youtube-embed:hover,
-.youtube-embed:hover {
-    background: #333 !important;
-    border-color: #ff4444 !important;
+#edit-editor .ql-editor .link-embed:hover,
+.link-embed:hover {
+    background: #1e2a42 !important;
+    border-color: #4a9eff !important;
+    box-shadow: 0 0 6px rgba(74, 158, 255, 0.4) !important;
 }
 
-.youtube-embed-icon {
-    color: #ff4444;
-    font-size: 0.75rem;
-}
-
-.youtube-embed-label {
+.link-embed-label {
     color: #ddd;
     white-space: nowrap;
     font-size: 0.8rem;

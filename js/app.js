@@ -326,11 +326,11 @@ function updateGraph() {
 // INITIALIZATION
 // ============================================
 
-function init() {
+async function init() {
     UI.init();
     initGraph();
     Rendering.setupLighting(Graph.scene());
-    Persistence.load();
+    await Persistence.load();
     GraphUtils.cleanGraphOnLoad();
     UI.setupColorPalette();
 
@@ -342,6 +342,14 @@ function init() {
     document.addEventListener('babel:delete', handleDelete);
     document.addEventListener('babel:reset-camera', resetCamera);
     document.addEventListener('babel:save', () => Persistence.save());
+
+    document.addEventListener('keydown', async (e) => {
+        if (e.ctrlKey && e.shiftKey && e.key === 'I') {
+            e.preventDefault();
+            const ok = await Persistence.importJSON();
+            if (ok) { updateGraph(); UI.updateHintText(); }
+        }
+    });
     document.addEventListener('babel:comparison-closed', updateGraph);
     document.addEventListener('babel:edit-closed', updateGraph);
 

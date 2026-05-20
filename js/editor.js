@@ -42,15 +42,25 @@ const Editor = {
         HighlightBlot.tagName = 'mark';
         Quill.register(HighlightBlot);
 
-        class YouTubeBlot extends Embed {
+        class LinkBlot extends Embed {
             static create(value) {
                 const node = super.create();
                 node.setAttribute('data-url', value.url);
                 node.setAttribute('contenteditable', 'false');
-                node.innerHTML = `<span class="youtube-embed-icon">▶</span><span class="youtube-embed-label">YouTube</span>`;
+
+
+                const domain = value.url.replace(/^(https?:\/\/)?(www\.)?/, '').split('/')[0];
+                const faviconUrl = `https://www.google.com/s2/favicons?sz=32&domain=${domain}`;
+                
+                // Truncate the domain to use as a fallback title for now
+                const displayTitle = "link";
+                // Construct the internal HTML structure
+                const iconHtml = `<img src="${faviconUrl}" alt="" style="width: 16px; height: 16px; vertical-align: middle; margin-right: 6px; border-radius: 2px;" />`;
+                node.innerHTML = `${iconHtml}<span class="link-embed-label">${displayTitle}</span>`;
+                node.onhover = () => {
+                    node.style.borderColor = '#0076fcff';
+                };
                 node.onclick = () => {
-                    navigator.clipboard.writeText(value.url);
-                    node.style.borderColor = '#4a9eff';
                     setTimeout(() => { node.style.borderColor = ''; }, 500);
                     window.open(value.url, '_blank', 'noopener,noreferrer');
                 };
@@ -60,10 +70,10 @@ const Editor = {
                 return { url: node.getAttribute('data-url') };
             }
         }
-        YouTubeBlot.blotName = 'youtube';
-        YouTubeBlot.tagName = 'span';
-        YouTubeBlot.className = 'youtube-embed';
-        Quill.register(YouTubeBlot);
+        LinkBlot.blotName = 'url-link';
+        LinkBlot.tagName = 'span';
+        LinkBlot.className = 'link-embed';
+        Quill.register(LinkBlot);
 
         class PDFBlot extends Embed {
             static create(value) {
@@ -214,10 +224,10 @@ const Editor = {
      */
     handlePaste(e) {
         const text = e.clipboardData?.getData('text/plain')?.trim();
-        if (text && this.isYouTubeURL(text)) {
+        if (text && this.isURL(text)) {
             e.preventDefault();
             e.stopImmediatePropagation();
-            this.embedYouTube(text);
+            this.embedLink(text);
             return;
         }
 
@@ -234,21 +244,15 @@ const Editor = {
         }
     },
 
-    isYouTubeURL(url) {
-        const youtubeRegex = /^(https?:\/\/)?(www\.)?(youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)[\w-]+/;
-        return youtubeRegex.test(url);
+    isURL(url) {
+        const regularUrlRegex = /^(https?:\/\/)?(www\.)?[\w\-]+(\.[\w\-]+)+[/#?]?.*$/i;
+        return regularUrlRegex.test(url);
     },
 
-    getYouTubeID(url) {
-        const match = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([\w-]+)/);
-        return match ? match[1] : null;
-    },
-
-    embedYouTube(url) {
-        const videoId = this.getYouTubeID(url);
-        if (!videoId) return;
+    embedLink(url) {
+        if (!url) return;
         const range = this.editor.getSelection(true);
-        this.editor.insertEmbed(range.index, 'youtube', { url }, 'user');
+        this.editor.insertEmbed(range.index, 'url-link', { url }, 'user');
         this.editor.setSelection(range.index + 1);
     },
 
