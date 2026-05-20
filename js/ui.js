@@ -15,16 +15,8 @@ const UI = {
     // Current heading level for cycling (0 = normal, 1-3 = h1-h3)
     currentHeadingLevel: 0,
 
-    // 3D Preview state
-    preview: {
-        scene: null,
-        camera: null,
-        renderer: null,
-        sphere: null,
-        innerSphere: null,
-        texture: null,
-        animationId: null
-    },
+    // Handle returned by Rendering.createPreview
+    preview: null,
 
     /**
      * Helper: Safely check if element has a class (null-safe)
@@ -101,193 +93,20 @@ const UI = {
         return swatch;
     },
 
-    /**
-     * Initialize 3D babel preview with wedge cutout
-     * - Wedge stays fixed facing camera
-     * - Texture rotates to simulate planet rotation
-     * - Visible interior (not black void)
-     */
     initPreview(color) {
         const container = this.elements.editBabel3d;
         if (!container) return;
-
-        // Clean up existing preview
         this.cleanupPreview();
-
-        const width = container.clientWidth || 400;
-        const height = container.clientHeight || 400;
-
-        // Create scene
-        this.preview.scene = new THREE.Scene();
-        this.preview.scene.background = new THREE.Color(0x0a0a0a);
-
-        // Create camera
-        this.preview.camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000);
-        this.preview.camera.position.z = 10;
-
-        // Create renderer
-        this.preview.renderer = new THREE.WebGLRenderer({ antialias: true });
-        this.preview.renderer.setSize(width, height);
-        this.preview.renderer.setPixelRatio(window.devicePixelRatio);
-        container.innerHTML = '';
-        container.appendChild(this.preview.renderer.domElement);
-
-        // Create outer sphere with wedge cutout - geometry stays FIXED
-        const outerGeometry = this.createWedgeSphereGeometry(4, 64, Math.PI * 0.35);
-        const texture = Rendering.createPlanetTexture(color);
-        texture.wrapS = THREE.RepeatWrapping;
-        texture.wrapT = THREE.RepeatWrapping;
-        const outerMaterial = new THREE.MeshStandardMaterial({
-            map: texture,
-            side: THREE.DoubleSide
-        });
-        this.preview.sphere = new THREE.Mesh(outerGeometry, outerMaterial);
-        this.preview.scene.add(this.preview.sphere);
-
-        // Create inner sphere for visible hollow interior (dark grey, not black)
-        const innerGeometry = new THREE.SphereGeometry(3.85, 64, 64);
-        const innerMaterial = new THREE.MeshStandardMaterial({
-            color: 0x1a1a1a,
-            side: THREE.BackSide,
-            roughness: 0.9
-        });
-        this.preview.innerSphere = new THREE.Mesh(innerGeometry, innerMaterial);
-        this.preview.scene.add(this.preview.innerSphere);
-
-        // Add lighting - brighter to illuminate interior
-        const ambientLight = new THREE.AmbientLight(0x606060, 1.0);
-        this.preview.scene.add(ambientLight);
-
-        const mainLight = new THREE.DirectionalLight(0xffffff, 1.0);
-        mainLight.position.set(5, 5, 5);
-        this.preview.scene.add(mainLight);
-
-        const fillLight = new THREE.DirectionalLight(0x6688cc, 0.5);
-        fillLight.position.set(-5, -3, -5);
-        this.preview.scene.add(fillLight);
-
-        // Interior point light to illuminate the hollow
-        const interiorLight = new THREE.PointLight(0x444444, 0.8, 10);
-        interiorLight.position.set(0, 0, 0);
-        this.preview.scene.add(interiorLight);
-
-        // Store texture reference for rotation animation
-        this.preview.texture = texture;
-
-        // Start animation loop
-        this.animatePreview();
+        this.preview = Rendering.createPreview(container, color);
     },
 
-    /**
-     * Create sphere geometry with a wedge (pie slice) removed
-     */
-    createWedgeSphereGeometry(radius, segments, wedgeAngle) {
-        const geometry = new THREE.SphereGeometry(radius, segments, segments);
-        const positions = geometry.attributes.position;
-        const indices = [];
-        const originalIndex = geometry.index.array;
-
-        // Keep faces that aren't in the wedge
-        for (let i = 0; i < originalIndex.length; i += 3) {
-            const idx1 = originalIndex[i];
-            const idx2 = originalIndex[i + 1];
-            const idx3 = originalIndex[i + 2];
-
-            // Check if any vertex of the face is in the wedge
-            let inWedge = false;
-            for (const idx of [idx1, idx2, idx3]) {
-                const x = positions.getX(idx);
-                const z = positions.getZ(idx);
-                const angle = Math.atan2(z, x);
-
-                // Wedge is centered around positive X axis
-                if (angle > -wedgeAngle / 2 && angle < wedgeAngle / 2 && x > 0) {
-                    inWedge = true;
-                    break;
-                }
-            }
-
-            if (!inWedge) {
-                indices.push(idx1, idx2, idx3);
-            }
-        }
-
-        geometry.setIndex(indices);
-        return geometry;
-    },
-
-    /**
-     * Update preview sphere color
-     */
     updatePreviewColor(color) {
-        if (!this.preview.sphere) return;
-
-        // Create new texture with new color, preserve rotation settings
-        const texture = Rendering.createPlanetTexture(color);
-        texture.wrapS = THREE.RepeatWrapping;
-        texture.wrapT = THREE.RepeatWrapping;
-        // Copy current offset from old texture
-        if (this.preview.texture) {
-            texture.offset.copy(this.preview.texture.offset);
-        }
-        this.preview.sphere.material.map = texture;
-        this.preview.sphere.material.needsUpdate = true;
-        this.preview.texture = texture;
+        this.preview?.updateColor(color);
     },
 
-    /**
-     * Animate the preview (texture rotation - geometry stays fixed)
-     */
-    animatePreview() {
-        if (!this.preview.renderer || !this.preview.scene || !this.preview.camera) return;
-
-        const animate = () => {
-            this.preview.animationId = requestAnimationFrame(animate);
-
-            // Rotate texture offset instead of geometry (wedge stays facing camera)
-            if (this.preview.texture) {
-                this.preview.texture.offset.x += 0.001;
-            }
-
-            this.preview.renderer.render(this.preview.scene, this.preview.camera);
-        };
-
-        animate();
-    },
-
-    /**
-     * Clean up 3D preview
-     */
     cleanupPreview() {
-        if (this.preview.animationId) {
-            cancelAnimationFrame(this.preview.animationId);
-            this.preview.animationId = null;
-        }
-
-        if (this.preview.renderer) {
-            this.preview.renderer.dispose();
-            this.preview.renderer = null;
-        }
-
-        if (this.preview.sphere) {
-            this.preview.sphere.geometry.dispose();
-            this.preview.sphere.material.dispose();
-            this.preview.sphere = null;
-        }
-
-        if (this.preview.innerSphere) {
-            this.preview.innerSphere.geometry.dispose();
-            this.preview.innerSphere.material.dispose();
-            this.preview.innerSphere = null;
-        }
-
-        if (this.preview.texture) {
-            this.preview.texture.dispose();
-            this.preview.texture = null;
-        }
-
-        this.preview.scene = null;
-        this.preview.camera = null;
+        this.preview?.destroy();
+        this.preview = null;
     },
 
     // Track if Quill blots have been registered
@@ -408,6 +227,31 @@ const UI = {
         // Handle paste for YouTube/PDF detection
         this.editor.root.addEventListener('paste', (e) => {
             this.handlePaste(e);
+        });
+
+        // Handle clicks on embeds (event delegation for loaded content)
+        this.editor.root.addEventListener('click', (e) => {
+            // YouTube embed - copy URL to clipboard
+            const ytEmbed = e.target.closest('.youtube-embed');
+            if (ytEmbed) {
+                const url = ytEmbed.getAttribute('data-url');
+                if (url) {
+                    navigator.clipboard.writeText(url);
+                    ytEmbed.style.borderColor = '#4a9eff';
+                    setTimeout(() => { ytEmbed.style.borderColor = ''; }, 500);
+                }
+                return;
+            }
+
+            // PDF embed - open in browser
+            const pdfEmbed = e.target.closest('.pdf-embed');
+            if (pdfEmbed) {
+                const url = pdfEmbed.getAttribute('data-url');
+                if (url) {
+                    window.open(url, '_blank');
+                }
+                return;
+            }
         });
 
         // Handle @ for babel linking
@@ -651,38 +495,37 @@ const UI = {
         Persistence.save();
     },
 
-    /**
-     * Setup event listeners
-     */
-    setupEventListeners(callbacks) {
-        document.addEventListener('keydown', (e) => this.handleKeyDown(e, callbacks));
-        document.addEventListener('keyup', (e) => this.handleKeyUp(e, callbacks));
+    setupEventListeners() {
+        document.addEventListener('keydown', (e) => this.handleKeyDown(e));
+        document.addEventListener('keyup', (e) => this.handleKeyUp(e));
 
-        document.getElementById('create-babel-btn').addEventListener('click', callbacks.createBabel);
-        document.getElementById('cancel-create-btn').addEventListener('click', callbacks.cancelCreation);
-        document.getElementById('comparison-done-btn').addEventListener('click', callbacks.closeComparison);
-        document.getElementById('edit-done-btn').addEventListener('click', callbacks.closeEdit);
+        document.getElementById('create-babel-btn').addEventListener('click', () => {
+            document.dispatchEvent(new CustomEvent('babel:create'));
+        });
+        document.getElementById('cancel-create-btn').addEventListener('click', () => this.cancelCreation());
+        document.getElementById('comparison-done-btn').addEventListener('click', () => this.closeComparison());
+        document.getElementById('edit-done-btn').addEventListener('click', () => this.closeEdit());
 
-        document.querySelector('.edge-arrow.left-to-right')
-            .addEventListener('click', () => callbacks.toggleEdge('left-to-right'));
-        document.querySelector('.edge-arrow.right-to-left')
-            .addEventListener('click', () => callbacks.toggleEdge('right-to-left'));
+        document.querySelector('.edge-arrow.left-to-right').addEventListener('click', () => {
+            document.dispatchEvent(new CustomEvent('babel:toggle-edge', { detail: { direction: 'left-to-right' } }));
+        });
+        document.querySelector('.edge-arrow.right-to-left').addEventListener('click', () => {
+            document.dispatchEvent(new CustomEvent('babel:toggle-edge', { detail: { direction: 'right-to-left' } }));
+        });
 
         document.addEventListener('keydown', e => {
             if (e.ctrlKey && e.key === 's') {
                 e.preventDefault();
-                callbacks.save();
+                document.dispatchEvent(new CustomEvent('babel:save'));
             }
         });
 
-        // Help button toggle
         const helpBtn = this.elements.editHelpBtn;
         const shortcutsPopup = this.elements.editShortcutsPopup;
         if (helpBtn && shortcutsPopup) {
             helpBtn.addEventListener('click', () => {
                 shortcutsPopup.classList.toggle('visible');
             });
-            // Close popup when clicking outside
             document.addEventListener('click', (e) => {
                 if (!helpBtn.contains(e.target) && !shortcutsPopup.contains(e.target)) {
                     shortcutsPopup.classList.remove('visible');
@@ -690,24 +533,17 @@ const UI = {
             });
         }
 
-        // Title auto-save
         const editTitle = this.elements.editTitle;
         if (editTitle) {
-            editTitle.addEventListener('input', () => {
-                this.triggerAutoSave();
-            });
+            editTitle.addEventListener('input', () => this.triggerAutoSave());
         }
     },
 
-    handleKeyDown(e, callbacks) {
+    handleKeyDown(e) {
         const { comparisonOverlay, editOverlay, creationForm } = this.elements;
 
-        // Allow typing in editor
         if (this.hasClass(editOverlay, 'active')) {
-            // In edit mode, only handle Escape
-            if (e.key === 'Escape') {
-                callbacks.closeEdit();
-            }
+            if (e.key === 'Escape') this.closeEdit();
             return;
         }
 
@@ -715,7 +551,7 @@ const UI = {
             if (e.key === 'Escape') e.target.blur();
             if (e.key === 'Enter' && this.hasClass(creationForm, 'active')) {
                 e.preventDefault();
-                callbacks.createBabel();
+                document.dispatchEvent(new CustomEvent('babel:create'));
             }
             return;
         }
@@ -725,18 +561,18 @@ const UI = {
                 if (!State.isCreating &&
                     !this.hasClass(comparisonOverlay, 'active') &&
                     !this.hasClass(editOverlay, 'active')) {
-                    callbacks.startCreation();
+                    this.startCreation();
                 }
                 break;
             case 'escape':
                 if (this.hasClass(creationForm, 'active')) {
-                    callbacks.cancelCreation();
+                    this.cancelCreation();
                 } else if (this.hasClass(comparisonOverlay, 'active')) {
-                    callbacks.closeComparison();
+                    this.closeComparison();
                 } else if (this.hasClass(editOverlay, 'active')) {
-                    callbacks.closeEdit();
+                    this.closeEdit();
                 } else if (State.selectedBabel) {
-                    callbacks.deselectBabel();
+                    document.dispatchEvent(new CustomEvent('babel:deselect'));
                 }
                 break;
             case 'delete':
@@ -744,28 +580,28 @@ const UI = {
                 if (State.selectedBabel &&
                     !this.hasClass(comparisonOverlay, 'active') &&
                     !this.hasClass(editOverlay, 'active')) {
-                    callbacks.handleDelete();
+                    document.dispatchEvent(new CustomEvent('babel:delete'));
                 }
                 break;
             case 'e':
                 if (State.selectedBabel &&
                     !this.hasClass(comparisonOverlay, 'active') &&
                     !this.hasClass(editOverlay, 'active')) {
-                    callbacks.openEdit(State.selectedBabel);
+                    this.openEdit(State.selectedBabel);
                 }
                 break;
             case ' ':
                 e.preventDefault();
-                callbacks.resetCamera();
+                document.dispatchEvent(new CustomEvent('babel:reset-camera'));
                 break;
         }
     },
 
-    handleKeyUp(e, callbacks) {
+    handleKeyUp(e) {
         if (e.key.toLowerCase() === 'r' &&
             State.isCreating &&
             !this.elements.creationForm.classList.contains('active')) {
-            callbacks.cancelCreation();
+            this.cancelCreation();
         }
     },
 
@@ -920,7 +756,7 @@ const UI = {
         document.querySelector('.edge-arrow.right-to-left').classList.toggle('active', rightToLeft);
     },
 
-    closeComparison(callback) {
+    closeComparison() {
         const leftPanel = document.getElementById('babel-panel-left');
         const rightPanel = document.getElementById('babel-panel-right');
 
@@ -943,7 +779,7 @@ const UI = {
         setTimeout(() => {
             this.elements.comparisonOverlay.classList.remove('active');
             State.comparisonBabels = [];
-            if (callback) callback();
+            document.dispatchEvent(new CustomEvent('babel:comparison-closed'));
         }, Config.ui.panelCloseDelay);
     },
 
@@ -988,32 +824,24 @@ const UI = {
         }, 100);
     },
 
-    closeEdit(callback) {
-        // Save before closing
+    closeEdit() {
         this.saveCurrentBabel();
 
-        // Clear auto-save timer
         if (this.autoSaveTimer) {
             clearTimeout(this.autoSaveTimer);
             this.autoSaveTimer = null;
         }
 
-        // Clean up 3D preview
         this.cleanupPreview();
 
-        // Close shortcuts popup if open
         if (this.elements.editShortcutsPopup) {
             this.elements.editShortcutsPopup.classList.remove('visible');
         }
 
-        // Hide overlay
         this.elements.editOverlay.classList.remove('active');
-
-        // Clear texture cache so main graph shows updated colors
         Rendering.textureCache.clear();
-
         State.editingBabel = null;
 
-        if (callback) callback();
+        document.dispatchEvent(new CustomEvent('babel:edit-closed'));
     }
 };

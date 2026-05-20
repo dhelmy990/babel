@@ -231,40 +231,37 @@ const Rendering = {
     },
 
     /**
-     * Create node Three.js object
+     * Create node Three.js object.
+     * Callers compute isSelected/isDeleteWarning from State so Rendering stays pure.
      */
-    createNodeObject(node) {
+    createNodeObject(node, { isSelected = false, isDeleteWarning = false } = {}) {
         const group = new THREE.Group();
         const cfg = Config.node;
 
-        let color = node.color || Config.graph.defaultNodeColor;
-        if (State.deleteWarningBabel?.id === node.id) {
-            color = '#ff0000';
-        }
+        const color = isDeleteWarning
+            ? '#ff0000'
+            : (node.color || Config.graph.defaultNodeColor);
 
-        // Main sphere with custom shader material
         const geometry = new THREE.SphereGeometry(cfg.radius, cfg.segments, cfg.segments);
         const texture = this.getPlanetTexture(color);
         const material = this.createHoleMaterial(texture, color);
 
         const sphere = new THREE.Mesh(geometry, material);
         sphere.rotation.z = Math.random() * 0.3;
-        sphere.userData.isMainSphere = true;  // Tag for raycasting
+        sphere.userData.isMainSphere = true;
         sphere.userData.nodeId = node.id;
         group.add(sphere);
 
-        // Atmosphere glow
         const glowGeometry = new THREE.SphereGeometry(cfg.glowRadius, 32, 32);
         const glowMaterial = new THREE.MeshBasicMaterial({
-            color: color,
+            color,
             transparent: true,
             opacity: cfg.glowOpacity,
             side: THREE.BackSide
         });
         group.add(new THREE.Mesh(glowGeometry, glowMaterial));
 
-        // Selection ring
-        if (State.selectedBabel?.id === node.id) {
+        if (isSelected) {
             const ringGeometry = new THREE.TorusGeometry(
                 cfg.selectionRingRadius, cfg.selectionRingTube, 16, 100
             );
@@ -279,6 +276,62 @@ const Rendering = {
         }
 
         return group;
+    },
+
+    /**
+     * Create a self-contained 3D preview inside container.
+     * Returns a handle with updateColor(color) and destroy().
+     */
+    createPreview(container, color) {
+        const width = container.clientWidth || 400;
+        const height = container.clientHeight || 400;
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x0a0a0a);
+
+        const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000);
+        camera.position.z = 10;
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(width, height);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        container.innerHTML = '';
+        container.appendChild(renderer.domElement);
+
+        const geometry = new THREE.SphereGeometry(4, 64, 64);
+        const texture = this.createPlanetTexture(color);
+        const material = new THREE.MeshStandardMaterial({ map: texture });
+        const sphere = new THREE.Mesh(geometry, material);
+        scene.add(sphere);
+
+        scene.add(new THREE.AmbientLight(0x404040, 0.6));
+        const mainLight = new THREE.DirectionalLight(0xffffff, 1.0);
+        mainLight.position.set(5, 5, 5);
+        scene.add(mainLight);
+        const fillLight = new THREE.DirectionalLight(0x6688cc, 0.4);
+        fillLight.position.set(-5, -3, -5);
+        scene.add(fillLight);
+
+        let animId = null;
+        const tick = () => {
+            animId = requestAnimationFrame(tick);
+            sphere.rotation.y += 0.005;
+            renderer.render(scene, camera);
+        };
+        tick();
+
+        return {
+            updateColor: (newColor) => {
+                sphere.material.map = this.createPlanetTexture(newColor);
+                sphere.material.needsUpdate = true;
+            },
+            destroy: () => {
+                if (animId) cancelAnimationFrame(animId);
+                renderer.dispose();
+                sphere.geometry.dispose();
+                sphere.material.dispose();
+            }
+        };
     },
 
     /**

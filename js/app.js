@@ -17,7 +17,10 @@ let hoveredSphere = null;
 function initGraph() {
     Graph = ForceGraph3D()(UI.elements.graphContainer)
         .backgroundColor(Config.graph.backgroundColor)
-        .nodeThreeObject(node => Rendering.createNodeObject(node))
+        .nodeThreeObject(node => Rendering.createNodeObject(node, {
+            isSelected: State.selectedBabel?.id === node.id,
+            isDeleteWarning: State.deleteWarningBabel?.id === node.id
+        }))
         .nodeLabel(node => node.title || 'Untitled')
         .linkWidth(0)
         .linkColor(() => 'rgba(0,0,0,0)')
@@ -52,7 +55,7 @@ function initGraph() {
             console.warn('DAG layout error - graph may have cycles');
         })
         .onEngineStop(() => {
-            Animation.updateLevelCircles(Graph);
+            LevelCircles.updateLevelCircles(Graph);
         });
 
     return Graph;
@@ -65,7 +68,6 @@ function initGraph() {
 function handleNodeClick(node, event) {
     const now = Date.now();
     if (node.__lastClick && (now - node.__lastClick) < Config.ui.doubleClickThreshold) {
-        // Double-click - focus camera
         Graph.cameraPosition(
             { x: node.x, y: node.y, z: node.z + 100 },
             { x: node.x, y: node.y, z: node.z },
@@ -75,7 +77,6 @@ function handleNodeClick(node, event) {
     }
     node.__lastClick = now;
 
-    // Single click - select
     State.selectedBabel = State.getBabel(node.id);
     Graph.nodeThreeObject(Graph.nodeThreeObject());
 }
@@ -103,22 +104,18 @@ function handleBackgroundClick() {
 }
 
 function handleNodeDrag(node) {
-    // Detect drag start (first call for this drag)
-    if (!Animation.dragState.isDragging || Animation.dragState.node?.id !== node.id) {
-        // Store original position for return animation
+    if (!LevelCircles.dragState.isDragging || LevelCircles.dragState.node?.id !== node.id) {
         node.__originalY = node.y;
         node.__originalX = node.x;
         node.__originalZ = node.z;
-        // Start tracking for circle animation
-        Animation.startDrag(node, Graph);
+        LevelCircles.startDrag(node, Graph);
     }
 
     node.fx = node.x;
     node.fy = node.y;
     node.fz = node.z;
 
-    // Update level circle with current drag position
-    Animation.updateDraggedLevelCircle(Graph, node.x, node.z);
+    LevelCircles.updateDraggedLevelCircle(Graph, node.x, node.z);
 }
 
 function handleNodeDragEnd(node) {
@@ -134,8 +131,7 @@ function handleNodeDragEnd(node) {
     node.fz = undefined;
     node.fy = node.y;
 
-    // Start circle return animation
-    Animation.endDrag(Graph);
+    LevelCircles.endDrag(Graph);
 
     if (originalY !== undefined) {
         const startY = node.y;
@@ -158,10 +154,8 @@ function handleNodeDragEnd(node) {
 }
 
 function handleNodeHover(node) {
-    // Clear previous hover state
     if (hoveredSphere) {
-        const prevMaterial = hoveredSphere.material;
-        Rendering.setHoverState(prevMaterial, false);
+        Rendering.setHoverState(hoveredSphere.material, false);
         hoveredSphere = null;
     }
     hoveredNode = null;
@@ -180,38 +174,28 @@ function handleMouseMove(event) {
     const container = UI.elements.graphContainer;
     const rect = container.getBoundingClientRect();
 
-    // Convert mouse to normalized device coordinates (-1 to +1)
     mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
-    // Get camera and update raycaster
     const camera = Graph.camera();
     raycaster.setFromCamera(mouse, camera);
 
-    // Find all node objects and raycast against them
     const scene = Graph.scene();
     const intersects = raycaster.intersectObjects(scene.children, true);
 
     for (const intersect of intersects) {
         const obj = intersect.object;
 
-        // Check if this is a main sphere (tagged in createNodeObject)
         if (obj.userData && obj.userData.isMainSphere) {
-            // Store reference for hover state management
             if (hoveredSphere !== obj) {
-                // Clear old sphere's hover state
                 if (hoveredSphere) {
                     Rendering.setHoverState(hoveredSphere.material, false);
                 }
-                // Set new sphere's hover state
                 hoveredSphere = obj;
                 Rendering.setHoverState(obj.material, true);
             }
 
-            // Convert world intersection point to local coordinates
             const localPoint = obj.worldToLocal(intersect.point.clone());
-
-            // Convert to UV and update shader
             const uv = Rendering.pointToUV(localPoint, Config.node.radius);
             Rendering.updateHolePosition(uv);
             break;
@@ -250,7 +234,8 @@ function createBabel() {
     });
 
     if (State.selectedSimilarBabels.length > 0) {
-        GraphUtils.pruneTransitiveEdges();
+        GraphUtils.pruneTransitiveEdges(State.edges)
+            .forEach(e => State.removeEdge(e.source, e.target));
     }
 
     updateGraph();
@@ -286,25 +271,21 @@ function toggleEdge(direction) {
     if (State.hasEdge(sourceId, targetId)) {
         State.removeEdge(sourceId, targetId);
     } else {
-        if (GraphUtils.wouldCreateCycle(sourceId, targetId)) {
+        if (GraphUtils.wouldCreateCycle(sourceId, targetId, State.edges)) {
             console.log('Cannot create edge: would create cycle');
             return;
         }
         State.addEdge(sourceId, targetId);
-        GraphUtils.pruneTransitiveEdges();
+        GraphUtils.pruneTransitiveEdges(State.edges)
+            .forEach(e => State.removeEdge(e.source, e.target));
     }
 
     UI.updateEdgeIndicators();
 }
 
 function resetCamera() {
-    // Get current camera position
     const pos = Graph.cameraPosition();
-
-    // Calculate distance from origin (preserve zoom level)
     const distance = Math.sqrt(pos.x * pos.x + pos.y * pos.y + pos.z * pos.z);
-
-    // Move camera to (0, 0, distance) looking at origin — this is the default "upright" view
     Graph.cameraPosition(
         { x: 0, y: 0, z: distance },
         { x: 0, y: 0, z: 0 },
@@ -317,7 +298,8 @@ function resetCamera() {
 // ============================================
 
 function updateGraph() {
-    const dagEdges = GraphUtils.getDagEdges();
+    const validEdges = State.getValidEdges();
+    const dagEdges = GraphUtils.getDagEdges(validEdges);
 
     const graphData = {
         nodes: State.babels.map(b => ({
@@ -336,8 +318,8 @@ function updateGraph() {
     console.log('Updating graph:', graphData.nodes.length, 'nodes,', graphData.links.length, 'links');
     Graph.graphData(graphData);
 
-    setTimeout(() => Animation.updateLevelCircles(Graph), 500);
-    setTimeout(() => Animation.updateLevelCircles(Graph), 1500);
+    setTimeout(() => LevelCircles.updateLevelCircles(Graph), 500);
+    setTimeout(() => LevelCircles.updateLevelCircles(Graph), 1500);
 }
 
 // ============================================
@@ -352,28 +334,23 @@ function init() {
     GraphUtils.cleanGraphOnLoad();
     UI.setupColorPalette();
 
-    UI.setupEventListeners({
-        createBabel,
-        cancelCreation: () => UI.cancelCreation(),
-        startCreation: () => UI.startCreation(),
-        closeComparison: () => UI.closeComparison(updateGraph),
-        closeEdit: () => UI.closeEdit(updateGraph),
-        openEdit: (babel) => UI.openEdit(babel),
-        toggleEdge,
-        deselectBabel,
-        handleDelete,
-        resetCamera,
-        save: () => Persistence.save()
-    });
+    UI.setupEventListeners();
+
+    document.addEventListener('babel:create', createBabel);
+    document.addEventListener('babel:toggle-edge', e => toggleEdge(e.detail.direction));
+    document.addEventListener('babel:deselect', deselectBabel);
+    document.addEventListener('babel:delete', handleDelete);
+    document.addEventListener('babel:reset-camera', resetCamera);
+    document.addEventListener('babel:save', () => Persistence.save());
+    document.addEventListener('babel:comparison-closed', updateGraph);
+    document.addEventListener('babel:edit-closed', updateGraph);
 
     updateGraph();
     UI.updateHintText();
     Animation.startLoop(Graph);
 
-    // Add mousemove listener for hole effect raycasting
     UI.elements.graphContainer.addEventListener('mousemove', handleMouseMove);
 
-    // Clear hover state when mouse leaves the container
     UI.elements.graphContainer.addEventListener('mouseleave', () => {
         if (hoveredSphere) {
             Rendering.setHoverState(hoveredSphere.material, false);
