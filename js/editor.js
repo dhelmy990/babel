@@ -114,9 +114,11 @@ const Editor = {
             this.triggerAutoSave();
         });
 
+        // Capture phase fires before Quill's bubbling paste handler, so
+        // stopImmediatePropagation prevents Quill from inserting the raw URL text.
         this.editor.root.addEventListener('paste', (e) => {
             this.handlePaste(e);
-        });
+        }, true);
 
         this.editor.root.addEventListener('click', (e) => {
             const ytEmbed = e.target.closest('.youtube-embed');
@@ -124,6 +126,7 @@ const Editor = {
                 const url = ytEmbed.getAttribute('data-url');
                 if (url) {
                     navigator.clipboard.writeText(url);
+                    window.open(url, '_blank', 'noopener,noreferrer');
                     ytEmbed.style.borderColor = '#4a9eff';
                     setTimeout(() => { ytEmbed.style.borderColor = ''; }, 500);
                 }
@@ -205,25 +208,29 @@ const Editor = {
     },
 
     /**
-     * Handle paste events: auto-embed PDFs and YouTube URLs.
+     * Handle paste events: auto-embed YouTube URLs and PDFs.
+     * Registered in capture phase so it fires before Quill's handler.
+     * stopImmediatePropagation prevents Quill from inserting raw text.
      */
     handlePaste(e) {
+        const text = e.clipboardData?.getData('text/plain')?.trim();
+        if (text && this.isYouTubeURL(text)) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            this.embedYouTube(text);
+            return;
+        }
+
         const files = e.clipboardData?.files;
         if (files && files.length > 0) {
             for (const file of files) {
                 if (file.type === 'application/pdf') {
                     e.preventDefault();
+                    e.stopImmediatePropagation();
                     this.embedPDF(file);
                     return;
                 }
             }
-        }
-
-        const text = e.clipboardData?.getData('text/plain');
-        if (text && this.isYouTubeURL(text)) {
-            e.preventDefault();
-            this.embedYouTube(text);
-            e.preventDefault();
         }
     },
 
@@ -312,6 +319,7 @@ const Editor = {
 
         babel.title = UI.elements.editTitle.value.trim() || 'Untitled';
         babel.description = this.editor ? this.editor.root.innerHTML : '';
+        babel.contentDelta = this.editor ? this.editor.getContents() : null;
         babel.color = State.selectedColor;
 
         Persistence.save();

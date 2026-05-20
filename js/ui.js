@@ -396,7 +396,11 @@ const UI = {
         this.elements.editTitle.value = babel.title || '';
 
         if (Editor.editor) {
-            Editor.editor.root.innerHTML = babel.description || '';
+            if (babel.contentDelta) {
+                Editor.editor.setContents(babel.contentDelta);
+            } else {
+                Editor.editor.root.innerHTML = babel.description || '';
+            }
         }
 
         this.setupColorPalette();
