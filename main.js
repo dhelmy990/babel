@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, screen } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -7,9 +7,14 @@ function getDataPath() {
 }
 
 function createWindow() {
+    const primaryDisplay = screen.getPrimaryDisplay();
+    const { width, height } = primaryDisplay.workAreaSize;
+
     const win = new BrowserWindow({
-        width: 1400,
-        height: 900,
+        x: primaryDisplay.bounds.x,
+        y: primaryDisplay.bounds.y,
+        width: width,
+        height: height,
         backgroundColor: '#0a0a0a',
         webPreferences: {
             preload: path.join(__dirname, 'preload.js'),
