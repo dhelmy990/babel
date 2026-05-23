@@ -10,7 +10,19 @@ const Animation = {
         const animCfg = Config.animation;
 
         while (obj.children.length > 0) {
-            obj.remove(obj.children[0]);
+            const child = obj.children[0];
+            obj.remove(child);
+            // Dispose GPU resources so VRAM is actually freed each frame.
+            // Without this, geometry + material buffers accumulate until the
+            // GPU process crashes (exit_code=133 / kTransientFailure).
+            if (child.geometry) child.geometry.dispose();
+            if (child.material) {
+                if (Array.isArray(child.material)) {
+                    child.material.forEach(m => m.dispose());
+                } else {
+                    child.material.dispose();
+                }
+            }
         }
 
         const startVec = new THREE.Vector3(start.x, start.y, start.z);

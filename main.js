@@ -2,6 +2,15 @@ const { app, BrowserWindow, ipcMain, dialog, screen, protocol, net, shell } = re
 const path = require('path');
 const fs = require('fs');
 
+// GPU stability flags — must be set before app is ready.
+// These prevent the GPU sandbox from treating transient failures as fatal,
+// and stop Electron from refusing to restart the GPU process after crashes.
+app.commandLine.appendSwitch('disable-gpu-process-crash-limit');
+app.commandLine.appendSwitch('ignore-gpu-blocklist');
+// If the GPU process keeps crashing, fall back to SwiftShader (software WebGL)
+// rather than leaving the renderer with a permanently dead context.
+app.commandLine.appendSwitch('enable-unsafe-swiftshader');
+
 // Must be called before app is ready
 protocol.registerSchemesAsPrivileged([
     { scheme: 'local-file', privileges: { secure: true, standard: true, supportFetchAPI: true } }

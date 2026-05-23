@@ -283,20 +283,33 @@ const Rendering = {
      * Returns a handle with updateColor(color) and destroy().
      */
     createPreview(container, color) {
-        const width = container.clientWidth || 400;
-        const height = container.clientHeight || 400;
-
         const scene = new THREE.Scene();
-        scene.background = new THREE.Color(0x0a0a0a);
 
-        const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000);
+        const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
         camera.position.z = 10;
 
-        const renderer = new THREE.WebGLRenderer({ antialias: true });
-        renderer.setSize(width, height);
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setClearColor(0x000000, 0);
         renderer.setPixelRatio(window.devicePixelRatio);
         container.innerHTML = '';
         container.appendChild(renderer.domElement);
+
+        // Keep renderer exactly in sync with container size
+        const ro = new ResizeObserver(entries => {
+            const { width, height } = entries[0].contentRect;
+            if (width === 0 || height === 0) return;
+            renderer.setSize(width, height);
+            camera.aspect = width / height;
+            camera.updateProjectionMatrix();
+        });
+        ro.observe(container);
+
+        // Seed initial size
+        const w = container.clientWidth || 400;
+        const h = container.clientHeight || 400;
+        renderer.setSize(w, h);
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
 
         const geometry = new THREE.SphereGeometry(4, 64, 64);
         const texture = this.createPlanetTexture(color);
@@ -327,6 +340,7 @@ const Rendering = {
             },
             destroy: () => {
                 if (animId) cancelAnimationFrame(animId);
+                ro.disconnect();
                 renderer.dispose();
                 sphere.geometry.dispose();
                 sphere.material.dispose();

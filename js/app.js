@@ -366,6 +366,47 @@ async function init() {
         }
         hoveredNode = null;
     });
+
+    // ── WebGL context-loss recovery ───────────────────────────────────────────
+    // When the GPU process crashes (exit_code=133), the WebGL context is lost.
+    // Three.js fires `webglcontextlost` on the canvas; we catch it and rebuild
+    // the graph renderer so the graph reappears instead of staying blank.
+    function attachContextLossHandler() {
+        const canvas = Graph.renderer()?.domElement;
+        if (!canvas) return;
+
+        canvas.addEventListener('webglcontextlost', (e) => {
+            e.preventDefault(); // allow context restoration attempt
+            console.warn('WebGL context lost — will attempt recovery…');
+        });
+
+        canvas.addEventListener('webglcontextrestored', () => {
+            console.log('WebGL context restored — reinitialising graph renderer.');
+            // Give Three.js a moment to finish internal context restoration
+            setTimeout(() => {
+                try {
+                    Rendering.setupLighting(Graph.scene());
+                    updateGraph();
+                } catch (err) {
+                    console.error('Context restore failed, reloading window:', err);
+                    window.location.reload();
+                }
+            }, 300);
+        });
+
+        // If the context never restores on its own (GPU process completely gone),
+        // reload the page after a short wait rather than staying blank.
+        canvas.addEventListener('webglcontextlost', () => {
+            setTimeout(() => {
+                if (!Graph.renderer()?.getContext()) {
+                    console.warn('Context not restored after 4 s — reloading.');
+                    window.location.reload();
+                }
+            }, 4000);
+        });
+    }
+
+    attachContextLossHandler();
 }
 
 // Start the application

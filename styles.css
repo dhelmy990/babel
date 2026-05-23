@@ -624,16 +624,11 @@ body {
     aspect-ratio: 1;
     flex: 1;
     max-height: calc(100% - 80px);
-    border-radius: 8px;
-    background: #0a0a0a;
     overflow: hidden;
 }
 
 #edit-babel-3d canvas {
     display: block;
-    width: 100% !important;
-    height: 100% !important;
-    border-radius: 8px;
 }
 
 #edit-right-panel .color-palette {
