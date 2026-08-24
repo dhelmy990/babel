@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="babel-admin-nonce" content="{{BABEL_ADMIN_NONCE}}">
+    <title>Babel Seed Operations</title>
+    <link rel="stylesheet" href="/admin/dashboard.css">
+    <script src="/admin/seed-status.js" defer></script>
+    <script src="/admin/dashboard.js" defer></script>
+  </head>
+  <body>
+    <main class="operations" aria-labelledby="page-title">
+      <header class="masthead">
+        <p class="eyebrow">Babel / local operations</p>
+        <h1 id="page-title">Wikipedia seed</h1>
+        <p id="seed-status" class="status" aria-live="polite">Loading seed status</p>
+      </header>
+
+      <section class="run" aria-label="Wikipedia seed run">
+        <p id="seed-current" class="current" aria-live="polite">No profile active / No article active</p>
+        <p id="seed-counts" class="counts" aria-live="polite">0/0 imported | 0 skipped | 0 failed</p>
+        <progress id="seed-progress" max="100" value="0" aria-label="Seed progress" aria-valuetext="0% complete">0%</progress>
+        <button id="seed-action" type="button">Seed Babels</button>
+      </section>
+
+      <section class="errors" aria-labelledby="errors-title" aria-live="polite">
+        <h2 id="errors-title">Live errors</h2>
+        <ul id="seed-errors"></ul>
+      </section>
+    </main>
+  </body>
+</html>
