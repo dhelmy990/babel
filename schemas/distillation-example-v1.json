@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://babel.local/schemas/distillation-example-v1.json",
+  "title": "Distillation example v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "article_key",
+    "page_id",
+    "canonical_title",
+    "wikidata_id",
+    "lead_text",
+    "article_text",
+    "teacher_vector",
+    "teacher_norm",
+    "source_revision_id",
+    "snapshot_date",
+    "split",
+    "reconciliation_status"
+  ],
+  "properties": {
+    "article_key": {"type": "string", "minLength": 1},
+    "page_id": {"type": "integer", "minimum": 1},
+    "canonical_title": {"type": "string", "minLength": 1},
+    "wikidata_id": {"type": ["string", "null"], "pattern": "^Q[1-9][0-9]*$"},
+    "lead_text": {"type": "string", "minLength": 1},
+    "article_text": {"type": "string", "minLength": 1},
+    "teacher_vector": {
+      "type": "array",
+      "minItems": 100,
+      "maxItems": 100,
+      "items": {"type": "number"}
+    },
+    "teacher_norm": {"type": "number", "exclusiveMinimum": 0},
+    "source_revision_id": {"type": ["integer", "null"], "minimum": 1},
+    "snapshot_date": {"const": "2016-10-01"},
+    "split": {"enum": ["train", "validation", "test"]},
+    "reconciliation_status": {"type": "string", "minLength": 1}
+  }
+}
