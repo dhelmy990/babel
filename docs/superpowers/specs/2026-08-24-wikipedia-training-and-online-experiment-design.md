@@ -2,7 +2,9 @@
 
 **Date:** 2026-08-24
 
-**Status:** Approved in conversation; awaiting written-spec review
+**Vector-storage amendment:** 2026-08-25
+
+**Status:** Approved in conversation; vector-storage amendment awaiting written-spec review
 
 **Hugging Face namespace:** `dhelmy990`
 
@@ -86,6 +88,9 @@ Colab/offline training              Local online experiment
 remote HF streaming                 remote HF streaming
 2016 distillation                   June/July environments
                                            |
+                                  PostgreSQL + pgvector
+                                  versioned runtime vectors
+                                           |
                                   synchronous recommendation
                                            |
                                      hidden simulator
@@ -104,6 +109,9 @@ Architectural boundaries:
   pinned commit SHA.
 - Hugging Face is authoritative for prepared datasets and archived experiment
   runs.
+- PostgreSQL/pgvector is the durable local runtime materialization for vectors
+  derived from pinned Hugging Face datasets and model artifacts. It is
+  reconstructible and does not replace Hugging Face as the portable archive.
 - Kafka is transient transport for observable online feedback, not a dataset
   store or a model-transfer mechanism.
 - Colab does not connect to Kafka or local services.
@@ -113,6 +121,100 @@ Architectural boundaries:
   and tiny fixtures, never raw dumps or bulk prepared shards.
 - The existing Electron app, C++ backend, model serving, and training remain
   separate processes or modules connected through explicit contracts.
+
+## Vector Materialization and Candidate Retrieval
+
+The recommendation candidate universe contains only Babel instances actually
+created by synthetic creators in the current run. Monthly Wikipedia catalog
+articles are source material for creator histories and new Babels; catalog rows
+that have not become Babels are never returned as recommendations.
+
+```text
+pinned observable monthly catalog
+          |
+          v
+catalog content-vector materialization
+          |
+          v
+synthetic creator creates a Babel instance
+          |
+          v
+versioned Babel embedding in PostgreSQL/pgvector
+          |
+          +--> pgvector HNSW retrieval (default)
+          |
+          +--> hnswlib run snapshot (explicit option)
+```
+
+Roles:
+
+- Hugging Face remains canonical for bulk prepared data, model artifacts, and
+  archived runs.
+- pgvector is the default serving backend and the durable local source for the
+  exact vector materialization active in a run.
+- hnswlib is an optional, disposable run-scoped acceleration backend rebuilt
+  from one version-pinned pgvector snapshot.
+- Both retrieval backends implement the same candidate-index contract and
+  return only created Babels belonging to other creators.
+- The selected backend is recorded in the immutable run configuration and
+  cannot switch during a run.
+- There is no automatic pgvector/hnswlib fallback. Failure is explicit so
+  latency results never combine two retrieval systems under one run label.
+
+Local persistence uses three versioned concepts:
+
+```text
+embedding_spaces
+  id
+  dimension = 100
+  distance = cosine
+  distilled_encoder_artifact
+  compatibility_version
+
+catalog_embeddings
+  embedding_space_id
+  article_key
+  dataset_commit_sha
+  content_hash
+  embedding vector(100)
+
+babel_embeddings
+  run_id
+  babel_id
+  creator_id
+  catalog_embedding_identity
+  serving_model_id
+  serving_model_version
+  residual vector(100)
+  embedding vector(100)
+```
+
+Catalog embeddings are materialized lazily or in bounded batches for source
+articles actually selected by a cohort; the initial 50-creator run does not
+need to encode every monthly Wikipedia article. Different creators may create
+Babels from the same source article, sharing the immutable catalog content
+vector while receiving distinct Babel IDs and independently versioned online
+residuals.
+
+The default pgvector query uses a cosine HNSW index over the active
+`babel_embeddings` version, filters by run/model version, excludes the requesting
+creator, and uses iterative scanning or deterministic oversampling until K valid
+candidates are available. A newly created Babel becomes eligible for later
+recommendation events after its creation/vector transaction commits; it is
+excluded from its own creator's results.
+
+When hnswlib is selected, its build manifest records the run, model/version,
+embedding-space compatibility, ordered Babel IDs, row count, vector checksum,
+HNSW parameters, and pgvector snapshot identity. The in-process index may be
+deleted at any time and reconstructed from PostgreSQL. Query/update concurrency
+uses a shadow index or explicit read/write coordination; an hnswlib index file
+is never authoritative model state.
+
+Training synchronization first creates a durable checkpoint, then transactionally
+materializes a new Babel-embedding version. pgvector serving activates that
+version atomically. An hnswlib run builds/verifies its corresponding shadow
+snapshot before swapping serving state. A failed materialization or incompatible
+embedding space leaves serving on the last complete version.
 
 ## Local Bulk-Data Workspace
 
@@ -840,6 +942,7 @@ Launch parameters:
 
 - pinned Hugging Face dataset revision;
 - selected immutable starting model;
+- retrieval backend, default `pgvector`, with explicit `hnswlib` option;
 - creator count, default 50;
 - June-only or June→July run;
 - event budget;
@@ -946,8 +1049,8 @@ Its item tower contains:
 
 - the complete 2016-distilled Qwen encoder and 1024→100 projection;
 - zero-initialized item residuals; and
-- a candidate ANN index built from compatible 100-dimensional catalog
-  embeddings.
+- an embedding-space manifest from which run-scoped Babel candidates are
+  materialized.
 
 Its creator-context tower starts in a deterministic, representation-compatible
 state:
@@ -961,8 +1064,11 @@ state:
 
 This initialization gives the original a meaningful content/history ranking
 without exposing hidden graph structure or pretraining it on future behavior.
-The exact initialization tensors, context-tower architecture, and ANN build
-manifest are stored with the original artifact.
+The exact initialization tensors, context-tower architecture, embedding-space
+definition, pgvector index parameters, and optional hnswlib build parameters
+are stored with the original artifact. The original does not contain imaginary
+candidate Babels; initial creator-history Babels populate the first run-scoped
+candidate set.
 
 ## Synchronous Recommendation Request
 
@@ -1020,6 +1126,10 @@ Conditions:
 3. serving during training and synchronization; and
 4. increasing request rates and nested creator cohorts.
 
+The default pgvector backend is measured first. A matched hnswlib condition may
+then use the same model, created-Babel snapshot, requests, and feedback range.
+This is a systems-backend comparison, not a recommender-model ablation.
+
 Report:
 
 - p50, p95, p99, and maximum recommendation latency;
@@ -1052,6 +1162,8 @@ training interference.
 - Graceful stop drains only through captured high-water marks.
 - Creator/source duplicates fail at both sampling and persistence boundaries.
 - Incompatible embedding/index versions cannot be synchronized or served.
+- A retrieval backend cannot change during a run, and hnswlib failure never
+  silently falls back to pgvector.
 - Remote deletion and overwrite operations are outside automated data
   publication; releases are additive and immutable once tagged.
 
@@ -1068,7 +1180,10 @@ Unit tests:
 - deterministic profile/PPR/action sampling;
 - hidden/observable schemas;
 - feedback event validation; and
-- immutable model lineage.
+- immutable model lineage;
+- catalog-versus-Babel embedding identity;
+- created-Babel-only candidate filtering; and
+- fixed retrieval-backend selection.
 
 Training tests:
 
@@ -1086,7 +1201,9 @@ Integration tests:
 - Kafka produce, train, checkpoint, restart, replay, and drain;
 - dashboard model selection, start, logs, and graceful stop;
 - accepted-edge reconstruction; and
-- synchronous recommendation timing fields.
+- synchronous recommendation timing fields;
+- pgvector filtered HNSW retrieval from an active model version; and
+- hnswlib manifest/rebuild equivalence against its pinned pgvector snapshot.
 
 End-to-end fixture:
 
@@ -1113,15 +1230,21 @@ One machine-readable manifest records:
 - simulator configuration;
 - run RNG seeds;
 - starting/ending model IDs;
+- embedding-space ID and vector-materialization version;
+- retrieval backend and HNSW parameters;
+- pgvector snapshot identity and optional hnswlib build checksum;
 - Kafka partition offset ranges; and
 - exported artifact checksums.
 
 ## Resolved Document and Codebase Gaps
 
 1. All requested data, training, Kafka, simulator, and serving components are
-   absent from the current implementation.
-2. The backend seeding dashboard exists only as a design and plan and
-   explicitly defers training, Kafka, PPR, and recommendation.
+   absent from the current implementation; the application backend itself is
+   present.
+2. The backend seeding dashboard is implemented and explicitly defers training,
+   Kafka, PPR, and recommendation. Its existing job/import path must be
+   preserved while its article source moves from live MediaWiki to a pinned
+   private-Hub snapshot.
 3. Its 20 generated profiles are archetypes, while online experiments launch
    50 creator instances by default.
 4. The dashboard design must be extended so synthetic experiments always
@@ -1144,6 +1267,10 @@ One machine-readable manifest records:
     Face CLI is incomplete because a dependency is missing.
 13. `documentation.md` says root `app.js` is empty although the legacy file is
     populated.
+14. PostgreSQL enables pgvector but previously declared no vector tables, while
+    the first online plan sent all retrieval to hnswlib. This design assigns
+    pgvector durable versioned materialization and default HNSW retrieval, with
+    hnswlib retained only as an explicit rebuildable run backend.
 
 These conflicts must be corrected or explicitly superseded as the relevant
 slice is implemented. The implementation must not leave several contradictory
@@ -1184,7 +1311,9 @@ Deliver:
 - extended admin dashboard and experiment control API;
 - default 50-creator deterministic cohort;
 - synchronous recommendation POST endpoint;
-- serving two-tower model and ANN retrieval;
+- versioned pgvector catalog/Babel embedding materialization;
+- serving two-tower model with pgvector HNSW retrieval by default;
+- optional hnswlib retrieval behind the same candidate-index contract;
 - simulator decisions and accepted-edge view;
 - minimal Kafka feedback path;
 - one online-training consumer;
@@ -1197,6 +1326,7 @@ Deliver:
 Deliver:
 
 - controlled serving-only and serving-plus-training experiments;
+- matched pgvector-versus-hnswlib serving comparison;
 - nested creator scale ladder;
 - configurable request-load generation;
 - latency-aware training backpressure;
@@ -1219,6 +1349,9 @@ the architecture.
 - Exposing hidden simulator state to the recommender or dashboard logs.
 - Mutating or replacing the original 2016-initialized recommender.
 - Model-component ablations in the initial experiment.
+- Recommending monthly catalog articles that no synthetic creator has created.
+- Treating hnswlib index files as durable or canonical state.
+- Automatic retrieval-backend switching or fallback within a run.
 - Full Monolith-scale infrastructure, Flink, or a distributed parameter server.
 - Performance load generation before the online vertical slice works.
 
@@ -1242,4 +1375,7 @@ The program succeeds when:
 7. June training continues into July without resetting the canonical temporal
    run; and
 8. controlled scale experiments quantify quality, adaptation time, throughput,
-   Kafka lag, synchronization effects, and serving-latency degradation.
+   Kafka lag, synchronization effects, and serving-latency degradation; and
+9. pgvector durably versions the active created-Babel candidate embeddings,
+   while any selected hnswlib index is reproducibly rebuilt from the recorded
+   pgvector snapshot and returns no uncreated catalog article.
