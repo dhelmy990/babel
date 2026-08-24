@@ -11,7 +11,7 @@ class PostgresDatabase;
 class MigrationRunner {
  public:
   explicit MigrationRunner(PostgresDatabase& database,
-                           std::filesystem::path migration_directory = "backend/migrations");
+                           std::filesystem::path migration_directory = {});
 
   Result<void> run();
 

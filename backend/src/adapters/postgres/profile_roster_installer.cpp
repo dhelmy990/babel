@@ -30,10 +30,7 @@ Result<void> ProfileRosterInstaller::install(std::span<const Creator> creators) 
     }
     transaction.commit();
   } catch (const std::exception& exception) {
-    return tl::make_unexpected(ApplicationError{
-        .code = ErrorCode::database_unavailable,
-        .message = exception.what(),
-    });
+    return tl::make_unexpected(mapPostgresError(exception));
   }
   return {};
 }

@@ -1,8 +1,11 @@
 #pragma once
 
+#include <exception>
 #include <memory>
 #include <string>
 #include <string_view>
+
+#include "babel/application/errors.hpp"
 
 namespace pqxx {
 class connection;
@@ -20,5 +23,7 @@ class PostgresDatabase {
  private:
   std::string connection_string_;
 };
+
+[[nodiscard]] ApplicationError mapPostgresError(const std::exception& exception);
 
 }  // namespace babel

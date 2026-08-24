@@ -22,21 +22,12 @@ struct MigrationFile {
 };
 
 std::filesystem::path resolveMigrationDirectory(const std::filesystem::path& requested) {
-  if (requested.is_absolute() || std::filesystem::is_directory(requested)) {
+  if (!requested.empty()) {
     return requested;
   }
 
-  auto current = std::filesystem::current_path();
-  while (true) {
-    const auto candidate = current / requested;
-    if (std::filesystem::is_directory(candidate)) {
-      return candidate;
-    }
-    if (current == current.root_path()) {
-      return requested;
-    }
-    current = current.parent_path();
-  }
+  const auto source_directory = std::filesystem::path{__FILE__}.parent_path();
+  return source_directory.parent_path().parent_path().parent_path() / "migrations";
 }
 
 Result<std::vector<MigrationFile>> discoverMigrations(const std::filesystem::path& directory) {
@@ -109,13 +100,6 @@ Result<std::string> readMigration(const std::filesystem::path& path) {
   return sql;
 }
 
-ApplicationError databaseError(const std::exception& exception) {
-  return ApplicationError{
-      .code = ErrorCode::database_unavailable,
-      .message = exception.what(),
-  };
-}
-
 }  // namespace
 
 MigrationRunner::MigrationRunner(PostgresDatabase& database,
@@ -161,7 +145,7 @@ Result<void> MigrationRunner::run() {
       transaction.commit();
     }
   } catch (const std::exception& exception) {
-    return tl::make_unexpected(databaseError(exception));
+    return tl::make_unexpected(mapPostgresError(exception));
   }
   return {};
 }

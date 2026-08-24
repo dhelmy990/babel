@@ -24,24 +24,22 @@ std::string testDatabaseUrl() {
   return "postgresql://babel:babel-local-dev@127.0.0.1:54329/babel";
 }
 
-std::filesystem::path migrationDirectory() {
-  auto current = std::filesystem::current_path();
-  while (!current.empty()) {
-    const auto candidate = current / "backend" / "migrations";
-    if (std::filesystem::exists(candidate)) {
-      return candidate;
-    }
-    if (current == current.root_path()) {
-      break;
-    }
-    current = current.parent_path();
-  }
-  throw std::runtime_error("could not locate backend/migrations");
-}
-
 std::string testSchemaName() {
   return "babel_test_postgres_repository_" + std::to_string(std::random_device{}());
 }
+
+class CurrentPathGuard {
+ public:
+  CurrentPathGuard() : original_(std::filesystem::current_path()) {}
+
+  ~CurrentPathGuard() {
+    std::error_code ignored;
+    std::filesystem::current_path(original_, ignored);
+  }
+
+ private:
+  std::filesystem::path original_;
+};
 
 class PostgresFixture {
  public:
@@ -49,7 +47,7 @@ class PostgresFixture {
       : base_url_(testDatabaseUrl()),
         schema_(testSchemaName()),
         database_(schemaDatabaseUrl()),
-        migration_runner_(database_, migrationDirectory()),
+        migration_runner_(database_),
         roster_installer_(database_),
         creators_(database_),
         graphs_(database_),
@@ -188,6 +186,51 @@ TEST_CASE_METHOD(PostgresFixture,
   REQUIRE(result.error().code == babel::ErrorCode::conflict);
   REQUIRE(countRows("babels") == 1);
   REQUIRE(countRows("babel_sources") == 1);
+}
+
+TEST_CASE_METHOD(PostgresFixture, "repository maps check violations to invalid argument",
+                 "[postgres_repository]") {
+  installSchemaAndRoster();
+  const auto owner = babel::ProfileManifest::creators().at(1).id;
+  auto invalid = makeBabel(owner, "Invalid color");
+  invalid.color = "not-a-color";
+
+  const auto result = wikipedia_babels_.insertWikipediaBabel(invalid, makeSource(invalid, 204));
+  REQUIRE_FALSE(result.has_value());
+  REQUIRE(result.error().code == babel::ErrorCode::invalid_argument);
+  REQUIRE(countRows("babels") == 0);
+  REQUIRE(countRows("babel_sources") == 0);
+}
+
+TEST_CASE_METHOD(PostgresFixture, "repository maps foreign key violations to invalid argument",
+                 "[postgres_repository]") {
+  installSchemaAndRoster();
+  const auto missing_owner = babel::CreatorId::v5("creator:missing-owner").value();
+  const auto article = makeBabel(missing_owner, "Missing owner");
+
+  const auto result = wikipedia_babels_.insertWikipediaBabel(article, makeSource(article, 205));
+  REQUIRE_FALSE(result.has_value());
+  REQUIRE(result.error().code == babel::ErrorCode::invalid_argument);
+  REQUIRE(countRows("babels") == 0);
+}
+
+TEST_CASE_METHOD(PostgresFixture, "repository maps non-constraint SQL errors to internal",
+                 "[postgres_repository]") {
+  const auto id = babel::CreatorId::v5("creator:before-migrations").value();
+  const auto result = creators_.exists(id);
+  REQUIRE_FALSE(result.has_value());
+  REQUIRE(result.error().code == babel::ErrorCode::internal);
+}
+
+TEST_CASE("repository maps connection failures to database unavailable", "[postgres_repository]") {
+  babel::PostgresDatabase unavailable(
+      "postgresql://babel:babel-local-dev@127.0.0.1:1/babel?connect_timeout=1");
+  babel::PostgresCreatorRepository creators(unavailable);
+  const auto id = babel::CreatorId::v5("creator:unavailable").value();
+
+  const auto result = creators.exists(id);
+  REQUIRE_FALSE(result.has_value());
+  REQUIRE(result.error().code == babel::ErrorCode::database_unavailable);
 }
 
 TEST_CASE_METHOD(PostgresFixture, "Wikipedia source must describe the Babel inserted with it",
@@ -536,6 +579,26 @@ TEST_CASE_METHOD(PostgresFixture, "roster upsert restores stable metadata and pr
   REQUIRE(creators_.get(unknown.id).value().display_name == unknown.display_name);
 }
 
+TEST_CASE_METHOD(PostgresFixture, "roster maps stable metadata collisions to conflict",
+                 "[postgres_repository]") {
+  installSchemaAndRoster();
+  const auto existing = babel::ProfileManifest::creators().at(1);
+  const babel::Creator conflicting{
+      .id = babel::CreatorId::v5("creator:conflicting-roster-entry").value(),
+      .slug = existing.slug,
+      .display_name = "Conflicting Creator",
+      .color = "#ABCDEF",
+      .kind = babel::CreatorKind::generated,
+      .order = 99,
+  };
+  const std::vector<babel::Creator> roster{conflicting};
+
+  const auto result = roster_installer_.install(roster);
+  REQUIRE_FALSE(result.has_value());
+  REQUIRE(result.error().code == babel::ErrorCode::conflict);
+  REQUIRE(creators_.exists(conflicting.id).value() == false);
+}
+
 TEST_CASE_METHOD(PostgresFixture, "migrations are idempotent and track every version once",
                  "[postgres_repository]") {
   REQUIRE(migration_runner_.run().has_value());
@@ -543,8 +606,10 @@ TEST_CASE_METHOD(PostgresFixture, "migrations are idempotent and track every ver
   REQUIRE(countRows("schema_migrations") == 3);
 }
 
-TEST_CASE_METHOD(PostgresFixture, "default migration path resolves from a build directory",
+TEST_CASE_METHOD(PostgresFixture, "default migration path resolves outside the source tree",
                  "[postgres_repository]") {
+  CurrentPathGuard restore_path;
+  std::filesystem::current_path(std::filesystem::temp_directory_path());
   babel::MigrationRunner defaults(database_);
   const auto result = defaults.run();
   INFO((result ? "migration succeeded" : result.error().message));
@@ -571,7 +636,7 @@ TEST_CASE_METHOD(PostgresFixture, "migration discovery rejects duplicate numeric
   REQUIRE(result.error().message.find("duplicate migration version") != std::string::npos);
 }
 
-TEST_CASE_METHOD(PostgresFixture, "failed migration rolls back its SQL and tracking row",
+TEST_CASE_METHOD(PostgresFixture, "migrations run numerically and stop after a rolled-back failure",
                  "[postgres_repository]") {
   const auto directory =
       std::filesystem::temp_directory_path() /
@@ -579,21 +644,34 @@ TEST_CASE_METHOD(PostgresFixture, "failed migration rolls back its SQL and track
   std::filesystem::remove_all(directory);
   std::filesystem::create_directories(directory);
   {
-    std::ofstream(directory / "004_failure.sql")
-        << "CREATE TABLE migration_should_rollback(id integer); SELECT missing_column;";
+    std::ofstream(directory / "2_create.sql")
+        << "CREATE TABLE migration_order_log(entry text NOT NULL);";
+    std::ofstream(directory / "10_failure.sql")
+        << "INSERT INTO migration_order_log(entry) VALUES ('middle'); SELECT missing_column;";
+    std::ofstream(directory / "11_later.sql")
+        << "CREATE TABLE migration_later_side_effect(id integer);";
   }
   babel::MigrationRunner failing(database_, directory);
   const auto result = failing.run();
   std::filesystem::remove_all(directory);
 
   REQUIRE_FALSE(result.has_value());
+  REQUIRE(result.error().code == babel::ErrorCode::internal);
   pqxx::connection connection(schemaDatabaseUrl());
   pqxx::read_transaction transaction(connection);
-  REQUIRE(transaction.exec("SELECT to_regclass('migration_should_rollback') IS NULL")
+  REQUIRE(transaction.exec("SELECT to_regclass('migration_order_log') IS NOT NULL")
+              .one_field()
+              .as<bool>());
+  REQUIRE(transaction.exec("SELECT count(*) FROM migration_order_log").one_field().as<int>() == 0);
+  REQUIRE(transaction.exec("SELECT to_regclass('migration_later_side_effect') IS NULL")
               .one_field()
               .as<bool>());
   REQUIRE(transaction
-              .exec("SELECT count(*) FROM schema_migrations WHERE version = '004'")
+              .exec("SELECT count(*) FROM schema_migrations WHERE version = '2'")
+              .one_field()
+              .as<int>() == 1);
+  REQUIRE(transaction
+              .exec("SELECT count(*) FROM schema_migrations WHERE version IN ('10', '11')")
               .one_field()
               .as<int>() == 0);
 }

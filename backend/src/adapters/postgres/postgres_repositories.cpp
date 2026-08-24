@@ -13,13 +13,6 @@
 namespace babel {
 namespace {
 
-ApplicationError databaseError(const std::exception& exception) {
-  return ApplicationError{
-      .code = ErrorCode::database_unavailable,
-      .message = exception.what(),
-  };
-}
-
 Creator creatorFromRow(const pqxx::row& row) {
   return Creator{
       .id = CreatorId::parse(row["id"].as<std::string>()).value(),
@@ -50,20 +43,6 @@ Babel babelFromRow(const pqxx::row& row) {
       .color = row["color"].as<std::string>(),
       .content_revision = row["content_revision"].as<std::uint64_t>(),
       .content_hash = row["content_hash"].as<std::string>(),
-  };
-}
-
-ApplicationError conflictError(const std::exception& exception) {
-  return ApplicationError{
-      .code = ErrorCode::conflict,
-      .message = exception.what(),
-  };
-}
-
-ApplicationError invalidDatabaseValue(const std::exception& exception) {
-  return ApplicationError{
-      .code = ErrorCode::invalid_argument,
-      .message = exception.what(),
   };
 }
 
@@ -186,7 +165,7 @@ Result<bool> PostgresCreatorRepository::exists(CreatorId id) {
         .one_field()
         .as<bool>();
   } catch (const std::exception& exception) {
-    return tl::make_unexpected(databaseError(exception));
+    return tl::make_unexpected(mapPostgresError(exception));
   }
 }
 
@@ -205,7 +184,7 @@ Result<Creator> PostgresCreatorRepository::get(CreatorId id) {
     }
     return creatorFromRow(rows.one_row());
   } catch (const std::exception& exception) {
-    return tl::make_unexpected(databaseError(exception));
+    return tl::make_unexpected(mapPostgresError(exception));
   }
 }
 
@@ -222,7 +201,7 @@ Result<std::vector<Creator>> PostgresCreatorRepository::listOrdered() {
     }
     return creators;
   } catch (const std::exception& exception) {
-    return tl::make_unexpected(databaseError(exception));
+    return tl::make_unexpected(mapPostgresError(exception));
   }
 }
 
@@ -284,7 +263,7 @@ Result<ProfileGraphDto> PostgresGraphRepository::loadGraph(CreatorId creator_id)
     }
     return graph;
   } catch (const std::exception& exception) {
-    return tl::make_unexpected(databaseError(exception));
+    return tl::make_unexpected(mapPostgresError(exception));
   }
 }
 
@@ -309,7 +288,7 @@ Result<std::optional<Babel>> PostgresWikipediaBabelRepository::findByPage(
     }
     return std::optional<Babel>{babelFromRow(rows.one_row())};
   } catch (const std::exception& exception) {
-    return tl::make_unexpected(databaseError(exception));
+    return tl::make_unexpected(mapPostgresError(exception));
   }
 }
 
@@ -349,9 +328,9 @@ Result<void> PostgresWikipediaBabelRepository::insertWikipediaBabel(
                      source_params);
     transaction.commit();
   } catch (const pqxx::unique_violation& exception) {
-    return tl::make_unexpected(conflictError(exception));
+    return tl::make_unexpected(mapPostgresError(exception));
   } catch (const std::exception& exception) {
-    return tl::make_unexpected(databaseError(exception));
+    return tl::make_unexpected(mapPostgresError(exception));
   }
   return {};
 }
@@ -376,9 +355,9 @@ Result<void> PostgresWikipediaBabelRepository::attachSeedAssignment(
     }
     transaction.commit();
   } catch (const pqxx::unique_violation& exception) {
-    return tl::make_unexpected(conflictError(exception));
+    return tl::make_unexpected(mapPostgresError(exception));
   } catch (const std::exception& exception) {
-    return tl::make_unexpected(databaseError(exception));
+    return tl::make_unexpected(mapPostgresError(exception));
   }
   return {};
 }
@@ -417,11 +396,11 @@ Result<SeedRunId> PostgresSeedRunRepository::createRun(
     }
     transaction.commit();
   } catch (const pqxx::unique_violation& exception) {
-    return tl::make_unexpected(conflictError(exception));
+    return tl::make_unexpected(mapPostgresError(exception));
   } catch (const pqxx::check_violation& exception) {
-    return tl::make_unexpected(invalidDatabaseValue(exception));
+    return tl::make_unexpected(mapPostgresError(exception));
   } catch (const std::exception& exception) {
-    return tl::make_unexpected(databaseError(exception));
+    return tl::make_unexpected(mapPostgresError(exception));
   }
   return run_id;
 }
@@ -436,7 +415,7 @@ Result<bool> PostgresSeedRunRepository::assignmentExists(SeedAssignmentId assign
         .one_field()
         .as<bool>();
   } catch (const std::exception& exception) {
-    return tl::make_unexpected(databaseError(exception));
+    return tl::make_unexpected(mapPostgresError(exception));
   }
 }
 
@@ -482,11 +461,11 @@ Result<void> PostgresSeedRunRepository::recordItemState(
     }
     transaction.commit();
   } catch (const pqxx::check_violation& exception) {
-    return tl::make_unexpected(invalidDatabaseValue(exception));
+    return tl::make_unexpected(mapPostgresError(exception));
   } catch (const pqxx::foreign_key_violation& exception) {
-    return tl::make_unexpected(invalidDatabaseValue(exception));
+    return tl::make_unexpected(mapPostgresError(exception));
   } catch (const std::exception& exception) {
-    return tl::make_unexpected(databaseError(exception));
+    return tl::make_unexpected(mapPostgresError(exception));
   }
   return {};
 }
@@ -518,7 +497,7 @@ Result<void> PostgresSeedRunRepository::setRunState(SeedRunId run_id, SeedRunSta
     }
     transaction.commit();
   } catch (const std::exception& exception) {
-    return tl::make_unexpected(databaseError(exception));
+    return tl::make_unexpected(mapPostgresError(exception));
   }
   return {};
 }
@@ -536,7 +515,7 @@ Result<SeedStatusDto> PostgresSeedRunRepository::status(SeedRunId run_id) {
     }
     return seedStatusFromRow(rows.one_row());
   } catch (const std::exception& exception) {
-    return tl::make_unexpected(databaseError(exception));
+    return tl::make_unexpected(mapPostgresError(exception));
   }
 }
 
@@ -554,7 +533,7 @@ Result<SeedStatusDto> PostgresSeedRunRepository::latestStatus() {
     const auto rows = transaction.exec(kSeedStatusQuery, pqxx::params{run_id.value});
     return seedStatusFromRow(rows.one_row());
   } catch (const std::exception& exception) {
-    return tl::make_unexpected(databaseError(exception));
+    return tl::make_unexpected(mapPostgresError(exception));
   }
 }
 
@@ -569,7 +548,7 @@ Result<void> PostgresSeedRunRepository::markRunningAsInterrupted() {
       )");
     transaction.commit();
   } catch (const std::exception& exception) {
-    return tl::make_unexpected(databaseError(exception));
+    return tl::make_unexpected(mapPostgresError(exception));
   }
   return {};
 }
@@ -587,7 +566,7 @@ Result<bool> PostgresLegacyMigrationRepository::digestExists(std::string_view sh
         .one_field()
         .as<bool>();
   } catch (const std::exception& exception) {
-    return tl::make_unexpected(databaseError(exception));
+    return tl::make_unexpected(mapPostgresError(exception));
   }
 }
 
@@ -649,13 +628,13 @@ Result<void> PostgresLegacyMigrationRepository::importPersonalGraph(
     if (raced_digest && raced_digest.value()) {
       return {};
     }
-    return tl::make_unexpected(conflictError(exception));
+    return tl::make_unexpected(mapPostgresError(exception));
   } catch (const pqxx::check_violation& exception) {
-    return tl::make_unexpected(invalidDatabaseValue(exception));
+    return tl::make_unexpected(mapPostgresError(exception));
   } catch (const pqxx::foreign_key_violation& exception) {
-    return tl::make_unexpected(invalidDatabaseValue(exception));
+    return tl::make_unexpected(mapPostgresError(exception));
   } catch (const std::exception& exception) {
-    return tl::make_unexpected(databaseError(exception));
+    return tl::make_unexpected(mapPostgresError(exception));
   }
   return {};
 }
