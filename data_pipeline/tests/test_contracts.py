@@ -26,6 +26,48 @@ def read_jsonl(path: Path) -> list[dict[str, object]]:
     return [json.loads(line) for line in path.read_text().splitlines() if line]
 
 
+def provenance_document() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "sources": [{
+            "filename": "vectors.bin",
+            "url": "https://example.test/vectors.bin",
+            "size": 12,
+            "md5": "a" * 32,
+            "sha1": "b" * 40,
+            "downloaded_at": "2016-10-01",
+        }],
+        "artifacts": {"shard": {"sha256": "c" * 64, "size": 12}},
+        "reports": {
+            "row_counts": {"input": 2, "matched": 1},
+            "match_rate": 0.5,
+            "exclusion_counts": {"unmatched": 1},
+            "text_statistics": {
+                "count": 2,
+                "min_length": 8,
+                "max_length": 12,
+                "mean_length": 10.0,
+                "stddev_length": 2.0,
+                "p50_length": 10.0,
+                "p95_length": 11.8,
+                "p99_length": 11.96,
+                "histogram": [0, 1, 1, 0],
+            },
+            "vector_statistics": {
+                "dimension": 100,
+                "count": 2,
+                "min_norm": 0.8,
+                "max_norm": 1.2,
+                "mean_norm": 1.0,
+                "stddev_norm": 0.2,
+                "p50_norm": 1.0,
+                "p95_norm": 1.18,
+                "non_finite_count": 0,
+            },
+        },
+    }
+
+
 def test_debug_rows_match_v1_schema() -> None:
     for row in read_jsonl(FIXTURE):
         validate_document("distillation-example-v1", row)
@@ -137,28 +179,10 @@ def test_provenance_schema_loads() -> None:
 
 
 def test_provenance_contract_validates_source_and_report_identity() -> None:
-    provenance = {
-        "schema_version": 1,
-        "sources": [{
-            "filename": "vectors.bin",
-            "url": "https://example.test/vectors.bin",
-            "size": 12,
-            "md5": "a" * 32,
-            "sha1": "b" * 40,
-            "downloaded_at": "2016-10-01",
-        }],
-        "artifacts": {"shard": {"sha256": "c" * 64, "size": 12}},
-        "reports": {
-            "row_counts": {"input": 2, "matched": 1},
-            "match_rate": 0.5,
-            "exclusion_counts": {"unmatched": 1},
-            "text_statistics": {"mean_length": 10.0},
-            "vector_statistics": {"dimension": 100, "mean_norm": 1.0},
-        },
-    }
+    provenance = provenance_document()
     validate_document("provenance-v1", provenance)
 
-    provenance["sources"][0]["url"] = "not a uri"
+    provenance["sources"][0]["url"] = "not a uri"  # type: ignore[index]
     with pytest.raises(ValidationError):
         validate_document("provenance-v1", provenance)
 
@@ -177,30 +201,30 @@ def test_provenance_contract_validates_source_and_report_identity() -> None:
 def test_provenance_rejects_missing_identity_and_unplanned_nested_fields(
     mutation: object,
 ) -> None:
-    provenance = {
-        "schema_version": 1,
-        "sources": [{
-            "filename": "vectors.bin",
-            "url": "https://example.test/vectors.bin",
-            "size": 12,
-            "md5": "a" * 32,
-            "sha1": "b" * 40,
-            "downloaded_at": "2016-10-01",
-        }],
-        "artifacts": {"shard": {"sha256": "c" * 64, "size": 12}},
-        "reports": {
-            "row_counts": {"input": 2, "matched": 1},
-            "match_rate": 0.5,
-            "exclusion_counts": {"unmatched": 1},
-            "text_statistics": {"mean_length": 10.0},
-            "vector_statistics": {"dimension": 100, "mean_norm": 1.0},
-        },
-    }
-    invalid = copy.deepcopy(provenance)
+    invalid = copy.deepcopy(provenance_document())
     mutation(invalid)  # type: ignore[operator]
 
     with pytest.raises(ValidationError):
         validate_document("provenance-v1", invalid)
+
+
+@pytest.mark.parametrize(
+    ("statistics", "field", "value"),
+    [
+        ("text_statistics", "stddev_lenght", 2.0),
+        ("vector_statistics", "p95_nrom", 1.18),
+        ("text_statistics", "histogram", [0, -1, 1]),
+        ("text_statistics", "histogram", [0, 1.5, 1]),
+    ],
+)
+def test_provenance_statistics_reject_typos_and_invalid_histogram_buckets(
+    statistics: str, field: str, value: object
+) -> None:
+    provenance = provenance_document()
+    provenance["reports"][statistics][field] = value  # type: ignore[index]
+
+    with pytest.raises(ValidationError):
+        validate_document("provenance-v1", provenance)
 
 
 def test_installed_data_wheel_imports_and_validates_outside_repository(tmp_path: Path) -> None:

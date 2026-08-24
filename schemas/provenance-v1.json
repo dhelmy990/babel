@@ -48,16 +48,57 @@
         "text_statistics": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["mean_length"],
-          "properties": {"mean_length": {"type": "number", "minimum": 0}}
+          "required": [
+            "count",
+            "min_length",
+            "max_length",
+            "mean_length",
+            "stddev_length",
+            "p50_length",
+            "p95_length",
+            "p99_length",
+            "histogram"
+          ],
+          "properties": {
+            "count": {"type": "integer", "minimum": 0},
+            "min_length": {"type": "integer", "minimum": 0},
+            "max_length": {"type": "integer", "minimum": 0},
+            "mean_length": {"type": "number", "minimum": 0},
+            "stddev_length": {"type": "number", "minimum": 0},
+            "p50_length": {"type": "number", "minimum": 0},
+            "p95_length": {"type": "number", "minimum": 0},
+            "p99_length": {"type": "number", "minimum": 0},
+            "histogram": {
+              "type": "array",
+              "minItems": 1,
+              "items": {"type": "integer", "minimum": 0}
+            }
+          }
         },
         "vector_statistics": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["dimension", "mean_norm"],
+          "required": [
+            "dimension",
+            "count",
+            "min_norm",
+            "max_norm",
+            "mean_norm",
+            "stddev_norm",
+            "p50_norm",
+            "p95_norm",
+            "non_finite_count"
+          ],
           "properties": {
             "dimension": {"const": 100},
-            "mean_norm": {"type": "number", "minimum": 0}
+            "count": {"type": "integer", "minimum": 0},
+            "min_norm": {"type": "number", "minimum": 0},
+            "max_norm": {"type": "number", "minimum": 0},
+            "mean_norm": {"type": "number", "minimum": 0},
+            "stddev_norm": {"type": "number", "minimum": 0},
+            "p50_norm": {"type": "number", "minimum": 0},
+            "p95_norm": {"type": "number", "minimum": 0},
+            "non_finite_count": {"type": "integer", "minimum": 0}
           }
         }
       }
