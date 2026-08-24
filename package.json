@@ -4,7 +4,8 @@
   "description": "Knowledge Graph",
   "main": "main.js",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "test": "node --test tests/js/*.test.js"
   },
   "devDependencies": {
     "electron": "^33.0.0"

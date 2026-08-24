@@ -1,0 +1,44 @@
+find_package(Catch2 3 CONFIG REQUIRED)
+find_package(OpenSSL REQUIRED)
+find_package(tl-expected CONFIG REQUIRED)
+
+function(babel_enable_warnings target)
+  get_target_property(target_type ${target} TYPE)
+  if(target_type STREQUAL "INTERFACE_LIBRARY")
+    target_compile_options(${target} INTERFACE -Wall -Wextra -Wpedantic)
+  else()
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+  endif()
+endfunction()
+
+add_library(babel_domain INTERFACE)
+target_include_directories(babel_domain INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(babel_domain INTERFACE OpenSSL::Crypto tl::expected)
+babel_enable_warnings(babel_domain)
+
+add_library(babel_application INTERFACE)
+target_link_libraries(babel_application INTERFACE babel_domain)
+babel_enable_warnings(babel_application)
+
+file(GLOB_RECURSE BABEL_BACKEND_SOURCES CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
+file(GLOB_RECURSE BABEL_TEST_SOURCES CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp")
+
+if(BABEL_BACKEND_SOURCES)
+  add_library(babel_backend STATIC ${BABEL_BACKEND_SOURCES})
+  target_link_libraries(babel_backend PUBLIC babel_application)
+else()
+  add_library(babel_backend INTERFACE)
+  target_link_libraries(babel_backend INTERFACE babel_application)
+endif()
+babel_enable_warnings(babel_backend)
+
+if(BUILD_TESTING)
+  add_executable(babel_tests ${BABEL_TEST_SOURCES})
+  target_link_libraries(babel_tests PRIVATE babel_application Catch2::Catch2WithMain)
+  babel_enable_warnings(babel_tests)
+
+  include(Catch)
+  catch_discover_tests(babel_tests TEST_PREFIX "domain_contract.")
+endif()
