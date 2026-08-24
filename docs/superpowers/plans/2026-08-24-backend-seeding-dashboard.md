@@ -274,6 +274,7 @@ public:
 };
 struct SeedItemUpdate {
     SeedItemState state;
+    std::uint32_t attempt_count;
     std::optional<WikipediaPageId> resolved_page_id;
     std::optional<BabelId> babel_id;
     std::optional<ApplicationError> error;
@@ -317,8 +318,10 @@ public:
 Also define `BabelSource`, `ProfileSummaryDto`, `BabelDto`, `EdgeDto`,
 `ProfileGraphDto`, and `SeedStatusDto` in the shared headers. `SeedStatusDto`
 must represent `not_started` separately from persisted run states.
-`SeedItemUpdate` carries the item state plus optional resolved page ID, imported
-Babel ID, and application error. Creating a run atomically snapshots every
+`SeedItemUpdate` carries the item state, explicit attempt count, optional
+resolved page ID, imported Babel ID, and application error. Pending/skipped
+updates use attempt zero; each real Wikipedia resolution/import attempt uses
+its one-based attempt number, including retries. Creating a run atomically snapshots every
 manifest assignment as a pending item and records the immutable declared total
 from that same snapshot. Mutable progress counters are derived from item rows
 rather than stored independently on `seed_runs`.
@@ -603,6 +606,9 @@ git commit -m "feat: add Wikipedia ingestion adapters"
 **Interfaces:**
 - Consumes: Fixed admin contract `GET /admin/api/v1/seed` and `POST /admin/api/v1/seed`; HTML-provided nonce in `<meta name="babel-admin-nonce">`.
 - Produces: Static assets consumed by Task 10 without changing backend headers.
+
+The admin HTTP DTO deliberately serializes backend `SeedStatusDto.imported` as
+the public JSON field `completed`; Task 10 owns this explicit mapping.
 
 - [ ] **Step 1: Write failing view-model tests**
 

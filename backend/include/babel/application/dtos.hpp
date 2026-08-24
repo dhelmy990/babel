@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -45,6 +46,7 @@ struct SeedAssignment {
 
 struct SeedItemUpdate {
   SeedItemState state;
+  std::uint32_t attempt_count{0};
   std::optional<WikipediaPageId> resolved_page_id;
   std::optional<BabelId> babel_id;
   std::optional<ApplicationError> error;

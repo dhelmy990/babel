@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <span>
@@ -19,6 +20,7 @@ static_assert(std::is_same_v<decltype(babel::SeedAssignment::id), babel::SeedAss
 static_assert(std::is_same_v<decltype(babel::SeedAssignment::creator_id), babel::CreatorId>);
 static_assert(std::is_same_v<decltype(babel::SeedAssignment::declared_title), std::string>);
 static_assert(std::is_same_v<decltype(babel::SeedItemUpdate::state), babel::SeedItemState>);
+static_assert(std::is_same_v<decltype(babel::SeedItemUpdate::attempt_count), std::uint32_t>);
 static_assert(std::is_same_v<decltype(babel::SeedItemUpdate::resolved_page_id),
                              std::optional<babel::WikipediaPageId>>);
 static_assert(std::is_same_v<decltype(babel::SeedItemUpdate::babel_id),
@@ -34,6 +36,17 @@ using RecordSeedItemState = babel::Result<void> (babel::SeedRunRepository::*)(
 static_assert(std::is_same_v<decltype(&babel::SeedRunRepository::createRun), CreateSeedRun>);
 static_assert(std::is_same_v<decltype(&babel::SeedRunRepository::recordItemState),
                              RecordSeedItemState>);
+
+TEST_CASE("a pending seed item update defaults its attempt count to zero") {
+  babel::SeedItemUpdate update{
+      .state = babel::SeedItemState::pending,
+      .resolved_page_id = std::nullopt,
+      .babel_id = std::nullopt,
+      .error = std::nullopt,
+  };
+
+  CHECK(update.attempt_count == 0);
+}
 
 TEST_CASE("an empty personal profile graph is a successful result") {
   const auto personal_id = babel::CreatorId::parse(
