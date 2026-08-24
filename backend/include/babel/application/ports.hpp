@@ -51,7 +51,7 @@ class SeedRunRepository {
   virtual Result<void> setRunState(SeedRunId, SeedRunState) = 0;
   virtual Result<SeedStatusDto> status(SeedRunId) = 0;
   virtual Result<SeedStatusDto> latestStatus() = 0;
-  virtual Result<void> markRunningAsInterrupted() = 0;
+  virtual Result<void> markNonterminalAsInterrupted() = 0;
 };
 
 class LegacyMigrationRepository {

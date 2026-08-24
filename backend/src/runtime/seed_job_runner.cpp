@@ -65,7 +65,7 @@ Result<SeedStatusDto> SeedJobRunner::currentStatus() {
 }
 
 Result<void> SeedJobRunner::markInterruptedRuns() {
-  return runs_.markRunningAsInterrupted();
+  return runs_.markNonterminalAsInterrupted();
 }
 
 void SeedJobRunner::execute(SeedRunId run_id, std::stop_token stop_token) noexcept {

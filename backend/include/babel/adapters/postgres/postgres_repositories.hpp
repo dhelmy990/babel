@@ -54,7 +54,7 @@ class PostgresSeedRunRepository final : public SeedRunRepository {
   Result<void> setRunState(SeedRunId run_id, SeedRunState state) override;
   Result<SeedStatusDto> status(SeedRunId run_id) override;
   Result<SeedStatusDto> latestStatus() override;
-  Result<void> markRunningAsInterrupted() override;
+  Result<void> markNonterminalAsInterrupted() override;
 
  private:
   PostgresDatabase& database_;

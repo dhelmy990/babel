@@ -19,6 +19,7 @@
 #include "babel/adapters/postgres/profile_roster_installer.hpp"
 #include "babel/application/profile_manifest.hpp"
 #include "babel/application/profile_query_service.hpp"
+#include "babel/runtime/application.hpp"
 
 namespace {
 
@@ -599,7 +600,7 @@ TEST_CASE_METHOD(PostgresFixture, "seed item database constraints reject invalid
               .as<std::string>() == "pending");
 }
 
-TEST_CASE_METHOD(PostgresFixture, "latest seed status handles no run and interrupts running runs",
+TEST_CASE_METHOD(PostgresFixture, "startup recovery interrupts queued and running runs",
                  "[postgres_repository]") {
   installSchemaAndRoster();
   const auto none = seed_runs_.latestStatus();
@@ -607,17 +608,47 @@ TEST_CASE_METHOD(PostgresFixture, "latest seed status handles no run and interru
   REQUIRE(none->kind == babel::SeedStatusKind::not_started);
   REQUIRE_FALSE(none->run_id.has_value());
 
-  const auto assignment = babel::ProfileManifest::seedAssignments().front();
-  const std::vector<babel::SeedAssignment> assignments{assignment};
-  const auto run = seed_runs_.createRun("manifest-v1", assignments).value();
-  REQUIRE(seed_runs_.setRunState(run, babel::SeedRunState::running).has_value());
-  REQUIRE(seed_runs_.markRunningAsInterrupted().has_value());
+  const auto assignments = babel::ProfileManifest::seedAssignments();
+  const std::vector<babel::SeedAssignment> queued_assignments{assignments.at(0)};
+  const std::vector<babel::SeedAssignment> running_assignments{assignments.at(1)};
+  const auto queued = seed_runs_.createRun("manifest-v1", queued_assignments).value();
+  const auto running = seed_runs_.createRun("manifest-v1", running_assignments).value();
+  REQUIRE(seed_runs_.setRunState(running, babel::SeedRunState::running).has_value());
+  REQUIRE(seed_runs_.markNonterminalAsInterrupted().has_value());
+
+  REQUIRE(seed_runs_.status(queued)->run_state == babel::SeedRunState::interrupted);
+  REQUIRE(seed_runs_.status(running)->run_state == babel::SeedRunState::interrupted);
 
   const auto latest = seed_runs_.latestStatus().value();
   REQUIRE(latest.kind == babel::SeedStatusKind::persisted);
-  REQUIRE(latest.run_id == run);
+  REQUIRE(latest.run_id == running);
   REQUIRE(latest.run_state == babel::SeedRunState::interrupted);
   REQUIRE(latest.total == 1);
+}
+
+TEST_CASE_METHOD(PostgresFixture, "a second backend lease cannot mutate the active run",
+                 "[postgres_repository]") {
+  installSchemaAndRoster();
+  auto process_a = babel::BackendInstanceLease::acquire(database_);
+  REQUIRE(process_a.has_value());
+
+  const std::vector<babel::SeedAssignment> assignments{
+      babel::ProfileManifest::seedAssignments().front()};
+  const auto active_run = seed_runs_.createRun("manifest-v1", assignments).value();
+  REQUIRE(seed_runs_.setRunState(active_run, babel::SeedRunState::running).has_value());
+
+  babel::PostgresDatabase unavailable(
+      "postgresql://babel:babel-local-dev@127.0.0.1:1/unavailable");
+  auto process_b = babel::BackendInstanceLease::acquire(unavailable);
+  REQUIRE_FALSE(process_b.has_value());
+  REQUIRE(process_b.error().code == babel::ErrorCode::conflict);
+  REQUIRE(seed_runs_.status(active_run)->run_state == babel::SeedRunState::running);
+
+  process_a->reset();
+  auto restarted = babel::BackendInstanceLease::acquire(database_);
+  REQUIRE(restarted.has_value());
+  REQUIRE(seed_runs_.markNonterminalAsInterrupted().has_value());
+  REQUIRE(seed_runs_.status(active_run)->run_state == babel::SeedRunState::interrupted);
 }
 
 TEST_CASE_METHOD(PostgresFixture, "legacy Personal graph and digest commit atomically",

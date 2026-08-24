@@ -96,15 +96,20 @@ drogon::HttpResponsePtr applicationError(const ApplicationError& error) {
 
 }  // namespace
 
-ProfileController::ProfileController(ProfileQueryService& profiles)
+ProfileController::ProfileController(ProfileQueryService& profiles, std::string instance_token)
     : ProfileController([&profiles] { return profiles.listProfiles(); },
-                        [&profiles](CreatorId id) { return profiles.loadGraph(std::move(id)); }) {}
+                        [&profiles](CreatorId id) { return profiles.loadGraph(std::move(id)); },
+                        std::move(instance_token)) {}
 
-ProfileController::ProfileController(ListProfiles list_profiles, LoadGraph load_graph)
-    : list_profiles_(std::move(list_profiles)), load_graph_(std::move(load_graph)) {}
+ProfileController::ProfileController(ListProfiles list_profiles, LoadGraph load_graph,
+                                     std::string instance_token)
+    : list_profiles_(std::move(list_profiles)),
+      load_graph_(std::move(load_graph)),
+      instance_token_(std::move(instance_token)) {}
 
 void ProfileController::health(const drogon::HttpRequestPtr&, Callback callback) const {
-  callback(response(drogon::k200OK, Json{{"status", "ok"}}));
+  callback(response(drogon::k200OK,
+                    Json{{"status", "ok"}, {"instanceToken", instance_token_}}));
 }
 
 void ProfileController::list(const drogon::HttpRequestPtr&, Callback callback) const {

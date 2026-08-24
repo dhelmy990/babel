@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -9,6 +10,23 @@
 #include "babel/runtime/config.hpp"
 
 namespace babel {
+
+class PostgresDatabase;
+
+class BackendInstanceLease final {
+ public:
+  static Result<std::unique_ptr<BackendInstanceLease>> acquire(PostgresDatabase&);
+  ~BackendInstanceLease();
+
+  BackendInstanceLease(const BackendInstanceLease&) = delete;
+  BackendInstanceLease& operator=(const BackendInstanceLease&) = delete;
+
+ private:
+  class State;
+  explicit BackendInstanceLease(std::unique_ptr<State>);
+
+  std::unique_ptr<State> state_;
+};
 
 enum class RuntimeCommandKind { migrate, serve, migrate_personal };
 

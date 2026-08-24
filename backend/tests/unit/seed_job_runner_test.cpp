@@ -116,10 +116,12 @@ class RunnerSeedRepository final : public SeedRunRepository {
     return result;
   }
 
-  Result<void> markRunningAsInterrupted() override {
+  Result<void> markNonterminalAsInterrupted() override {
     std::scoped_lock lock(mutex_);
     ++mark_interrupted_calls;
-    if (state == SeedRunState::running) state = SeedRunState::interrupted;
+    if (state == SeedRunState::queued || state == SeedRunState::running) {
+      state = SeedRunState::interrupted;
+    }
     changed_.notify_all();
     return {};
   }

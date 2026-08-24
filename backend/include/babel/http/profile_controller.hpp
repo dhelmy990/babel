@@ -19,8 +19,8 @@ class ProfileController final {
 
   static constexpr std::size_t kMaxGraphJsonBytes = 64U * 1024U * 1024U;
 
-  explicit ProfileController(ProfileQueryService&);
-  ProfileController(ListProfiles, LoadGraph);
+  ProfileController(ProfileQueryService&, std::string instance_token);
+  ProfileController(ListProfiles, LoadGraph, std::string instance_token = "test-instance");
 
   void health(const drogon::HttpRequestPtr&, Callback) const;
   void list(const drogon::HttpRequestPtr&, Callback) const;
@@ -29,6 +29,7 @@ class ProfileController final {
  private:
   ListProfiles list_profiles_;
   LoadGraph load_graph_;
+  std::string instance_token_;
 };
 
 }  // namespace babel

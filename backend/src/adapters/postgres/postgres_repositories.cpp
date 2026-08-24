@@ -614,14 +614,14 @@ Result<SeedStatusDto> PostgresSeedRunRepository::latestStatus() {
   }
 }
 
-Result<void> PostgresSeedRunRepository::markRunningAsInterrupted() {
+Result<void> PostgresSeedRunRepository::markNonterminalAsInterrupted() {
   try {
     auto connection = database_.connect();
     pqxx::work transaction(*connection);
     transaction.exec(R"(
         UPDATE seed_runs
         SET state = 'interrupted', finished_at = now()
-        WHERE state = 'running'
+        WHERE state IN ('queued', 'running')
       )");
     transaction.commit();
   } catch (const std::exception& exception) {

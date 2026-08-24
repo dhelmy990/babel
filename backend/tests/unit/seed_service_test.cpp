@@ -124,7 +124,7 @@ class RecordingSeedRepository final : public SeedRunRepository {
   }
 
   Result<SeedStatusDto> latestStatus() override { return status(run_id); }
-  Result<void> markRunningAsInterrupted() override {
+  Result<void> markNonterminalAsInterrupted() override {
     std::scoped_lock lock(mutex_);
     run_state = SeedRunState::interrupted;
     return {};

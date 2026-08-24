@@ -74,13 +74,15 @@ TEST_CASE("profile routes use camelCase JSON and preserve empty graphs") {
       [graph = graphWithContent(0)](CreatorId) mutable {
         graph.babels.clear();
         return Result<ProfileGraphDto>{graph};
-      }};
+      },
+      "test-instance-token"};
 
   const auto health = invoke(
       [&](const auto& req, auto callback) { controller.health(req, std::move(callback)); },
       request(drogon::Get, "/health"));
   REQUIRE(health->getStatusCode() == drogon::k200OK);
   CHECK(body(health).at("status") == "ok");
+  CHECK(body(health).at("instanceToken") == "test-instance-token");
 
   const auto profiles = invoke(
       [&](const auto& req, auto callback) { controller.list(req, std::move(callback)); },

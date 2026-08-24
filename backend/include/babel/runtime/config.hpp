@@ -17,6 +17,7 @@ struct RuntimeConfig {
   std::string database_url;
   std::string bind_address{"127.0.0.1"};
   std::uint16_t port{8787};
+  std::optional<std::string> instance_token;
   std::filesystem::path migration_directory;
   std::filesystem::path admin_asset_directory;
 

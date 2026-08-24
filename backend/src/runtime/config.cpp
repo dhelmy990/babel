@@ -1,5 +1,6 @@
 #include "babel/runtime/config.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 
 namespace babel {
@@ -11,6 +12,14 @@ constexpr std::string_view kDefaultDatabaseUrl =
 bool invalidEnvironmentValue(std::string_view value) {
   return value.empty() || value.find('\0') != std::string_view::npos ||
          value.find('\n') != std::string_view::npos || value.find('\r') != std::string_view::npos;
+}
+
+bool validInstanceToken(std::string_view value) {
+  return value.size() == 64 &&
+         std::all_of(value.begin(), value.end(), [](unsigned char character) {
+           return (character >= '0' && character <= '9') ||
+                  (character >= 'a' && character <= 'f');
+         });
 }
 
 }  // namespace
@@ -29,6 +38,10 @@ Result<RuntimeConfig> RuntimeConfig::fromEnvironment(const Environment& environm
   config.database_url = database_url.value_or(std::string{kDefaultDatabaseUrl});
   if (invalidEnvironmentValue(config.database_url)) {
     return invalidArgument("BABEL_DATABASE_URL must be a non-empty single-line value");
+  }
+  config.instance_token = environment("BABEL_INSTANCE_TOKEN");
+  if (config.instance_token && !validInstanceToken(*config.instance_token)) {
+    return invalidArgument("BABEL_INSTANCE_TOKEN must contain exactly 64 lowercase hex digits");
   }
 
 #ifdef BABEL_MIGRATION_DIRECTORY

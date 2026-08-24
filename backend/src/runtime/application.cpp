@@ -1,7 +1,11 @@
 #include "babel/runtime/application.hpp"
 
+#include <cerrno>
+#include <fcntl.h>
 #include <mutex>
 #include <string>
+#include <sys/file.h>
+#include <unistd.h>
 #include <utility>
 
 #include <boost/uuid/random_generator.hpp>
@@ -25,9 +29,79 @@
 #include "babel/runtime/seed_job_runner.hpp"
 
 namespace babel {
+class BackendInstanceLease::State final {
+ public:
+  State(int file_descriptor, std::unique_ptr<pqxx::connection> connection)
+      : file_descriptor_(file_descriptor), connection_(std::move(connection)) {}
+
+  ~State() {
+    connection_.reset();
+    if (file_descriptor_ >= 0) close(file_descriptor_);
+  }
+
+ private:
+  int file_descriptor_;
+  std::unique_ptr<pqxx::connection> connection_;
+};
+
 namespace {
 
 constexpr std::string_view kManifestVersion = "wikipedia-user-profiles-v1";
+constexpr int kBackendAdvisoryLockNamespace = 621946339;
+constexpr int kBackendAdvisoryLockId = 8787;
+
+class FileDescriptor final {
+ public:
+  explicit FileDescriptor(int value) : value_(value) {}
+  ~FileDescriptor() {
+    if (value_ >= 0) close(value_);
+  }
+
+  FileDescriptor(const FileDescriptor&) = delete;
+  FileDescriptor& operator=(const FileDescriptor&) = delete;
+  FileDescriptor(FileDescriptor&& other) noexcept : value_(other.release()) {}
+  FileDescriptor& operator=(FileDescriptor&& other) noexcept {
+    if (this == &other) return *this;
+    if (value_ >= 0) close(value_);
+    value_ = other.release();
+    return *this;
+  }
+
+  [[nodiscard]] int get() const noexcept { return value_; }
+  int release() noexcept { return std::exchange(value_, -1); }
+
+ private:
+  int value_;
+};
+
+Result<FileDescriptor> acquireLocalBackendLock() {
+  const auto path = "/tmp/babel-backend-" + std::to_string(getuid()) + "-8787.lock";
+  const int descriptor = open(path.c_str(), O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
+  if (descriptor < 0) {
+    return tl::make_unexpected(ApplicationError{
+        .code = ErrorCode::internal,
+        .message = "could not acquire backend instance ownership",
+    });
+  }
+
+  FileDescriptor file(descriptor);
+  int result;
+  do {
+    result = flock(file.get(), LOCK_EX | LOCK_NB);
+  } while (result < 0 && errno == EINTR);
+
+  if (result == 0) return file;
+  if (errno == EWOULDBLOCK || errno == EAGAIN) {
+    return tl::make_unexpected(ApplicationError{
+        .code = ErrorCode::conflict,
+        .message = "another Babel backend instance is already running",
+    });
+  }
+  return tl::make_unexpected(ApplicationError{
+      .code = ErrorCode::internal,
+      .message = "could not acquire backend instance ownership",
+  });
+}
 
 class ThreadSafeIdGenerator final : public IdGenerator {
  public:
@@ -51,6 +125,39 @@ ApplicationError commandError(std::string message) {
 }
 
 }  // namespace
+
+BackendInstanceLease::BackendInstanceLease(std::unique_ptr<State> state)
+    : state_(std::move(state)) {}
+
+BackendInstanceLease::~BackendInstanceLease() = default;
+
+Result<std::unique_ptr<BackendInstanceLease>> BackendInstanceLease::acquire(
+    PostgresDatabase& database) {
+  auto local_lock = acquireLocalBackendLock();
+  if (!local_lock) return tl::make_unexpected(local_lock.error());
+
+  try {
+    auto connection = database.connect();
+    pqxx::nontransaction session(*connection);
+    const auto acquired = session
+                              .exec("SELECT pg_try_advisory_lock($1, $2)",
+                                    pqxx::params{kBackendAdvisoryLockNamespace,
+                                                 kBackendAdvisoryLockId})
+                              .one_field()
+                              .as<bool>();
+    if (!acquired) {
+      return tl::make_unexpected(ApplicationError{
+          .code = ErrorCode::conflict,
+          .message = "another Babel backend instance owns this database",
+      });
+    }
+    return std::unique_ptr<BackendInstanceLease>(
+        new BackendInstanceLease(
+            std::make_unique<State>(local_lock->release(), std::move(connection))));
+  } catch (const std::exception& exception) {
+    return tl::make_unexpected(mapPostgresError(exception));
+  }
+}
 
 Result<RuntimeCommand> parseRuntimeCommand(std::span<const std::string_view> arguments) {
   if (arguments.size() == 1 && arguments[0] == "migrate") {
@@ -134,6 +241,9 @@ Result<void> Application::serve() {
   if (!ready) return tl::make_unexpected(ready.error());
 
   PostgresDatabase database(config_.database_url);
+  auto instance_lease = BackendInstanceLease::acquire(database);
+  if (!instance_lease) return tl::make_unexpected(instance_lease.error());
+
   PostgresCreatorRepository creators(database);
   PostgresGraphRepository graphs(database);
   PostgresWikipediaBabelRepository wikipedia_babels(database);
@@ -147,11 +257,23 @@ Result<void> Application::serve() {
   SeedService seed_service(ProfileManifest::seedAssignments(), seed_runs, article_source,
                            importer, SeedRetryPolicy::withDefaultDelay());
   SeedJobRunner seed_runner(std::string{kManifestVersion}, seed_service, seed_runs);
+
+  std::string instance_token;
+  if (config_.instance_token) {
+    instance_token = *config_.instance_token;
+  } else {
+    auto generated = generateAdminNonce();
+    if (!generated) return tl::make_unexpected(generated.error());
+    instance_token = std::move(*generated);
+  }
+  auto admin_nonce = generateAdminNonce();
+  if (!admin_nonce) return tl::make_unexpected(admin_nonce.error());
+  AdminSecurity admin_security(std::move(*admin_nonce));
+
   auto interrupted = seed_runner.markInterruptedRuns();
   if (!interrupted) return tl::make_unexpected(interrupted.error());
 
-  AdminSecurity admin_security;
-  ProfileController profile_controller(profiles);
+  ProfileController profile_controller(profiles, std::move(instance_token));
   AdminController admin_controller(admin_security, config_.admin_asset_directory, seed_runner);
 
   auto& server = drogon::app();
