@@ -62,3 +62,4 @@ ALTER TABLE edges ADD CONSTRAINT edges_source_owner_fk
   FOREIGN KEY (owner_id, source_babel_id) REFERENCES babels(owner_id, id) ON DELETE CASCADE;
 ALTER TABLE edges ADD CONSTRAINT edges_target_owner_fk
   FOREIGN KEY (owner_id, target_babel_id) REFERENCES babels(owner_id, id) ON DELETE CASCADE;
+CREATE INDEX edges_owner_id_index ON edges(owner_id);

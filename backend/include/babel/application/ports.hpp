@@ -41,10 +41,13 @@ class SeedRunRepository {
  public:
   virtual ~SeedRunRepository() = default;
 
-  virtual Result<SeedRunId> createRun(std::string_view manifest_version, std::size_t total) = 0;
+  // Atomically snapshot every assignment as a pending seed_run_items row for the new run.
+  virtual Result<SeedRunId> createRun(std::string_view manifest_version,
+                                      std::span<const SeedAssignment> assignments) = 0;
   virtual Result<bool> assignmentExists(SeedAssignmentId) = 0;
-  virtual Result<void> recordItemState(SeedRunId, SeedAssignmentId, SeedItemState,
-                                       std::optional<ApplicationError>) = 0;
+  // Atomically persist the transition outcome and its optional resolved/imported/error fields.
+  virtual Result<void> recordItemState(SeedRunId, SeedAssignmentId,
+                                       const SeedItemUpdate&) = 0;
   virtual Result<void> setRunState(SeedRunId, SeedRunState) = 0;
   virtual Result<SeedStatusDto> status(SeedRunId) = 0;
   virtual Result<SeedStatusDto> latestStatus() = 0;

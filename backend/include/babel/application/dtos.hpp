@@ -37,6 +37,19 @@ struct ProfileGraphDto {
   std::vector<EdgeDto> edges;
 };
 
+struct SeedAssignment {
+  SeedAssignmentId id;
+  CreatorId creator_id;
+  std::string declared_title;
+};
+
+struct SeedItemUpdate {
+  SeedItemState state;
+  std::optional<WikipediaPageId> resolved_page_id;
+  std::optional<BabelId> babel_id;
+  std::optional<ApplicationError> error;
+};
+
 enum class SeedStatusKind { not_started, persisted };
 
 struct SeedStatusDto {

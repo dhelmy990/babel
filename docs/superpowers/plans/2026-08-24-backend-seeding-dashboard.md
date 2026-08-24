@@ -272,11 +272,22 @@ public:
     virtual Result<void> insertWikipediaBabel(const Babel&, const BabelSource&) = 0;
     virtual Result<void> attachSeedAssignment(BabelId, SeedAssignmentId, std::string_view) = 0;
 };
+struct SeedItemUpdate {
+    SeedItemState state;
+    std::optional<WikipediaPageId> resolved_page_id;
+    std::optional<BabelId> babel_id;
+    std::optional<ApplicationError> error;
+};
 class SeedRunRepository {
 public:
-    virtual Result<SeedRunId> createRun(std::string_view manifest_version, std::size_t total) = 0;
+    virtual Result<SeedRunId> createRun(
+        std::string_view manifest_version,
+        std::span<const SeedAssignment> assignments) = 0;
     virtual Result<bool> assignmentExists(SeedAssignmentId) = 0;
-    virtual Result<void> recordItemState(SeedRunId, SeedAssignmentId, SeedItemState, std::optional<ApplicationError>) = 0;
+    virtual Result<void> recordItemState(
+        SeedRunId,
+        SeedAssignmentId,
+        const SeedItemUpdate&) = 0;
     virtual Result<void> setRunState(SeedRunId, SeedRunState) = 0;
     virtual Result<SeedStatusDto> status(SeedRunId) = 0;
     virtual Result<SeedStatusDto> latestStatus() = 0;
@@ -306,6 +317,10 @@ public:
 Also define `BabelSource`, `ProfileSummaryDto`, `BabelDto`, `EdgeDto`,
 `ProfileGraphDto`, and `SeedStatusDto` in the shared headers. `SeedStatusDto`
 must represent `not_started` separately from persisted run states.
+`SeedItemUpdate` carries the item state plus optional resolved page ID, imported
+Babel ID, and application error. Creating a run atomically snapshots every
+manifest assignment as a pending item; status counters are derived from those
+item rows rather than stored independently on `seed_runs`.
 `WikipediaBabelRepository::insertWikipediaBabel` must atomically insert `Babel`
 and its source row. `GraphRepository::loadGraph` returns an empty successful
 graph for a creator with no content.
@@ -750,7 +765,7 @@ TEST_CASE("seed processes only missing assignments") {
     FakeWikipediaImportService importer;
     SeedService service(manifest, runs, source, importer, noDelayRetryPolicy());
 
-    auto run_id = runs.createRun(3).value();
+    auto run_id = runs.createRun("test-v1", manifest).value();
     REQUIRE(service.run(run_id).has_value());
     REQUIRE(importer.calls.size() == 2);
     REQUIRE(runs.status(run_id).completed == 2);

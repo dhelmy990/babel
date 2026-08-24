@@ -1,10 +1,13 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <functional>
+#include <optional>
+#include <span>
 #include <string>
 #include <type_traits>
 
 #include "babel/application/dtos.hpp"
+#include "babel/application/ports.hpp"
 
 static_assert(std::is_same_v<decltype(babel::CreatorId::value), std::string>);
 static_assert(std::is_same_v<decltype(babel::BabelId::value), std::string>);
@@ -12,6 +15,25 @@ static_assert(std::is_same_v<decltype(babel::EdgeId::value), std::string>);
 static_assert(std::is_same_v<decltype(babel::SeedRunId::value), std::string>);
 static_assert(std::is_same_v<decltype(babel::SeedAssignmentId::value), std::string>);
 static_assert(std::is_same_v<decltype(babel::WikipediaPageId::value), std::int64_t>);
+static_assert(std::is_same_v<decltype(babel::SeedAssignment::id), babel::SeedAssignmentId>);
+static_assert(std::is_same_v<decltype(babel::SeedAssignment::creator_id), babel::CreatorId>);
+static_assert(std::is_same_v<decltype(babel::SeedAssignment::declared_title), std::string>);
+static_assert(std::is_same_v<decltype(babel::SeedItemUpdate::state), babel::SeedItemState>);
+static_assert(std::is_same_v<decltype(babel::SeedItemUpdate::resolved_page_id),
+                             std::optional<babel::WikipediaPageId>>);
+static_assert(std::is_same_v<decltype(babel::SeedItemUpdate::babel_id),
+                             std::optional<babel::BabelId>>);
+static_assert(std::is_same_v<decltype(babel::SeedItemUpdate::error),
+                             std::optional<babel::ApplicationError>>);
+
+using CreateSeedRun = babel::Result<babel::SeedRunId> (babel::SeedRunRepository::*)(
+    std::string_view, std::span<const babel::SeedAssignment>);
+using RecordSeedItemState = babel::Result<void> (babel::SeedRunRepository::*)(
+    babel::SeedRunId, babel::SeedAssignmentId, const babel::SeedItemUpdate&);
+
+static_assert(std::is_same_v<decltype(&babel::SeedRunRepository::createRun), CreateSeedRun>);
+static_assert(std::is_same_v<decltype(&babel::SeedRunRepository::recordItemState),
+                             RecordSeedItemState>);
 
 TEST_CASE("an empty personal profile graph is a successful result") {
   const auto personal_id = babel::CreatorId::parse(

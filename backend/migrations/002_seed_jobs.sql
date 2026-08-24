@@ -4,14 +4,10 @@ CREATE TABLE seed_runs (
   state text NOT NULL CHECK (state IN (
     'queued', 'running', 'completed', 'completed_with_errors', 'failed', 'interrupted'
   )),
-  total integer NOT NULL CHECK (total >= 0),
-  completed integer NOT NULL DEFAULT 0 CHECK (completed >= 0),
-  skipped integer NOT NULL DEFAULT 0 CHECK (skipped >= 0),
-  failed integer NOT NULL DEFAULT 0 CHECK (failed >= 0),
+  total integer NOT NULL CHECK (total > 0),
   started_at timestamptz,
   finished_at timestamptz,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  CHECK (completed + skipped + failed <= total)
+  created_at timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE TABLE seed_run_items (
@@ -29,7 +25,11 @@ CREATE TABLE seed_run_items (
   error_detail text,
   started_at timestamptz,
   finished_at timestamptz,
-  PRIMARY KEY (seed_run_id, seed_assignment_id)
+  PRIMARY KEY (seed_run_id, seed_assignment_id),
+  CONSTRAINT seed_run_items_imported_result_check
+    CHECK (state <> 'imported' OR (resolved_page_id IS NOT NULL AND babel_id IS NOT NULL)),
+  CONSTRAINT seed_run_items_failed_error_check
+    CHECK (state <> 'failed' OR (error_code IS NOT NULL AND char_length(error_code) > 0))
 );
 
 ALTER TABLE seed_run_items ADD CONSTRAINT seed_run_items_babel_owner_fk
