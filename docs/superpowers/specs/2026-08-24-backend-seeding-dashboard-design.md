@@ -158,10 +158,14 @@ text from `content_html` for the duration of a job.
 - `canonical_url`.
 - `source_revision_id` when supplied by Wikipedia.
 - `fetched_at`.
+- `seed_assignment_id`: nullable stable UUID from the versioned seed manifest.
+- `declared_title`: the manifest title used to initiate resolution.
 
-The unique key is `(owner_id, provider, external_page_id)`. It permits the same
-Wikipedia page to belong to multiple profiles while preventing duplicate
-imports for one profile.
+Unique keys cover both `(owner_id, provider, external_page_id)` and non-null
+`seed_assignment_id`. The first permits the same Wikipedia page to belong to
+multiple profiles while preventing duplicate imports for one profile. The
+second lets a repeated seed run determine completed manifest assignments
+without resolving or fetching their titles again.
 
 Wikipedia provenance remains attached if editing is added later. A future
 refresh must not overwrite local edits automatically.
@@ -212,8 +216,10 @@ All four declared seed titles are used for every profile. PPR weights, PPR
 computation, archetype expansion, and simulated users are ignored. Profile
 names are display metadata and are not future recommender features.
 
-Stable UUIDs, slugs, colors, ordering, and seed assignments are checked by
-automated tests. The same Wikipedia page may appear under more than one profile.
+Stable UUIDs, slugs, ordering, seed-assignment UUIDs, and 20 distinct fixed hex
+colors are checked by automated tests. Every profile color must remain legible
+against the black selector background. The same Wikipedia page may appear under
+more than one profile.
 
 ## Wikipedia Ingestion
 
@@ -255,8 +261,8 @@ The dashboard is the only operator-facing way to start population. There is no
 `POST /admin/api/v1/seed` creates a background run and returns immediately. The
 dashboard polls its status. Only one run may be active at a time.
 
-The job performs schema and manifest preflight checks, finds missing
-profile/source assignments, and fetches with bounded concurrency, request
+The job performs schema and manifest preflight checks, finds missing stable
+seed-assignment UUIDs, and fetches with bounded concurrency, request
 timeouts, a descriptive user agent, and limited retry with backoff. Each
 article is committed independently so one failure does not discard successful
 work.
@@ -287,7 +293,8 @@ There is no separate operational-test control in this milestone. Schema,
 manifest, Wikipedia, sanitizer, and persistence checks occur as seed preflight
 or seed stages and surface through the same progress/error model. Later metrics
 and monitoring panels can extend this control plane without changing seed
-services.
+services. Any future manual population or operational-test action must also be
+initiated from this dashboard; deterministic automated tests remain external.
 
 ## HTTP Contracts
 
@@ -397,7 +404,8 @@ button is the population boundary.
 ## Technology Choices
 
 - C++20 and CMake.
-- A pinned dependency manifest for reproducible local builds.
+- A `vcpkg.json` manifest with a pinned vcpkg baseline for reproducible local
+  builds.
 - Drogon as the thin HTTP server/static asset adapter.
 - libpqxx behind PostgreSQL repository adapters.
 - libcurl for Wikipedia HTTPS requests.
@@ -413,6 +421,8 @@ Automated tests do not run through the dashboard.
 ### Unit tests
 
 - The manifest has exactly 20 stable profiles and 80 profile/title assignments.
+- Every seed assignment has a stable UUID and every profile has a distinct,
+  black-background-safe color.
 - Sanitization preserves supported content and removes scripts, event handlers,
   unsafe URLs, unsupported structures, and unwanted Wikipedia chrome.
 - Seed behavior imports missing assignments, skips existing assignments, and
