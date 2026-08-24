@@ -6,6 +6,8 @@ const State = {
     // Core data
     babels: [],
     edges: [],
+    currentProfile: null,
+    isReadOnlyProfile: false,
 
     // Selection state
     selectedBabel: null,
@@ -36,12 +38,16 @@ const State = {
     },
 
     addBabel(babel) {
+        if (this.isReadOnlyProfile) return false;
         this.babels.push(babel);
+        return true;
     },
 
     removeBabel(id) {
+        if (this.isReadOnlyProfile) return false;
         this.babels = this.babels.filter(b => b.id !== id);
         this.edges = this.edges.filter(e => e.source !== id && e.target !== id);
+        return true;
     },
 
     getBabel(id) {
@@ -49,6 +55,7 @@ const State = {
     },
 
     addEdge(source, target) {
+        if (this.isReadOnlyProfile) return false;
         const id = `${source}-${target}`;
         if (!this.edges.find(e => e.id === id)) {
             this.edges.push({ source, target, id });
@@ -58,6 +65,7 @@ const State = {
     },
 
     removeEdge(source, target) {
+        if (this.isReadOnlyProfile) return false;
         const index = this.edges.findIndex(e => e.source === source && e.target === target);
         if (index >= 0) {
             this.edges.splice(index, 1);

@@ -73,22 +73,14 @@ const Editor = {
                     : filename;
                 node.innerHTML = `<span class="pdf-embed-icon">PDF</span><span class="pdf-embed-label">${shortName}</span>`;
 
-                node.addEventListener('click', async (e) => {
+                node.addEventListener('click', (e) => {
                     e.stopPropagation();
                     const p = node.getAttribute('data-path');
                     if (!p) return;
-                    // blob: URLs are in-memory fallbacks — open directly, no existence check
-                    if (p.startsWith('blob:')) { window.open(p, '_blank'); return; }
-                    if (window.electronAPI) {
-                        const exists = await window.electronAPI.checkFileExists(p);
-                        if (exists) {
-                            window.electronAPI.openFile(p);
-                        } else {
-                            Editor.showMissingFileModal(node);
-                        }
-                    } else {
-                        window.open(p, '_blank');
-                    }
+                    const target = /^[a-z][a-z0-9+.-]*:/i.test(p)
+                        ? p
+                        : `file://${p.replace(/\\/g, '/')}`;
+                    window.open(target, '_blank', 'noopener,noreferrer');
                 });
                 return node;
             }
@@ -111,7 +103,9 @@ const Editor = {
                 node.setAttribute('data-path', value.path);
                 node.setAttribute('contenteditable', 'false');
                 const img = document.createElement('img');
-                img.src = 'file://' + value.path.replace(/\\/g, '/');
+                img.src = /^[a-z][a-z0-9+.-]*:/i.test(value.path)
+                    ? value.path
+                    : 'file://' + value.path.replace(/\\/g, '/');
                 img.draggable = false;
                 img.alt = '';
                 node.appendChild(img);
@@ -230,6 +224,7 @@ const Editor = {
     },
 
     handlePaste(e) {
+        if (State.isReadOnlyProfile) return;
         const text = e.clipboardData?.getData('text/plain')?.trim();
         if (text && this.isURL(text)) {
             e.preventDefault();
@@ -263,73 +258,41 @@ const Editor = {
     },
 
     embedLink(url) {
-        if (!url) return;
+        if (State.isReadOnlyProfile || !url) return;
         const range = this.editor.getSelection(true);
         this.editor.insertEmbed(range.index, 'url-link', { url }, 'user');
         this.editor.setSelection(range.index + 1);
     },
 
     async embedPDF(file) {
+        if (State.isReadOnlyProfile) return;
         const range = this.editor.getSelection(true);
-        let filePath = file.path || '';
-        if (!filePath && window.electronAPI) {
-            const ext = file.name.split('.').pop() || 'pdf';
-            const buf = await file.arrayBuffer();
-            const result = await window.electronAPI.saveFile(buf, 'pdfs', ext);
-            filePath = result.success ? result.path : URL.createObjectURL(file);
-        } else if (!filePath) {
-            filePath = URL.createObjectURL(file);
-        }
+        const filePath = file.path || URL.createObjectURL(file);
         this.editor.insertEmbed(range.index, 'pdf', { path: filePath, filename: file.name }, 'user');
         this.editor.setSelection(range.index + 1);
     },
 
     async embedImage(file) {
-        if (!window.electronAPI) return;
+        if (State.isReadOnlyProfile) return;
         const range = this.editor.getSelection(true);
-        let filePath = file.path || '';
-        if (!filePath) {
-            const ext = (file.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
-            const buf = await file.arrayBuffer();
-            const result = await window.electronAPI.saveFile(buf, 'images', ext);
-            if (!result.success) return;
-            filePath = result.path;
-        }
+        const filePath = file.path || URL.createObjectURL(file);
         this.editor.insertEmbed(range.index, 'local-image', { path: filePath }, 'user');
         this.editor.setSelection(range.index + 1);
     },
 
     showMissingFileModal(node) {
+        if (State.isReadOnlyProfile) return;
         this.hideMissingFileModal();
 
         const modal = document.createElement('div');
         modal.className = 'missing-file-modal';
         modal.innerHTML = `
             <div class="missing-file-text">File not found</div>
-            <button class="missing-file-locate">Locate File</button>
         `;
 
         const rect = node.getBoundingClientRect();
         modal.style.left = rect.left + 'px';
         modal.style.top = (rect.bottom + 6) + 'px';
-
-        modal.querySelector('.missing-file-locate').addEventListener('click', async () => {
-            const result = await window.electronAPI.locateFile([
-                { name: 'PDF', extensions: ['pdf'] }
-            ]);
-            if (result.success) {
-                node.setAttribute('data-path', result.path);
-                const label = node.querySelector('.pdf-embed-label');
-                if (label) {
-                    const filename = result.path.split(/[\\/]/).pop();
-                    label.textContent = filename.length > 15
-                        ? filename.substring(0, 12) + '...' + filename.slice(-4)
-                        : filename;
-                }
-                Editor.triggerAutoSave();
-            }
-            this.hideMissingFileModal();
-        });
 
         document.body.appendChild(modal);
         this._missingFileModal = modal;
@@ -379,13 +342,15 @@ const Editor = {
     },
 
     triggerAutoSave() {
+        if (State.isReadOnlyProfile) return;
         if (this.autoSaveTimer) clearTimeout(this.autoSaveTimer);
         this.autoSaveTimer = setTimeout(() => this.saveCurrentBabel(), 2000);
     },
 
     saveCurrentBabel() {
+        if (State.isReadOnlyProfile) return false;
         const babel = State.editingBabel;
-        if (!babel) return;
+        if (!babel) return false;
 
         babel.title = UI.elements.editTitle.value.trim() || 'Untitled';
         babel.description = this.editor ? this.editor.root.innerHTML : '';
@@ -393,5 +358,6 @@ const Editor = {
         babel.color = State.selectedColor;
 
         Persistence.save();
+        return true;
     }
 };

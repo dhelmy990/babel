@@ -272,11 +272,23 @@ public:
     virtual Result<void> insertWikipediaBabel(const Babel&, const BabelSource&) = 0;
     virtual Result<void> attachSeedAssignment(BabelId, SeedAssignmentId, std::string_view) = 0;
 };
+struct SeedItemUpdate {
+    SeedItemState state;
+    std::uint32_t attempt_count;
+    std::optional<WikipediaPageId> resolved_page_id;
+    std::optional<BabelId> babel_id;
+    std::optional<ApplicationError> error;
+};
 class SeedRunRepository {
 public:
-    virtual Result<SeedRunId> createRun(std::string_view manifest_version, std::size_t total) = 0;
+    virtual Result<SeedRunId> createRun(
+        std::string_view manifest_version,
+        std::span<const SeedAssignment> assignments) = 0;
     virtual Result<bool> assignmentExists(SeedAssignmentId) = 0;
-    virtual Result<void> recordItemState(SeedRunId, SeedAssignmentId, SeedItemState, std::optional<ApplicationError>) = 0;
+    virtual Result<void> recordItemState(
+        SeedRunId,
+        SeedAssignmentId,
+        const SeedItemUpdate&) = 0;
     virtual Result<void> setRunState(SeedRunId, SeedRunState) = 0;
     virtual Result<SeedStatusDto> status(SeedRunId) = 0;
     virtual Result<SeedStatusDto> latestStatus() = 0;
@@ -285,7 +297,9 @@ public:
 class LegacyMigrationRepository {
 public:
     virtual Result<bool> digestExists(std::string_view sha256) = 0;
-    virtual Result<void> importPersonalGraph(std::string_view sha256, std::span<const Babel>, std::span<const Edge>) = 0;
+    // Return true when this call imported the graph and false when the digest
+    // was already claimed; graph rows and the digest commit atomically.
+    virtual Result<bool> importPersonalGraph(std::string_view sha256, std::span<const Babel>, std::span<const Edge>) = 0;
 };
 class ArticleSource {
 public:
@@ -306,6 +320,13 @@ public:
 Also define `BabelSource`, `ProfileSummaryDto`, `BabelDto`, `EdgeDto`,
 `ProfileGraphDto`, and `SeedStatusDto` in the shared headers. `SeedStatusDto`
 must represent `not_started` separately from persisted run states.
+`SeedItemUpdate` carries the item state, explicit attempt count, optional
+resolved page ID, imported Babel ID, and application error. Pending/skipped
+updates use attempt zero; each real Wikipedia resolution/import attempt uses
+its one-based attempt number, including retries. Creating a run atomically snapshots every
+manifest assignment as a pending item and records the immutable declared total
+from that same snapshot. Mutable progress counters are derived from item rows
+rather than stored independently on `seed_runs`.
 `WikipediaBabelRepository::insertWikipediaBabel` must atomically insert `Babel`
 and its source row. `GraphRepository::loadGraph` returns an empty successful
 graph for a creator with no content.
@@ -588,6 +609,9 @@ git commit -m "feat: add Wikipedia ingestion adapters"
 - Consumes: Fixed admin contract `GET /admin/api/v1/seed` and `POST /admin/api/v1/seed`; HTML-provided nonce in `<meta name="babel-admin-nonce">`.
 - Produces: Static assets consumed by Task 10 without changing backend headers.
 
+The admin HTTP DTO deliberately serializes backend `SeedStatusDto.imported` as
+the public JSON field `completed`; Task 10 owns this explicit mapping.
+
 - [ ] **Step 1: Write failing view-model tests**
 
 ```js
@@ -750,10 +774,10 @@ TEST_CASE("seed processes only missing assignments") {
     FakeWikipediaImportService importer;
     SeedService service(manifest, runs, source, importer, noDelayRetryPolicy());
 
-    auto run_id = runs.createRun(3).value();
+    auto run_id = runs.createRun("test-v1", manifest).value();
     REQUIRE(service.run(run_id).has_value());
     REQUIRE(importer.calls.size() == 2);
-    REQUIRE(runs.status(run_id).completed == 2);
+    REQUIRE(runs.status(run_id).imported == 2);
     REQUIRE(runs.status(run_id).skipped == 1);
 }
 ```
@@ -817,7 +841,7 @@ git commit -m "feat: add durable background profile seeding"
 TEST_CASE("legacy migration targets Personal and preserves edge identity") {
     FakeLegacyMigrationRepository repository;
     FakeHtmlSanitizer sanitizer = passThroughSanitizer();
-    LegacyMigrationService service(personalCreatorId(), repository, sanitizer, fixedUuidGenerator());
+    LegacyMigrationService service(personalCreatorId(), repository, sanitizer);
 
     auto result = service.migrateFile(fixturePath("legacy_graph.json")).value();
 
@@ -831,7 +855,12 @@ TEST_CASE("legacy migration targets Personal and preserves edge identity") {
 
 - [ ] **Step 2: Write failing validation and idempotency tests**
 
-Assert malformed JSON, duplicate legacy IDs, invalid colors, and edges referencing missing nodes fail before repository writes. Hash the complete source bytes; a second completed migration with the same SHA-256 returns `already_migrated` and performs no inserts. Verify the fixture bytes are unchanged before and after.
+Assert malformed JSON, duplicate legacy IDs, invalid colors, edges referencing
+missing nodes, non-reciprocal directed cycles, and complete serialized graphs
+over the shared 64 MiB response limit fail before repository writes. Reciprocal
+edge pairs remain valid mutual relationships. Hash the complete source bytes; a
+second completed migration with the same SHA-256 returns `already_migrated` and
+performs no inserts. Verify the fixture bytes are unchanged before and after.
 
 - [ ] **Step 3: Run migration tests and verify failure**
 
@@ -841,11 +870,26 @@ Expected: compile fails because the service is absent.
 
 - [ ] **Step 4: Implement strict legacy parsing**
 
-Require root arrays `babels` and `edges`. Accept legacy Babel fields `id`, `title`, `description`, and `color`; ignore `contentDelta`; sanitize `description` into canonical `content_html`. Convert every legacy ID to a generated UUID through an in-memory map, then resolve edge endpoints through that map. Validate the entire graph before opening a write transaction.
+Require root arrays `babels` and `edges`. Accept legacy Babel fields `id`,
+`title`, `description`, and `color`; ignore `contentDelta`; sanitize
+`description` into canonical `content_html`. Validate reciprocal-aware DAG
+semantics and measure the exact public graph JSON against the shared 64 MiB
+limit before opening a write transaction.
+
+- [ ] **Step 4a: Make migrated identities stable**
+
+Convert every legacy Babel ID to UUIDv5 using the length-prefixed name
+`legacy:<Personal UUID>:babel:<legacy-id-length>:<legacy-id>`. Derive edge IDs
+from both length-prefixed endpoint IDs. This keeps Personal graph identities
+stable across source ordering and repeated migrations.
 
 - [ ] **Step 5: Implement atomic PostgreSQL import**
 
-Insert all Personal Babels, all valid edges, and one `legacy_migrations` record in a single transaction. Never create `babel_sources` rows for local legacy content. Re-query the digest inside the transaction to make concurrent duplicate runs harmless.
+Atomically claim the digest with `INSERT ... ON CONFLICT DO NOTHING RETURNING`.
+Only the caller that claims it inserts all Personal Babels and valid edges in
+that same transaction and returns `true`; a concurrent duplicate performs no
+graph writes and returns `false`. Never create `babel_sources` rows for local
+legacy content.
 
 - [ ] **Step 6: Run unit and PostgreSQL migration tests**
 
@@ -976,6 +1020,9 @@ git commit -m "feat: load read-only creator profiles in Electron"
 **Interfaces:**
 - Consumes: Tasks 3 through 9.
 - Produces: runnable `babel_backend migrate`, `serve`, and `migrate-personal`; all HTTP contracts; `just db-up`, `just start`, `just test`, and `just migrate-personal`.
+- Contract: profile graph responses are capped at 64 MiB in the backend and in
+  Electron's bounded streaming reader. If a stored Personal graph exceeds that
+  wire limit, return a typed HTTP error rather than emitting a partial graph.
 
 - [ ] **Step 1: Write failing HTTP contract tests**
 
@@ -1008,6 +1055,9 @@ Expected: compile fails because controllers and composition root are absent.
 - [ ] **Step 3: Implement profile routes and JSON mapping**
 
 Expose `GET /health`, `GET /api/v1/profiles`, and `GET /api/v1/profiles/{profileId}/graph`. Use camelCase JSON fields expected by Task 9. Map `not_found` to 404, validation to 400, database unavailability to 503, and internal errors to a generic 500 body without leaking SQL.
+Serialize profile graphs with the shared 64 MiB whole-response ceiling and
+return a structured 413 response when the complete JSON representation would
+exceed it.
 
 - [ ] **Step 4: Implement dashboard/static and seed routes**
 

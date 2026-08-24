@@ -1,0 +1,11 @@
+{
+  "babels": [
+    {
+      "id": "broken",
+      "title": "Broken",
+      "description": "<p>This fixture is intentionally malformed</p>",
+      "color": "#123456"
+    }
+  ],
+  "edges": [
+}

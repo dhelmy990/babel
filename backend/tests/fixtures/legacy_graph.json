@@ -1,0 +1,28 @@
+{
+  "babels": [
+    {
+      "id": "1726502400000",
+      "title": "Origin",
+      "description": "<p>Safe <strong>origin</strong><script>alert('legacy')</script></p>",
+      "color": "#12ABEF",
+      "contentDelta": {
+        "ops": [
+          { "insert": "This Delta must not be persisted.\n" }
+        ]
+      }
+    },
+    {
+      "id": "1726502401000",
+      "title": "Destination",
+      "description": "<p>Connected destination</p>",
+      "color": "#FEDCBA"
+    }
+  ],
+  "edges": [
+    {
+      "id": "1726502400000-1726502401000",
+      "source": "1726502400000",
+      "target": "1726502401000"
+    }
+  ]
+}

@@ -1,0 +1,92 @@
+:root {
+  --void: #070808;
+  --surface: #0d0f0f;
+  --line: #252b2b;
+  --ink: #f1ebdf;
+  --muted: #9a9a90;
+  --accent: #7fc7c3;
+  --accent-dim: #275654;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+  background: radial-gradient(circle at 88% 8%, #142727 0, var(--void) 30rem);
+  color: var(--ink);
+  font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+}
+
+.operations {
+  width: min(100% - 3rem, 58rem);
+  margin: 0 auto;
+  padding: clamp(3rem, 11vh, 8rem) 0 4rem;
+}
+
+.masthead { border-bottom: 1px solid var(--line); padding-bottom: 2rem; }
+
+.eyebrow, .counts, .current, .errors h2 {
+  margin: 0;
+  color: var(--muted);
+  font-size: .73rem;
+  letter-spacing: .09em;
+  line-height: 1.6;
+  text-transform: uppercase;
+}
+
+h1 {
+  margin: .5rem 0 1rem;
+  font-size: clamp(2.2rem, 8vw, 5.6rem);
+  font-weight: 500;
+  letter-spacing: -.08em;
+  line-height: .9;
+}
+
+.status { margin: 0; color: var(--accent); font-size: .95rem; }
+.run { padding: 2.25rem 0; border-bottom: 1px solid var(--line); }
+.current { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.counts { margin-top: .65rem; }
+
+progress {
+  width: 100%;
+  height: .25rem;
+  margin: 1.35rem 0 1.5rem;
+  appearance: none;
+  border: 0;
+  background: var(--line);
+}
+
+progress::-webkit-progress-bar { background: var(--line); }
+progress::-webkit-progress-value { background: var(--accent); }
+progress::-moz-progress-bar { background: var(--accent); }
+
+button {
+  border: 1px solid var(--accent);
+  border-radius: 0;
+  padding: .8rem 1rem;
+  background: var(--accent);
+  color: #071111;
+  cursor: pointer;
+  font: inherit;
+  font-size: .78rem;
+  font-weight: 700;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+button:hover:not(:disabled), button:focus-visible { background: var(--ink); outline: none; }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+button:disabled { cursor: wait; opacity: .45; }
+
+.errors { padding-top: 1.5rem; }
+.errors h2 { color: var(--ink); }
+.errors ul { margin: .9rem 0 0; padding: 0; list-style: none; }
+.errors li { padding: .65rem 0; border-top: 1px solid var(--line); color: #d6b4a4; font-size: .82rem; line-height: 1.5; overflow-wrap: anywhere; }
+
+@media (max-width: 560px) {
+  .operations { width: min(100% - 2rem, 58rem); padding-top: 3rem; }
+  h1 { letter-spacing: -.07em; }
+  button { width: 100%; }
+}
