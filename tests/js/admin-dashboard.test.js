@@ -89,6 +89,12 @@ test('percentage uses completed items, floors the fraction, and guards zero tota
   assert.equal(seedViewModel({ state: 'completed', total: 0, completed: 0 }).percent, 0);
 });
 
+test('skipped assignments satisfy progress and completed summaries', () => {
+  const model = seedViewModel({ state: 'completed', total: 80, completed: 0, skipped: 80 });
+  assert.equal(model.percent, 100);
+  assert.equal(model.summary, '0 imported; 80 already present');
+});
+
 test('error view models keep plain text for textContent and provide escaped copies', () => {
   const errors = seedErrorViewModel([
     { article: 'A < B', message: 'Bad <script>alert("x")</script> & retry' },
@@ -116,6 +122,33 @@ test('request helpers use the fixed endpoint and attach to a conflicting active 
 
   assert.equal(status.state, 'queued');
   assert.deepEqual(result, { attached: true, status: { state: 'running' } });
+});
+
+test('status requests reject malformed success payloads and nested error messages', async () => {
+  await assert.rejects(
+    dashboard.requestSeedStatus(async () => ({ ok: true, status: 200, json: async () => ({ runId: 'not-status' }) })),
+    /invalid status payload/,
+  );
+  await assert.rejects(
+    dashboard.requestSeedStatus(async () => ({ ok: false, status: 500, json: async () => ({ error: { message: 'database unavailable' } }) })),
+    /database unavailable/,
+  );
+});
+
+test('a timed-out GET recovers the action state', async () => {
+  const documentRef = fakeDocument();
+  let triggerTimeout;
+  const controller = dashboard.createDashboardController({
+    document: documentRef,
+    fetchImpl: async (_url, options) => new Promise((_, reject) => options.signal.addEventListener('abort', () => reject(new Error('timed out')))),
+    setTimeoutImpl: (callback) => { triggerTimeout = callback; return 1; },
+    clearTimeoutImpl() {},
+  });
+  const refresh = controller.refresh();
+  triggerTimeout();
+  await refresh;
+  assert.equal(documentRef.elements.get('seed-action').disabled, false);
+  assert.match(documentRef.elements.get('seed-status').textContent, /Unable to reach seed service/);
 });
 
 test('an initial stale status cannot stop polling started by a successful seed request', async () => {
@@ -200,6 +233,46 @@ test('a slow poll GET is not superseded by the next interval tick', async () => 
 
   slowStatus.resolve({ ok: true, status: 200, json: async () => ({ state: 'completed', total: 80, completed: 80 }) });
   await Promise.all([firstTick, secondTick]);
-  assert.equal(documentRef.elements.get('seed-status').textContent, 'All 80 Wikipedia Babels imported');
+  assert.equal(documentRef.elements.get('seed-status').textContent, '80 imported; 0 already present');
   assert.deepEqual(cleared, [1]);
+});
+
+test('a runId-only POST keeps the action disabled through recovery', async () => {
+  const documentRef = fakeDocument();
+  const recovery = deferred();
+  let posts = 0;
+  const controller = dashboard.createDashboardController({
+    document: documentRef,
+    fetchImpl: async (_url, options = {}) => {
+      if (options.method === 'POST') {
+        posts += 1;
+        return { ok: true, status: 202, json: async () => ({ runId: 'run-1' }) };
+      }
+      return recovery.promise;
+    },
+  });
+  const start = controller.start();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(documentRef.elements.get('seed-action').disabled, true);
+  await controller.start();
+  assert.equal(posts, 1);
+  recovery.resolve({ ok: true, status: 200, json: async () => ({ state: 'completed', total: 1, completed: 1 }) });
+  await start;
+  assert.equal(documentRef.elements.get('seed-action').disabled, false);
+});
+
+test('stop aborts an active GET and prevents its result from rendering', async () => {
+  const documentRef = fakeDocument();
+  const response = deferred();
+  let signal;
+  const controller = dashboard.createDashboardController({
+    document: documentRef,
+    fetchImpl: async (_url, options) => { signal = options.signal; return response.promise; },
+  });
+  const refresh = controller.refresh();
+  controller.stop();
+  assert.equal(signal.aborted, true);
+  response.resolve({ ok: true, status: 200, json: async () => ({ state: 'queued', total: 1 }) });
+  await refresh;
+  assert.equal(documentRef.elements.get('seed-status').textContent, '');
 });

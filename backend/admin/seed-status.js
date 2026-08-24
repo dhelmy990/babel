@@ -42,7 +42,8 @@
     const skipped = count(source.skipped);
     const failed = count(source.failed);
     const state = String(source.state || 'not_started');
-    const percent = total === 0 ? 0 : Math.min(100, Math.floor((completed / total) * 100));
+    const satisfied = Math.min(total, completed + skipped);
+    const percent = total === 0 ? 0 : Math.floor((satisfied / total) * 100);
     const remaining = Math.max(0, total - completed - skipped - failed);
     const retryCount = Math.max(0, total - completed - skipped);
     const disabled = state === 'queued' || state === 'running';
@@ -65,7 +66,7 @@
         break;
       case 'completed':
         view.label = 'Seed complete';
-        view.summary = `All ${completed} Wikipedia Babels imported`;
+        view.summary = `${completed} imported; ${skipped} already present`;
         break;
       case 'completed_with_errors':
         view.label = `Retry ${retryCount} missing`;
@@ -87,5 +88,17 @@
     return view;
   }
 
-  return { escapeHtml, seedErrorViewModel, seedViewModel };
+  function normalizeSeedStatus(status) {
+    const states = new Set(['not_started', 'queued', 'running', 'completed', 'completed_with_errors', 'failed', 'interrupted']);
+    if (!status || typeof status !== 'object' || !states.has(status.state)) return null;
+    return {
+      ...status,
+      total: count(status.total),
+      completed: count(status.completed),
+      skipped: count(status.skipped),
+      failed: count(status.failed),
+    };
+  }
+
+  return { escapeHtml, normalizeSeedStatus, seedErrorViewModel, seedViewModel };
 }));

@@ -16,7 +16,8 @@
 
   function errorMessage(payload, fallback) {
     if (!payload || typeof payload !== 'object') return fallback;
-    return payload.message || payload.error || fallback;
+    const error = payload.error;
+    return payload.message || (error && typeof error === 'object' ? error.message : error) || fallback;
   }
 
   async function responsePayload(response) {
@@ -27,10 +28,10 @@
     }
   }
 
-  async function requestSeedStatus(fetchImpl) {
+  async function requestSeedStatus(fetchImpl, signal) {
     let response;
     try {
-      response = await fetchImpl(ENDPOINT, { headers: { Accept: 'application/json' } });
+      response = await fetchImpl(ENDPOINT, { headers: { Accept: 'application/json' }, signal });
     } catch (error) {
       throw new Error(`Unable to reach seed service: ${error.message || 'network error'}`);
     }
@@ -39,7 +40,9 @@
     if (!response.ok) {
       throw new Error(`Seed status request failed (${response.status}): ${errorMessage(payload, 'unknown error')}`);
     }
-    return payload.status || payload;
+    const status = seedStatus.normalizeSeedStatus(payload.status || payload);
+    if (!status) throw new Error('Seed service returned invalid status payload');
+    return status;
   }
 
   async function startSeedRun(fetchImpl, nonce) {
@@ -73,6 +76,8 @@
     const fetchImpl = options.fetchImpl || root.fetch.bind(root);
     const setIntervalImpl = options.setIntervalImpl || root.setInterval.bind(root);
     const clearIntervalImpl = options.clearIntervalImpl || root.clearInterval.bind(root);
+    const setTimeoutImpl = options.setTimeoutImpl || root.setTimeout.bind(root);
+    const clearTimeoutImpl = options.clearTimeoutImpl || root.clearTimeout.bind(root);
     const elements = {
       action: documentRef.getElementById('seed-action'),
       status: documentRef.getElementById('seed-status'),
@@ -88,6 +93,8 @@
     let lifecycleGeneration = 0;
     let refreshPromise = null;
     let refreshGeneration = null;
+    let activeAbort = null;
+    let disposed = false;
 
     function renderErrors(errors) {
       elements.errors.replaceChildren();
@@ -108,10 +115,7 @@
 
     function render(status) {
       const model = renderAction(status);
-      const completed = Number(status.completed) || 0;
-      const total = Number(status.total) || 0;
-      const skipped = Number(status.skipped) || 0;
-      const failed = Number(status.failed) || 0;
+      const { completed, total, skipped, failed } = seedStatus.normalizeSeedStatus(status);
       const profile = status.current_profile || status.currentProfile || 'No profile active';
       const article = status.current_article || status.currentArticle || 'No article active';
 
@@ -141,7 +145,7 @@
     }
 
     function synchronizePolling(status) {
-      if (!isActiveSeedState(status)) {
+      if (disposed || !isActiveSeedState(status)) {
         stopPolling();
       } else if (pollTimer === null) {
         pollTimer = setIntervalImpl(refresh, 1000);
@@ -149,26 +153,32 @@
     }
 
     async function refresh() {
+      if (disposed) return undefined;
       const responseGeneration = lifecycleGeneration;
       if (refreshPromise && refreshGeneration === responseGeneration) {
         return refreshPromise;
       }
 
-      const pending = requestSeedStatus(fetchImpl)
+      const abortController = typeof root.AbortController === 'function' ? new root.AbortController() : null;
+      activeAbort = abortController;
+      const timeout = setTimeoutImpl(() => abortController?.abort(), 10000);
+      const pending = requestSeedStatus(fetchImpl, abortController?.signal)
         .then((status) => {
-          if (responseGeneration === lifecycleGeneration) {
+          if (!disposed && responseGeneration === lifecycleGeneration) {
             lastStatus = status;
             render(status);
           }
           return status;
         })
         .catch((error) => {
-          if (responseGeneration === lifecycleGeneration) {
+          if (!disposed && responseGeneration === lifecycleGeneration) {
             renderError(error.message);
           }
           return undefined;
         })
         .finally(() => {
+          clearTimeoutImpl(timeout);
+          if (activeAbort === abortController) activeAbort = null;
           if (refreshPromise === pending) {
             refreshPromise = null;
             refreshGeneration = null;
@@ -180,7 +190,7 @@
     }
 
     async function start() {
-      if (starting) return;
+      if (disposed || starting) return;
       starting = true;
       lifecycleGeneration += 1;
       renderAction(lastStatus || { state: 'not_started', total: 0, completed: 0, skipped: 0, failed: 0 });
@@ -193,14 +203,22 @@
       } catch (error) {
         renderError(error.message);
       } finally {
-        starting = false;
-        renderAction(lastStatus || { state: 'not_started', total: 0, completed: 0, skipped: 0, failed: 0 });
         await refresh();
+        if (!disposed) {
+          starting = false;
+          renderAction(lastStatus || { state: 'not_started', total: 0, completed: 0, skipped: 0, failed: 0 });
+        }
       }
     }
 
     elements.action.addEventListener('click', start);
-    return { refresh, start, stop: stopPolling };
+    function stop() {
+      disposed = true;
+      lifecycleGeneration += 1;
+      stopPolling();
+      activeAbort?.abort();
+    }
+    return { refresh, start, stop };
   }
 
   function initializeDashboard() {
