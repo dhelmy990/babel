@@ -4,9 +4,9 @@
 
 **Goal:** Let the admin dashboard start and gracefully stop a deterministic 50-creator June→July experiment that synchronously serves two-tower recommendations, publishes observable feedback through one Kafka topic, trains asynchronously, synchronizes versioned state, and saves an immutable child model.
 
-**Architecture:** The implemented C++/Drogon backend remains the dashboard control plane and PostgreSQL owner. A separately installable Python package runs the hidden simulator, loopback recommendation service, Kafka producer, single online trainer, model-state synchronization, and bounded feedback export; strict loader and process boundaries prevent hidden monthly data from entering serving or training. Each run starts from an immutable Hugging Face model artifact, works in a run-scoped local copy, and publishes a new immutable descendant without altering its parent.
+**Architecture:** The implemented C++/Drogon backend remains the dashboard control plane and PostgreSQL owner. PostgreSQL/pgvector durably materializes lazy catalog vectors and the active vectors of Babels actually created in a run; serving uses pgvector HNSW by default or an explicitly selected hnswlib snapshot rebuilt from the same pinned PostgreSQL rows. A separately installable Python package runs the hidden simulator, loopback recommendation service, Kafka producer, single online trainer, model-state synchronization, and bounded feedback export; each run freezes its retrieval backend and publishes an immutable child without altering its parent.
 
-**Tech Stack:** C++20, Drogon, PostgreSQL 18/pgvector, Python 3.10+, PyTorch, Transformers, Safetensors, Datasets, Hugging Face Hub, FastAPI/Uvicorn, hnswlib, SciPy, confluent-kafka, Apache Kafka 4.3.1 in KRaft mode, PyArrow, psutil, pytest, Catch2, Node test runner.
+**Tech Stack:** C++20, Drogon, PostgreSQL 18 with pgvector 0.8.6, Python 3.10+, PyTorch, Transformers, Safetensors, Datasets, Hugging Face Hub, FastAPI/Uvicorn, psycopg 3, pgvector-python, hnswlib, SciPy, confluent-kafka, Apache Kafka 4.3.1 in KRaft mode, PyArrow, psutil, pytest, Catch2, Node test runner.
 
 ## Global Constraints
 
@@ -17,6 +17,12 @@
 - Default creators: 50; creator IDs and all randomness derive deterministically from the run seed.
 - A creator may not create two Babels from the same source article; enforce sampling without replacement and `UNIQUE(run_id, creator_id, source_article_key)`.
 - Different creators may create Babels from the same source article.
+- Only Babels actually created by synthetic creators in the current run are recommendation candidates; uncreated monthly catalog articles are never candidates.
+- Hugging Face remains canonical for prepared data/model artifacts; pgvector is the durable local runtime materialization derived from their pinned SHAs.
+- Catalog embeddings are materialized lazily or in bounded batches for source articles selected by the cohort; the 50-creator run must not encode the complete monthly catalog.
+- Retrieval backend is an immutable run field: `pgvector` by default or explicit `hnswlib`.
+- pgvector uses cosine HNSW over active created-Babel vectors; hnswlib is disposable and rebuilt from one checksum-bearing pgvector snapshot.
+- Retrieval never switches mid-run and never silently falls back between pgvector and hnswlib.
 - The dashboard is the only operator surface for starting and gracefully stopping synthetic runs.
 - Offline Qwen distillation is never launched or reported by this dashboard.
 - Recommendation is a synchronous HTTP POST; Kafka is outside the request path.
@@ -48,7 +54,7 @@ cross-process contracts, fixtures, package skeleton
           +-------------------- Wave 1 --------------------+
           |                         |                       |
  Agent A / Task 2          Agent B / Task 3        Agent C / Task 4
- run/model persistence     hidden-world engine     model + serving POST
+ vectors/run persistence   hidden-world engine     model + retrieval POST
           |                         |                       |
           +------------------ integration gate ------------+
                                     |
@@ -73,7 +79,7 @@ cross-process contracts, fixtures, package skeleton
 | Wave | Safe ownership | Integration gate |
 |---|---|---|
 | Foundation | Orchestrator owns `schemas/online/`, fixture envelopes, shared Python contract/config files | Contract and leakage tests pass before branching |
-| Wave 1 | Agent A owns migration/C++ repositories; B owns `online/.../hidden`; C owns `online/.../model` and `serving` | C++, Python, model-compatibility, and import-boundary suites pass together |
+| Wave 1 | Agent A owns migration/C++ repositories and vector tables; B owns `online/.../hidden`; C owns Python materialization/retrieval/model/serving | C++, pgvector, Python, model-compatibility, and import-boundary suites pass together |
 | Wave 2 | A owns Kafka/export; B owns simulator/client; C owns C++ experiment application/HTTP | A fixture recommendation produces one schema-valid Kafka event and one durable run row |
 | Wave 3 | A owns trainer/sync; C owns admin HTML/CSS/JS and Node tests | Checkpoint/offset recovery and dashboard contracts pass before lifecycle composition |
 | Final | Orchestrator alone owns runtime supervisor, Justfile/Compose integration, acceptance docs | Full tiny June→July run, graceful drain, export, and immutable child verification pass |
@@ -93,6 +99,8 @@ schemas/online/
   feedback-event-v1.json             atomic Kafka event
   activity-log-v1.json               dashboard-safe structured log
   model-manifest-v1.json              immutable lineage/compatibility
+  embedding-space-v1.json            100d materialization identity
+  hnsw-snapshot-v1.json               rebuildable index provenance
 fixtures/online/
   tiny/                               two months, six creators, catalogs/graphs
   requests.jsonl                      serving contract examples
@@ -112,7 +120,10 @@ online/
     model/
       item_tower.py
       context_tower.py
-      ann.py
+      candidate_index.py
+      materialization.py
+      pgvector_index.py
+      hnswlib_index.py
       artifact.py
       registry.py
     serving/
@@ -173,6 +184,8 @@ README.md
 - Create: `schemas/online/feedback-event-v1.json`
 - Create: `schemas/online/activity-log-v1.json`
 - Create: `schemas/online/model-manifest-v1.json`
+- Create: `schemas/online/embedding-space-v1.json`
+- Create: `schemas/online/hnsw-snapshot-v1.json`
 - Create: `fixtures/online/tiny/*`
 - Create: `fixtures/online/requests.jsonl`
 - Create: `fixtures/online/feedback.jsonl`
@@ -186,7 +199,7 @@ README.md
 
 **Interfaces:**
 - Consumes: Slice 2 monthly schemas and exact pinned dataset/model revisions.
-- Produces: `RunConfigV1`, `RecommendationRequestV1`, `RecommendationResponseV1`, `FeedbackEventV1`, `ActivityLogV1`, `ModelManifestV1`, `validate_contract`, and the immutable field names used by every later task.
+- Produces: `RunConfigV1`, `RetrievalBackend`, `EmbeddingSpaceV1`, `HnswSnapshotV1`, `RecommendationRequestV1`, `RecommendationResponseV1`, `FeedbackEventV1`, `ActivityLogV1`, `ModelManifestV1`, `validate_contract`, and the immutable field names used by every later task.
 
 - [ ] **Step 1: Write failing round-trip and leakage tests**
 
@@ -201,6 +214,17 @@ def test_feedback_fixture_round_trips_without_hidden_fields():
 def test_serving_and_training_packages_cannot_import_hidden_world():
     violations = forbidden_imports("online/src/babel_online", sources=("serving", "training", "model"), forbidden="babel_online.hidden")
     assert violations == []
+
+def test_run_defaults_to_pgvector_and_forbids_backend_switch():
+    run = RunConfigV1.model_validate(fixture_run_config())
+    assert run.retrievalBackend == "pgvector"
+    with pytest.raises(FrozenInstanceError):
+        run.retrievalBackend = "hnswlib"
+
+def test_hnsw_snapshot_is_derived_from_pgvector_rows():
+    snapshot = HnswSnapshotV1.model_validate(fixture_hnsw_manifest())
+    assert snapshot.pgvectorSnapshotSha256
+    assert snapshot.rowCount == len(snapshot.orderedBabelIds)
 ```
 
 - [ ] **Step 2: Run tests and verify missing contracts fail**
@@ -239,27 +263,68 @@ class RecommendationCandidateV1(BaseModel):
     modelScore: float
 ```
 
-The response returns request/run/model IDs, integer model version, ordered
-candidates, and nanosecond durations for queue, tokenization, Qwen encoding,
-history lookup, context tower, ANN retrieval, filtering, and total server time.
+The response returns request/run/model IDs, integer model version, fixed
+`retrievalBackend`, embedding-space ID, active PostgreSQL snapshot checksum,
+backend snapshot checksum (equal to the PostgreSQL checksum for pgvector and the
+validated hnswlib-manifest checksum for hnswlib), SHA-256 of the normalized
+little-endian float32 query vector, ordered candidates, and nanosecond durations
+for queue, tokenization, Qwen encoding, history lookup, context tower, candidate
+retrieval, filtering, and total server time.
 The feedback schema matches the approved camelCase event exactly and sets
 `additionalProperties: false` recursively.
 
 - [ ] **Step 4: Define immutable run and model manifests**
 
-`RunConfigV1` includes dataset SHA, starting model ID, 50 default creators,
+```python
+RetrievalBackend = Literal["pgvector", "hnswlib"]
+
+class EmbeddingSpaceV1(BaseModel):
+    dimension: Literal[100]
+    distance: Literal["cosine"]
+    distilledEncoderArtifact: str
+    compatibilityVersion: str
+
+class HnswSnapshotV1(BaseModel):
+    runId: UUID
+    servingModelId: UUID
+    servingModelVersion: int
+    embeddingSpaceId: UUID
+    pgvectorSnapshotSha256: str
+    orderedBabelIds: list[UUID]
+    rowCount: int
+    vectorSha256: str
+    m: int = 16
+    efConstruction: int = 200
+    efSearch: int = 100
+```
+
+`RunConfigV1` includes dataset SHA, starting model ID, immutable
+`retrievalBackend` defaulting to `pgvector`, 50 default creators,
 environment sequence (`["2026-06"]` or `["2026-06", "2026-07"]`), per-month
 event budgets, RNG seed, all simulator defaults, `top_l`, recommendation K,
 Kafka topic/group, checkpoint interval, sync interval, and artifact roots.
 `ModelManifestV1` includes stable ID/label, nullable parent/producing run,
 encoder repo/revision, dataset revisions, environment, counts, training config,
-metrics, checkpoint path/checksum, and embedding/index compatibility version.
+metrics, checkpoint path/checksum, and `EmbeddingSpaceV1` identity. HNSW
+parameters belong to the run/snapshot, not the immutable recommender weights.
+
+Freeze snapshot canonicalization in `contracts.py`: sort by lowercase canonical
+Babel UUID; encode each normalized vector as exactly 100 little-endian float32
+values in C order; `vectorSha256` hashes their concatenation. The PostgreSQL
+snapshot hash covers canonical JSON Lines containing Babel ID, creator ID, source
+article key, catalog content hash, embedding-space ID, serving model ID,
+materialized model version, and that row's vector SHA, with sorted keys, UTF-8,
+LF delimiters, and no
+insignificant whitespace. Both adapters and Slice 4 import this one function;
+they may not implement parallel checksum formats.
 
 - [ ] **Step 5: Build a fully separated tiny fixture**
 
 Create six observable articles and text, separate June/July directed graphs,
 clickstream rows, two resolved archetypes, deterministic histories, one
-original model manifest, request examples, and feedback examples. Put hidden
+original model manifest, four created Babel instances, two uncreated catalog
+articles, pgvector rows, an equivalent hnswlib snapshot manifest, request
+examples, and feedback examples. Put hidden
 rows in a physically separate fixture directory; observable fixtures contain
 no graph or simulator values.
 
@@ -281,7 +346,7 @@ git add schemas/online fixtures/online online/pyproject.toml online/requirements
 git commit -m "feat: freeze online experiment contracts"
 ```
 
-### Task 2: Persist Runs, Synthetic Babels, Logs, and Immutable Models
+### Task 2: Persist Runs, Vector Materializations, Logs, and Immutable Models
 
 **Files:**
 - Create: `backend/migrations/005_online_experiment.sql`
@@ -293,11 +358,12 @@ git commit -m "feat: freeze online experiment contracts"
 - Create: `backend/src/adapters/postgres/experiment_repository.cpp`
 - Create: `backend/tests/unit/model_registry_service_test.cpp`
 - Create: `backend/tests/integration/experiment_repository_test.cpp`
+- Create: `backend/tests/integration/vector_materialization_repository_test.cpp`
 - Modify: `backend/CMakeLists.txt`
 
 **Interfaces:**
 - Consumes: Task 1 run/model schemas and existing `Result<T>`/PostgreSQL adapter patterns.
-- Produces: `ExperimentRepository`, `ModelRegistryRepository`, `ModelRegistryService::listCompatible`, immutable model creation, lifecycle transitions, activity pagination, and duplicate-source enforcement.
+- Produces: `ExperimentRepository`, `ModelRegistryRepository`, `VectorMaterializationRepository`, `ModelRegistryService::listCompatible`, immutable model creation, lifecycle transitions, activity pagination, duplicate-source enforcement, and an atomic active-vector state.
 
 - [ ] **Step 1: Write failing persistence and lineage tests**
 
@@ -315,24 +381,115 @@ TEST_CASE_METHOD(PostgresFixture, "a child never mutates its original parent") {
   REQUIRE(registry.get(original->id)->checksum == original->checksum);
   REQUIRE(child->parent_model_id == original->id);
 }
+
+TEST_CASE_METHOD(PostgresFixture, "catalog vectors are reused but created Babel vectors remain distinct") {
+  auto catalog = vectors.upsertCatalogEmbedding(catalogEmbedding("enwiki:42"));
+  vectors.insertCreatedBabelEmbedding(runId, creatorA, babelA, catalog.id, originalModelId);
+  vectors.insertCreatedBabelEmbedding(runId, creatorB, babelB, catalog.id, originalModelId);
+  REQUIRE(vectors.catalogEmbeddingCount("enwiki:42") == 1);
+  REQUIRE(vectors.createdBabelIds(runId) == std::vector{babelA, babelB});
+}
+
+TEST_CASE_METHOD(PostgresFixture, "retrieval backend is immutable after launch") {
+  auto run = repository.insertRun(runConfig("pgvector"));
+  REQUIRE_THROWS(database.execSqlSync(
+      "UPDATE experiment_runs SET retrieval_backend = 'hnswlib' WHERE id = $1",
+      run.id));
+  REQUIRE(repository.get(run.id)->retrieval_backend == "pgvector");
+}
 ```
 
 - [ ] **Step 2: Run tests and verify failure**
 
-Run: `cmake --build --preset test && ctest --preset test -R "experiment_repository|model_registry" --output-on-failure`
+Run: `cmake --build --preset test && ctest --preset test -R "experiment_repository|vector_materialization|model_registry" --output-on-failure`
 
 Expected: tests do not compile because experiment repositories are absent.
 
 - [ ] **Step 3: Add the online migration**
 
 Create `recommender_models`, `experiment_runs`, `experiment_creators`,
-`experiment_babels`, `experiment_activity_logs`, and `model_synchronizations`.
-Store the exact launch JSON and its SHA-256. Add check constraints for the
-approved lifecycle and immutable-parent lineage. Add:
+`experiment_babels`, `experiment_activity_logs`, `model_synchronizations`,
+`embedding_spaces`, `catalog_embeddings`, `babel_embeddings`, and
+`run_embedding_states`. Store the exact launch JSON and its SHA-256. Persist
+`retrieval_backend` with `CHECK (retrieval_backend IN ('pgvector','hnswlib'))`
+and an update-rejecting trigger so it cannot change after insertion. Add check
+constraints for the approved lifecycle and immutable-parent lineage. Add:
 
 ```sql
 UNIQUE (run_id, creator_id, source_article_key)
+UNIQUE (run_id, babel_id, creator_id)
+UNIQUE (id, retrieval_backend) -- on experiment_runs for the state-table FK
 ```
+
+Define the vector tables concretely:
+
+```sql
+embedding_spaces (
+  id uuid PRIMARY KEY,
+  dimension integer NOT NULL CHECK (dimension = 100),
+  distance text NOT NULL CHECK (distance = 'cosine'),
+  distilled_encoder_artifact text NOT NULL,
+  compatibility_version text NOT NULL,
+  UNIQUE (distilled_encoder_artifact, compatibility_version)
+)
+
+catalog_embeddings (
+  id uuid PRIMARY KEY,
+  embedding_space_id uuid NOT NULL REFERENCES embedding_spaces(id),
+  dataset_commit_sha text NOT NULL CHECK (dataset_commit_sha ~ '^[0-9a-f]{40}$'),
+  article_key text NOT NULL,
+  content_hash text NOT NULL CHECK (content_hash ~ '^[0-9a-f]{64}$'),
+  embedding vector(100) NOT NULL,
+  UNIQUE (embedding_space_id, dataset_commit_sha, article_key, content_hash)
+)
+
+babel_embeddings (
+  run_id uuid NOT NULL,
+  babel_id uuid NOT NULL,
+  creator_id uuid NOT NULL,
+  catalog_embedding_id uuid NOT NULL REFERENCES catalog_embeddings(id),
+  serving_model_id uuid NOT NULL REFERENCES recommender_models(id),
+  materialized_model_version bigint NOT NULL,
+  residual vector(100) NOT NULL,
+  embedding vector(100) NOT NULL,
+  updated_at timestamptz NOT NULL,
+  PRIMARY KEY (run_id, babel_id),
+  FOREIGN KEY (run_id, babel_id, creator_id)
+    REFERENCES experiment_babels(run_id, babel_id, creator_id)
+)
+
+run_embedding_states (
+  run_id uuid PRIMARY KEY,
+  embedding_space_id uuid NOT NULL REFERENCES embedding_spaces(id),
+  retrieval_backend text NOT NULL CHECK (retrieval_backend IN ('pgvector','hnswlib')),
+  active_model_id uuid NOT NULL REFERENCES recommender_models(id),
+  active_model_version bigint NOT NULL,
+  pgvector_snapshot_sha256 text NOT NULL
+    CHECK (pgvector_snapshot_sha256 ~ '^[0-9a-f]{64}$'),
+  hnsw_snapshot_sha256 text
+    CHECK (hnsw_snapshot_sha256 IS NULL OR hnsw_snapshot_sha256 ~ '^[0-9a-f]{64}$'),
+  updated_at timestamptz NOT NULL,
+  CHECK ((retrieval_backend = 'pgvector' AND hnsw_snapshot_sha256 IS NULL) OR
+         (retrieval_backend = 'hnswlib' AND hnsw_snapshot_sha256 IS NOT NULL)),
+  FOREIGN KEY (run_id, retrieval_backend)
+    REFERENCES experiment_runs(id, retrieval_backend)
+)
+```
+
+Add B-tree indexes for run/creator/model filtering and the default cosine index:
+
+```sql
+CREATE INDEX babel_embeddings_cosine_hnsw
+ON babel_embeddings USING hnsw (embedding vector_cosine_ops)
+WITH (m = 16, ef_construction = 200);
+```
+
+`catalog_embeddings` may contain only the bounded articles materialized for the
+run workload; it is not the candidate universe. Only rows with a corresponding
+`experiment_babels` and `babel_embeddings` row are retrievable candidates.
+`babel_embeddings` stores the current materialization; immutable checkpoints and
+model artifacts retain prior versions rather than duplicating every historical
+vector in the serving table.
 
 Do not reuse the existing `edges` table: it enforces same-owner application
 graphs, while experiment edges may cross synthetic creators and are reconstructed
@@ -348,17 +505,22 @@ starting -> running -> stop_requested -> draining_feedback
 ```
 
 and transitions from nonterminal states to `failed` or `interrupted`.
-Compatibility requires equal encoder artifact, output dimension 100, schema
-major version, and index-space version. Never expose a delete/update method for
-model artifact rows; only labels may be added as separate metadata.
+Compatibility requires equal encoder artifact, output dimension 100, cosine
+distance, schema major version, and embedding-space compatibility version.
+Implement `upsertCatalogEmbedding`, `insertCreatedBabelEmbedding`,
+`readActiveCreatedBabelRows`, and `activateMaterialization`; the last operation
+updates touched vectors and `run_embedding_states` in one transaction. Never
+expose a delete/update method for model artifact rows; only labels may be added
+as separate metadata. Do not expose a normal repository operation for changing
+the run retrieval backend.
 
 - [ ] **Step 5: Run migration/service tests and commit**
 
-Run: `ctest --preset test -R "experiment_repository|model_registry" --output-on-failure`
+Run: `ctest --preset test -R "experiment_repository|vector_materialization|model_registry" --output-on-failure`
 
 ```bash
 git add backend/migrations/005_online_experiment.sql backend/include/babel/application/experiment_models.hpp backend/include/babel/application/experiment_ports.hpp backend/include/babel/application/model_registry_service.hpp backend/include/babel/adapters/postgres/experiment_repository.hpp backend/src/application/model_registry_service.cpp backend/src/adapters/postgres/experiment_repository.cpp backend/tests backend/CMakeLists.txt
-git commit -m "feat: persist online runs and immutable models"
+git commit -m "feat: persist online runs and vector materializations"
 ```
 
 ### Task 3: Build the Hidden Monthly World and Deterministic Creator Cohort
@@ -433,25 +595,32 @@ git add online/src/babel_online/hidden online/src/babel_online/simulation/sampli
 git commit -m "feat: generate deterministic hidden creator worlds"
 ```
 
-### Task 4: Build the Immutable Original, ANN State, and Recommendation POST
+### Task 4: Build the Immutable Original, Versioned Candidate Retrieval, and Recommendation POST
 
 **Files:**
 - Create: `online/src/babel_online/observable.py`
 - Create: `online/src/babel_online/model/item_tower.py`
 - Create: `online/src/babel_online/model/context_tower.py`
-- Create: `online/src/babel_online/model/ann.py`
+- Create: `online/src/babel_online/model/candidate_index.py`
+- Create: `online/src/babel_online/model/materialization.py`
+- Create: `online/src/babel_online/model/pgvector_index.py`
+- Create: `online/src/babel_online/model/hnswlib_index.py`
 - Create: `online/src/babel_online/model/artifact.py`
 - Create: `online/src/babel_online/model/registry.py`
 - Create: `online/src/babel_online/serving/state.py`
 - Create: `online/src/babel_online/serving/timings.py`
 - Create: `online/src/babel_online/serving/app.py`
 - Create: `online/tests/model/test_context_tower.py`
+- Create: `online/tests/model/test_materialization.py`
+- Create: `online/tests/model/test_candidate_index.py`
+- Create: `online/tests/model/test_pgvector_integration.py`
+- Create: `online/tests/model/test_hnsw_snapshot.py`
 - Create: `online/tests/model/test_artifact.py`
 - Create: `online/tests/serving/test_recommendations.py`
 
 **Interfaces:**
 - Consumes: observable catalog, complete distilled encoder artifact, Task 1 recommendation contracts.
-- Produces: `ItemTower`, `CreatorContextTower`, `CandidateIndex`, `build_original_artifact`, `ServingState.apply_sync`, and `POST /api/v1/recommendations`.
+- Produces: `ItemTower`, `CreatorContextTower`, `EmbeddingMaterializer`, the `CandidateIndex` protocol, `PgvectorCandidateIndex`, `HnswlibCandidateIndex`, `build_original_artifact`, `ServingState.apply_sync`, and `POST /api/v1/recommendations`.
 
 - [ ] **Step 1: Write initialization, filtering, and timing tests**
 
@@ -467,11 +636,45 @@ def test_recommendation_excludes_own_babels(client, serving_state):
     assert response.status_code == 200
     assert all(c["creatorId"] != "creator-a" for c in response.json()["candidates"])
     assert set(response.json()["timingsNs"]) == REQUIRED_TIMING_STAGES
+
+@pytest.mark.parametrize("backend", ["pgvector", "hnswlib"])
+def test_uncreated_catalog_articles_are_never_candidates(index_for, backend):
+    index = index_for(backend, include_uncreated_highest_score=True)
+    result = index.search(query=unit(0), run_id=RUN, state=ACTIVE_STATE,
+                          exclude_creator_id=CREATOR_A, k=10)
+    assert UNCREATED_ARTICLE_KEY not in {candidate.article_key for candidate in result}
+    assert {candidate.babel_id for candidate in result} == {CREATED_BY_B, CREATED_BY_C}
+
+def test_hnsw_snapshot_rejects_checksum_mismatch_without_pgvector_fallback(runtime):
+    runtime.configure_backend("hnswlib")
+    runtime.corrupt_snapshot_vector_checksum()
+    with pytest.raises(SnapshotIntegrityError):
+        runtime.start_serving()
+    assert runtime.pgvector_index.search_calls == 0
+
+def test_tiny_fixture_backends_return_the_same_created_candidates(tiny_indexes):
+    pg, hns = tiny_indexes
+    assert ids(pg.search(**TINY_QUERY)) == ids(hns.search(**TINY_QUERY))
+
+@pytest.mark.parametrize("backend", ["pgvector", "hnswlib"])
+def test_two_creators_using_one_article_remain_two_candidates(index_for, backend):
+    result = index_for(backend).search(**SAME_SOURCE_QUERY)
+    same_source = [row for row in result if row.article_key == "enwiki:42"]
+    assert {row.creator_id for row in same_source} == {CREATOR_B, CREATOR_C}
+    assert len({row.babel_id for row in same_source}) == 2
+
+@pytest.mark.pgvector
+def test_real_pgvector_query_joins_created_babels_and_filters_owner(pgvector_fixture):
+    result = pgvector_fixture.index.search(**TINY_QUERY)
+    assert ids(result) == pgvector_fixture.expected_other_creator_babel_ids
+    assert UNCREATED_ARTICLE_KEY not in {row.article_key for row in result}
 ```
 
 - [ ] **Step 2: Run and verify failure**
 
-Run: `python3 -m pytest online/tests/model online/tests/serving -v`
+Run: `python3 -m pytest online/tests/model online/tests/serving -m 'not pgvector' -v`
+
+With Compose PostgreSQL: `python3 -m pytest online/tests/model/test_pgvector_integration.py -m pgvector -v`
 
 Expected: FAIL because model and serving modules are missing.
 
@@ -483,34 +686,114 @@ scaled dot-product attention between history and new-Babel embeddings. Initializ
 the fusion linear map on `[new, attended_history]` to `[0.5I, 0.5I]` with zero
 bias. Leave attention/fusion and residuals trainable in the working copy.
 
-- [ ] **Step 4: Build the run-scoped HNSW candidate index**
+- [ ] **Step 4: Materialize catalog vectors lazily and created Babel vectors transactionally**
 
-Precompute/cache observable catalog content vectors, then index each actually
-created synthetic Babel under its Babel ID and creator ID. The same article may
-therefore have several Babel labels. Support adding a new Babel, applying
-touched residual updates under a write lock, querying oversampled neighbors,
-and filtering the request creator's own Babels before truncating to K.
+Define the retrieval boundary once:
 
-- [ ] **Step 5: Implement measured synchronous serving**
+```python
+class CandidateIndex(Protocol):
+    backend: RetrievalBackend
+
+    def search(
+        self,
+        query: NDArray[np.float32],
+        *,
+        run_id: UUID,
+        state: MaterializedServingState,
+        exclude_creator_id: UUID,
+        k: int,
+    ) -> list[RetrievedCandidate]: ...
+
+    def activate(self, state: MaterializedServingState) -> None: ...
+```
+
+When a source article is selected, look up `catalog_embeddings` by embedding
+space, pinned dataset SHA, article key, and content hash. Encode with the frozen
+Qwen item tower only on a cache miss, then insert idempotently. In the same Babel
+creation unit of work, insert the `experiment_babels` row and its normalized
+`babel_embeddings` row with a zero residual. The same catalog vector may back
+several creator-owned Babel rows; those Babel IDs remain distinct candidates.
+Do not precompute the full monthly catalog for the initial 50-creator run.
+
+- [ ] **Step 5: Implement pgvector as the default candidate index**
+
+At request start under the serving read lock, read one `run_embedding_states`
+row and hold that model ID, version, and snapshot checksum for the request. Set `hnsw.ef_search = 100` and
+`hnsw.iterative_scan = strict_order` in the read transaction. Query only the
+active run's created Babel rows, filter the request creator in SQL, oversample
+when filtering reduces results, and order by cosine distance:
+
+```sql
+SELECT eb.babel_id,
+       eb.creator_id,
+       xb.source_article_key,
+       1 - (eb.embedding <=> $1::vector) AS score
+FROM babel_embeddings AS eb
+JOIN experiment_babels AS xb
+  ON xb.run_id = eb.run_id AND xb.babel_id = eb.babel_id
+JOIN run_embedding_states AS rs ON rs.run_id = eb.run_id
+WHERE eb.run_id = $2
+  AND rs.active_model_id = $3
+  AND rs.active_model_version = $4
+  AND rs.pgvector_snapshot_sha256 = $5
+  AND eb.serving_model_id = $3
+  AND eb.materialized_model_version <= $4
+  AND eb.creator_id <> $6
+ORDER BY eb.embedding <=> $1::vector
+LIMIT $7;
+```
+
+The join to `experiment_babels` is a required invariant, not an optimization.
+`catalog_embeddings` is never queried as the recommendation candidate table.
+
+- [ ] **Step 6: Implement hnswlib as an explicit disposable adapter**
+
+For a run launched with `retrievalBackend=hnswlib`, read the same ordered active
+created-Babel rows from PostgreSQL, hash the canonical float32 vector bytes, and
+validate the `HnswSnapshotV1` row count, ordered Babel IDs, vector checksum,
+embedding space, model version, and PostgreSQL snapshot checksum before building
+or loading the index. Maintain Babel-ID/creator/source metadata beside integer
+labels. Build a shadow index and atomically swap it only after validation. A
+missing, corrupt, or stale snapshot fails the run or synchronization and retains
+the last valid hnswlib state; it never redirects the request to pgvector.
+
+The backend factory has no environment-dependent auto mode:
+
+```python
+def candidate_index_for(config: RunConfig, repository: EmbeddingRepository) -> CandidateIndex:
+    if config.retrievalBackend == "pgvector":
+        return PgvectorCandidateIndex(repository)
+    if config.retrievalBackend == "hnswlib":
+        return HnswlibCandidateIndex.from_pgvector_snapshot(repository, config)
+    raise UnsupportedRetrievalBackend(config.retrievalBackend)
+```
+
+- [ ] **Step 7: Implement measured synchronous serving**
 
 Use a bounded request semaphore and capture enqueue time before acquisition.
-Time tokenization, new-note encoding, history lookup, context computation, ANN,
-filtering, and total with `perf_counter_ns`. Return the complete v1 response and
+Time tokenization, new-note encoding, history lookup, context computation,
+candidate retrieval, filtering, and total with `perf_counter_ns`. Record the
+fixed retrieval backend, active model version, vector snapshot checksum, and
+query-vector checksum on every response/activity record. Return the complete v1 response and
 `Server-Timing`; client/network overhead is computed later as client total minus
-server total. Return model ID/version used by the request, even if a sync lands
-immediately afterward.
+server total. Return the model ID/version captured at request start even if a
+sync lands immediately afterward.
 
-- [ ] **Step 6: Build and publish the original without mutation APIs**
+- [ ] **Step 8: Build and publish the original without mutation APIs**
 
-Write Safetensors, context initialization, content-cache/index manifest,
-compatibility version, source model/dataset SHAs, and checksums into an atomic
-artifact directory. Upload it as an immutable path/tag in
+Write Safetensors, context initialization, embedding-space manifest, pgvector
+query parameters, optional hnswlib build parameters, compatibility version,
+source model/dataset SHAs, and checksums into an atomic artifact directory.
+Do not publish an hnswlib index as authoritative model state. Upload the model as
+an immutable path/tag in
 `dhelmy990/babel-two-tower-recommender`; register its stable ID in PostgreSQL.
 `load_artifact` verifies every checksum before serving.
 
-- [ ] **Step 7: Run tests and commit**
+- [ ] **Step 9: Run tests and commit**
 
-Run: `python3 -m pytest online/tests/model online/tests/serving -v`
+Run: `python3 -m pytest online/tests/model online/tests/serving -m 'not pgvector' -v`
+
+With Compose PostgreSQL: `python3 -m pytest online/tests/model/test_pgvector_integration.py -m pgvector -v`
 
 ```bash
 git add online/src/babel_online/observable.py online/src/babel_online/model online/src/babel_online/serving online/tests/model online/tests/serving
@@ -613,6 +896,12 @@ def test_kafka_failure_records_no_activity_or_edge(engine, unavailable_bus):
         engine.step()
     assert engine.observable_actions() == before_actions
     assert engine.accepted_edges() == before_edges
+
+def test_initial_histories_and_new_notes_are_the_only_candidates(engine):
+    engine.initialize_creator_histories()
+    engine.step()
+    assert engine.candidate_babel_ids() == engine.persisted_synthetic_babel_ids()
+    assert not (engine.uncreated_catalog_article_keys() & engine.candidate_article_keys())
 ```
 
 - [ ] **Step 2: Run and verify failure**
@@ -632,23 +921,33 @@ is `propensity*((1-epsilon)*(1-R)+epsilon*0.5)`; multiply it by the remaining
 mass to obtain unconditional exclusion. Ignore receives the remainder. Derive
 one deterministic draw per candidate; allow multiple includes.
 
-- [ ] **Step 4: Implement synchronous POST and atomic feedback publication**
+- [ ] **Step 4: Populate created-Babel candidates and publish feedback atomically**
 
-Create the new Babel once, POST observable text/history/K to loopback serving,
-measure client monotonic duration, evaluate candidates privately, validate one
-feedback event, and wait for Kafka acknowledgement. Only then persist the
-activity record and expose include actions as accepted edges. The newly created
-Babel may remain durably staged on failure, but it retains the same event number
-and request ID and is retried rather than sampled again. On publish failure,
-retain the RNG/event number for exact retry and pause the simulation.
+Before the first event, insert each creator's observable initial-history notes as
+synthetic Babels and materialize their vectors through Task 4. They form the
+initial candidate set; unused monthly catalog articles do not. For each event,
+create the new Babel once and commit its catalog/Babel materialization before
+POSTing observable text/history/K to loopback serving. The request creator's own
+new Babel is excluded by the candidate query, but it becomes eligible for other
+creators immediately after the transaction commits.
+
+Measure client monotonic duration, evaluate returned candidates privately,
+validate one feedback event, and wait for Kafka acknowledgement. Only then
+persist the activity record and expose include actions as accepted edges. The
+newly created Babel may remain durably staged on failure, but it retains the same
+event number and request ID and is retried rather than sampled again. On publish
+failure, retain the RNG/event number for exact retry and pause the simulation.
 
 - [ ] **Step 5: Implement June→July continuity**
 
 At the month budget boundary, preserve creators, created Babels, trainer/model
 state, and run ID. Load July hidden and observable data at the same dataset SHA,
-map persistent identities through the crosswalk, initialize new source articles
-with content-only vectors, rebuild the compatible run index, and continue event
-numbering. Never reset to the original model.
+map persistent identities through the crosswalk, and lazily materialize July
+catalog/Babel vectors only when creators actually select them. Existing June
+created-Babel candidates remain in the run. If hnswlib is selected, rebuild a
+validated shadow index from the resulting committed PostgreSQL rows; pgvector
+requires no separate rebuild. Continue event numbering and never reset to the
+original model.
 
 - [ ] **Step 6: Test and commit**
 
@@ -685,7 +984,13 @@ TEST_CASE("start snapshots config and launches exactly one supervisor") {
   auto run = service.start(validLaunchRequest());
   REQUIRE(run);
   REQUIRE(repository.get(run->id)->creator_count == 50);
+  REQUIRE(repository.get(run->id)->retrieval_backend == "pgvector");
   REQUIRE(process.launches() == 1);
+}
+
+TEST_CASE("launch accepts only the two explicit retrieval backends") {
+  REQUIRE(service.start(launchRequestWithBackend("hnswlib")));
+  REQUIRE_FALSE(service.start(launchRequestWithBackend("auto")));
 }
 
 TEST_CASE("graceful stop changes intent but does not kill the process") {
@@ -704,10 +1009,12 @@ Expected: tests do not compile because experiment control is missing.
 - [ ] **Step 3: Implement validated launch and compatibility checks**
 
 Resolve the selected model from the immutable registry, reject incompatible
-dataset/index versions, verify creator count/event budget/ranges, persist exact
-config before process launch, and pass only the new run ID plus database/runtime
-environment to `babel-online run --run-id <uuid>`. One active local synthetic
-run is allowed initially.
+dataset/embedding-space versions, verify creator count/event budget/ranges, and
+accept only `pgvector` or `hnswlib`, defaulting to `pgvector`. Persist the exact
+config and fixed retrieval backend before process launch, and pass only the new
+run ID plus database/runtime environment to `babel-online run --run-id <uuid>`.
+The API exposes no operation that changes the backend of an existing run. One
+active local synthetic run is allowed initially.
 
 - [ ] **Step 4: Add nonce-protected dashboard APIs**
 
@@ -750,6 +1057,7 @@ git commit -m "feat: control online experiments from the backend"
 - Create: `online/tests/training/test_checkpoint.py`
 - Create: `online/tests/training/test_recovery.py`
 - Create: `online/tests/training/test_synchronizer.py`
+- Create: `online/tests/training/test_vector_materialization.py`
 
 **Interfaces:**
 - Consumes: Task 4 working model, Task 5 manual consumer, Task 1 feedback/model schemas.
@@ -770,6 +1078,23 @@ def test_offsets_commit_only_after_atomic_checkpoint(trainer, kafka):
     assert kafka.committed == trainer.start_offsets
     trainer.checkpoint()
     assert kafka.committed == trainer.checkpoint_offsets
+
+def test_pgvector_sync_activates_vectors_and_model_version_together(synchronizer, repository):
+    before = repository.active_state(RUN)
+    synchronizer.synchronize(changed_residuals={BABEL_B: unit(7)}, version=before.version + 1)
+    after = repository.active_state(RUN)
+    assert after.version == before.version + 1
+    assert repository.vector(BABEL_B).materialized_model_version == after.version
+    assert after.pgvector_snapshot_sha256 == repository.hash_active_created_babel_rows(RUN)
+
+def test_failed_hnsw_shadow_build_keeps_last_complete_version(hns_runtime):
+    before = hns_runtime.active_state()
+    hns_runtime.fail_next_shadow_build()
+    with pytest.raises(IndexBuildError):
+        hns_runtime.synchronize(version=before.version + 1)
+    assert hns_runtime.active_state() == before
+    assert hns_runtime.pgvector_rows_checksum() == before.pgvector_snapshot_sha256
+    assert hns_runtime.pgvector_index.search_calls == 0
 ```
 
 - [ ] **Step 2: Run and verify failure**
@@ -791,18 +1116,35 @@ gradients.
 
 Save working model/residuals, optimizer/scheduler, RNG, global step, training
 version, dataset/model manifests, per-partition next offsets, metrics, and
-touched-index labels under `.partial`, fsync, rename, then commit Kafka offsets.
+touched Babel IDs under `.partial`, fsync, rename, then commit Kafka offsets.
 On restart, verify checksums, restore state, assign partitions, and seek to the
 checkpoint offsets. Ignore incomplete directories.
 
-- [ ] **Step 5: Synchronize through direct atomic model state**
+- [ ] **Step 5: Synchronize model state and durable vectors as one activation**
 
 At the configured interval, write only changed context tensors and touched item
-residuals plus compatibility/checksum manifest into `sync-v<N>.partial`, rename
-to `sync-v<N>`, and atomically update `LATEST`. Serving verifies compatibility,
-applies state under its write lock, updates touched ANN labels, and reports both
-training and serving versions. Failed/incompatible sync leaves serving on its
-last version.
+residuals plus compatibility/checksum manifest into `sync-v<N>.partial`, fsync,
+rename to `sync-v<N>`, and request activation only after the complete checkpoint
+for version N is durable. Serving first verifies all files,
+embedding-space compatibility, parent model, expected prior version, and
+checksums without mutating active state.
+
+Under the serving write lock, begin a PostgreSQL transaction, apply touched
+residual/final-vector updates, label them with version N, and compute the
+canonical checksum over all active created-Babel rows ordered by Babel ID. For a
+pgvector run, update `run_embedding_states` and commit before swapping the
+already validated context tensors and `LATEST`, then release the lock. Untouched
+rows may retain an earlier materialization version and remain valid under the
+same active model/embedding space.
+
+For an hnswlib run, build and validate a shadow index from those same
+transaction-visible rows before commit. Its manifest must name the prospective
+PostgreSQL checksum, ordered IDs, row count, model version, embedding space, and
+vector checksum. Only after a successful build may the transaction update both
+snapshot checksums and commit; then swap the prepared context state, shadow
+index, and `LATEST` before releasing the lock. Any validation, database, or
+index-build failure rolls back and leaves the last complete serving version.
+Never fall back to pgvector for an hnswlib run.
 
 - [ ] **Step 6: Run tests and commit**
 
@@ -827,7 +1169,7 @@ git commit -m "feat: train and synchronize online model state"
 
 **Interfaces:**
 - Consumes: Task 7 HTTP endpoints and activity/status DTOs.
-- Produces: model selector, launch form, Start, Graceful stop, timeline, online-health panel, and run summary.
+- Produces: model selector, retrieval-backend selector, launch form, Start, Graceful stop, timeline, online-health panel, and run summary.
 
 - [ ] **Step 1: Write failing pure view-model tests**
 
@@ -842,6 +1184,15 @@ test('distillation losses never render in online health', () => {
   assert.equal(JSON.stringify(view).includes('vectorLoss'), false);
   assert.equal(JSON.stringify(view).includes('relationalLoss'), false);
 });
+
+test('retrieval defaults to pgvector and becomes read-only after start', () => {
+  const draft = launchView(newRunFixture());
+  assert.equal(draft.retrievalBackend.value, 'pgvector');
+  assert.equal(draft.retrievalBackend.disabled, false);
+  const running = launchView(runningRunFixture({retrievalBackend: 'hnswlib'}));
+  assert.equal(running.retrievalBackend.value, 'hnswlib');
+  assert.equal(running.retrievalBackend.disabled, true);
+});
 ```
 
 - [ ] **Step 2: Run and verify failure**
@@ -853,18 +1204,23 @@ Expected: FAIL because `experiment-status.js` is absent.
 - [ ] **Step 3: Extend the dashboard without weakening seed controls**
 
 Keep the existing Wikipedia seed section. Add dataset/model selectors, default
-50 creators, June-only/June→July choice, event budgets, seed, advanced simulator
-settings, Start, and Graceful stop. Disable incompatible models with a visible
-reason. Do not add reset, overwrite, pause, resume, or Colab controls.
+50 creators, retrieval selector (`pgvector` default, `hnswlib` explicit),
+June-only/June→July choice, event budgets, seed, advanced simulator settings,
+Start, and Graceful stop. Disable incompatible models with a visible reason.
+Freeze and visibly label the chosen retrieval backend after Start. Do not add
+auto selection, mid-run switching, reset, overwrite, pause, resume, or Colab
+controls.
 
 - [ ] **Step 4: Render the three approved views**
 
 Timeline rows show creator/new Babel, recommended titles, actions, and derived
 accepted edges. Health shows rates, produced/trained counts, offsets/lag,
 rolling ranking loss, checkpoint, training/serving versions, synchronization,
-and timing p50/p95/p99. Summary shows counts, action distribution, resources,
-sync history, lifecycle/export progress, child artifact, and actionable errors.
-Poll logs by sequence and cap DOM rows to 1,000.
+retrieval backend/vector snapshot, and timing p50/p95/p99. Summary shows counts,
+action distribution, resources, sync history, lifecycle/export progress, child
+artifact, and actionable errors. A failed hnswlib snapshot is shown as a run or
+sync error, never as a pgvector fallback. Poll logs by sequence and cap DOM rows
+to 1,000.
 
 - [ ] **Step 5: Test assets and commit**
 
@@ -906,6 +1262,13 @@ def test_graceful_stop_drains_checkpoints_exports_and_saves_child(tiny_runtime):
     ]
     assert tiny_runtime.child_model(run.id).parent_id == tiny_runtime.original.id
     assert tiny_runtime.original.checksum == tiny_runtime.original_checksum_before
+
+def test_default_run_serves_only_created_babels_from_pgvector(tiny_runtime):
+    run = tiny_runtime.start(retrieval_backend="pgvector")
+    response = tiny_runtime.recommend_once(run.id)
+    assert response.retrieval_backend == "pgvector"
+    assert set(response.candidate_ids) <= set(tiny_runtime.created_babel_ids(run.id))
+    assert not (set(response.candidate_ids) & set(tiny_runtime.uncreated_catalog_ids(run.id)))
 ```
 
 - [ ] **Step 2: Run and verify failure**
@@ -917,12 +1280,15 @@ Expected: FAIL because the supervisor is missing.
 - [ ] **Step 3: Implement separate serving/training processes**
 
 The supervisor starts a loopback Uvicorn serving child and a single trainer
-child, waits for both health checks, then runs the simulator. It persists
-rate-limited structured logs. Every five seconds it records basic per-process
-CPU/RSS, host memory, optional GPU utilization, request/event rates, rolling
-p50/p95/p99, Kafka offsets/lag, training step duration/loss, and synchronization
-versions/timestamps through `telemetry.py` and `resources.py`; these are the
-basic health signals consumed by the Slice 3 dashboard, while controlled
+child, initializes the run's embedding space and pgvector materialization, and,
+only for an hnswlib run, validates/builds its initial snapshot from the same
+PostgreSQL created-Babel rows. It waits for both health checks before running the
+simulator and persists rate-limited structured logs. Every five seconds it
+records basic per-process CPU/RSS, host memory, optional GPU utilization,
+request/event rates, rolling p50/p95/p99, Kafka offsets/lag, training step
+duration/loss, synchronization versions/timestamps, fixed retrieval backend,
+and active vector checksums through `telemetry.py` and `resources.py`; these are
+the basic health signals consumed by the Slice 3 dashboard, while controlled
 sampling remains Slice 4. On `stop_requested`, stop creating events,
 capture Kafka high-water marks, let training drain through those exact marks,
 checkpoint, export the same range, stop children, and publish/register one
@@ -951,21 +1317,26 @@ With Compose services, run the tiny June→July E2E twice: once normally and onc
 with trainer termination after an acknowledged event. Expected: the normal run
 creates multiple accepted edges, at least one training update/sync, an exact
 Parquet offset export, and an immutable child; recovery replays only uncommitted
-events and produces no duplicate update.
+events and produces no duplicate update. Run the normal fixture with pgvector,
+then run a short hnswlib fixture derived from the same PostgreSQL rows; assert
+identical eligible created-Babel IDs, validate the hnswlib manifest, and force a
+bad snapshot to prove that no backend fallback occurs.
 
 - [ ] **Step 6: Verify real private-Hub smoke behavior**
 
 Start from the registered original, load the connected dataset by exact SHA,
 serve one real recommendation with all stage timings, complete a short 50-creator
-June run, gracefully stop, remotely verify the run export and child artifact,
-then start a second run selecting that child. Confirm the original checksum is
-unchanged.
+June run using the default pgvector backend, gracefully stop, remotely verify
+the run export and child artifact, then start a second run selecting that child.
+Confirm the original checksum is unchanged, every returned candidate has an
+`experiment_babels` row for the run, and unused catalog rows never appear.
 
 - [ ] **Step 7: Write the runbook and commit**
 
-Document prerequisites/tokens, dashboard fields, model selection, expected log
-flow, safe stop, Kafka recovery, artifact locations, error meanings, and how to
-start from original versus child.
+Document prerequisites/tokens, dashboard fields, model and fixed retrieval
+selection, pgvector HNSW defaults, optional hnswlib snapshot provenance,
+expected log flow, safe stop, Kafka recovery, artifact locations, error
+meanings, and how to start from original versus child.
 
 ```bash
 git add online/src/babel_online/runtime online/tests/runtime online/tests/e2e Justfile README.md documentation.md docs/runbooks/online-experiment.md
@@ -977,7 +1348,12 @@ git commit -m "feat: complete online recommendation vertical slice"
 - [ ] Dashboard Start creates an immutable configuration and a 50-creator run.
 - [ ] No creator/source duplicate can pass sampler or PostgreSQL constraints.
 - [ ] Every event performs a synchronous recommendation POST with stage timings.
-- [ ] Candidates are other creators' Babels and several may be included.
+- [ ] Candidate rows are only synthetic creators' persisted Babels; unused catalog articles never appear.
+- [ ] Candidate rows exclude the request creator; multiple other creators' Babels may be included.
+- [ ] Catalog vectors are materialized lazily and reused without collapsing distinct creator-owned Babels.
+- [ ] pgvector cosine HNSW is the default and queries the active 100-dimensional created-Babel materialization.
+- [ ] An explicit hnswlib run rebuilds from the same checksum-bearing PostgreSQL rows and never falls back.
+- [ ] Retrieval backend is visible and immutable for the life of a run.
 - [ ] One schema-valid observable event is acknowledged by Kafka per recommendation.
 - [ ] Hidden fields fail schema and import-boundary tests.
 - [ ] One consumer trains pairwise updates and commits offsets only after checkpoint.
@@ -992,10 +1368,14 @@ git commit -m "feat: complete online recommendation vertical slice"
 Slice 4 treats this vertical slice as frozen behavior and adds controlled load,
 not new recommender semantics. Before dispatching its fleet, record the accepted
 recommendation request/response schemas, feedback schema, lifecycle transitions,
-metric names, sync manifest, tiny-run evidence, and a known-good original/child
-pair. Review stage timing completeness and clock units especially carefully:
+metric names, embedding-space manifest, active pgvector snapshot checksum,
+optional hnswlib snapshot manifest, tiny-run evidence, and a known-good
+original/child pair. Review stage timing completeness and clock units especially carefully:
 Slice 4 can repair instrumentation defects, but it must not change the hidden
 decision formula, creator construction, pairwise labels, model initialization,
-or model lineage while measuring them. Preserve a serving-only replay corpus
-and an exact feedback-offset range from the 50-creator smoke run; those become
-the paired inputs for interference comparisons.
+model lineage, candidate-universe rule, or fixed-backend semantics while
+measuring them. Preserve a serving-only replay corpus, the ordered created-Babel
+IDs and float32 vector checksum for its active PostgreSQL snapshot, and an exact
+feedback-offset range from the 50-creator smoke run. Slice 4 must build hnswlib
+from that same snapshot and use identical request schedules for the matched
+retrieval comparison before interpreting backend latency differences.

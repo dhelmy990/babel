@@ -2,18 +2,24 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Quantify recommendation latency, online-training interference, synchronization cost, adaptation, and resource limits across deterministic nested creator cohorts from 50 through 10,000 without changing the recommender or simulator semantics.
+**Goal:** Quantify pgvector-versus-hnswlib retrieval behavior, recommendation latency, online-training interference, synchronization cost, adaptation, and resource limits across deterministic nested creator cohorts from 50 through 10,000 without changing the recommender or simulator semantics.
 
-**Architecture:** A separate benchmark package drives the stable Slice 3 APIs in two modes: fixed observable replay isolates systems interference, while live nested-cohort runs measure learning and temporal adaptation. A sidecar resource sampler and existing per-request/online telemetry produce raw Parquet records; deterministic analysis creates paired reports, freezes the 50-creator quality target, and applies latency-aware trainer backpressure without giving the recommender hidden data.
+**Architecture:** A separate benchmark package drives the stable Slice 3 APIs in two modes: fixed observable replay first compares pgvector and hnswlib against one checksum-identical created-Babel vector snapshot, then isolates online-training interference on the default pgvector path; live nested-cohort runs measure learning and temporal adaptation with pgvector unless the operator explicitly selects another fixed backend. A sidecar resource sampler and existing per-request/online telemetry produce raw Parquet records; deterministic analysis creates paired reports, freezes the 50-creator quality target, and applies latency-aware trainer backpressure without giving the recommender hidden data.
 
-**Tech Stack:** Python 3.10+, asyncio/httpx, PyArrow/Parquet, NumPy, SciPy, pandas, psutil, pynvml, Hugging Face Hub, PostgreSQL, Kafka, pytest, existing C++/Drogon dashboard and `babel_online` package.
+**Tech Stack:** Python 3.10+, asyncio/httpx, PyArrow/Parquet, NumPy, SciPy, pandas, psutil, pynvml, Hugging Face Hub, PostgreSQL 18 with pgvector 0.8.6, hnswlib, psycopg 3, Kafka, pytest, existing C++/Drogon dashboard and `babel_online` package.
 
 ## Global Constraints
 
 - Requires Slice 3 acceptance, a known-good original/child model pair, a frozen request/feedback replay corpus, and stable online schemas.
 - Do not change model architecture, hidden decision formulas, creator construction, labels, Qwen weights, or model lineage in this slice.
+- The candidate universe remains only Babels created by synthetic creators in the run; a benchmark fails if an unused catalog article is returned.
+- Hugging Face remains canonical for bulk artifacts; the benchmarked vectors are the pinned local PostgreSQL materialization derived from those artifacts.
+- pgvector cosine HNSW is the default serving backend. hnswlib is an explicit fixed run/condition backend and never a fallback.
+- The matched backend comparison uses one PostgreSQL snapshot: identical ordered Babel IDs, creator IDs, source keys, float32 vector bytes, embedding space, model ID/version, and snapshot checksum.
+- hnswlib must be rebuilt from that snapshot; backend build/load time is measured separately from steady-state request latency.
+- Retrieval backend never changes within a condition. A backend failure invalidates the condition rather than redirecting requests.
 - The 2016 Colab job runs elsewhere and is excluded from local interference measurements.
-- Conditions are: serving only; serving plus training with synchronization disabled; serving plus training and synchronization; then increasing request rates and creator cohorts.
+- Conditions are: matched pgvector serving-only; matched hnswlib serving-only; pgvector serving plus training with synchronization disabled; pgvector serving plus training and synchronization; then pgvector increasing request rates and creator cohorts.
 - Fixed replay conditions use identical observable requests and feedback offset ranges in identical order.
 - Live adaptation conditions use deterministic nested cohorts `50 ⊂ 100 ⊂ 500 ⊂ 1,000 ⊂ 5,000 ⊂ 10,000`.
 - The first 50 creators are byte-for-byte identical in every larger cohort.
@@ -52,7 +58,7 @@ benchmark contracts, paired-design manifest, fixture
           +-------------------- Wave 2 --------------------+
           |                                                 |
  Agent A / Task 5                                  Agent B / Task 6
- condition runner + backpressure                   nested scale runner
+ retrieval pair + interference/backpressure        nested scale runner
           |                                                 |
           +------------------ integration gate ------------+
                                     |
@@ -66,7 +72,7 @@ benchmark contracts, paired-design manifest, fixture
 | Lane | Owned paths | Review concern |
 |---|---|---|
 | Orchestrator | `schemas/performance/`, frozen manifests, final runbook | Paired inputs and stopping rules are immutable before work starts |
-| Agent A | `benchmark/loadgen.py`, `conditions.py`, `backpressure.py` | Load timing and control loops never use wall-clock durations |
+| Agent A | `benchmark/loadgen.py`, `retrieval.py`, `conditions.py`, `backpressure.py` | Backend comparisons use checksum-identical rows and load timing/control loops never use wall-clock durations |
 | Agent B | `benchmark/resources.py`, `scale.py` | Sampler overhead is measured; cohorts remain nested |
 | Agent C | `benchmark/evaluation.py`, `analysis.py`, performance C++ control files, dashboard assets | Hidden evaluation data cannot flow back into online services |
 
@@ -83,6 +89,7 @@ schemas/performance/
   request-measurement-v1.json         client/server latency record
   resource-sample-v1.json             host/process/device sample
   adaptation-window-v1.json           quality/event/time window
+  retrieval-comparison-v1.json        paired backend inputs and exact-recall output
   performance-summary-v1.json         comparative output
 fixtures/performance/
   requests.jsonl
@@ -95,6 +102,7 @@ benchmark/
   src/babel_benchmark/
     contracts.py
     loadgen.py
+    retrieval.py
     resources.py
     evaluation.py
     backpressure.py
@@ -133,6 +141,7 @@ documentation.md
 - Create: `schemas/performance/request-measurement-v1.json`
 - Create: `schemas/performance/resource-sample-v1.json`
 - Create: `schemas/performance/adaptation-window-v1.json`
+- Create: `schemas/performance/retrieval-comparison-v1.json`
 - Create: `schemas/performance/performance-summary-v1.json`
 - Create: `fixtures/performance/requests.jsonl`
 - Create: `fixtures/performance/feedback.jsonl`
@@ -146,20 +155,39 @@ documentation.md
 
 **Interfaces:**
 - Consumes: frozen Slice 3 request/response/feedback/run/model schemas.
-- Produces: `BenchmarkManifestV1`, `RequestMeasurementV1`, `ResourceSampleV1`, `AdaptationWindowV1`, `PerformanceSummaryV1`, and exact condition names.
+- Produces: `BenchmarkManifestV1`, `RequestMeasurementV1`, `ResourceSampleV1`, `AdaptationWindowV1`, `RetrievalComparisonV1`, `PerformanceSummaryV1`, and exact condition names.
 
 - [ ] **Step 1: Write failing schema and paired-input tests**
 
 ```python
 def test_every_system_condition_uses_the_same_replay_inputs(manifest):
-    conditions = {c.name: c for c in manifest.conditions}
+    conditions = {c.name: c for c in manifest.replay_conditions}
     assert {c.request_corpus_sha256 for c in conditions.values()} == {manifest.request_corpus_sha256}
-    assert {c.feedback_range for c in conditions.values()} == {manifest.feedback_range}
+    assert all(c.feedback_range == manifest.feedback_range for c in conditions.values())
 
 def test_raw_measurement_preserves_stage_and_model_identity():
     row = RequestMeasurementV1.model_validate(fixture_request())
     assert row.clientTotalNs >= row.serverTotalNs
     assert row.servingModelId and row.servingModelVersion >= 0
+    assert row.retrievalBackend in {"pgvector", "hnswlib"}
+    assert row.pgvectorSnapshotSha256
+    assert row.backendSnapshotSha256
+    assert row.queryVectorSha256
+
+def test_backend_pair_pins_identical_created_babel_vectors(manifest):
+    pg = manifest.condition("pgvector_serving_only")
+    hns = manifest.condition("hnswlib_serving_only")
+    assert pg.pgvectorSnapshotSha256 == hns.pgvectorSnapshotSha256
+    assert pg.orderedBabelIdsSha256 == hns.orderedBabelIdsSha256
+    assert pg.vectorBytesSha256 == hns.vectorBytesSha256
+    assert pg.createdBabelRowCount == hns.createdBabelRowCount
+    assert pg.servingModelId == hns.servingModelId
+    assert pg.servingModelVersion == hns.servingModelVersion
+
+def test_backend_pair_uses_byte_identical_queries_by_request_id(pg_rows, hns_rows):
+    assert {r.requestId: r.queryVectorSha256 for r in pg_rows} == {
+        r.requestId: r.queryVectorSha256 for r in hns_rows
+    }
 ```
 
 - [ ] **Step 2: Run and verify failure**
@@ -173,17 +201,28 @@ Expected: collection fails because benchmark contracts are absent.
 Use stable names:
 
 ```text
-serving_only
-serving_plus_training_no_sync
-serving_plus_training_and_sync
-live_scale
+pgvector_serving_only
+hnswlib_serving_only
+pgvector_training_no_sync
+pgvector_training_and_sync
+live_scale_pgvector
 ```
 
-The manifest pins dataset/model SHAs, request corpus checksum, Kafka topic and
-offset range, warmup/sample counts, concurrency/RPS schedule, sync interval,
-trainer micro-batch bounds, resource interval, timeouts, safety limits, host
-description, and code commit. Comparisons join by request ID and schedule slot,
-not timestamp proximity alone.
+The manifest pins dataset/model SHAs, embedding-space ID, active PostgreSQL
+snapshot checksum, ordered created-Babel-ID checksum, canonical float32 vector
+checksum, created-Babel row count, model ID/version, request corpus checksum,
+Kafka topic and offset range, warmup/sample counts, concurrency/RPS schedule,
+pgvector `ef_search`/iterative-scan settings, hnswlib M/ef-construction/ef-search,
+sync interval, trainer micro-batch bounds, resource interval, timeouts, safety
+limits, host description, and code commit. Comparisons join by request ID and
+schedule slot, not timestamp proximity alone. Validate that every snapshot Babel
+ID belongs to a synthetic creator in that run and that no catalog-only row is
+present.
+
+`RetrievalComparisonV1` records backend build/load time, steady-state latency,
+throughput, timeout/error counts, memory, candidate-set violations, and Recall@K
+against exact cosine results. Record pgvector and hnswlib parameters separately;
+do not hide them behind a generic tuning profile.
 
 - [ ] **Step 4: Define the calibration threshold algorithm**
 
@@ -229,6 +268,13 @@ def test_client_latency_wraps_the_entire_http_request(fake_server):
     row = run_one(fake_server, fixture_request())
     assert row.clientTotalNs >= row.serverTotalNs
     assert row.inferredNetworkSerializationNs == row.clientTotalNs - row.serverTotalNs
+
+def test_replay_records_fixed_backend_and_snapshot(fake_server):
+    row = run_one(fake_server, fixture_request())
+    assert row.retrievalBackend == fake_server.fixed_backend
+    assert row.pgvectorSnapshotSha256 == fake_server.pgvector_snapshot_sha256
+    assert row.backendSnapshotSha256 == fake_server.backend_snapshot_sha256
+    assert row.queryVectorSha256 == fake_server.query_vector_sha256
 ```
 
 - [ ] **Step 2: Run and verify failure**
@@ -249,7 +295,14 @@ timeouts/errors as rows rather than omitting them.
 
 Time from immediately before request serialization through complete response
 read with `perf_counter_ns`. Validate server stage timings and calculate inferred
-network/serialization. Mark warmup rows explicitly; never mix them into reported
+network/serialization. Require the response's retrieval backend, embedding-space
+ID, and serving model ID to equal the condition manifest on every sampled
+request. Before the first sync, model version, PostgreSQL snapshot, and backend
+snapshot must equal the starting manifest; afterward they must join exactly to
+the condition's immutable synchronization ledger. Any unmatched version or
+checksum invalidates the condition. The matched retrieval pair must also report
+the same query-vector checksum for each request ID; otherwise it is not a valid
+backend comparison. Mark warmup rows explicitly; never mix them into reported
 percentiles. Stream records to atomic Parquet row groups to bound memory.
 
 - [ ] **Step 5: Test and commit**
@@ -369,8 +422,10 @@ git commit -m "feat: evaluate temporal recommender adaptation"
 ### Task 5: Run Paired Interference Conditions and Apply Latency Backpressure
 
 **Files:**
+- Create: `benchmark/src/babel_benchmark/retrieval.py`
 - Create: `benchmark/src/babel_benchmark/backpressure.py`
 - Create: `benchmark/src/babel_benchmark/conditions.py`
+- Create: `benchmark/tests/test_retrieval.py`
 - Create: `benchmark/tests/test_backpressure.py`
 - Create: `benchmark/tests/test_conditions.py`
 - Modify: `online/src/babel_online/training/consumer.py`
@@ -378,11 +433,27 @@ git commit -m "feat: evaluate temporal recommender adaptation"
 
 **Interfaces:**
 - Consumes: Tasks 1–3 and Slice 3 trainer control socket/status.
-- Produces: `LatencyBackpressureController`, `run_condition_matrix`, and paired raw condition directories.
+- Produces: `FrozenVectorSnapshot`, `prepare_backend_condition`, `exact_cosine_top_k`, `compare_retrieval_backends`, `LatencyBackpressureController`, `run_condition_matrix`, and paired raw condition directories.
 
-- [ ] **Step 1: Write the backpressure state-machine tests**
+- [ ] **Step 1: Write backend-pair and backpressure state-machine tests**
 
 ```python
+def test_backend_conditions_clone_identical_created_babel_rows(condition_factory):
+    pg = condition_factory.prepare("pgvector_serving_only")
+    hns = condition_factory.prepare("hnswlib_serving_only")
+    assert pg.run_id != hns.run_id
+    assert pg.snapshot.pgvector_sha256 == hns.snapshot.pgvector_sha256
+    assert pg.snapshot.ordered_babel_ids == hns.snapshot.ordered_babel_ids
+    assert pg.snapshot.vector_bytes_sha256 == hns.snapshot.vector_bytes_sha256
+    assert all(row.is_created_synthetic_babel for row in pg.snapshot.rows)
+
+def test_backend_failure_invalidates_condition_without_fallback(condition_factory):
+    condition = condition_factory.prepare("hnswlib_serving_only")
+    condition.corrupt_hnsw_snapshot()
+    result = condition.run()
+    assert result.status == "invalid"
+    assert result.pgvector_request_count == 0
+
 def test_controller_reduces_batch_then_adds_delay():
     ctl = controller(batch=16, minimum=2, threshold_ms=100)
     assert ctl.observe_p95(130).micro_batch == 8
@@ -398,26 +469,69 @@ def test_backpressure_never_changes_offsets_or_event_order(controller, events):
 
 - [ ] **Step 2: Run and verify failure**
 
-Run: `python3 -m pytest benchmark/tests/test_backpressure.py benchmark/tests/test_conditions.py -v`
+Run: `python3 -m pytest benchmark/tests/test_retrieval.py benchmark/tests/test_backpressure.py benchmark/tests/test_conditions.py -v`
 
 Expected: FAIL because condition orchestration is missing.
 
-- [ ] **Step 3: Establish the serving-only baseline first**
+- [ ] **Step 3: Freeze one created-Babel vector snapshot and exact ground truth**
 
-For each request schedule, warm the model/index, disable trainer and sync,
-replay the fixed request corpus, and compute baseline p95. The latency threshold
-for matching training conditions is `1.25 * baseline_p95`; record the numeric
-value before enabling training.
+Read the accepted Slice 3 materialization in stable Babel-ID order and reject any
+row without matching `experiment_babels`/synthetic-creator ownership. Canonically
+hash the Babel ID, creator ID, source key, normalized float32 vector bytes,
+catalog content hash, embedding-space ID, and model ID/version with Slice 3's
+canonicalization function; exclude run ID so the exact rows can be cloned into
+condition-specific runs. Create a fresh run for each condition with
+its backend immutable from launch, then insert byte-identical experiment Babel
+and vector rows. Assert the destination checksum before starting its server.
 
-- [ ] **Step 4: Run the two training interference conditions**
+For evaluation queries only, compute exact filtered cosine top-K from the same
+condition table with PostgreSQL index and bitmap scans disabled in a read-only
+transaction. Exclude the request creator exactly as serving does. This offline
+query is ground truth for Recall@K; it is never substituted into the serving
+path.
 
-Reset to the same immutable starting artifact before each condition. Replay the
-same Kafka feedback range at a controlled rate. In
-`serving_plus_training_no_sync`, train/checkpoint but hold serving version fixed.
-In `serving_plus_training_and_sync`, apply the configured sync cadence. Use the
-same request arrival schedule and resource sampler in both.
+- [ ] **Step 4: Run the matched pgvector/hnswlib serving comparison**
 
-- [ ] **Step 5: Apply hysteretic training backpressure**
+Start `pgvector_serving_only` with the frozen PostgreSQL HNSW parameters, warm it
+with the manifest's warmup requests, and replay the measured schedule. Start
+`hnswlib_serving_only` from a different run ID but the checksum-identical rows,
+build/validate its shadow snapshot using the frozen hnswlib parameters, and
+replay the identical warmup and measured schedule. Both conditions use the same
+model artifact, model version, process placement, request IDs, schedule slots,
+and resource sampler. Record separately:
+
+```text
+snapshot preparation / index build / index load time
+steady-state p50 / p95 / p99 / max and throughput
+process and index memory
+Recall@10 and Recall@50 versus exact cosine top-K
+candidate-set violations and timeout/error counts
+```
+
+For pgvector, preparation time covers snapshot clone/activation, database index
+maintenance, and warmup; for hnswlib it additionally exposes export/build/load
+times. Do not present these unequal phases as request latency.
+
+- [ ] **Step 5: Establish the pgvector serving-only interference baseline**
+
+Use `pgvector_serving_only` for each request schedule, disable trainer and sync,
+and compute its baseline p95 after warmup. The latency threshold for matching
+training conditions is `1.25 * baseline_p95`; record the numeric value and source
+condition checksum before enabling training. hnswlib results do not define this
+threshold because the online interference and scale ladder remain pgvector-first.
+
+- [ ] **Step 6: Run the two pgvector training interference conditions**
+
+Reset to the same immutable starting artifact and clone the same frozen created-
+Babel snapshot before each condition. Replay the same Kafka feedback range at a
+controlled rate. In `pgvector_training_no_sync`, train/checkpoint but hold
+serving model/vector version fixed. In `pgvector_training_and_sync`, apply the
+configured atomic pgvector synchronization cadence. Use the same request arrival
+schedule and resource sampler in both; verify every response still reports
+`retrievalBackend=pgvector` and a model-version/vector-checksum pair present in
+that condition's synchronization ledger.
+
+- [ ] **Step 7: Apply hysteretic training backpressure**
 
 Calculate rolling p95 over the latest max(200 requests, 60 seconds). If it
 exceeds threshold for two consecutive windows, halve the micro-batch down to 2,
@@ -425,13 +539,13 @@ then add 25 ms inter-batch delay up to 500 ms. After five consecutive windows
 below `0.90 * threshold`, remove delay in 25 ms steps, then double batch up to
 its configured maximum. Persist every transition and its observed latency/lag.
 
-- [ ] **Step 6: Test and commit**
+- [ ] **Step 8: Test and commit**
 
-Run: `python3 -m pytest benchmark/tests/test_backpressure.py benchmark/tests/test_conditions.py online/tests/training/test_consumer.py -v`
+Run: `python3 -m pytest benchmark/tests/test_retrieval.py benchmark/tests/test_backpressure.py benchmark/tests/test_conditions.py online/tests/training/test_consumer.py -v`
 
 ```bash
-git add benchmark/src/babel_benchmark/backpressure.py benchmark/src/babel_benchmark/conditions.py benchmark/tests/test_backpressure.py benchmark/tests/test_conditions.py online/src/babel_online/training/consumer.py online/tests/training/test_consumer.py
-git commit -m "feat: measure and bound training interference"
+git add benchmark/src/babel_benchmark/retrieval.py benchmark/src/babel_benchmark/backpressure.py benchmark/src/babel_benchmark/conditions.py benchmark/tests/test_retrieval.py benchmark/tests/test_backpressure.py benchmark/tests/test_conditions.py online/src/babel_online/training/consumer.py online/tests/training/test_consumer.py
+git commit -m "feat: compare retrieval and bound training interference"
 ```
 
 ### Task 6: Execute Safe Nested Creator Scaling
@@ -455,6 +569,11 @@ def test_safety_breach_stops_before_next_scale(runner):
     runner.complete(50, peak_memory_fraction=.95)
     assert runner.next_scale() is None
     assert runner.receipt.reason == "memory_safety_limit"
+
+def test_scale_plan_defaults_to_fixed_pgvector_backend():
+    plan = ScaleRunPlan.for_creators(50)
+    assert plan.retrieval_backend == "pgvector"
+    assert plan.allow_backend_switch is False
 ```
 
 - [ ] **Step 2: Run and verify failure**
@@ -466,9 +585,18 @@ Expected: FAIL because scale orchestration is absent.
 - [ ] **Step 3: Build explicit one-run-at-a-time scale plans**
 
 Each scale gets a fresh run ID, the same selected starting model, dataset SHA,
-simulator parameters, frozen quality target, per-creator event budget, and
-request schedule normalized both by total RPS and RPS/creator. Record creator
-manifest checksum and assert each smaller manifest is the exact prefix.
+embedding space, `retrievalBackend=pgvector` by default, simulator parameters,
+frozen quality target, per-creator event budget, and request schedule normalized
+both by total RPS and RPS/creator. Record the creator manifest checksum and
+assert each smaller manifest is the exact prefix. If a later operator explicitly
+requests an hnswlib scale study, it is a separate fully labeled ladder; never mix
+backends within a ladder or compare its points to the pgvector ladder as though
+only creator count changed.
+
+At every scale, assert that the retrievable row count equals the distinct
+created synthetic Babel count, that every row has its owning creator, and that
+no unused catalog article is returned. Record pgvector table/index sizes and
+created-Babel insert/materialization time alongside request and trainer metrics.
 
 - [ ] **Step 4: Enforce resource safety before advancing**
 
@@ -524,12 +652,24 @@ git commit -m "feat: run deterministic creator scale ladder"
 def test_slowdown_uses_paired_condition_p95():
     report = analyze_fixture(baseline_ms=[10, 20, 30], trained_ms=[20, 40, 60])
     assert report.p95SlowdownRatio == pytest.approx(2.0)
+
+def test_retrieval_report_rejects_nonidentical_snapshots():
+    with pytest.raises(UnpairedRetrievalComparison):
+        analyze_retrieval(pg_fixture(snapshot="a"), hns_fixture(snapshot="b"))
+
+def test_retrieval_report_includes_accuracy_and_preparation_costs():
+    report = analyze_retrieval(pg_fixture(), hns_fixture())
+    assert report.pgvector.recallAt10 is not None
+    assert report.hnswlib.recallAt10 is not None
+    assert report.hnswlib.indexBuildNs > 0
+    assert report.candidateSetViolations == 0
 ```
 
 ```javascript
 test('dashboard defaults to 50 and never auto-advances', () => {
   const view = benchmarkForm(defaults());
   assert.equal(view.creatorCount, 50);
+  assert.equal(view.scaleRetrievalBackend, 'pgvector');
   assert.equal(view.autoAdvance, false);
 });
 ```
@@ -556,24 +696,35 @@ modules are absent.
 Report p50/p95/p99/max, RPS, timeout/error rate, all server stages, client
 overhead, trainer step time, Kafka lag, sync duration/spikes, version staleness,
 CPU/GPU/memory/disk/network, backpressure actions, and
-`p95(condition)/p95(serving_only)`. For scale runs report quality versus total
-events, events/creator, wall/training time, throughput, and June/July target
-attainment. Include sample counts and confidence intervals from deterministic
-bootstrap resampling; never report a percentile without its denominator.
+`p95(condition)/p95(pgvector_serving_only)`. Give the matched retrieval pair its
+own table: preparation/build/load time, steady-state latency/throughput, memory,
+Recall@10/50 against exact cosine, pgvector and hnswlib parameters, snapshot and
+vector checksums, row count, and candidate-set violations. Do not claim hnswlib
+is faster or more accurate unless the snapshot/model/request equality checks
+pass. For scale runs report quality versus total events, events/creator,
+wall/training time, throughput, pgvector table/index growth, materialization
+cost, and June/July target attainment. Include sample counts and confidence
+intervals from deterministic bootstrap resampling; never report a percentile
+without its denominator.
 
 - [ ] **Step 4: Add explicit dashboard benchmark launch/status**
 
 Allow selection of starting immutable model, one cohort or maximum ladder size,
-request schedule, sync interval, and safety limits. Default creator count/max is
-50 and auto-advance is false. Show the current condition, raw sample counts,
-resource/safety state, backpressure, graceful-stop progress, and links to the
-accepted report/artifact. Keep these controls separate from ordinary online-run
-Start.
+scale retrieval backend, request schedule, sync interval, and safety limits.
+The systems suite always includes the matched pgvector/hnswlib serving-only pair;
+the training-interference conditions default to pgvector. Default scale backend
+is pgvector, creator count/max is 50, and auto-advance is false. The selected
+backend is fixed and visible for every condition/run. Show vector snapshot
+checksum, current condition/backend, raw sample counts, resource/safety state,
+backpressure, graceful-stop progress, and links to the accepted report/artifact.
+Keep these controls separate from ordinary online-run Start.
 
 Persist `performance_experiments` and `performance_conditions` in migration
-006 with immutable manifest/checksum, state, current condition/cohort, safety
-receipt, artifact SHA, and timestamps. `PerformanceJobRunner` launches exactly
-one `babel-benchmark run --benchmark-id <uuid>` process after the dashboard POST.
+006 with immutable manifest/checksum, retrieval backend, PostgreSQL snapshot
+checksum, model/vector identity, state, current condition/cohort, safety receipt,
+artifact SHA, and timestamps. Reject backend/snapshot updates after condition
+creation. `PerformanceJobRunner` launches exactly one `babel-benchmark run
+--benchmark-id <uuid>` process after the dashboard POST.
 Expose:
 
 ```text
@@ -622,9 +773,11 @@ git commit -m "feat: report online performance experiments"
 
 Run: `python3 -m pytest benchmark/tests/e2e/test_performance_fixture.py -v`
 
-Expected: a tiny replay produces all three paired system conditions, a backpressure
-transition, resource rows, a frozen target, 50⊂100 creator manifests, and a
-summary whose IDs/checksums join exactly.
+Expected: a tiny replay produces both checksum-matched serving backends and both
+pgvector training-interference conditions, a backpressure transition, resource
+rows, a frozen target, 50⊂100 creator manifests, and a summary whose
+IDs/checksums join exactly. The fixture includes a deliberately higher-scoring
+unused catalog vector and proves neither backend returns it.
 
 - [ ] **Step 2: Run full repository regression gates**
 
@@ -648,26 +801,34 @@ and obtain operator review. If the target is unattainable within calibration
 budget or quality is invalid, stop; do not fabricate a threshold or launch
 larger cohorts.
 
-- [ ] **Step 4: Run the paired interference matrix**
+- [ ] **Step 4: Run the matched retrieval pair, then the interference matrix**
 
-For each approved RPS/concurrency point, run serving-only first, derive its
-threshold, then run training/no-sync and training/sync from the same model with
-identical inputs. Remotely publish and verify raw artifacts after every condition
-so later failures do not lose completed measurements.
+For each approved RPS/concurrency point, first run pgvector and hnswlib
+serving-only from checksum-identical created-Babel rows with identical requests.
+Verify candidate universe, Recall@K, and snapshot equality before accepting the
+backend comparison. Then use pgvector serving-only to derive the interference
+threshold and run pgvector training/no-sync and training/sync from the same model
+and cloned vector snapshot with identical inputs. Remotely publish and verify raw
+artifacts after every condition so later failures do not lose completed
+measurements.
 
 - [ ] **Step 5: Advance the scale ladder only by explicit approval**
 
 Run 50, review safety/quality, then offer 100; repeat for 500, 1,000, 5,000,
 and 10,000. A stopped ladder is valid partial evidence. Every completed scale
 must have a graceful checkpoint/export and independent immutable child; no
-larger scale continues from the smaller scale's learned model.
+larger scale continues from the smaller scale's learned model. Use pgvector for
+the approved ladder unless the manifest explicitly defines a separate hnswlib
+ladder; never switch a running condition or ladder point.
 
 - [ ] **Step 6: Write the runbook and final comparative report**
 
 Document hardware capture, dashboard controls, safe sequencing, calibration,
-condition reset, interpreting latency/lag/backpressure, recovery, scale approval,
-Hub paths, and how to regenerate every table from raw Parquet. Clearly distinguish
-systems replay results from live adaptation results.
+condition reset, matched snapshot construction, exact-cosine ground truth,
+interpreting retrieval latency/recall/build cost and training
+latency/lag/backpressure, recovery, scale approval, Hub paths, and how to
+regenerate every table from raw Parquet. Clearly distinguish backend replay,
+training-interference replay, and live adaptation results.
 
 - [ ] **Step 7: Commit**
 
@@ -678,8 +839,12 @@ git commit -m "docs: verify performance and scaling experiments"
 
 ## Slice Acceptance Gate
 
-- [ ] Serving-only, training/no-sync, and training/sync use identical paired inputs.
-- [ ] Every request has client total, server total, stage timings, model version, and outcome.
+- [ ] pgvector serving-only, hnswlib serving-only, pgvector training/no-sync, and pgvector training/sync use the declared paired inputs.
+- [ ] The retrieval pair proves identical created-Babel IDs, vectors, embedding space, model version, request schedule, per-request query-vector checksums, and PostgreSQL snapshot checksum.
+- [ ] No condition returns an unused catalog article or the request creator's own Babel.
+- [ ] Every request has client total, server total, stage timings, retrieval backend, vector snapshot, model version, and outcome.
+- [ ] Retrieval reports include preparation/build/load cost, memory, Recall@10/50 versus exact cosine, and fixed backend parameters.
+- [ ] A backend error invalidates its condition; no request silently falls back.
 - [ ] Reports contain p50/p95/p99/max, RPS, errors, lag, step time, sync spikes, and resource use.
 - [ ] Slowdown ratio uses matching schedule/model/hardware conditions.
 - [ ] Backpressure protects latency without dropping/reordering feedback.
@@ -696,10 +861,15 @@ git commit -m "docs: verify performance and scaling experiments"
 This is the last approved implementation slice. The next phase is an evidence
 review and architecture decision, not automatic expansion. Review which resource
 first saturates, whether p95 degradation comes from encoder inference, trainer
-contention, Kafka lag, or synchronization, and whether quality reaches the
-frozen target before changing infrastructure. Only evidence from the paired raw
-records should justify a later GPU split, multiple consumers/partitions, remote
-serving, a parameter server, or other Monolith-like scaling. Preserve the
-accepted manifests, original/child artifacts, dataset/model SHAs, raw Parquet,
-and code commit so any future architecture proposal can be compared against
-this reproducible local baseline.
+contention, PostgreSQL retrieval/index maintenance, hnswlib memory/build cost,
+Kafka lag, or synchronization, and whether quality reaches the frozen target
+before changing infrastructure. Treat pgvector as the default after this slice
+unless the matched evidence justifies expanding hnswlib's role; a win at one
+snapshot size is not permission to replace durable PostgreSQL state or enable
+automatic fallback. Only evidence from the paired raw records should justify a
+later GPU split, multiple consumers/partitions, remote serving, a parameter
+server, or other Monolith-like scaling. Preserve the accepted manifests,
+original/child artifacts, embedding-space/model/dataset SHAs, PostgreSQL and
+hnswlib snapshot manifests, ordered IDs/vector checksums, raw Parquet, and code
+commit so any future architecture proposal can be compared against this
+reproducible local baseline.
