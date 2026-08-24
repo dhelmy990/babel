@@ -23,6 +23,7 @@ class GraphRepository {
  public:
   virtual ~GraphRepository() = default;
 
+  // Return an empty graph for an existing creator with no content; use not_found only when absent.
   virtual Result<ProfileGraphDto> loadGraph(CreatorId) = 0;
 };
 
@@ -31,6 +32,7 @@ class WikipediaBabelRepository {
   virtual ~WikipediaBabelRepository() = default;
 
   virtual Result<std::optional<Babel>> findByPage(CreatorId, WikipediaPageId) = 0;
+  // Commit the Babel and its source atomically, or persist neither record.
   virtual Result<void> insertWikipediaBabel(const Babel&, const BabelSource&) = 0;
   virtual Result<void> attachSeedAssignment(BabelId, SeedAssignmentId, std::string_view) = 0;
 };

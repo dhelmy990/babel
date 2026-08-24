@@ -2,19 +2,31 @@
   "version": 6,
   "configurePresets": [
     {
-      "name": "test",
-      "displayName": "Test",
+      "name": "dev",
+      "displayName": "Development",
       "generator": "Unix Makefiles",
-      "binaryDir": "${sourceDir}/build/test",
+      "binaryDir": "${sourceDir}/build/dev",
       "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
       "cacheVariables": {
-        "BUILD_TESTING": "ON",
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "test",
+      "displayName": "Test",
+      "inherits": "dev",
+      "binaryDir": "${sourceDir}/build/test",
+      "cacheVariables": {
+        "BUILD_TESTING": "ON"
       }
     }
   ],
   "buildPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev"
+    },
     {
       "name": "test",
       "configurePreset": "test"

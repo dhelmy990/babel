@@ -1,4 +1,10 @@
 find_package(Catch2 3 CONFIG REQUIRED)
+find_package(boost_uuid CONFIG REQUIRED)
+find_package(CURL CONFIG REQUIRED)
+find_package(Drogon CONFIG REQUIRED)
+find_package(libpqxx CONFIG REQUIRED)
+find_package(LibXml2 REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(tl-expected CONFIG REQUIRED)
 
@@ -27,16 +33,30 @@ file(GLOB_RECURSE BABEL_TEST_SOURCES CONFIGURE_DEPENDS
 
 if(BABEL_BACKEND_SOURCES)
   add_library(babel_backend STATIC ${BABEL_BACKEND_SOURCES})
-  target_link_libraries(babel_backend PUBLIC babel_application)
+  target_link_libraries(babel_backend PUBLIC
+    babel_application
+    Boost::uuid
+    CURL::libcurl
+    Drogon::Drogon
+    libpqxx::pqxx
+    LibXml2::LibXml2
+    nlohmann_json::nlohmann_json)
 else()
   add_library(babel_backend INTERFACE)
-  target_link_libraries(babel_backend INTERFACE babel_application)
+  target_link_libraries(babel_backend INTERFACE
+    babel_application
+    Boost::uuid
+    CURL::libcurl
+    Drogon::Drogon
+    libpqxx::pqxx
+    LibXml2::LibXml2
+    nlohmann_json::nlohmann_json)
 endif()
 babel_enable_warnings(babel_backend)
 
 if(BUILD_TESTING)
   add_executable(babel_tests ${BABEL_TEST_SOURCES})
-  target_link_libraries(babel_tests PRIVATE babel_application Catch2::Catch2WithMain)
+  target_link_libraries(babel_tests PRIVATE babel_backend Catch2::Catch2WithMain)
   babel_enable_warnings(babel_tests)
 
   include(Catch)

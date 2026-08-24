@@ -101,15 +101,12 @@ class UuidId {
     return Derived{std::move(generated.value())};
   }
 
-  [[nodiscard]] std::string_view value() const noexcept { return value_; }
+  std::string value;
 
   friend bool operator==(const UuidId&, const UuidId&) = default;
 
  protected:
-  explicit UuidId(std::string value) : value_(std::move(value)) {}
-
- private:
-  std::string value_;
+  explicit UuidId(std::string value) : value(std::move(value)) {}
 };
 
 }  // namespace detail
@@ -173,14 +170,12 @@ class WikipediaPageId {
     return WikipediaPageId{value};
   }
 
-  [[nodiscard]] std::int64_t value() const noexcept { return value_; }
+  std::int64_t value;
 
   friend bool operator==(const WikipediaPageId&, const WikipediaPageId&) = default;
 
  private:
-  explicit WikipediaPageId(std::int64_t value) : value_(value) {}
-
-  std::int64_t value_;
+  explicit WikipediaPageId(std::int64_t value) : value(value) {}
 };
 
 }  // namespace babel
@@ -190,35 +185,35 @@ namespace std {
 template <>
 struct hash<babel::CreatorId> {
   std::size_t operator()(const babel::CreatorId& id) const noexcept {
-    return hash<std::string_view>{}(id.value());
+    return hash<std::string>{}(id.value);
   }
 };
 
 template <>
 struct hash<babel::BabelId> {
   std::size_t operator()(const babel::BabelId& id) const noexcept {
-    return hash<std::string_view>{}(id.value());
+    return hash<std::string>{}(id.value);
   }
 };
 
 template <>
 struct hash<babel::EdgeId> {
   std::size_t operator()(const babel::EdgeId& id) const noexcept {
-    return hash<std::string_view>{}(id.value());
+    return hash<std::string>{}(id.value);
   }
 };
 
 template <>
 struct hash<babel::SeedRunId> {
   std::size_t operator()(const babel::SeedRunId& id) const noexcept {
-    return hash<std::string_view>{}(id.value());
+    return hash<std::string>{}(id.value);
   }
 };
 
 template <>
 struct hash<babel::SeedAssignmentId> {
   std::size_t operator()(const babel::SeedAssignmentId& id) const noexcept {
-    return hash<std::string_view>{}(id.value());
+    return hash<std::string>{}(id.value);
   }
 };
 
