@@ -54,6 +54,12 @@ struct SeedItemUpdate {
 
 enum class SeedStatusKind { not_started, persisted };
 
+struct SeedErrorDto {
+  std::string article;
+  ErrorCode code;
+  std::string message;
+};
+
 struct SeedStatusDto {
   SeedStatusKind kind{SeedStatusKind::not_started};
   std::optional<SeedRunId> run_id;
@@ -62,6 +68,9 @@ struct SeedStatusDto {
   std::size_t imported{0};
   std::size_t skipped{0};
   std::size_t failed{0};
+  std::optional<std::string> current_profile;
+  std::optional<std::string> current_article;
+  std::vector<SeedErrorDto> errors;
 };
 
 }  // namespace babel

@@ -125,7 +125,55 @@ SeedStatusDto seedStatusFromRow(const pqxx::row& row) {
       .imported = row["imported"].as<std::size_t>(),
       .skipped = row["skipped"].as<std::size_t>(),
       .failed = row["failed"].as<std::size_t>(),
+      .current_profile = std::nullopt,
+      .current_article = std::nullopt,
+      .errors = {},
   };
+}
+
+ErrorCode errorCodeFromName(std::string_view code) {
+  if (code == "invalid_argument") return ErrorCode::invalid_argument;
+  if (code == "not_found") return ErrorCode::not_found;
+  if (code == "conflict") return ErrorCode::conflict;
+  if (code == "database_unavailable") return ErrorCode::database_unavailable;
+  if (code == "wikipedia_unavailable") return ErrorCode::wikipedia_unavailable;
+  if (code == "wikipedia_not_found") return ErrorCode::wikipedia_not_found;
+  if (code == "sanitizer_rejected") return ErrorCode::sanitizer_rejected;
+  if (code == "invalid_legacy_file") return ErrorCode::invalid_legacy_file;
+  return ErrorCode::internal;
+}
+
+void populateSeedStatusDetails(pqxx::read_transaction& transaction, SeedStatusDto& status) {
+  if (!status.run_id) return;
+  const auto current = transaction.exec(R"(
+      SELECT c.display_name, i.declared_title
+      FROM seed_run_items i
+      JOIN creators c ON c.id = i.creator_id
+      WHERE i.seed_run_id = $1 AND i.state IN ('resolving', 'importing')
+      ORDER BY i.started_at DESC NULLS LAST, i.seed_assignment_id
+      LIMIT 1
+    )",
+                                        pqxx::params{status.run_id->value});
+  if (!current.empty()) {
+    status.current_profile = current.one_row()["display_name"].as<std::string>();
+    status.current_article = current.one_row()["declared_title"].as<std::string>();
+  }
+
+  const auto errors = transaction.exec(R"(
+      SELECT declared_title, error_code, error_detail
+      FROM seed_run_items
+      WHERE seed_run_id = $1 AND state = 'failed'
+      ORDER BY declared_title, seed_assignment_id
+    )",
+                                       pqxx::params{status.run_id->value});
+  status.errors.reserve(errors.size());
+  for (const auto& row : errors) {
+    status.errors.push_back(SeedErrorDto{
+        .article = row["declared_title"].as<std::string>(),
+        .code = errorCodeFromName(row["error_code"].as<std::string>()),
+        .message = row["error_detail"].as<std::string>(),
+    });
+  }
 }
 
 constexpr auto kSeedStatusQuery = R"(
@@ -538,7 +586,9 @@ Result<SeedStatusDto> PostgresSeedRunRepository::status(SeedRunId run_id) {
           .message = "seed run not found: " + run_id.value,
       });
     }
-    return seedStatusFromRow(rows.one_row());
+    auto status = seedStatusFromRow(rows.one_row());
+    populateSeedStatusDetails(transaction, status);
+    return status;
   } catch (const std::exception& exception) {
     return tl::make_unexpected(mapPostgresError(exception));
   }
@@ -556,7 +606,9 @@ Result<SeedStatusDto> PostgresSeedRunRepository::latestStatus() {
     }
     const auto run_id = SeedRunId::parse(latest.one_field().as<std::string>()).value();
     const auto rows = transaction.exec(kSeedStatusQuery, pqxx::params{run_id.value});
-    return seedStatusFromRow(rows.one_row());
+    auto status = seedStatusFromRow(rows.one_row());
+    populateSeedStatusDetails(transaction, status);
+    return status;
   } catch (const std::exception& exception) {
     return tl::make_unexpected(mapPostgresError(exception));
   }

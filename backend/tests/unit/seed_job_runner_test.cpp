@@ -75,6 +75,12 @@ class RunnerSeedRepository final : public SeedRunRepository {
         .run_id = run_id,
         .run_state = state,
         .total = captured_assignments.size(),
+        .imported = 0,
+        .skipped = 0,
+        .failed = 0,
+        .current_profile = std::nullopt,
+        .current_article = std::nullopt,
+        .errors = {},
     };
     for (const auto& [assignment_id, update] : item_updates) {
       (void)assignment_id;
@@ -94,6 +100,12 @@ class RunnerSeedRepository final : public SeedRunRepository {
         .run_id = latest_run,
         .run_state = state,
         .total = captured_assignments.size(),
+        .imported = 0,
+        .skipped = 0,
+        .failed = 0,
+        .current_profile = std::nullopt,
+        .current_article = std::nullopt,
+        .errors = {},
     };
     for (const auto& [assignment_id, update] : item_updates) {
       (void)assignment_id;

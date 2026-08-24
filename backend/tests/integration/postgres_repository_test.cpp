@@ -528,6 +528,49 @@ TEST_CASE_METHOD(PostgresFixture, "seed status derives persisted outcomes and ex
   REQUIRE(failed["error_detail"].as<std::string>() == "upstream timed out");
 }
 
+TEST_CASE_METHOD(PostgresFixture, "seed status reloads the current item and durable failures",
+                 "[postgres_repository]") {
+  installSchemaAndRoster();
+  const auto manifest = babel::ProfileManifest::seedAssignments();
+  const std::vector<babel::SeedAssignment> assignments{manifest.at(0), manifest.at(1)};
+  const auto run = seed_runs_.createRun("manifest-v1", assignments).value();
+
+  REQUIRE(seed_runs_
+              .recordItemState(run, assignments.at(0).id,
+                               babel::SeedItemUpdate{
+                                   .state = babel::SeedItemState::resolving,
+                                   .attempt_count = 1,
+                                   .resolved_page_id = std::nullopt,
+                                   .babel_id = std::nullopt,
+                                   .error = std::nullopt,
+                               })
+              .has_value());
+  REQUIRE(seed_runs_
+              .recordItemState(run, assignments.at(1).id,
+                               babel::SeedItemUpdate{
+                                   .state = babel::SeedItemState::failed,
+                                   .attempt_count = 3,
+                                   .resolved_page_id = std::nullopt,
+                                   .babel_id = std::nullopt,
+                                   .error = babel::ApplicationError{
+                                       .code = babel::ErrorCode::wikipedia_unavailable,
+                                       .message = "upstream unavailable <retry>",
+                                   },
+                               })
+              .has_value());
+
+  babel::PostgresSeedRunRepository reloaded(database_);
+  const auto status = reloaded.status(run);
+  REQUIRE(status.has_value());
+  REQUIRE(status->current_profile ==
+          babel::ProfileManifest::creators().at(1).display_name);
+  REQUIRE(status->current_article == assignments.at(0).declared_title);
+  REQUIRE(status->errors.size() == 1);
+  CHECK(status->errors.front().article == assignments.at(1).declared_title);
+  CHECK(status->errors.front().code == babel::ErrorCode::wikipedia_unavailable);
+  CHECK(status->errors.front().message == "upstream unavailable <retry>");
+}
+
 TEST_CASE_METHOD(PostgresFixture, "seed item database constraints reject invalid outcomes",
                  "[postgres_repository]") {
   installSchemaAndRoster();

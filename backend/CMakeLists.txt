@@ -28,6 +28,7 @@ babel_enable_warnings(babel_application)
 
 file(GLOB_RECURSE BABEL_BACKEND_SOURCES CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
+list(FILTER BABEL_BACKEND_SOURCES EXCLUDE REGEX "/main\\.cpp$")
 file(GLOB_RECURSE BABEL_TEST_SOURCES CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp")
 
@@ -53,6 +54,15 @@ else()
     nlohmann_json::nlohmann_json)
 endif()
 babel_enable_warnings(babel_backend)
+
+add_executable(babel_backend_cli "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp")
+set_target_properties(babel_backend_cli PROPERTIES OUTPUT_NAME babel_backend)
+target_link_libraries(babel_backend_cli PRIVATE babel_backend)
+babel_enable_warnings(babel_backend_cli)
+
+target_compile_definitions(babel_backend PRIVATE
+  BABEL_MIGRATION_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/migrations"
+  BABEL_ADMIN_ASSET_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/admin")
 
 if(BUILD_TESTING)
   add_custom_target(babel_tests ALL)

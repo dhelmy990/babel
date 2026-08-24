@@ -100,6 +100,12 @@ class RecordingSeedRepository final : public SeedRunRepository {
         .run_id = run_id,
         .run_state = run_state,
         .total = snapshot.size(),
+        .imported = 0,
+        .skipped = 0,
+        .failed = 0,
+        .current_profile = std::nullopt,
+        .current_article = std::nullopt,
+        .errors = {},
     };
     for (const auto& assignment : snapshot) {
       auto found = transitions.rend();
