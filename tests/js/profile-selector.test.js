@@ -1,5 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
 
 const {
   applyProfileGraph,
@@ -228,4 +231,74 @@ test('backend timeout remains active while the JSON body is being read', async (
   await new Promise((resolve) => setImmediate(resolve));
   scheduled();
   await assert.rejects(result, { message: 'Backend request timed out' });
+});
+
+test('preload exposes only read-only profile IPC methods', async () => {
+  const preloadPath = path.join(__dirname, '../../preload.js');
+  const source = fs.readFileSync(preloadPath, 'utf8');
+  const invocations = [];
+  let exposed;
+
+  vm.runInNewContext(source, {
+    require(moduleName) {
+      assert.equal(moduleName, 'electron');
+      return {
+        contextBridge: {
+          exposeInMainWorld(name, api) {
+            assert.equal(name, 'electronAPI');
+            exposed = api;
+          },
+        },
+        ipcRenderer: {
+          invoke(channel, ...args) {
+            invocations.push([channel, ...args]);
+            return Promise.resolve({ success: true });
+          },
+        },
+      };
+    },
+  });
+
+  assert.deepEqual(Object.keys(exposed).sort(), [
+    'listProfiles',
+    'loadProfileGraph',
+  ]);
+  await exposed.listProfiles();
+  await exposed.loadProfileGraph('profile-id');
+  assert.deepEqual(invocations, [
+    ['profiles:list'],
+    ['profiles:graph', 'profile-id'],
+  ]);
+  assert.equal(exposed.save, undefined);
+  assert.equal(exposed.saveFile, undefined);
+});
+
+test('renderer does not call legacy Electron APIs removed from preload', () => {
+  const rendererFiles = [
+    '../../js/app.js',
+    '../../js/editor.js',
+    '../../js/persistence.js',
+    '../../js/ui.js',
+  ];
+  const forbiddenMethods = [
+    'save',
+    'load',
+    'exportJSON',
+    'importJSON',
+    'openFile',
+    'checkFileExists',
+    'locateFile',
+    'saveFile',
+  ];
+
+  for (const relativePath of rendererFiles) {
+    const source = fs.readFileSync(path.join(__dirname, relativePath), 'utf8');
+    for (const method of forbiddenMethods) {
+      assert.doesNotMatch(
+        source,
+        new RegExp(`electronAPI\\?*\\.${method}\\b`),
+        `${relativePath} must not call electronAPI.${method}`,
+      );
+    }
+  }
 });
