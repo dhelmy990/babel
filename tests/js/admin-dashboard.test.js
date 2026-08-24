@@ -16,7 +16,6 @@ test('unseeded state offers the initial action', () => {
     disabled: false,
     percent: 0,
     summary: 'No Wikipedia Babels imported',
-    retryCount: 80,
   });
 });
 
@@ -28,7 +27,6 @@ test('partial completion offers retry and preserves errors', () => {
   assert.equal(model.label, 'Retry 3 missing');
   assert.equal(model.disabled, false);
   assert.equal(model.percent, 96);
-  assert.equal(model.retryCount, 3);
 });
 
 test('queued and running states are the only disabled actions', () => {

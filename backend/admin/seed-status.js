@@ -52,7 +52,6 @@
       disabled,
       percent,
       summary: 'No Wikipedia Babels imported',
-      retryCount,
     };
 
     switch (state) {
