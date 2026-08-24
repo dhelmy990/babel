@@ -9,6 +9,7 @@
     "schema_version": {"const": 1},
     "sources": {
       "type": "array",
+      "minItems": 1,
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -23,7 +24,43 @@
         }
       }
     },
-    "artifacts": {"type": "object", "additionalProperties": {"type": "object", "required": ["sha256", "size"], "properties": {"sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "size": {"type": "integer", "minimum": 0}}}},
-    "reports": {"type": "object", "required": ["row_counts", "match_rate", "exclusion_counts", "text_statistics", "vector_statistics"], "properties": {"row_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}}, "match_rate": {"type": "number", "minimum": 0, "maximum": 1}, "exclusion_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}}, "text_statistics": {"type": "object"}, "vector_statistics": {"type": "object"}}}
+    "artifacts": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sha256", "size"],
+        "properties": {
+          "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+          "size": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "reports": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["row_counts", "match_rate", "exclusion_counts", "text_statistics", "vector_statistics"],
+      "properties": {
+        "row_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+        "match_rate": {"type": "number", "minimum": 0, "maximum": 1},
+        "exclusion_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+        "text_statistics": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mean_length"],
+          "properties": {"mean_length": {"type": "number", "minimum": 0}}
+        },
+        "vector_statistics": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["dimension", "mean_norm"],
+          "properties": {
+            "dimension": {"const": 100},
+            "mean_norm": {"type": "number", "minimum": 0}
+          }
+        }
+      }
+    }
   }
 }

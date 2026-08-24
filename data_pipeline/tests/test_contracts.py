@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import copy
 import json
+import os
+import shutil
 import subprocess
 import sys
-import zipfile
 from pathlib import Path
 
 import pytest
@@ -13,10 +15,11 @@ from jsonschema import ValidationError
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT / "data_pipeline" / "src"))
 
-from babel_data.contracts import load_schema, validate_document  # noqa: E402
+from babel_data.contracts import UnknownSchema, load_schema, validate_document  # noqa: E402
 
 
 FIXTURE = REPOSITORY_ROOT / "fixtures" / "distillation" / "debug-examples.jsonl"
+BUILD_REQUIREMENTS = ("setuptools==75.8.0", "wheel==0.45.1")
 
 
 def read_jsonl(path: Path) -> list[dict[str, object]]:
@@ -36,6 +39,22 @@ def test_schema_loader_is_independent_of_current_working_directory(
     schema = load_schema("distillation-example-v1")
 
     assert schema["$id"].endswith("distillation-example-v1.json")
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["unknown-v1", "provenance", "../schemas/provenance-v1", "../../etc/passwd"],
+)
+def test_schema_loader_rejects_unknown_and_unversioned_names(name: str) -> None:
+    with pytest.raises(UnknownSchema):
+        load_schema(name)
+
+
+def test_schema_loader_does_not_return_cached_mutable_state() -> None:
+    schema = load_schema("provenance-v1")
+    schema["title"] = "caller mutation"
+
+    assert load_schema("provenance-v1")["title"] == "Distillation provenance v1"
 
 
 @pytest.mark.parametrize(
@@ -144,17 +163,125 @@ def test_provenance_contract_validates_source_and_report_identity() -> None:
         validate_document("provenance-v1", provenance)
 
 
-def test_installed_wheel_contains_schema_resources(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda value: value.update(sources=[]),
+        lambda value: value.update(artifacts={}),
+        lambda value: value["artifacts"]["shard"].update(unplanned=True),
+        lambda value: value["reports"].update(unplanned=True),
+        lambda value: value["reports"]["text_statistics"].update(unplanned=True),
+        lambda value: value["reports"]["vector_statistics"].update(unplanned=True),
+    ],
+)
+def test_provenance_rejects_missing_identity_and_unplanned_nested_fields(
+    mutation: object,
+) -> None:
+    provenance = {
+        "schema_version": 1,
+        "sources": [{
+            "filename": "vectors.bin",
+            "url": "https://example.test/vectors.bin",
+            "size": 12,
+            "md5": "a" * 32,
+            "sha1": "b" * 40,
+            "downloaded_at": "2016-10-01",
+        }],
+        "artifacts": {"shard": {"sha256": "c" * 64, "size": 12}},
+        "reports": {
+            "row_counts": {"input": 2, "matched": 1},
+            "match_rate": 0.5,
+            "exclusion_counts": {"unmatched": 1},
+            "text_statistics": {"mean_length": 10.0},
+            "vector_statistics": {"dimension": 100, "mean_norm": 1.0},
+        },
+    }
+    invalid = copy.deepcopy(provenance)
+    mutation(invalid)  # type: ignore[operator]
+
+    with pytest.raises(ValidationError):
+        validate_document("provenance-v1", invalid)
+
+
+def test_installed_data_wheel_imports_and_validates_outside_repository(tmp_path: Path) -> None:
+    source = REPOSITORY_ROOT / "data_pipeline"
+    assert not (source / "build").exists()
+    copied_source = tmp_path / "data_pipeline"
+    shutil.copytree(
+        source,
+        copied_source,
+        ignore=shutil.ignore_patterns(
+            "build", "dist", "*.egg-info", "__pycache__", ".pytest_cache"
+        ),
+    )
+    builder = tmp_path / "builder"
+    subprocess.run([sys.executable, "-m", "venv", str(builder)], check=True)
+    builder_python = builder / "bin" / "python"
+    subprocess.run(
+        [builder_python, "-m", "pip", "install", *BUILD_REQUIREMENTS],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
     wheel_directory = tmp_path / "wheel"
     subprocess.run(
-        [sys.executable, "-m", "pip", "wheel", "--no-deps", "--wheel-dir", str(wheel_directory), str(REPOSITORY_ROOT / "data_pipeline")],
+        [
+            builder_python,
+            "-m",
+            "pip",
+            "wheel",
+            "--no-build-isolation",
+            "--no-deps",
+            "--wheel-dir",
+            str(wheel_directory),
+            str(copied_source),
+        ],
         check=True,
         capture_output=True,
         text=True,
     )
     wheel = next(wheel_directory.glob("babel_data-*.whl"))
-    with zipfile.ZipFile(wheel) as archive:
-        assert "babel_data/schemas/distillation-example-v1.json" in archive.namelist()
+    installed = tmp_path / "installed"
+    subprocess.run(
+        [
+            builder_python,
+            "-m",
+            "pip",
+            "install",
+            "--no-deps",
+            "--target",
+            str(installed),
+            str(wheel),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    outside_repository = tmp_path / "outside"
+    outside_repository.mkdir()
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(installed)
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import babel_data; "
+                "schema = babel_data.load_schema('distillation-example-v1'); "
+                "assert schema['title'] == 'Distillation example v1'; "
+                "babel_data.validate_document('dataset-readiness-v1', "
+                "{'state': 'building', 'schema_version': 1, 'teacher_dimension': 100, "
+                "'available_examples': 0, 'verified_shards': [], 'source_checksums': {}, "
+                "'remote_verified': False, 'remote_commit_sha': None})"
+            ),
+        ],
+        cwd=outside_repository,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert not (source / "build").exists()
 
 
 def test_packaged_schemas_exactly_match_canonical_contracts() -> None:

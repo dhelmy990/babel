@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools==75.8.0", "wheel==0.45.1"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,12 +8,16 @@ version = "0.1.0"
 description = "Babel distillation data acquisition and validation"
 requires-python = ">=3.10,<3.13"
 dependencies = [
-  "jsonschema==4.23.0",
+  "jsonschema[format-nongpl]==4.23.0",
   "pyarrow==17.0.0",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest==8.3.4"]
+dev = [
+  "pytest==8.3.4",
+  "setuptools==75.8.0",
+  "wheel==0.45.1",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

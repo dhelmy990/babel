@@ -5,14 +5,33 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Mapping
-from typing import Any
+from copy import deepcopy
+from functools import cache
 from importlib.resources import files
+from typing import Any
 
 from jsonschema import Draft202012Validator, FormatChecker, validators
 
 
+_SCHEMA_NAMES = frozenset(
+    {
+        "dataset-readiness-v1",
+        "distillation-example-v1",
+        "provenance-v1",
+    }
+)
+
+
+class UnknownSchema(ValueError):
+    """Raised when a caller requests a schema outside the public registry."""
+
+
 def _is_finite_json_number(checker: Any, instance: object) -> bool:
-    return isinstance(instance, (int, float)) and not isinstance(instance, bool) and math.isfinite(instance)
+    return (
+        isinstance(instance, (int, float))
+        and not isinstance(instance, bool)
+        and math.isfinite(instance)
+    )
 
 
 _FiniteNumberValidator = validators.extend(
@@ -21,11 +40,34 @@ _FiniteNumberValidator = validators.extend(
 )
 
 
+def _require_known_schema(name: str) -> None:
+    if not isinstance(name, str) or name not in _SCHEMA_NAMES:
+        raise UnknownSchema(f"unknown schema: {name!r}")
+
+
+@cache
+def _load_schema(name: str) -> dict[str, Any]:
+    _require_known_schema(name)
+    path = files("babel_data").joinpath("schemas", f"{name}.json")
+    with path.open(encoding="utf-8") as schema_file:
+        schema = json.load(schema_file)
+    Draft202012Validator.check_schema(schema)
+    return schema
+
+
+@cache
+def _validator(name: str) -> Draft202012Validator:
+    _require_known_schema(name)
+    return _FiniteNumberValidator(
+        _load_schema(name),
+        format_checker=FormatChecker(),
+    )
+
+
 def load_schema(name: str) -> dict:
     """Load a checked-in JSON Schema by its versioned contract name."""
-    path = files("babel_data").joinpath("schemas").joinpath(f"{name}.json")
-    with path.open(encoding="utf-8") as schema_file:
-        return json.load(schema_file)
+    _require_known_schema(name)
+    return deepcopy(_load_schema(name))
 
 
 def validate_document(schema_name: str, value: Mapping[str, object]) -> None:
@@ -34,4 +76,4 @@ def validate_document(schema_name: str, value: Mapping[str, object]) -> None:
     JSON permits neither NaN nor infinities; the custom number type enforces
     that rule in addition to the JSON Schema document constraints.
     """
-    _FiniteNumberValidator(load_schema(schema_name), format_checker=FormatChecker()).validate(dict(value))
+    _validator(schema_name).validate(dict(value))
