@@ -1,7 +1,10 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdint>
+#include <filesystem>
 #include <functional>
+#include <fstream>
+#include <iterator>
 #include <optional>
 #include <span>
 #include <string>
@@ -46,6 +49,18 @@ TEST_CASE("a pending seed item update defaults its attempt count to zero") {
   };
 
   CHECK(update.attempt_count == 0);
+}
+
+TEST_CASE("seed item migration constrains attempts by state") {
+  const auto migration_path = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
+                              "migrations/002_seed_jobs.sql";
+  std::ifstream migration_file(migration_path);
+  REQUIRE(migration_file.good());
+
+  const std::string migration{std::istreambuf_iterator<char>{migration_file}, {}};
+  CHECK(migration.find("CONSTRAINT seed_run_items_attempt_count_state_check") != std::string::npos);
+  CHECK(migration.find("state IN ('pending', 'skipped') AND attempt_count = 0") != std::string::npos);
+  CHECK(migration.find("state IN ('resolving', 'importing', 'imported', 'failed') AND attempt_count > 0") != std::string::npos);
 }
 
 TEST_CASE("an empty personal profile graph is a successful result") {

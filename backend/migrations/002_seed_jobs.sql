@@ -26,6 +26,11 @@ CREATE TABLE seed_run_items (
   started_at timestamptz,
   finished_at timestamptz,
   PRIMARY KEY (seed_run_id, seed_assignment_id),
+  CONSTRAINT seed_run_items_attempt_count_state_check
+    CHECK (
+      (state IN ('pending', 'skipped') AND attempt_count = 0) OR
+      (state IN ('resolving', 'importing', 'imported', 'failed') AND attempt_count > 0)
+    ),
   CONSTRAINT seed_run_items_resolved_page_check
     CHECK (state NOT IN ('importing', 'imported') OR resolved_page_id IS NOT NULL),
   CONSTRAINT seed_run_items_imported_babel_check
