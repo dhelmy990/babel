@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import importlib.metadata
 import json
 import os
 import shutil
@@ -238,19 +239,16 @@ def test_installed_data_wheel_imports_and_validates_outside_repository(tmp_path:
             "build", "dist", "*.egg-info", "__pycache__", ".pytest_cache"
         ),
     )
-    builder = tmp_path / "builder"
-    subprocess.run([sys.executable, "-m", "venv", str(builder)], check=True)
-    builder_python = builder / "bin" / "python"
-    subprocess.run(
-        [builder_python, "-m", "pip", "install", *BUILD_REQUIREMENTS],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    for requirement in BUILD_REQUIREMENTS:
+        package, expected_version = requirement.split("==")
+        assert importlib.metadata.version(package) == expected_version
+    environment = os.environ.copy()
+    environment["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
+    environment["PIP_NO_INDEX"] = "1"
     wheel_directory = tmp_path / "wheel"
     subprocess.run(
         [
-            builder_python,
+            sys.executable,
             "-m",
             "pip",
             "wheel",
@@ -260,6 +258,7 @@ def test_installed_data_wheel_imports_and_validates_outside_repository(tmp_path:
             str(wheel_directory),
             str(copied_source),
         ],
+        env=environment,
         check=True,
         capture_output=True,
         text=True,
@@ -268,7 +267,7 @@ def test_installed_data_wheel_imports_and_validates_outside_repository(tmp_path:
     installed = tmp_path / "installed"
     subprocess.run(
         [
-            builder_python,
+            sys.executable,
             "-m",
             "pip",
             "install",
@@ -277,13 +276,13 @@ def test_installed_data_wheel_imports_and_validates_outside_repository(tmp_path:
             str(installed),
             str(wheel),
         ],
+        env=environment,
         check=True,
         capture_output=True,
         text=True,
     )
     outside_repository = tmp_path / "outside"
     outside_repository.mkdir()
-    environment = os.environ.copy()
     environment["PYTHONPATH"] = str(installed)
     subprocess.run(
         [

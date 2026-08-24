@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.metadata
 import os
 import shutil
 import subprocess
@@ -81,7 +82,10 @@ def test_training_config_accepts_valid_overrides() -> None:
         {"lora_targets": []},
         {"lora_targets": ()},
         {"lora_targets": ("q_proj", "q_proj")},
+        {"lora_targets": ("q_proj", "Q_PROJ")},
         {"lora_targets": (" ",)},
+        {"lora_targets": (" q_proj",)},
+        {"lora_targets": ("q_proj ",)},
         {"lora_targets": ("q_proj", 1)},
         {"model_id": ""},
         {"model_id": "  "},
@@ -107,19 +111,16 @@ def test_installed_training_wheel_imports_config_outside_repository(tmp_path: Pa
             "build", "dist", "*.egg-info", "__pycache__", ".pytest_cache"
         ),
     )
-    builder = tmp_path / "builder"
-    subprocess.run([sys.executable, "-m", "venv", str(builder)], check=True)
-    builder_python = builder / "bin" / "python"
-    subprocess.run(
-        [builder_python, "-m", "pip", "install", *BUILD_REQUIREMENTS],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    for requirement in BUILD_REQUIREMENTS:
+        package, expected_version = requirement.split("==")
+        assert importlib.metadata.version(package) == expected_version
+    environment = os.environ.copy()
+    environment["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
+    environment["PIP_NO_INDEX"] = "1"
     wheel_directory = tmp_path / "wheel"
     subprocess.run(
         [
-            builder_python,
+            sys.executable,
             "-m",
             "pip",
             "wheel",
@@ -129,6 +130,7 @@ def test_installed_training_wheel_imports_config_outside_repository(tmp_path: Pa
             str(wheel_directory),
             str(copied_source),
         ],
+        env=environment,
         check=True,
         capture_output=True,
         text=True,
@@ -137,7 +139,7 @@ def test_installed_training_wheel_imports_config_outside_repository(tmp_path: Pa
     installed = tmp_path / "installed"
     subprocess.run(
         [
-            builder_python,
+            sys.executable,
             "-m",
             "pip",
             "install",
@@ -146,13 +148,13 @@ def test_installed_training_wheel_imports_config_outside_repository(tmp_path: Pa
             str(installed),
             str(wheel),
         ],
+        env=environment,
         check=True,
         capture_output=True,
         text=True,
     )
     outside_repository = tmp_path / "outside"
     outside_repository.mkdir()
-    environment = os.environ.copy()
     environment["PYTHONPATH"] = str(installed)
     subprocess.run(
         [

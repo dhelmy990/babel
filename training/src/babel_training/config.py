@@ -48,12 +48,17 @@ class DistillationConfig:
             not isinstance(self.lora_targets, tuple)
             or not self.lora_targets
             or any(
-                not isinstance(target, str) or not target.strip()
+                not isinstance(target, str)
+                or not target
+                or target != target.strip()
                 for target in self.lora_targets
             )
-            or len(set(self.lora_targets)) != len(self.lora_targets)
+            or len({target.casefold() for target in self.lora_targets})
+            != len(self.lora_targets)
         ):
-            raise ValueError("lora_targets must be unique, nonblank tuple entries")
+            raise ValueError(
+                "lora_targets must be unique, unpadded, nonblank tuple entries"
+            )
         if not isinstance(self.model_id, str) or not self.model_id.strip():
             raise ValueError("model_id must be nonblank")
         if not isinstance(self.model_revision, str) or not re.fullmatch(
