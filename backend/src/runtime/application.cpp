@@ -179,6 +179,9 @@ Application::Application(RuntimeConfig config) : config_(std::move(config)) {}
 
 Result<void> Application::migrate() {
   PostgresDatabase database(config_.database_url);
+  auto instance_lease = BackendInstanceLease::acquire(database);
+  if (!instance_lease) return tl::make_unexpected(instance_lease.error());
+
   MigrationRunner migrations(database, config_.migration_directory);
   auto migrated = migrations.run();
   if (!migrated) return tl::make_unexpected(migrated.error());
@@ -225,10 +228,13 @@ Result<void> Application::verifySchemaReady() {
 
 Result<LegacyMigrationResult> Application::migratePersonal(
     const std::filesystem::path& source) {
+  PostgresDatabase database(config_.database_url);
+  auto instance_lease = BackendInstanceLease::acquire(database);
+  if (!instance_lease) return tl::make_unexpected(instance_lease.error());
+
   auto ready = verifySchemaReady();
   if (!ready) return tl::make_unexpected(ready.error());
 
-  PostgresDatabase database(config_.database_url);
   PostgresLegacyMigrationRepository migrations(database);
   LibxmlHtmlSanitizer sanitizer;
   const auto personal = ProfileManifest::creators().front().id;
@@ -237,12 +243,12 @@ Result<LegacyMigrationResult> Application::migratePersonal(
 }
 
 Result<void> Application::serve() {
-  auto ready = verifySchemaReady();
-  if (!ready) return tl::make_unexpected(ready.error());
-
   PostgresDatabase database(config_.database_url);
   auto instance_lease = BackendInstanceLease::acquire(database);
   if (!instance_lease) return tl::make_unexpected(instance_lease.error());
+
+  auto ready = verifySchemaReady();
+  if (!ready) return tl::make_unexpected(ready.error());
 
   PostgresCreatorRepository creators(database);
   PostgresGraphRepository graphs(database);

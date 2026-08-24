@@ -651,6 +651,49 @@ TEST_CASE_METHOD(PostgresFixture, "a second backend lease cannot mutate the acti
   REQUIRE(seed_runs_.status(active_run)->run_state == babel::SeedRunState::interrupted);
 }
 
+TEST_CASE_METHOD(PostgresFixture, "serve rejects a second instance before schema access",
+                 "[postgres_repository]") {
+  auto owner = babel::BackendInstanceLease::acquire(database_);
+  REQUIRE(owner.has_value());
+
+  babel::RuntimeConfig config;
+  config.database_url = "postgresql://babel:babel-local-dev@127.0.0.1:1/unavailable";
+  babel::Application application(std::move(config));
+  const auto served = application.serve();
+
+  REQUIRE_FALSE(served.has_value());
+  REQUIRE(served.error().code == babel::ErrorCode::conflict);
+}
+
+TEST_CASE_METHOD(PostgresFixture, "migrate rejects a second instance before database access",
+                 "[postgres_repository]") {
+  auto owner = babel::BackendInstanceLease::acquire(database_);
+  REQUIRE(owner.has_value());
+
+  babel::RuntimeConfig config;
+  config.database_url = "postgresql://babel:babel-local-dev@127.0.0.1:1/unavailable";
+  babel::Application application(std::move(config));
+  const auto migrated = application.migrate();
+
+  REQUIRE_FALSE(migrated.has_value());
+  REQUIRE(migrated.error().code == babel::ErrorCode::conflict);
+}
+
+TEST_CASE_METHOD(PostgresFixture,
+                 "Personal migration rejects a second instance before database access",
+                 "[postgres_repository]") {
+  auto owner = babel::BackendInstanceLease::acquire(database_);
+  REQUIRE(owner.has_value());
+
+  babel::RuntimeConfig config;
+  config.database_url = "postgresql://babel:babel-local-dev@127.0.0.1:1/unavailable";
+  babel::Application application(std::move(config));
+  const auto migrated = application.migratePersonal("unreachable-source.json");
+
+  REQUIRE_FALSE(migrated.has_value());
+  REQUIRE(migrated.error().code == babel::ErrorCode::conflict);
+}
+
 TEST_CASE_METHOD(PostgresFixture, "legacy Personal graph and digest commit atomically",
                  "[postgres_repository]") {
   installSchemaAndRoster();
