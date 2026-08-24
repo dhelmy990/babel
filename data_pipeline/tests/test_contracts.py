@@ -93,7 +93,7 @@ def test_building_readiness_can_defer_remote_commit() -> None:
 
 @pytest.mark.parametrize(
     "field,value",
-    [("verified_shards", []), ("remote_verified", False), ("remote_commit_sha", None)],
+    [("verified_shards", []), ("source_checksums", {}), ("remote_verified", False), ("remote_commit_sha", None)],
 )
 def test_pilot_ready_requires_published_evidence(field: str, value: object) -> None:
     readiness = json.loads(

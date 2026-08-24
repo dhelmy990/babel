@@ -45,7 +45,7 @@
     "else": {"properties": {"remote_commit_sha": {"type": "null"}}}
   }, {
     "if": {"properties": {"state": {"const": "pilot_ready"}}},
-    "then": {"properties": {"available_examples": {"minimum": 1}, "verified_shards": {"minItems": 1}, "remote_verified": {"const": true}, "remote_commit_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"}}}
+    "then": {"properties": {"available_examples": {"minimum": 1}, "verified_shards": {"minItems": 1}, "source_checksums": {"minProperties": 1}, "remote_verified": {"const": true}, "remote_commit_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"}}}
   }, {
     "if": {"properties": {"state": {"const": "complete"}}},
     "then": {
