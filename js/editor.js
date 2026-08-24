@@ -230,6 +230,7 @@ const Editor = {
     },
 
     handlePaste(e) {
+        if (State.isReadOnlyProfile) return;
         const text = e.clipboardData?.getData('text/plain')?.trim();
         if (text && this.isURL(text)) {
             e.preventDefault();
@@ -263,13 +264,14 @@ const Editor = {
     },
 
     embedLink(url) {
-        if (!url) return;
+        if (State.isReadOnlyProfile || !url) return;
         const range = this.editor.getSelection(true);
         this.editor.insertEmbed(range.index, 'url-link', { url }, 'user');
         this.editor.setSelection(range.index + 1);
     },
 
     async embedPDF(file) {
+        if (State.isReadOnlyProfile) return;
         const range = this.editor.getSelection(true);
         let filePath = file.path || '';
         if (!filePath && window.electronAPI) {
@@ -285,7 +287,7 @@ const Editor = {
     },
 
     async embedImage(file) {
-        if (!window.electronAPI) return;
+        if (State.isReadOnlyProfile || !window.electronAPI) return;
         const range = this.editor.getSelection(true);
         let filePath = file.path || '';
         if (!filePath) {
@@ -300,6 +302,7 @@ const Editor = {
     },
 
     showMissingFileModal(node) {
+        if (State.isReadOnlyProfile) return;
         this.hideMissingFileModal();
 
         const modal = document.createElement('div');
@@ -379,13 +382,15 @@ const Editor = {
     },
 
     triggerAutoSave() {
+        if (State.isReadOnlyProfile) return;
         if (this.autoSaveTimer) clearTimeout(this.autoSaveTimer);
         this.autoSaveTimer = setTimeout(() => this.saveCurrentBabel(), 2000);
     },
 
     saveCurrentBabel() {
+        if (State.isReadOnlyProfile) return false;
         const babel = State.editingBabel;
-        if (!babel) return;
+        if (!babel) return false;
 
         babel.title = UI.elements.editTitle.value.trim() || 'Untitled';
         babel.description = this.editor ? this.editor.root.innerHTML : '';
@@ -393,5 +398,6 @@ const Editor = {
         babel.color = State.selectedColor;
 
         Persistence.save();
+        return true;
     }
 };

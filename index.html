@@ -4,11 +4,38 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Babel - Knowledge Graph</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="styles.css">
     <!-- Quill Editor (Tiptap requires bundler, Quill works via CDN) -->
     <link href="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.snow.css" rel="stylesheet">
 </head>
 <body>
+    <main id="profile-selector" class="profile-selector" tabindex="-1" aria-labelledby="profile-selector-title">
+        <div class="profile-selector-grain" aria-hidden="true"></div>
+        <header class="profile-selector-header">
+            <span class="profile-selector-kicker">BABEL / CREATOR INDEX</span>
+            <h1 id="profile-selector-title">Whose orbit?</h1>
+            <p>Select a creator profile to enter its read-only knowledge graph.</p>
+        </header>
+        <div id="profile-wheel" class="profile-wheel" role="listbox" aria-label="Creator profiles" aria-busy="true">
+            <div class="profile-wheel-axis" aria-hidden="true"></div>
+            <div id="profile-wheel-list" class="profile-wheel-list"></div>
+        </div>
+        <div id="profile-selector-status" class="profile-selector-status" aria-live="polite">Connecting to the local archive...</div>
+        <button id="profile-selector-retry" class="profile-selector-retry" type="button" hidden>Retry connection</button>
+        <p class="profile-selector-keys"><kbd>↑</kbd><kbd>↓</kbd> choose <span>/</span> <kbd>Enter</kbd> open</p>
+    </main>
+
+    <header id="graph-profile-bar" class="graph-profile-bar" hidden>
+        <div>
+            <span class="graph-profile-label">Viewing</span>
+            <strong id="graph-profile-name"></strong>
+        </div>
+        <button id="switch-profile-btn" type="button">Switch profile</button>
+    </header>
+
     <div id="graph-container"></div>
 
     <!-- Hint text for empty state -->
@@ -121,6 +148,7 @@
     <script src="js/level-circles.js"></script>
     <script src="js/animation.js"></script>
     <script src="js/persistence.js"></script>
+    <script src="js/profile-selector.js"></script>
     <script src="js/editor.js"></script>
     <script src="js/ui.js"></script>
     <script src="js/app.js"></script>

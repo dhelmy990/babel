@@ -1,6 +1,10 @@
 const { app, BrowserWindow, ipcMain, dialog, screen, protocol, net, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const {
+    createBackendRequest,
+    profileGraphPath,
+} = require('./js/profile-selector.js');
 
 // GPU stability flags — must be set before app is ready.
 // These prevent the GPU sandbox from treating transient failures as fatal,
@@ -54,6 +58,38 @@ app.on('window-all-closed', () => {
 app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
 });
+
+// ── Backend profile queries ─────────────────────────────────────────────────
+
+let requestBackend;
+
+async function backendRequest(pathname) {
+    if (!requestBackend) {
+        requestBackend = createBackendRequest({
+            baseUrl: process.env.BABEL_BACKEND_URL || undefined,
+        });
+    }
+    return requestBackend(pathname);
+}
+
+async function profileResult(request) {
+    try {
+        return { success: true, data: await request() };
+    } catch (error) {
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : 'Backend request failed',
+        };
+    }
+}
+
+ipcMain.handle('profiles:list', () => profileResult(
+    () => backendRequest('/api/v1/profiles'),
+));
+
+ipcMain.handle('profiles:graph', (event, profileId) => profileResult(
+    () => backendRequest(profileGraphPath(profileId)),
+));
 
 // ── Persistence ──────────────────────────────────────────────────────────────
 
