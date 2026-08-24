@@ -594,7 +594,9 @@ TEST_CASE_METHOD(PostgresFixture, "legacy Personal graph and digest commit atomi
   };
   const std::string digest(64, 'a');
 
-  REQUIRE(legacy_migrations_.importPersonalGraph(digest, babels, edges).has_value());
+  const auto imported = legacy_migrations_.importPersonalGraph(digest, babels, edges);
+  REQUIRE(imported.has_value());
+  REQUIRE(*imported);
   REQUIRE(legacy_migrations_.digestExists(digest).value());
   REQUIRE(countRows("legacy_migrations") == 1);
   REQUIRE(countRows("babels") == 2);
@@ -602,6 +604,7 @@ TEST_CASE_METHOD(PostgresFixture, "legacy Personal graph and digest commit atomi
 
   const auto duplicate = legacy_migrations_.importPersonalGraph(digest, babels, edges);
   REQUIRE(duplicate.has_value());
+  REQUIRE_FALSE(*duplicate);
   REQUIRE(countRows("babels") == 2);
 }
 

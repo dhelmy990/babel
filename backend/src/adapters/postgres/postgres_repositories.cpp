@@ -595,7 +595,7 @@ Result<bool> PostgresLegacyMigrationRepository::digestExists(std::string_view sh
   }
 }
 
-Result<void> PostgresLegacyMigrationRepository::importPersonalGraph(
+Result<bool> PostgresLegacyMigrationRepository::importPersonalGraph(
     std::string_view sha256, std::span<const Babel> babels, std::span<const Edge> edges) {
   if (!validSha256(sha256)) {
     return invalidArgument("legacy source digest must be 64 lowercase hexadecimal characters");
@@ -613,22 +613,19 @@ Result<void> PostgresLegacyMigrationRepository::importPersonalGraph(
   try {
     auto connection = database_.connect();
     pqxx::work transaction(*connection);
-    const auto already_imported = transaction
-                                      .exec("SELECT EXISTS(SELECT 1 FROM legacy_migrations "
-                                            "WHERE source_sha256 = $1)",
-                                            pqxx::params{sha256})
-                                      .one_field()
-                                      .as<bool>();
-    if (already_imported) {
-      transaction.commit();
-      return {};
-    }
-    transaction.exec(R"(
+    const auto claimed = transaction.exec(R"(
         INSERT INTO legacy_migrations(
           source_sha256, creator_id, babel_count, edge_count
         ) VALUES ($1, $2, $3, $4)
+        ON CONFLICT (source_sha256) DO NOTHING
+        RETURNING source_sha256
       )",
-                     pqxx::params{sha256, kPersonalCreatorId, babels.size(), edges.size()});
+                                          pqxx::params{sha256, kPersonalCreatorId, babels.size(),
+                                                       edges.size()});
+    if (claimed.empty()) {
+      transaction.commit();
+      return false;
+    }
     for (const auto& babel : babels) {
       transaction.exec(R"(
           INSERT INTO babels(
@@ -648,12 +645,7 @@ Result<void> PostgresLegacyMigrationRepository::importPersonalGraph(
                                     edge.target_id.value});
     }
     transaction.commit();
-  } catch (const pqxx::unique_violation& exception) {
-    const auto raced_digest = digestExists(sha256);
-    if (raced_digest && raced_digest.value()) {
-      return {};
-    }
-    return tl::make_unexpected(mapPostgresError(exception));
+    return true;
   } catch (const pqxx::check_violation& exception) {
     return tl::make_unexpected(mapPostgresError(exception));
   } catch (const pqxx::foreign_key_violation& exception) {
@@ -661,7 +653,6 @@ Result<void> PostgresLegacyMigrationRepository::importPersonalGraph(
   } catch (const std::exception& exception) {
     return tl::make_unexpected(mapPostgresError(exception));
   }
-  return {};
 }
 
 }  // namespace babel

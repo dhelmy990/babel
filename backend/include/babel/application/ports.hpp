@@ -59,7 +59,9 @@ class LegacyMigrationRepository {
   virtual ~LegacyMigrationRepository() = default;
 
   virtual Result<bool> digestExists(std::string_view sha256) = 0;
-  virtual Result<void> importPersonalGraph(std::string_view sha256, std::span<const Babel>,
+  // True means this call claimed the digest and imported the graph; false is a repeated digest
+  // no-op, including a concurrent import that claimed it first.
+  virtual Result<bool> importPersonalGraph(std::string_view sha256, std::span<const Babel>,
                                            std::span<const Edge>) = 0;
 };
 

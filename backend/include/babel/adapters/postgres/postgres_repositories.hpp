@@ -65,7 +65,7 @@ class PostgresLegacyMigrationRepository final : public LegacyMigrationRepository
   explicit PostgresLegacyMigrationRepository(PostgresDatabase& database);
 
   Result<bool> digestExists(std::string_view sha256) override;
-  Result<void> importPersonalGraph(std::string_view sha256, std::span<const Babel> babels,
+  Result<bool> importPersonalGraph(std::string_view sha256, std::span<const Babel> babels,
                                    std::span<const Edge> edges) override;
 
  private:
