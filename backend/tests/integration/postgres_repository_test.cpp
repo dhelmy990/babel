@@ -1,9 +1,14 @@
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
+#include <memory>
 #include <optional>
 #include <random>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 #include <pqxx/pqxx>
@@ -46,6 +51,7 @@ class PostgresFixture {
   PostgresFixture()
       : base_url_(testDatabaseUrl()),
         schema_(testSchemaName()),
+        integration_lock_(acquireIntegrationLock(base_url_)),
         database_(schemaDatabaseUrl()),
         migration_runner_(database_),
         roster_installer_(database_),
@@ -107,6 +113,13 @@ class PostgresFixture {
   }
 
  protected:
+  static std::unique_ptr<pqxx::connection> acquireIntegrationLock(const std::string& url) {
+    auto connection = std::make_unique<pqxx::connection>(url);
+    pqxx::nontransaction transaction(*connection);
+    transaction.exec("SELECT pg_advisory_lock(621946339, 20260824)");
+    return connection;
+  }
+
   std::string schemaDatabaseUrl() const {
     const auto separator = base_url_.find('?') == std::string::npos ? '?' : '&';
     return base_url_ + separator + "options=-csearch_path%3D" + schema_;
@@ -124,6 +137,7 @@ class PostgresFixture {
 
   std::string base_url_;
   std::string schema_;
+  std::unique_ptr<pqxx::connection> integration_lock_;
   babel::PostgresDatabase database_;
   babel::MigrationRunner migration_runner_;
   babel::ProfileRosterInstaller roster_installer_;
@@ -282,6 +296,75 @@ TEST_CASE_METHOD(PostgresFixture, "seed assignments attach to existing Wikipedia
   REQUIRE(row["seed_assignment_id"].as<std::string>() == assignment.id.value);
   REQUIRE(row["declared_title"].as<std::string>() == assignment.declared_title);
   REQUIRE(seed_runs_.assignmentExists(assignment.id).value());
+
+  const auto other_assignment = babel::ProfileManifest::seedAssignments().at(1);
+  const auto conflict = wikipedia_babels_.attachSeedAssignment(
+      article.id, other_assignment.id, other_assignment.declared_title);
+  REQUIRE_FALSE(conflict.has_value());
+  REQUIRE(conflict.error().code == babel::ErrorCode::conflict);
+  const auto preserved = transaction
+                             .exec("SELECT seed_assignment_id, declared_title FROM babel_sources "
+                                   "WHERE babel_id = $1",
+                                   pqxx::params{article.id.value})
+                             .one_row();
+  REQUIRE(preserved["seed_assignment_id"].as<std::string>() == assignment.id.value);
+  REQUIRE(preserved["declared_title"].as<std::string>() == assignment.declared_title);
+  REQUIRE(seed_runs_.assignmentExists(assignment.id).value());
+  REQUIRE_FALSE(seed_runs_.assignmentExists(other_assignment.id).value());
+}
+
+TEST_CASE_METHOD(PostgresFixture, "graph loading uses one repeatable read snapshot",
+                 "[postgres_repository]") {
+  installSchemaAndRoster();
+  const auto owner = babel::ProfileManifest::creators().at(1).id;
+  const auto concurrent_babel = makeBabel(owner, "Concurrent graph insert");
+
+  pqxx::connection blocker_connection(schemaDatabaseUrl());
+  pqxx::work blocker(blocker_connection);
+  blocker.exec("LOCK TABLE babels IN ACCESS EXCLUSIVE MODE");
+
+  auto graph_future = std::async(std::launch::async, [&] { return profile_service_.loadGraph(owner); });
+  pqxx::connection observer(base_url_);
+  bool reader_is_blocked = false;
+  for (int attempt = 0; attempt < 100 && !reader_is_blocked; ++attempt) {
+    pqxx::read_transaction observation(observer);
+    reader_is_blocked = observation
+                            .exec(R"(
+                                SELECT EXISTS(
+                                  SELECT 1
+                                  FROM pg_locks locks
+                                  JOIN pg_class relations ON relations.oid = locks.relation
+                                  JOIN pg_namespace schemas ON schemas.oid = relations.relnamespace
+                                  WHERE schemas.nspname = $1
+                                    AND relations.relname = 'babels'
+                                    AND NOT locks.granted
+                                )
+                              )",
+                                  pqxx::params{schema_})
+                            .one_field()
+                            .as<bool>();
+    if (!reader_is_blocked) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+  }
+
+  if (reader_is_blocked) {
+    blocker.exec(R"(
+        INSERT INTO babels(id, owner_id, title, content_html, color, content_revision, content_hash)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+      )",
+                 pqxx::params{concurrent_babel.id.value, concurrent_babel.owner_id.value,
+                              concurrent_babel.title, concurrent_babel.content_html,
+                              concurrent_babel.color, concurrent_babel.content_revision,
+                              concurrent_babel.content_hash});
+  }
+  blocker.commit();
+  const auto graph = graph_future.get();
+
+  REQUIRE(reader_is_blocked);
+  REQUIRE(graph.has_value());
+  REQUIRE(graph->babels.empty());
+  REQUIRE(graph->edges.empty());
 }
 
 TEST_CASE_METHOD(PostgresFixture, "loading an absent profile returns not found",
@@ -599,6 +682,51 @@ TEST_CASE_METHOD(PostgresFixture, "roster maps stable metadata collisions to con
   REQUIRE(creators_.exists(conflicting.id).value() == false);
 }
 
+TEST_CASE_METHOD(PostgresFixture, "roster installation atomically swaps manifest identities",
+                 "[postgres_repository]") {
+  installSchemaAndRoster();
+  const auto original = babel::ProfileManifest::creators();
+  auto swapped = original;
+  std::swap(swapped.at(1).slug, swapped.at(2).slug);
+  std::swap(swapped.at(1).order, swapped.at(2).order);
+
+  REQUIRE(roster_installer_.install(swapped).has_value());
+  REQUIRE(creators_.get(swapped.at(1).id).value().slug == swapped.at(1).slug);
+  REQUIRE(creators_.get(swapped.at(1).id).value().order == swapped.at(1).order);
+  REQUIRE(creators_.get(swapped.at(2).id).value().slug == swapped.at(2).slug);
+  REQUIRE(creators_.get(swapped.at(2).id).value().order == swapped.at(2).order);
+
+  REQUIRE(roster_installer_.install(original).has_value());
+  REQUIRE(creators_.get(original.at(1).id).value().slug == original.at(1).slug);
+  REQUIRE(creators_.get(original.at(2).id).value().slug == original.at(2).slug);
+}
+
+TEST_CASE_METHOD(PostgresFixture, "roster staging avoids unknown temporary slug identities",
+                 "[postgres_repository]") {
+  installSchemaAndRoster();
+  const auto original = babel::ProfileManifest::creators();
+  const babel::Creator unknown{
+      .id = babel::CreatorId::v5("creator:temporary-slug-owner").value(),
+      .slug = "babel-stage-" + original.at(1).id.value,
+      .display_name = "Temporary Slug Owner",
+      .color = "#ABCDEF",
+      .kind = babel::CreatorKind::generated,
+      .order = 99,
+  };
+  const std::vector<babel::Creator> unknown_roster{unknown};
+  REQUIRE(roster_installer_.install(unknown_roster).has_value());
+
+  auto swapped = original;
+  std::swap(swapped.at(1).slug, swapped.at(2).slug);
+  std::swap(swapped.at(1).order, swapped.at(2).order);
+  const auto result = roster_installer_.install(swapped);
+
+  REQUIRE(result.has_value());
+  REQUIRE(creators_.get(unknown.id).value().slug == unknown.slug);
+  REQUIRE(creators_.get(swapped.at(1).id).value().slug == swapped.at(1).slug);
+  REQUIRE(creators_.get(swapped.at(2).id).value().slug == swapped.at(2).slug);
+}
+
 TEST_CASE_METHOD(PostgresFixture, "migrations are idempotent and track every version once",
                  "[postgres_repository]") {
   REQUIRE(migration_runner_.run().has_value());
@@ -634,6 +762,94 @@ TEST_CASE_METHOD(PostgresFixture, "migration discovery rejects duplicate numeric
   REQUIRE_FALSE(result.has_value());
   REQUIRE(result.error().code == babel::ErrorCode::internal);
   REQUIRE(result.error().message.find("duplicate migration version") != std::string::npos);
+}
+
+TEST_CASE_METHOD(PostgresFixture, "migration versions are canonical across filename aliases",
+                 "[postgres_repository]") {
+  const auto directory = std::filesystem::temp_directory_path() /
+                         ("babel-postgres-version-alias-test-" + schema_);
+  std::filesystem::create_directories(directory);
+  const auto migration_sql =
+      "CREATE TABLE canonical_migration_once(id integer); INSERT INTO canonical_migration_once "
+      "VALUES (1);";
+  std::ofstream(directory / "001_once.sql") << migration_sql;
+  babel::MigrationRunner runner(database_, directory);
+  const auto first = runner.run();
+  std::filesystem::rename(directory / "001_once.sql", directory / "1_once.sql");
+  const auto second = runner.run();
+  std::filesystem::remove_all(directory);
+
+  REQUIRE(first.has_value());
+  REQUIRE(second.has_value());
+  REQUIRE(countRows("canonical_migration_once") == 1);
+  pqxx::connection connection(schemaDatabaseUrl());
+  pqxx::read_transaction transaction(connection);
+  REQUIRE(transaction.exec("SELECT version FROM schema_migrations").one_field().as<std::string>() ==
+          "1");
+}
+
+TEST_CASE_METHOD(PostgresFixture, "concurrent migration runners apply each version once",
+                 "[postgres_repository]") {
+  const auto directory = std::filesystem::temp_directory_path() /
+                         ("babel-postgres-concurrent-migration-test-" + schema_);
+  std::filesystem::create_directories(directory);
+  std::ofstream(directory / "1_once.sql")
+      << "SELECT pg_sleep(0.2); CREATE TABLE concurrent_migration_once(id integer); "
+         "INSERT INTO concurrent_migration_once VALUES (1);";
+  babel::MigrationRunner first_runner(database_, directory);
+  babel::MigrationRunner second_runner(database_, directory);
+  std::promise<void> release_runners;
+  auto start = release_runners.get_future().share();
+  auto first = std::async(std::launch::async, [&] {
+    start.wait();
+    return first_runner.run();
+  });
+  auto second = std::async(std::launch::async, [&] {
+    start.wait();
+    return second_runner.run();
+  });
+  release_runners.set_value();
+  const auto first_result = first.get();
+  const auto second_result = second.get();
+  std::filesystem::remove_all(directory);
+
+  INFO((first_result ? "first runner succeeded" : first_result.error().message));
+  INFO((second_result ? "second runner succeeded" : second_result.error().message));
+  REQUIRE(first_result.has_value());
+  REQUIRE(second_result.has_value());
+  REQUIRE(countRows("concurrent_migration_once") == 1);
+  REQUIRE(countRows("schema_migrations") == 1);
+}
+
+TEST_CASE_METHOD(PostgresFixture, "migration filesystem failures return typed errors without throwing",
+                 "[postgres_repository]") {
+  const auto missing = std::filesystem::temp_directory_path() /
+                       ("babel-postgres-missing-migration-test-" + schema_);
+  babel::MigrationRunner missing_runner(database_, missing);
+  babel::Result<void> missing_result;
+  REQUIRE_NOTHROW(missing_result = missing_runner.run());
+  REQUIRE_FALSE(missing_result.has_value());
+  REQUIRE(missing_result.error().code == babel::ErrorCode::internal);
+
+  const auto unreadable = std::filesystem::temp_directory_path() /
+                          ("babel-postgres-unreadable-migration-test-" + schema_);
+  std::filesystem::create_directories(unreadable);
+  std::ofstream(unreadable / "1_unreadable.sql") << "SELECT 1;";
+  std::filesystem::permissions(unreadable, std::filesystem::perms::none);
+  babel::MigrationRunner unreadable_runner(database_, unreadable);
+  babel::Result<void> unreadable_result;
+  bool threw = false;
+  try {
+    unreadable_result = unreadable_runner.run();
+  } catch (...) {
+    threw = true;
+  }
+  std::filesystem::permissions(unreadable, std::filesystem::perms::owner_all);
+  std::filesystem::remove_all(unreadable);
+
+  REQUIRE_FALSE(threw);
+  REQUIRE_FALSE(unreadable_result.has_value());
+  REQUIRE(unreadable_result.error().code == babel::ErrorCode::internal);
 }
 
 TEST_CASE_METHOD(PostgresFixture, "migrations run numerically and stop after a rolled-back failure",

@@ -56,8 +56,15 @@ Result<std::vector<MigrationFile>> discoverMigrations(const std::filesystem::pat
 
     try {
       const auto numeric_version = std::stoull(match[1].str());
+      if (numeric_version == 0) {
+        return tl::make_unexpected(ApplicationError{
+            .code = ErrorCode::internal,
+            .message = "migration version must be positive: " + filename,
+        });
+      }
       const auto [position, inserted] = by_version.emplace(
-          numeric_version, MigrationFile{.version = match[1].str(), .path = entry.path()});
+          numeric_version,
+          MigrationFile{.version = std::to_string(numeric_version), .path = entry.path()});
       if (!inserted) {
         return tl::make_unexpected(ApplicationError{
             .code = ErrorCode::internal,
@@ -107,13 +114,18 @@ MigrationRunner::MigrationRunner(PostgresDatabase& database,
     : database_(database), migration_directory_(std::move(migration_directory)) {}
 
 Result<void> MigrationRunner::run() {
-  auto migrations = discoverMigrations(resolveMigrationDirectory(migration_directory_));
-  if (!migrations) {
-    return tl::make_unexpected(migrations.error());
-  }
-
   try {
     auto connection = database_.connect();
+    {
+      pqxx::nontransaction session(*connection);
+      session.exec("SELECT pg_advisory_lock(621946339, 3)");
+    }
+
+    auto migrations = discoverMigrations(resolveMigrationDirectory(migration_directory_));
+    if (!migrations) {
+      return tl::make_unexpected(migrations.error());
+    }
+
     {
       pqxx::work bootstrap(*connection);
       bootstrap.exec(R"(
@@ -128,7 +140,8 @@ Result<void> MigrationRunner::run() {
     for (const auto& migration : migrations.value()) {
       pqxx::work transaction(*connection);
       const auto already_applied = transaction.exec(
-          "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = $1)",
+          "SELECT EXISTS(SELECT 1 FROM schema_migrations "
+          "WHERE ltrim(version, '0') = $1)",
           pqxx::params{migration.version});
       if (already_applied.one_field().as<bool>()) {
         transaction.commit();

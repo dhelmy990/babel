@@ -211,7 +211,8 @@ PostgresGraphRepository::PostgresGraphRepository(PostgresDatabase& database)
 Result<ProfileGraphDto> PostgresGraphRepository::loadGraph(CreatorId creator_id) {
   try {
     auto connection = database_.connect();
-    pqxx::read_transaction transaction(*connection);
+    pqxx::transaction<pqxx::isolation_level::repeatable_read, pqxx::write_policy::read_only>
+        transaction(*connection);
     const auto creator_rows = transaction.exec(
         std::string{"SELECT "} + kCreatorColumns + " FROM creators WHERE id = $1",
         pqxx::params{creator_id.value});
@@ -344,10 +345,20 @@ Result<void> PostgresWikipediaBabelRepository::attachSeedAssignment(
         UPDATE babel_sources
         SET seed_assignment_id = $2, declared_title = $3
         WHERE babel_id = $1
+          AND (seed_assignment_id IS NULL OR seed_assignment_id = $2)
       )",
                                          pqxx::params{babel_id.value, assignment_id.value,
                                                       declared_title});
     if (result.affected_rows() == 0) {
+      const auto existing = transaction.exec(
+          "SELECT seed_assignment_id FROM babel_sources WHERE babel_id = $1",
+          pqxx::params{babel_id.value});
+      if (!existing.empty() && !existing.one_field().is_null()) {
+        return tl::make_unexpected(ApplicationError{
+            .code = ErrorCode::conflict,
+            .message = "Wikipedia source already belongs to another seed assignment",
+        });
+      }
       return tl::make_unexpected(ApplicationError{
           .code = ErrorCode::not_found,
           .message = "Wikipedia source not found for Babel: " + babel_id.value,
