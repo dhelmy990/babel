@@ -194,8 +194,10 @@
     async function start() {
       if (disposed || starting) return;
       starting = true;
+      activeAbort?.abort();
       lifecycleGeneration += 1;
       const startGeneration = lifecycleGeneration;
+      let actionError = null;
       const postAbortController = typeof root.AbortController === 'function' ? new root.AbortController() : null;
       activePostAbort = postAbortController;
       const postTimeout = setTimeoutImpl(() => postAbortController?.abort(), 10000);
@@ -207,12 +209,16 @@
           render(result.status);
         }
       } catch (error) {
-        if (!disposed && startGeneration === lifecycleGeneration) renderError(error.message);
+        if (!disposed && startGeneration === lifecycleGeneration) {
+          actionError = error.message;
+          renderError(actionError);
+        }
       } finally {
         clearTimeoutImpl(postTimeout);
         if (activePostAbort === postAbortController) activePostAbort = null;
         if (!disposed && startGeneration === lifecycleGeneration) {
           await refresh();
+          if (actionError) renderError(actionError);
         }
         if (!disposed && startGeneration === lifecycleGeneration) {
           starting = false;

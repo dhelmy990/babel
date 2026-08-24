@@ -201,7 +201,7 @@ test('a failed POST followed by a failed recovery GET re-enables the seed action
   await controller.start();
 
   assert.equal(documentRef.elements.get('seed-action').disabled, false);
-  assert.match(documentRef.elements.get('seed-status').textContent, /Unable to reach seed service/);
+  assert.match(documentRef.elements.get('seed-status').textContent, /Unable to start seed run/);
 });
 
 test('a slow poll GET is not superseded by the next interval tick', async () => {
@@ -316,4 +316,19 @@ test('a late POST response after stop cannot render or start polling', async () 
   await start;
   assert.equal(documentRef.elements.get('seed-status').textContent, '');
   assert.equal(intervals.length, 0);
+});
+
+test('a rejected POST remains visible after a successful not-started reconciliation', async () => {
+  const documentRef = fakeDocument();
+  const controller = dashboard.createDashboardController({
+    document: documentRef,
+    fetchImpl: async (_url, options = {}) => {
+      if (options.method === 'POST') {
+        return { ok: false, status: 403, json: async () => ({ error: { message: 'invalid admin nonce' } }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ state: 'not_started', total: 80 }) };
+    },
+  });
+  await controller.start();
+  assert.match(documentRef.elements.get('seed-status').textContent, /invalid admin nonce/);
 });
