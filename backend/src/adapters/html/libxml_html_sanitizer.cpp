@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cstddef>
 #include <memory>
+#include <new>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -14,14 +15,24 @@
 #include <libxml/HTMLparser.h>
 #include <libxml/HTMLtree.h>
 #include <libxml/tree.h>
+#include <libxml/uri.h>
 
 namespace babel {
 namespace {
 
 constexpr std::size_t kMaxInputBytes = 5U * 1024U * 1024U;
+constexpr std::size_t kMaxMarkupTokens = 50'000U;
+constexpr std::size_t kMaxDomNodes = 100'000U;
+constexpr std::size_t kMaxOutputBytes = 5U * 1024U * 1024U;
 
 using HtmlDoc = std::unique_ptr<xmlDoc, decltype(&xmlFreeDoc)>;
 using XmlBuffer = std::unique_ptr<xmlBuffer, decltype(&xmlBufferFree)>;
+
+struct XmlUriDeleter {
+  void operator()(xmlURI* value) const { xmlFreeURI(value); }
+};
+
+using XmlUri = std::unique_ptr<xmlURI, XmlUriDeleter>;
 
 struct XmlStringDeleter {
   void operator()(xmlChar* value) const { xmlFree(value); }
@@ -31,6 +42,10 @@ using XmlString = std::unique_ptr<xmlChar, XmlStringDeleter>;
 
 ApplicationError rejected(std::string message) {
   return ApplicationError{.code = ErrorCode::sanitizer_rejected, .message = std::move(message)};
+}
+
+ApplicationError internalFailure(std::string message) {
+  return ApplicationError{.code = ErrorCode::internal, .message = std::move(message)};
 }
 
 std::string lower(std::string_view value) {
@@ -158,12 +173,53 @@ bool hasUnsafeUrlCharacter(std::string_view value) {
   });
 }
 
-bool validHttpsUrl(std::string_view value) {
-  if (!value.starts_with("https://") || hasUnsafeUrlCharacter(value)) {
+std::optional<std::string> urlAuthority(std::string_view value) {
+  const auto scheme_end = value.find("://");
+  if (scheme_end == std::string_view::npos) {
+    return std::nullopt;
+  }
+  const auto authority_start = scheme_end + 3U;
+  const auto authority_end = value.find_first_of("/?#", authority_start);
+  const auto authority = value.substr(
+      authority_start,
+      authority_end == std::string_view::npos ? value.size() - authority_start
+                                              : authority_end - authority_start);
+  if (authority.empty()) {
+    return std::nullopt;
+  }
+  return lower(authority);
+}
+
+bool validHttpsUrl(std::string_view value, bool wikimedia_image = false) {
+  if (value.empty() || hasUnsafeUrlCharacter(value)) {
     return false;
   }
-  const auto authority = value.substr(std::string_view("https://").size());
-  return !authority.empty() && authority.front() != '/';
+
+  const std::string null_terminated(value);
+  xmlURI* parsed_raw = nullptr;
+  if (xmlParseURISafe(null_terminated.c_str(), &parsed_raw) != 0 || parsed_raw == nullptr) {
+    if (parsed_raw != nullptr) {
+      xmlFreeURI(parsed_raw);
+    }
+    return false;
+  }
+  XmlUri parsed(parsed_raw);
+  if (parsed->scheme == nullptr || lower(parsed->scheme) != "https" || parsed->server == nullptr ||
+      std::string_view(parsed->server).empty() || parsed->user != nullptr || parsed->opaque != nullptr) {
+    return false;
+  }
+
+  if (!wikimedia_image) {
+    return true;
+  }
+  const auto host = lower(parsed->server);
+  const bool expected_host =
+      host == "upload.wikimedia.org" || host == "commons.wikimedia.org";
+  const auto authority = urlAuthority(value);
+  if (!expected_host || !authority) {
+    return false;
+  }
+  return *authority == host || *authority == host + ":443";
 }
 
 std::optional<std::string> sanitizedUrl(std::string_view raw, bool image) {
@@ -185,7 +241,7 @@ std::optional<std::string> sanitizedUrl(std::string_view raw, bool image) {
     return std::nullopt;
   }
 
-  if (!validHttpsUrl(resolved)) {
+  if (!validHttpsUrl(resolved, image)) {
     return std::nullopt;
   }
   return resolved;
@@ -203,11 +259,47 @@ xmlNodePtr findBody(xmlNodePtr node) {
   return nullptr;
 }
 
-void appendSanitized(xmlNodePtr input, xmlNodePtr output_parent) {
+Result<void> validateNodeBudget(xmlNodePtr node, std::size_t& node_count) {
+  for (auto* current = node; current != nullptr; current = current->next) {
+    ++node_count;
+    if (node_count > kMaxDomNodes) {
+      return tl::make_unexpected(rejected("HTML DOM exceeds the sanitizer node limit"));
+    }
+    auto children = validateNodeBudget(current->children, node_count);
+    if (!children) {
+      return tl::make_unexpected(children.error());
+    }
+  }
+  return {};
+}
+
+Result<void> attachNode(xmlNodePtr parent, xmlNodePtr child) {
+  if (child == nullptr) {
+    return tl::make_unexpected(internalFailure("libxml2 could not allocate sanitized HTML"));
+  }
+  if (xmlAddChild(parent, child) == nullptr) {
+    xmlFreeNode(child);
+    return tl::make_unexpected(internalFailure("libxml2 could not attach sanitized HTML"));
+  }
+  return {};
+}
+
+Result<void> addProperty(xmlNodePtr node, const char* name, const std::string& value) {
+  if (xmlNewProp(node, BAD_CAST name, BAD_CAST value.c_str()) == nullptr) {
+    return tl::make_unexpected(
+        internalFailure("libxml2 could not allocate a sanitized HTML attribute"));
+  }
+  return {};
+}
+
+Result<void> appendSanitized(xmlNodePtr input, xmlNodePtr output_parent) {
   for (auto* current = input; current != nullptr; current = current->next) {
     if (current->type == XML_TEXT_NODE || current->type == XML_CDATA_SECTION_NODE) {
       if (current->content != nullptr) {
-        xmlAddChild(output_parent, xmlNewText(current->content));
+        auto attached = attachNode(output_parent, xmlNewText(current->content));
+        if (!attached) {
+          return tl::make_unexpected(attached.error());
+        }
       }
       continue;
     }
@@ -220,7 +312,10 @@ void appendSanitized(xmlNodePtr input, xmlNodePtr output_parent) {
       continue;
     }
     if (!allowedElement(name)) {
-      appendSanitized(current->children, output_parent);
+      auto children = appendSanitized(current->children, output_parent);
+      if (!children) {
+        return tl::make_unexpected(children.error());
+      }
       continue;
     }
 
@@ -242,88 +337,154 @@ void appendSanitized(xmlNodePtr input, xmlNodePtr output_parent) {
     }
 
     auto* output = xmlNewNode(nullptr, BAD_CAST name.c_str());
-    if (output == nullptr) {
-      continue;
+    auto attached = attachNode(output_parent, output);
+    if (!attached) {
+      return tl::make_unexpected(attached.error());
     }
-    xmlAddChild(output_parent, output);
 
     if (href) {
-      xmlNewProp(output, BAD_CAST "href", BAD_CAST href->c_str());
+      auto property = addProperty(output, "href", *href);
+      if (!property) {
+        return tl::make_unexpected(property.error());
+      }
     }
     if (src) {
-      xmlNewProp(output, BAD_CAST "src", BAD_CAST src->c_str());
+      auto property = addProperty(output, "src", *src);
+      if (!property) {
+        return tl::make_unexpected(property.error());
+      }
     }
     if (name == "img") {
       if (const auto alt = attribute(*current, "alt")) {
-        xmlNewProp(output, BAD_CAST "alt", BAD_CAST alt->c_str());
+        auto property = addProperty(output, "alt", *alt);
+        if (!property) {
+          return tl::make_unexpected(property.error());
+        }
       }
     }
     if (const auto title = attribute(*current, "title")) {
-      xmlNewProp(output, BAD_CAST "title", BAD_CAST title->c_str());
+      auto property = addProperty(output, "title", *title);
+      if (!property) {
+        return tl::make_unexpected(property.error());
+      }
     }
 
     if (name != "img" && name != "br") {
-      appendSanitized(current->children, output);
+      auto children = appendSanitized(current->children, output);
+      if (!children) {
+        return tl::make_unexpected(children.error());
+      }
     }
   }
+  return {};
+}
+
+bool hasMeaningfulContent(xmlNodePtr node) {
+  for (auto* current = node; current != nullptr; current = current->next) {
+    if (current->type == XML_TEXT_NODE || current->type == XML_CDATA_SECTION_NODE) {
+      if (current->content != nullptr) {
+        const std::string_view content(reinterpret_cast<const char*>(current->content));
+        const bool non_whitespace = std::ranges::any_of(content, [](const unsigned char character) {
+          return std::isspace(character) == 0;
+        });
+        if (non_whitespace) {
+          return true;
+        }
+      }
+      continue;
+    }
+    if (current->type == XML_ELEMENT_NODE && nodeName(*current) == "img") {
+      return true;
+    }
+    if (hasMeaningfulContent(current->children)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 }  // namespace
 
 Result<SanitizedHtml> LibxmlHtmlSanitizer::sanitize(std::string_view html,
                                                     std::string_view canonical_url) {
-  if (!validHttpsUrl(canonical_url)) {
-    return tl::make_unexpected(rejected("Sanitizer canonical URL must use HTTPS"));
-  }
-  if (html.size() > kMaxInputBytes) {
-    return tl::make_unexpected(rejected("HTML input exceeds the sanitizer size limit"));
-  }
-  if (html.find('\0') != std::string_view::npos) {
-    return tl::make_unexpected(rejected("HTML input contains a NUL byte"));
-  }
-
-  constexpr int parse_options = HTML_PARSE_NONET | HTML_PARSE_NOERROR | HTML_PARSE_NOWARNING |
-                                HTML_PARSE_COMPACT;
-  const std::string parser_base_url(canonical_url);
-  HtmlDoc input(htmlReadMemory(html.data(), static_cast<int>(html.size()), parser_base_url.c_str(),
-                               "UTF-8", parse_options),
-                xmlFreeDoc);
-  if (input == nullptr) {
-    return tl::make_unexpected(rejected("libxml2 could not parse the HTML fragment"));
-  }
-
-  auto* body = findBody(xmlDocGetRootElement(input.get()));
-  if (body == nullptr) {
-    return tl::make_unexpected(rejected("libxml2 did not produce an HTML body"));
-  }
-
-  HtmlDoc output(htmlNewDocNoDtD(nullptr, nullptr), xmlFreeDoc);
-  if (output == nullptr) {
-    return tl::make_unexpected(rejected("libxml2 could not allocate sanitized HTML"));
-  }
-  auto* output_body = xmlNewNode(nullptr, BAD_CAST "body");
-  if (output_body == nullptr) {
-    return tl::make_unexpected(rejected("libxml2 could not allocate sanitized HTML"));
-  }
-  xmlDocSetRootElement(output.get(), output_body);
-  appendSanitized(body->children, output_body);
-
-  XmlBuffer buffer(xmlBufferCreate(), xmlBufferFree);
-  if (buffer == nullptr) {
-    return tl::make_unexpected(rejected("libxml2 could not serialize sanitized HTML"));
-  }
-  for (auto* child = output_body->children; child != nullptr; child = child->next) {
-    if (htmlNodeDump(buffer.get(), output.get(), child) < 0) {
-      return tl::make_unexpected(rejected("libxml2 could not serialize sanitized HTML"));
+  try {
+    if (!validHttpsUrl(canonical_url)) {
+      return tl::make_unexpected(rejected("Sanitizer canonical URL must use HTTPS"));
     }
-  }
+    if (html.size() > kMaxInputBytes) {
+      return tl::make_unexpected(rejected("HTML input exceeds the sanitizer size limit"));
+    }
+    if (html.find('\0') != std::string_view::npos) {
+      return tl::make_unexpected(rejected("HTML input contains a NUL byte"));
+    }
+    if (static_cast<std::size_t>(std::ranges::count(html, '<')) > kMaxMarkupTokens) {
+      return tl::make_unexpected(rejected("HTML input exceeds the sanitizer markup limit"));
+    }
 
-  const auto* content = xmlBufferContent(buffer.get());
-  return SanitizedHtml{
-      .value = content == nullptr
-                   ? std::string{}
-                   : std::string(reinterpret_cast<const char*>(content), xmlBufferLength(buffer.get())),
-  };
+    constexpr int parse_options = HTML_PARSE_NONET | HTML_PARSE_NOERROR |
+                                  HTML_PARSE_NOWARNING | HTML_PARSE_COMPACT;
+    const std::string parser_base_url(canonical_url);
+    HtmlDoc input(htmlReadMemory(html.data(), static_cast<int>(html.size()),
+                                 parser_base_url.c_str(), "UTF-8", parse_options),
+                  xmlFreeDoc);
+    if (input == nullptr) {
+      return tl::make_unexpected(rejected("libxml2 could not parse the HTML fragment"));
+    }
+
+    std::size_t node_count = 0;
+    auto node_budget = validateNodeBudget(xmlDocGetRootElement(input.get()), node_count);
+    if (!node_budget) {
+      return tl::make_unexpected(node_budget.error());
+    }
+
+    auto* body = findBody(xmlDocGetRootElement(input.get()));
+    if (body == nullptr) {
+      return tl::make_unexpected(rejected("libxml2 did not produce an HTML body"));
+    }
+
+    HtmlDoc output(htmlNewDocNoDtD(nullptr, nullptr), xmlFreeDoc);
+    if (output == nullptr) {
+      return tl::make_unexpected(internalFailure("libxml2 could not allocate sanitized HTML"));
+    }
+    auto* output_body = xmlNewNode(nullptr, BAD_CAST "body");
+    if (output_body == nullptr) {
+      return tl::make_unexpected(internalFailure("libxml2 could not allocate sanitized HTML"));
+    }
+    xmlDocSetRootElement(output.get(), output_body);
+    auto reconstructed = appendSanitized(body->children, output_body);
+    if (!reconstructed) {
+      return tl::make_unexpected(reconstructed.error());
+    }
+    if (!hasMeaningfulContent(output_body->children)) {
+      return tl::make_unexpected(rejected("Sanitized HTML contains no meaningful content"));
+    }
+
+    XmlBuffer buffer(xmlBufferCreate(), xmlBufferFree);
+    if (buffer == nullptr) {
+      return tl::make_unexpected(
+          internalFailure("libxml2 could not allocate a serialization buffer"));
+    }
+    for (auto* child = output_body->children; child != nullptr; child = child->next) {
+      if (htmlNodeDump(buffer.get(), output.get(), child) < 0) {
+        return tl::make_unexpected(internalFailure("libxml2 could not serialize sanitized HTML"));
+      }
+      const auto output_size = xmlBufferLength(buffer.get());
+      if (output_size < 0 || static_cast<std::size_t>(output_size) > kMaxOutputBytes) {
+        return tl::make_unexpected(rejected("Sanitized HTML exceeds the output size limit"));
+      }
+    }
+
+    const auto* content = xmlBufferContent(buffer.get());
+    if (content == nullptr) {
+      return tl::make_unexpected(internalFailure("libxml2 returned an empty serialization buffer"));
+    }
+    return SanitizedHtml{
+        .value = std::string(reinterpret_cast<const char*>(content), xmlBufferLength(buffer.get())),
+    };
+  } catch (const std::bad_alloc&) {
+    return tl::make_unexpected(
+        internalFailure("Memory allocation failed while sanitizing HTML"));
+  }
 }
 
 }  // namespace babel

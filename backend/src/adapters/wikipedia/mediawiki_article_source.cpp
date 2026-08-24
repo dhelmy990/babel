@@ -1,15 +1,18 @@
 #include "babel/adapters/wikipedia/mediawiki_article_source.hpp"
 
 #include <array>
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
 
 #include <curl/curl.h>
+#include <libxml/uri.h>
 #include <nlohmann/json.hpp>
 
 namespace babel {
@@ -18,10 +21,75 @@ namespace {
 constexpr std::string_view kApiEndpoint = "https://en.wikipedia.org/w/api.php";
 constexpr std::int64_t kConnectTimeoutMs = 3'000;
 constexpr std::int64_t kTotalTimeoutMs = 10'000;
+constexpr std::int64_t kMaxTransportTimeoutMs = 300'000;
 constexpr std::size_t kMaxResponseBytes = 20U * 1024U * 1024U;
+
+struct XmlUriDeleter {
+  void operator()(xmlURI* value) const { xmlFreeURI(value); }
+};
+
+using XmlUri = std::unique_ptr<xmlURI, XmlUriDeleter>;
 
 ApplicationError error(ErrorCode code, std::string message) {
   return ApplicationError{.code = code, .message = std::move(message)};
+}
+
+std::string lowerAscii(std::string_view value) {
+  std::string result;
+  result.reserve(value.size());
+  for (const unsigned char character : value) {
+    result.push_back(static_cast<char>(std::tolower(character)));
+  }
+  return result;
+}
+
+XmlUri parsedUri(std::string_view value) {
+  const std::string null_terminated(value);
+  xmlURI* parsed_raw = nullptr;
+  if (xmlParseURISafe(null_terminated.c_str(), &parsed_raw) != 0 || parsed_raw == nullptr) {
+    if (parsed_raw != nullptr) {
+      xmlFreeURI(parsed_raw);
+    }
+    return XmlUri{};
+  }
+  return XmlUri(parsed_raw);
+}
+
+bool validHttpsUrl(std::string_view value) {
+  auto parsed = parsedUri(value);
+  return parsed != nullptr && parsed->scheme != nullptr &&
+         lowerAscii(parsed->scheme) == "https" && parsed->server != nullptr &&
+         !std::string_view(parsed->server).empty() && parsed->user == nullptr &&
+         parsed->opaque == nullptr;
+}
+
+std::optional<std::string> urlAuthority(std::string_view value) {
+  const auto scheme_end = value.find("://");
+  if (scheme_end == std::string_view::npos) {
+    return std::nullopt;
+  }
+  const auto authority_start = scheme_end + 3U;
+  const auto authority_end = value.find_first_of("/?#", authority_start);
+  const auto authority = value.substr(
+      authority_start,
+      authority_end == std::string_view::npos ? value.size() - authority_start
+                                              : authority_end - authority_start);
+  if (authority.empty()) {
+    return std::nullopt;
+  }
+  return lowerAscii(authority);
+}
+
+bool validCanonicalWikipediaUrl(std::string_view value) {
+  auto parsed = parsedUri(value);
+  if (parsed == nullptr || parsed->scheme == nullptr || parsed->server == nullptr ||
+      parsed->user != nullptr || parsed->opaque != nullptr) {
+    return false;
+  }
+  const auto authority = urlAuthority(value);
+  return lowerAscii(parsed->scheme) == "https" &&
+         lowerAscii(parsed->server) == "en.wikipedia.org" &&
+         authority && (*authority == "en.wikipedia.org" || *authority == "en.wikipedia.org:443");
 }
 
 std::string percentEncode(std::string_view value) {
@@ -59,14 +127,16 @@ HttpRequest requestFor(std::string query) {
 }
 
 Result<nlohmann::json> parsedJson(const HttpResponse& response) {
-  if (response.status_code == 404) {
-    return tl::make_unexpected(
-        error(ErrorCode::wikipedia_not_found, "MediaWiki page was not found"));
+  if (response.status_code == 404 || response.status_code == 408 ||
+      response.status_code == 429 || response.status_code >= 500) {
+    return tl::make_unexpected(error(
+        ErrorCode::wikipedia_unavailable,
+        "MediaWiki endpoint returned HTTP status " + std::to_string(response.status_code)));
   }
   if (response.status_code < 200 || response.status_code >= 300) {
     return tl::make_unexpected(error(
-        ErrorCode::wikipedia_unavailable,
-        "MediaWiki returned HTTP status " + std::to_string(response.status_code)));
+        ErrorCode::internal,
+        "MediaWiki request returned HTTP status " + std::to_string(response.status_code)));
   }
 
   auto json = nlohmann::json::parse(response.body, nullptr, false);
@@ -94,17 +164,30 @@ bool validRedirects(const nlohmann::json& query) {
   return true;
 }
 
-bool isMissingError(const nlohmann::json& json) {
+std::optional<ApplicationError> classifiedApiError(const nlohmann::json& json) {
   const auto api_error = json.find("error");
-  if (api_error == json.end() || !api_error->is_object()) {
-    return false;
+  if (api_error == json.end()) {
+    return std::nullopt;
+  }
+  if (!api_error->is_object()) {
+    return error(ErrorCode::internal, "MediaWiki API error had an invalid schema");
   }
   const auto code = api_error->find("code");
   if (code == api_error->end() || !code->is_string()) {
-    return false;
+    return error(ErrorCode::internal, "MediaWiki API error had an invalid code");
   }
-  const auto value = code->get<std::string>();
-  return value == "missingtitle" || value == "nosuchpageid" || value == "invalidpageid";
+  const auto value = lowerAscii(code->get<std::string>());
+  if (value == "missingtitle" || value == "missingrev" || value == "nosuchpageid" ||
+      value == "invalidpageid") {
+    return error(ErrorCode::wikipedia_not_found, "MediaWiki page was not found");
+  }
+  if (value == "readonly" || value == "readonlytext" || value == "maxlag" ||
+      value == "ratelimited" || value == "dbqueryerror" ||
+      value.starts_with("internal_api_error_db")) {
+    return error(ErrorCode::wikipedia_unavailable,
+                 "MediaWiki API is temporarily unavailable: " + value);
+  }
+  return error(ErrorCode::internal, "MediaWiki API rejected the request: " + value);
 }
 
 Result<nlohmann::json> execute(HttpTransport& transport, HttpRequest request) {
@@ -114,7 +197,14 @@ Result<nlohmann::json> execute(HttpTransport& transport, HttpRequest request) {
                                      "MediaWiki transport failed: " +
                                          response.error().message));
   }
-  return parsedJson(response.value());
+  auto json = parsedJson(response.value());
+  if (!json) {
+    return tl::make_unexpected(json.error());
+  }
+  if (auto api_error = classifiedApiError(json.value())) {
+    return tl::make_unexpected(std::move(*api_error));
+  }
+  return json.value();
 }
 
 Result<WikipediaPageId> parsePageId(const nlohmann::json& value) {
@@ -191,9 +281,47 @@ class CurlHeaders final {
   curl_slist* value = nullptr;
 };
 
+Result<long> validatedTimeout(std::int64_t value, std::string_view name) {
+  if (value <= 0 || value > kMaxTransportTimeoutMs ||
+      value > static_cast<std::int64_t>(std::numeric_limits<long>::max())) {
+    return tl::make_unexpected(error(
+        ErrorCode::wikipedia_unavailable,
+        "MediaWiki transport " + std::string(name) + " timeout is outside the supported range"));
+  }
+  return static_cast<long>(value);
+}
+
+std::optional<ApplicationError> curlOptionFailure(CURLcode result, std::string_view option) {
+  if (result == CURLE_OK) {
+    return std::nullopt;
+  }
+  return error(ErrorCode::wikipedia_unavailable,
+               "libcurl could not set " + std::string(option) + ": " +
+                   curl_easy_strerror(result));
+}
+
 }  // namespace
 
 Result<HttpResponse> CurlHttpTransport::get(const HttpRequest& request) {
+  auto connect_timeout = validatedTimeout(request.connect_timeout_ms, "connect");
+  if (!connect_timeout) {
+    return tl::make_unexpected(connect_timeout.error());
+  }
+  auto total_timeout = validatedTimeout(request.total_timeout_ms, "total");
+  if (!total_timeout) {
+    return tl::make_unexpected(total_timeout.error());
+  }
+  if (total_timeout.value() < connect_timeout.value()) {
+    return tl::make_unexpected(error(
+        ErrorCode::wikipedia_unavailable,
+        "MediaWiki transport total timeout must not be shorter than the connect timeout"));
+  }
+  if (!validHttpsUrl(request.url)) {
+    return tl::make_unexpected(error(
+        ErrorCode::wikipedia_unavailable,
+        "MediaWiki transport requires an HTTPS URL without credentials"));
+  }
+
   static const CURLcode global_init = curl_global_init(CURL_GLOBAL_DEFAULT);
   if (global_init != CURLE_OK) {
     return tl::make_unexpected(
@@ -215,24 +343,71 @@ Result<HttpResponse> CurlHttpTransport::get(const HttpRequest& request) {
   }
 
   std::string body;
-  curl_easy_setopt(handle.value, CURLOPT_URL, request.url.c_str());
-  curl_easy_setopt(handle.value, CURLOPT_CONNECTTIMEOUT_MS,
-                   static_cast<long>(request.connect_timeout_ms));
-  curl_easy_setopt(handle.value, CURLOPT_TIMEOUT_MS, static_cast<long>(request.total_timeout_ms));
-  curl_easy_setopt(handle.value, CURLOPT_FOLLOWLOCATION, request.follow_redirects ? 1L : 0L);
-  curl_easy_setopt(handle.value, CURLOPT_MAXREDIRS, 5L);
-  curl_easy_setopt(handle.value, CURLOPT_PROTOCOLS_STR, "https");
-  curl_easy_setopt(handle.value, CURLOPT_REDIR_PROTOCOLS_STR, "https");
-  curl_easy_setopt(handle.value, CURLOPT_NOSIGNAL, 1L);
-  curl_easy_setopt(handle.value, CURLOPT_HTTPHEADER, headers.value);
-  curl_easy_setopt(handle.value, CURLOPT_WRITEFUNCTION, writeResponse);
-  curl_easy_setopt(handle.value, CURLOPT_WRITEDATA, &body);
+  std::array<char, CURL_ERROR_SIZE> error_buffer{};
+  if (auto failure = curlOptionFailure(
+          curl_easy_setopt(handle.value, CURLOPT_ERRORBUFFER, error_buffer.data()),
+          "CURLOPT_ERRORBUFFER")) {
+    return tl::make_unexpected(std::move(*failure));
+  }
+  if (auto failure = curlOptionFailure(
+          curl_easy_setopt(handle.value, CURLOPT_URL, request.url.c_str()), "CURLOPT_URL")) {
+    return tl::make_unexpected(std::move(*failure));
+  }
+  if (auto failure = curlOptionFailure(
+          curl_easy_setopt(handle.value, CURLOPT_CONNECTTIMEOUT_MS, connect_timeout.value()),
+          "CURLOPT_CONNECTTIMEOUT_MS")) {
+    return tl::make_unexpected(std::move(*failure));
+  }
+  if (auto failure = curlOptionFailure(
+          curl_easy_setopt(handle.value, CURLOPT_TIMEOUT_MS, total_timeout.value()),
+          "CURLOPT_TIMEOUT_MS")) {
+    return tl::make_unexpected(std::move(*failure));
+  }
+  if (auto failure = curlOptionFailure(
+          curl_easy_setopt(handle.value, CURLOPT_FOLLOWLOCATION,
+                           request.follow_redirects ? 1L : 0L),
+          "CURLOPT_FOLLOWLOCATION")) {
+    return tl::make_unexpected(std::move(*failure));
+  }
+  if (auto failure = curlOptionFailure(curl_easy_setopt(handle.value, CURLOPT_MAXREDIRS, 5L),
+                                       "CURLOPT_MAXREDIRS")) {
+    return tl::make_unexpected(std::move(*failure));
+  }
+  if (auto failure = curlOptionFailure(
+          curl_easy_setopt(handle.value, CURLOPT_PROTOCOLS_STR, "https"),
+          "CURLOPT_PROTOCOLS_STR")) {
+    return tl::make_unexpected(std::move(*failure));
+  }
+  if (auto failure = curlOptionFailure(
+          curl_easy_setopt(handle.value, CURLOPT_REDIR_PROTOCOLS_STR, "https"),
+          "CURLOPT_REDIR_PROTOCOLS_STR")) {
+    return tl::make_unexpected(std::move(*failure));
+  }
+  if (auto failure = curlOptionFailure(curl_easy_setopt(handle.value, CURLOPT_NOSIGNAL, 1L),
+                                       "CURLOPT_NOSIGNAL")) {
+    return tl::make_unexpected(std::move(*failure));
+  }
+  if (auto failure = curlOptionFailure(
+          curl_easy_setopt(handle.value, CURLOPT_HTTPHEADER, headers.value),
+          "CURLOPT_HTTPHEADER")) {
+    return tl::make_unexpected(std::move(*failure));
+  }
+  if (auto failure = curlOptionFailure(
+          curl_easy_setopt(handle.value, CURLOPT_WRITEFUNCTION, writeResponse),
+          "CURLOPT_WRITEFUNCTION")) {
+    return tl::make_unexpected(std::move(*failure));
+  }
+  if (auto failure = curlOptionFailure(
+          curl_easy_setopt(handle.value, CURLOPT_WRITEDATA, &body), "CURLOPT_WRITEDATA")) {
+    return tl::make_unexpected(std::move(*failure));
+  }
 
   const auto result = curl_easy_perform(handle.value);
   if (result != CURLE_OK) {
+    const std::string detail = error_buffer.front() == '\0' ? curl_easy_strerror(result)
+                                                            : error_buffer.data();
     return tl::make_unexpected(error(ErrorCode::wikipedia_unavailable,
-                                     "libcurl request failed: " +
-                                         std::string(curl_easy_strerror(result))));
+                                     "libcurl request failed: " + detail));
   }
 
   long status_code = 0;
@@ -251,10 +426,6 @@ Result<ResolvedWikipediaPage> MediaWikiArticleSource::resolveTitle(std::string_v
                                              "&format=json&formatversion=2"));
   if (!json) {
     return tl::make_unexpected(json.error());
-  }
-  if (isMissingError(json.value())) {
-    return tl::make_unexpected(
-        error(ErrorCode::wikipedia_not_found, "MediaWiki title was not found"));
   }
 
   const auto query = json->find("query");
@@ -286,7 +457,7 @@ Result<ResolvedWikipediaPage> MediaWikiArticleSource::resolveTitle(std::string_v
   auto page_id = parsePageId(page["pageid"]);
   const auto canonical_title = page["title"].get<std::string>();
   const auto canonical_url = page["fullurl"].get<std::string>();
-  if (!page_id || canonical_title.empty() || !canonical_url.starts_with("https://")) {
+  if (!page_id || canonical_title.empty() || !validCanonicalWikipediaUrl(canonical_url)) {
     return tl::make_unexpected(
         error(ErrorCode::internal, "MediaWiki page response had invalid canonical fields"));
   }
@@ -304,10 +475,6 @@ Result<RawWikipediaArticle> MediaWikiArticleSource::fetchByPageId(WikipediaPageI
                  "&prop=text%7Crevid%7Cdisplaytitle&format=json&formatversion=2"));
   if (!json) {
     return tl::make_unexpected(json.error());
-  }
-  if (isMissingError(json.value())) {
-    return tl::make_unexpected(
-        error(ErrorCode::wikipedia_not_found, "MediaWiki page ID was not found"));
   }
 
   const auto parsed = json->find("parse");

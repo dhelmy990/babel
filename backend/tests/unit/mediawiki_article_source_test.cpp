@@ -10,6 +10,7 @@
 namespace {
 
 using babel::ApplicationError;
+using babel::CurlHttpTransport;
 using babel::ErrorCode;
 using babel::HttpRequest;
 using babel::HttpResponse;
@@ -142,6 +143,136 @@ TEST_CASE("MediaWiki transport and server failures map to wikipedia_unavailable"
     REQUIRE_FALSE(result.has_value());
     REQUIRE(result.error().code == ErrorCode::wikipedia_unavailable);
   }
+}
+
+TEST_CASE("MediaWiki HTTP status classification distinguishes endpoint and request failures") {
+  const std::vector<std::pair<long, ErrorCode>> cases{
+      {404, ErrorCode::wikipedia_unavailable},
+      {408, ErrorCode::wikipedia_unavailable},
+      {429, ErrorCode::wikipedia_unavailable},
+      {500, ErrorCode::wikipedia_unavailable},
+      {400, ErrorCode::internal},
+      {403, ErrorCode::internal},
+  };
+
+  for (const auto& [status, expected_code] : cases) {
+    RecordingTransport transport;
+    transport.response = HttpResponse{.status_code = status, .body = "request failed"};
+    MediaWikiArticleSource source(transport);
+
+    const auto result = source.resolveTitle("Film");
+
+    REQUIRE_FALSE(result.has_value());
+    REQUIRE(result.error().code == expected_code);
+  }
+}
+
+TEST_CASE("MediaWiki top-level missing errors map to wikipedia_not_found") {
+  for (const std::string code : {"missingtitle", "missingrev"}) {
+    RecordingTransport transport;
+    transport.response.body = "{\"error\":{\"code\":\"" + code +
+                              "\",\"info\":\"not found\"}}";
+    MediaWikiArticleSource source(transport);
+
+    const auto result = source.fetchByPageId(WikipediaPageId::fromInt(42).value());
+
+    REQUIRE_FALSE(result.has_value());
+    REQUIRE(result.error().code == ErrorCode::wikipedia_not_found);
+  }
+}
+
+TEST_CASE("MediaWiki transient API errors map to wikipedia_unavailable") {
+  for (const std::string code : {"readonly", "maxlag", "ratelimited", "readonlytext"}) {
+    RecordingTransport transport;
+    transport.response.body = "{\"error\":{\"code\":\"" + code +
+                              "\",\"info\":\"retry later\"}}";
+    MediaWikiArticleSource source(transport);
+
+    const auto result = source.resolveTitle("Film");
+
+    REQUIRE_FALSE(result.has_value());
+    REQUIRE(result.error().code == ErrorCode::wikipedia_unavailable);
+  }
+}
+
+TEST_CASE("MediaWiki deterministic API errors map to internal") {
+  RecordingTransport transport;
+  transport.response.body =
+      R"json({"error":{"code":"badvalue","info":"invalid parameter"}})json";
+  MediaWikiArticleSource source(transport);
+
+  const auto result = source.resolveTitle("Film");
+
+  REQUIRE_FALSE(result.has_value());
+  REQUIRE(result.error().code == ErrorCode::internal);
+}
+
+TEST_CASE("resolved MediaWiki full URLs require the exact canonical HTTPS authority") {
+  const std::vector<std::string> invalid_urls{
+      "https://en.wikipedia.org.evil.test/wiki/Film",
+      "https://user@en.wikipedia.org/wiki/Film",
+      "https://en.wikipedia.org:444/wiki/Film",
+      "https://en.wikipedia.org:0/wiki/Film",
+      "https:///wiki/Film",
+  };
+
+  for (const auto& full_url : invalid_urls) {
+    RecordingTransport transport;
+    transport.response.body =
+        "{\"query\":{\"pages\":[{\"pageid\":42,\"title\":\"Film\",\"fullurl\":\"" +
+        full_url + "\"}]}}";
+    MediaWikiArticleSource source(transport);
+
+    const auto result = source.resolveTitle("Film");
+
+    REQUIRE_FALSE(result.has_value());
+    REQUIRE(result.error().code == ErrorCode::internal);
+  }
+}
+
+TEST_CASE("curl transport rejects invalid timeout configuration before I/O") {
+  CurlHttpTransport transport;
+  const std::vector<HttpRequest> invalid_requests{
+      HttpRequest{.url = "http://127.0.0.1/",
+                  .connect_timeout_ms = 0,
+                  .total_timeout_ms = 10'000,
+                  .follow_redirects = true,
+                  .headers = {}},
+      HttpRequest{.url = "http://127.0.0.1/",
+                  .connect_timeout_ms = 3'000,
+                  .total_timeout_ms = -1,
+                  .follow_redirects = true,
+                  .headers = {}},
+      HttpRequest{.url = "http://127.0.0.1/",
+                  .connect_timeout_ms = 3'000,
+                  .total_timeout_ms = 300'001,
+                  .follow_redirects = true,
+                  .headers = {}},
+  };
+
+  for (const auto& request : invalid_requests) {
+    const auto result = transport.get(request);
+    REQUIRE_FALSE(result.has_value());
+    REQUIRE(result.error().code == ErrorCode::wikipedia_unavailable);
+    REQUIRE(result.error().message.find("timeout") != std::string::npos);
+  }
+}
+
+TEST_CASE("curl transport rejects non-HTTPS request URLs before I/O") {
+  CurlHttpTransport transport;
+  const HttpRequest request{
+      .url = "http://127.0.0.1/",
+      .connect_timeout_ms = 3'000,
+      .total_timeout_ms = 10'000,
+      .follow_redirects = true,
+      .headers = {},
+  };
+
+  const auto result = transport.get(request);
+
+  REQUIRE_FALSE(result.has_value());
+  REQUIRE(result.error().code == ErrorCode::wikipedia_unavailable);
+  REQUIRE(result.error().message.find("HTTPS") != std::string::npos);
 }
 
 TEST_CASE("malformed and schema-invalid MediaWiki responses map to internal") {
