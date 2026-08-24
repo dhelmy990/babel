@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -69,20 +70,18 @@ class RecordingSanitizer final : public HtmlSanitizer {
   std::optional<ApplicationError> sanitize_error;
 };
 
-class SequentialIdGenerator final : public IdGenerator {
+class CountingLibxmlSanitizer final : public HtmlSanitizer {
  public:
-  BabelId newBabelId() override {
-    ++babel_count;
-    return BabelId::v5("legacy-test-babel:" + std::to_string(babel_count)).value();
+  Result<SanitizedHtml> sanitize(std::string_view html,
+                                 std::string_view canonical_url) override {
+    ++sanitize_count;
+    return sanitizer_.sanitize(html, canonical_url);
   }
 
-  EdgeId newEdgeId() override {
-    ++edge_count;
-    return EdgeId::v5("legacy-test-edge:" + std::to_string(edge_count)).value();
-  }
+  int sanitize_count{0};
 
-  int babel_count{0};
-  int edge_count{0};
+ private:
+  LibxmlHtmlSanitizer sanitizer_;
 };
 
 CreatorId personalCreatorId() { return ProfileManifest::creators().front().id; }
@@ -121,11 +120,16 @@ ApplicationError testError(ErrorCode code, std::string message) {
   return ApplicationError{.code = code, .message = std::move(message)};
 }
 
+const Babel& babelWithTitle(const std::vector<Babel>& babels, std::string_view title) {
+  const auto found = std::ranges::find(babels, title, &Babel::title);
+  REQUIRE(found != babels.end());
+  return *found;
+}
+
 TEST_CASE("legacy migration targets Personal and preserves edge connectivity") {
   FakeLegacyMigrationRepository repository;
   RecordingSanitizer sanitizer;
-  SequentialIdGenerator ids;
-  LegacyMigrationService service(personalCreatorId(), repository, sanitizer, ids);
+  LegacyMigrationService service(personalCreatorId(), repository, sanitizer);
 
   const auto result = service.migrateFile(fixturePath("legacy_graph.json"));
 
@@ -141,8 +145,6 @@ TEST_CASE("legacy migration targets Personal and preserves edge connectivity") {
   CHECK(repository.imported_edges[0].source_id == repository.imported_babels[0].id);
   CHECK(repository.imported_edges[0].target_id == repository.imported_babels[1].id);
   CHECK(repository.transaction_count == 1);
-  CHECK(ids.babel_count == 2);
-  CHECK(ids.edge_count == 1);
   CHECK(repository.last_digest ==
         "c16d958099a777f5413243738aec99add49fbc385f17b2e5a89c5b160c665171");
   CHECK(repository.imported_babels[0].content_html == "<p>Safe <strong>origin</strong></p>");
@@ -154,11 +156,68 @@ TEST_CASE("legacy migration targets Personal and preserves edge connectivity") {
   CHECK(sanitizer.canonical_urls[0] == "https://legacy.babel.invalid/graph");
 }
 
+TEST_CASE("repeated legacy parsing derives stable entity UUIDs from Personal and legacy identity") {
+  FakeLegacyMigrationRepository repository;
+  RecordingSanitizer sanitizer;
+  LegacyMigrationService service(personalCreatorId(), repository, sanitizer);
+  const auto path = fixturePath("legacy_graph.json");
+
+  REQUIRE(service.migrateFile(path).has_value());
+  const auto first_babels = repository.imported_babels;
+  const auto first_edges = repository.imported_edges;
+  REQUIRE(service.migrateFile(path).has_value());
+
+  const auto owner = personalCreatorId().value;
+  const auto expected_origin =
+      BabelId::v5("legacy:" + owner + ":babel:13:1726502400000").value();
+  const auto expected_destination =
+      BabelId::v5("legacy:" + owner + ":babel:13:1726502401000").value();
+  const auto expected_edge = EdgeId::v5("legacy:" + owner +
+                                        ":edge:13:1726502400000:13:1726502401000")
+                                 .value();
+  CHECK(babelWithTitle(first_babels, "Origin").id == expected_origin);
+  CHECK(babelWithTitle(first_babels, "Destination").id == expected_destination);
+  REQUIRE(first_edges.size() == 1);
+  CHECK(first_edges.front().id == expected_edge);
+  CHECK(babelWithTitle(repository.imported_babels, "Origin").id == expected_origin);
+  CHECK(babelWithTitle(repository.imported_babels, "Destination").id == expected_destination);
+  REQUIRE(repository.imported_edges.size() == 1);
+  CHECK(repository.imported_edges.front().id == expected_edge);
+}
+
+TEST_CASE("reordered legacy Babel arrays preserve stable UUIDs and edge connectivity") {
+  TemporaryLegacyFile reordered(
+      R"({"babels":[{"id":"1726502401000","title":"Destination","description":"<p>Connected destination</p>","color":"#FEDCBA"},{"id":"1726502400000","title":"Origin","description":"<p>Safe origin</p>","color":"#12ABEF"}],"edges":[{"id":"1726502400000-1726502401000","source":"1726502400000","target":"1726502401000"}]})");
+  FakeLegacyMigrationRepository original_repository;
+  FakeLegacyMigrationRepository reordered_repository;
+  RecordingSanitizer original_sanitizer;
+  RecordingSanitizer reordered_sanitizer;
+  LegacyMigrationService original_service(personalCreatorId(), original_repository,
+                                          original_sanitizer);
+  LegacyMigrationService reordered_service(personalCreatorId(), reordered_repository,
+                                           reordered_sanitizer);
+
+  REQUIRE(original_service.migrateFile(fixturePath("legacy_graph.json")).has_value());
+  REQUIRE(reordered_service.migrateFile(reordered.path()).has_value());
+
+  const auto original_origin = babelWithTitle(original_repository.imported_babels, "Origin").id;
+  const auto original_destination =
+      babelWithTitle(original_repository.imported_babels, "Destination").id;
+  CHECK(babelWithTitle(reordered_repository.imported_babels, "Origin").id == original_origin);
+  CHECK(babelWithTitle(reordered_repository.imported_babels, "Destination").id ==
+        original_destination);
+  REQUIRE(reordered_repository.imported_edges.size() == 1);
+  CHECK(reordered_repository.imported_edges.front().source_id == original_origin);
+  CHECK(reordered_repository.imported_edges.front().target_id == original_destination);
+  REQUIRE(original_repository.imported_edges.size() == 1);
+  CHECK(reordered_repository.imported_edges.front().id ==
+        original_repository.imported_edges.front().id);
+}
+
 TEST_CASE("legacy migration hashes exact bytes without changing source bytes or mtime") {
   FakeLegacyMigrationRepository repository;
   RecordingSanitizer sanitizer;
-  SequentialIdGenerator ids;
-  LegacyMigrationService service(personalCreatorId(), repository, sanitizer, ids);
+  LegacyMigrationService service(personalCreatorId(), repository, sanitizer);
   const auto path = fixturePath("legacy_graph.json");
   const auto bytes_before = readBytes(path);
   const auto mtime_before = std::filesystem::last_write_time(path);
@@ -174,8 +233,7 @@ TEST_CASE("legacy migration hashes exact bytes without changing source bytes or 
 TEST_CASE("malformed and unreadable legacy files return typed errors without writes") {
   FakeLegacyMigrationRepository repository;
   RecordingSanitizer sanitizer;
-  SequentialIdGenerator ids;
-  LegacyMigrationService service(personalCreatorId(), repository, sanitizer, ids);
+  LegacyMigrationService service(personalCreatorId(), repository, sanitizer);
 
   const auto malformed = service.migrateFile(fixturePath("legacy_graph_invalid.json"));
   const auto unreadable = service.migrateFile(fixturePath("does-not-exist.json"));
@@ -225,8 +283,7 @@ TEST_CASE("legacy migration rejects invalid graph schemas and invariants before 
       TemporaryLegacyFile file(json);
       FakeLegacyMigrationRepository repository;
       RecordingSanitizer sanitizer;
-      SequentialIdGenerator ids;
-      LegacyMigrationService service(personalCreatorId(), repository, sanitizer, ids);
+      LegacyMigrationService service(personalCreatorId(), repository, sanitizer);
 
       const auto result = service.migrateFile(file.path());
 
@@ -234,26 +291,76 @@ TEST_CASE("legacy migration rejects invalid graph schemas and invariants before 
       CHECK(result.error().code == ErrorCode::invalid_legacy_file);
       CHECK(repository.transaction_count == 0);
       CHECK(sanitizer.inputs.empty());
-      CHECK(ids.babel_count == 0);
-      CHECK(ids.edge_count == 0);
     }
   }
 }
 
-TEST_CASE("malformed legacy HTML is rejected by the real sanitizer before writes") {
+TEST_CASE("embedded NUL in any legacy identity or content prevents sanitization and writes") {
+  const std::vector<std::pair<std::string, std::string>> nul_graphs{
+      {"Babel ID",
+       R"({"babels":[{"id":"a\u0000","title":"A","description":"<p>A</p>","color":"#123456"}],"edges":[]})"},
+      {"title",
+       R"({"babels":[{"id":"a","title":"A\u0000","description":"<p>A</p>","color":"#123456"}],"edges":[]})"},
+      {"description",
+       R"({"babels":[{"id":"a","title":"A","description":"<p>A\u0000</p>","color":"#123456"}],"edges":[]})"},
+      {"color",
+       R"({"babels":[{"id":"a","title":"A","description":"<p>A</p>","color":"#12\u0000456"}],"edges":[]})"},
+      {"edge ID",
+       R"({"babels":[{"id":"a","title":"A","description":"<p>A</p>","color":"#123456"},{"id":"b","title":"B","description":"<p>B</p>","color":"#654321"}],"edges":[{"id":"e\u0000","source":"a","target":"b"}]})"},
+      {"edge source",
+       R"({"babels":[{"id":"a","title":"A","description":"<p>A</p>","color":"#123456"},{"id":"b","title":"B","description":"<p>B</p>","color":"#654321"}],"edges":[{"id":"e","source":"a\u0000","target":"b"}]})"},
+      {"edge target",
+       R"({"babels":[{"id":"a","title":"A","description":"<p>A</p>","color":"#123456"},{"id":"b","title":"B","description":"<p>B</p>","color":"#654321"}],"edges":[{"id":"e","source":"a","target":"b\u0000"}]})"},
+  };
+
+  for (const auto& [name, json] : nul_graphs) {
+    DYNAMIC_SECTION(name) {
+      TemporaryLegacyFile file(json);
+      FakeLegacyMigrationRepository repository;
+      RecordingSanitizer sanitizer;
+      LegacyMigrationService service(personalCreatorId(), repository, sanitizer);
+
+      const auto result = service.migrateFile(file.path());
+
+      REQUIRE_FALSE(result.has_value());
+      CHECK(result.error().code == ErrorCode::invalid_legacy_file);
+      CHECK(sanitizer.inputs.empty());
+      CHECK(repository.transaction_count == 0);
+    }
+  }
+}
+
+TEST_CASE("unsafe-only legacy HTML is rejected by the real sanitizer before writes") {
   TemporaryLegacyFile file(
-      R"({"babels":[{"id":"a","title":"A","description":"<p>bad\u0000html</p>","color":"#123456"}],"edges":[]})");
+      R"({"babels":[{"id":"a","title":"A","description":"<script>alert('legacy')</script>","color":"#123456"}],"edges":[]})");
   FakeLegacyMigrationRepository repository;
   LibxmlHtmlSanitizer sanitizer;
-  SequentialIdGenerator ids;
-  LegacyMigrationService service(personalCreatorId(), repository, sanitizer, ids);
+  LegacyMigrationService service(personalCreatorId(), repository, sanitizer);
 
   const auto result = service.migrateFile(file.path());
 
   REQUIRE_FALSE(result.has_value());
   CHECK(result.error().code == ErrorCode::invalid_legacy_file);
   CHECK(repository.transaction_count == 0);
-  CHECK(ids.babel_count == 0);
+}
+
+TEST_CASE("blank legacy descriptions become canonical empty Quill HTML without sanitizing") {
+  TemporaryLegacyFile file(
+      R"({"babels":[{"id":"empty","title":"Empty","description":"","color":"#123456"},{"id":"whitespace","title":"Whitespace","description":" \n\t","color":"#654321"}],"edges":[]})");
+  FakeLegacyMigrationRepository repository;
+  CountingLibxmlSanitizer sanitizer;
+  LegacyMigrationService service(personalCreatorId(), repository, sanitizer);
+
+  const auto result = service.migrateFile(file.path());
+
+  REQUIRE(result.has_value());
+  CHECK(result->status == LegacyMigrationStatus::imported);
+  REQUIRE(repository.imported_babels.size() == 2);
+  CHECK(babelWithTitle(repository.imported_babels, "Empty").content_html == "<p><br></p>");
+  CHECK(babelWithTitle(repository.imported_babels, "Whitespace").content_html ==
+        "<p><br></p>");
+  CHECK(sanitizer.sanitize_count == 0);
+  CHECK(repository.transaction_count == 1);
 }
 
 TEST_CASE("sanitizer rejection becomes invalid legacy file and prevents writes") {
@@ -262,23 +369,20 @@ TEST_CASE("sanitizer rejection becomes invalid legacy file and prevents writes")
   FakeLegacyMigrationRepository repository;
   RecordingSanitizer sanitizer;
   sanitizer.sanitize_error = testError(ErrorCode::sanitizer_rejected, "malformed HTML");
-  SequentialIdGenerator ids;
-  LegacyMigrationService service(personalCreatorId(), repository, sanitizer, ids);
+  LegacyMigrationService service(personalCreatorId(), repository, sanitizer);
 
   const auto result = service.migrateFile(file.path());
 
   REQUIRE_FALSE(result.has_value());
   CHECK(result.error().code == ErrorCode::invalid_legacy_file);
   CHECK(repository.transaction_count == 0);
-  CHECK(ids.babel_count == 0);
 }
 
 TEST_CASE("known source digest is an early no-op") {
   FakeLegacyMigrationRepository repository;
   repository.digest_exists = true;
   RecordingSanitizer sanitizer;
-  SequentialIdGenerator ids;
-  LegacyMigrationService service(personalCreatorId(), repository, sanitizer, ids);
+  LegacyMigrationService service(personalCreatorId(), repository, sanitizer);
 
   const auto result = service.migrateFile(fixturePath("legacy_graph_invalid.json"));
 
@@ -289,15 +393,13 @@ TEST_CASE("known source digest is an early no-op") {
   CHECK(repository.digest_count == 1);
   CHECK(repository.transaction_count == 0);
   CHECK(sanitizer.inputs.empty());
-  CHECK(ids.babel_count == 0);
 }
 
 TEST_CASE("repository race no-op is reported as already migrated") {
   FakeLegacyMigrationRepository repository;
   repository.import_result = false;
   RecordingSanitizer sanitizer;
-  SequentialIdGenerator ids;
-  LegacyMigrationService service(personalCreatorId(), repository, sanitizer, ids);
+  LegacyMigrationService service(personalCreatorId(), repository, sanitizer);
 
   const auto result = service.migrateFile(fixturePath("legacy_graph.json"));
 
@@ -312,8 +414,7 @@ TEST_CASE("empty legacy graph is a valid atomic import") {
   TemporaryLegacyFile file(R"({"babels":[],"edges":[]})");
   FakeLegacyMigrationRepository repository;
   RecordingSanitizer sanitizer;
-  SequentialIdGenerator ids;
-  LegacyMigrationService service(personalCreatorId(), repository, sanitizer, ids);
+  LegacyMigrationService service(personalCreatorId(), repository, sanitizer);
 
   const auto result = service.migrateFile(file.path());
 
@@ -328,8 +429,7 @@ TEST_CASE("empty legacy graph is a valid atomic import") {
 TEST_CASE("legacy migration rejects any owner other than manifest Personal") {
   FakeLegacyMigrationRepository repository;
   RecordingSanitizer sanitizer;
-  SequentialIdGenerator ids;
-  LegacyMigrationService service(ProfileManifest::creators().at(1).id, repository, sanitizer, ids);
+  LegacyMigrationService service(ProfileManifest::creators().at(1).id, repository, sanitizer);
 
   const auto result = service.migrateFile(fixturePath("does-not-exist.json"));
 

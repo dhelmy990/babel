@@ -18,7 +18,7 @@ struct LegacyMigrationResult {
 class LegacyMigrationService final {
  public:
   LegacyMigrationService(CreatorId personal_creator_id, LegacyMigrationRepository&,
-                         HtmlSanitizer&, IdGenerator&);
+                         HtmlSanitizer&);
 
   Result<LegacyMigrationResult> migrateFile(std::filesystem::path source_path);
 
@@ -26,7 +26,6 @@ class LegacyMigrationService final {
   CreatorId personal_creator_id_;
   LegacyMigrationRepository& repository_;
   HtmlSanitizer& sanitizer_;
-  IdGenerator& ids_;
 };
 
 }  // namespace babel

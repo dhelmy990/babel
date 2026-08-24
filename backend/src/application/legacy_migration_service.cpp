@@ -5,6 +5,7 @@
 #include <cctype>
 #include <exception>
 #include <fstream>
+#include <initializer_list>
 #include <iterator>
 #include <set>
 #include <stdexcept>
@@ -59,6 +60,8 @@ bool hasNonWhitespace(std::string_view value) {
     return std::isspace(character) == 0;
   });
 }
+
+bool containsNul(std::string_view value) { return value.find('\0') != std::string_view::npos; }
 
 bool validColor(std::string_view color) {
   return color.size() == 7 && color.front() == '#' &&
@@ -125,8 +128,12 @@ Result<LegacyGraph> validateGraph(const nlohmann::json& graph) {
         .description = babel.at("description").get<std::string>(),
         .color = babel.at("color").get<std::string>(),
     };
-    if (!hasNonWhitespace(parsed.id) || parsed.id.find('\0') != std::string::npos) {
-      return tl::make_unexpected(invalidLegacy("Legacy Babel ID must not be blank or contain NUL"));
+    if (containsNul(parsed.id) || containsNul(parsed.title) || containsNul(parsed.description) ||
+        containsNul(parsed.color)) {
+      return tl::make_unexpected(invalidLegacy("Legacy Babel fields must not contain NUL"));
+    }
+    if (!hasNonWhitespace(parsed.id)) {
+      return tl::make_unexpected(invalidLegacy("Legacy Babel ID must not be blank"));
     }
     if (!hasNonWhitespace(parsed.title)) {
       return tl::make_unexpected(invalidLegacy("Legacy Babel title must not be blank"));
@@ -154,8 +161,11 @@ Result<LegacyGraph> validateGraph(const nlohmann::json& graph) {
         .source = edge.at("source").get<std::string>(),
         .target = edge.at("target").get<std::string>(),
     };
-    if (!hasNonWhitespace(parsed.id) || parsed.id.find('\0') != std::string::npos) {
-      return tl::make_unexpected(invalidLegacy("Legacy edge ID must not be blank or contain NUL"));
+    if (containsNul(parsed.id) || containsNul(parsed.source) || containsNul(parsed.target)) {
+      return tl::make_unexpected(invalidLegacy("Legacy edge fields must not contain NUL"));
+    }
+    if (!hasNonWhitespace(parsed.id)) {
+      return tl::make_unexpected(invalidLegacy("Legacy edge ID must not be blank"));
     }
     if (!edge_ids.insert(parsed.id).second) {
       return tl::make_unexpected(invalidLegacy("Legacy edge IDs must be unique"));
@@ -208,15 +218,24 @@ Result<std::string> readSource(const std::filesystem::path& source_path) {
   return bytes;
 }
 
+std::string stableLegacyName(const CreatorId& owner, std::string_view entity_kind,
+                             std::initializer_list<std::string_view> identity_parts) {
+  std::string name = "legacy:" + owner.value + ":" + std::string(entity_kind);
+  // Length prefixes keep arbitrary legacy IDs unambiguous even when they contain separators.
+  for (const auto part : identity_parts) {
+    name += ":" + std::to_string(part.size()) + ":" + std::string(part);
+  }
+  return name;
+}
+
 }  // namespace
 
 LegacyMigrationService::LegacyMigrationService(CreatorId personal_creator_id,
                                                LegacyMigrationRepository& repository,
-                                               HtmlSanitizer& sanitizer, IdGenerator& ids)
+                                               HtmlSanitizer& sanitizer)
     : personal_creator_id_(std::move(personal_creator_id)),
       repository_(repository),
-      sanitizer_(sanitizer),
-      ids_(ids) {}
+      sanitizer_(sanitizer) {}
 
 Result<LegacyMigrationResult> LegacyMigrationService::migrateFile(
     std::filesystem::path source_path) {
@@ -252,26 +271,33 @@ Result<LegacyMigrationResult> LegacyMigrationService::migrateFile(
     std::vector<Babel> babels;
     babels.reserve(graph->babels.size());
     for (const auto& legacy : graph->babels) {
-      auto sanitized = sanitizer_.sanitize(legacy.description, kLegacyCanonicalBase);
-      if (!sanitized) {
-        return tl::make_unexpected(invalidLegacy("Legacy Babel description was rejected: " +
-                                                 sanitized.error().message));
+      std::string content_html;
+      if (hasNonWhitespace(legacy.description)) {
+        auto sanitized = sanitizer_.sanitize(legacy.description, kLegacyCanonicalBase);
+        if (!sanitized) {
+          return tl::make_unexpected(invalidLegacy("Legacy Babel description was rejected: " +
+                                                   sanitized.error().message));
+        }
+        content_html = std::move(sanitized->value);
+      } else {
+        content_html = "<p><br></p>";
       }
-      auto content_hash = sha256(sanitized->value, "sanitized legacy HTML");
+      auto content_hash = sha256(content_html, "sanitized legacy HTML");
       if (!content_hash) return tl::make_unexpected(content_hash.error());
-      const auto id = ids_.newBabelId();
-      if (!generated_babel_ids.insert(id.value).second) {
+      auto id = BabelId::v5(stableLegacyName(personal_creator_id_, "babel", {legacy.id}));
+      if (!id) return tl::make_unexpected(id.error());
+      if (!generated_babel_ids.insert(id->value).second) {
         return tl::make_unexpected(ApplicationError{
             .code = ErrorCode::internal,
-            .message = "ID generator returned a duplicate Babel ID",
+            .message = "Stable legacy Babel UUID derivation produced a collision",
         });
       }
-      id_map.emplace(legacy.id, id);
+      id_map.emplace(legacy.id, *id);
       babels.push_back(Babel{
-          .id = id,
+          .id = *id,
           .owner_id = personal_creator_id_,
           .title = legacy.title,
-          .content_html = std::move(sanitized->value),
+          .content_html = std::move(content_html),
           .color = legacy.color,
           .content_revision = 1,
           .content_hash = std::move(*content_hash),
@@ -282,15 +308,17 @@ Result<LegacyMigrationResult> LegacyMigrationService::migrateFile(
     std::unordered_set<std::string> generated_edge_ids;
     edges.reserve(graph->edges.size());
     for (const auto& legacy : graph->edges) {
-      const auto edge_id = ids_.newEdgeId();
-      if (!generated_edge_ids.insert(edge_id.value).second) {
+      auto edge_id = EdgeId::v5(stableLegacyName(personal_creator_id_, "edge",
+                                                {legacy.source, legacy.target}));
+      if (!edge_id) return tl::make_unexpected(edge_id.error());
+      if (!generated_edge_ids.insert(edge_id->value).second) {
         return tl::make_unexpected(ApplicationError{
             .code = ErrorCode::internal,
-            .message = "ID generator returned a duplicate Edge ID",
+            .message = "Stable legacy edge UUID derivation produced a collision",
         });
       }
       edges.push_back(Edge{
-          .id = edge_id,
+          .id = *edge_id,
           .owner_id = personal_creator_id_,
           .source_id = id_map.at(legacy.source),
           .target_id = id_map.at(legacy.target),
