@@ -1,357 +1,294 @@
-# Babel — Codebase Documentation
+# Babel Codebase Documentation
 
-## What it is
+## System Shape
 
-Babel is a browser-based 3D knowledge graph editor. Nodes ("babels") are planet-like spheres rendered in Three.js and arranged as a directed acyclic graph (DAG) by a force-simulation layout. Edges represent relationships between babels. Each babel has a rich-text body edited with Quill.
+Babel currently has three deployed local processes:
 
-Run it with:
-```
-python3 -m http.server 3000
-# then open http://localhost:3000/
-```
+1. PostgreSQL with pgvector, started by Docker Compose.
+2. A C++ modular-monolith backend, bound to `127.0.0.1:8787`.
+3. Electron, the supported profile-selection and graph-viewing application.
 
----
+The backend also serves a small local operations dashboard at `/admin`. The
+dashboard is not part of Electron and has one operational responsibility:
+starting and monitoring generated-profile Wikipedia population.
 
-## File map
+There is no authentication in this release. Loopback binding, strict local
+request checks, an instance-local admin nonce, and a single-backend database
+lease define the local security boundary.
 
-```
-index.html          Entry point — loads scripts in dependency order
-styles.css          All CSS
-app.js              Root-level app.js (legacy, now empty — see js/app.js)
-js/
-  config.js         Frozen configuration constants
-  state.js          Global mutable data + mutation methods
-  graph-utils.js    Pure DAG algorithms (cycle detection, transitivity)
-  rendering.js      Three.js materials, shaders, textures, lighting, preview
-  level-circles.js  DAG hierarchy circles + drag animation
-  animation.js      Edge flash animation + main render loop
-  persistence.js    localStorage save/load, JSON export/import
-  editor.js         Quill editor: blot registration, shortcuts, embeds, auto-save
-  ui.js             DOM wiring, overlays, color palette, CustomEvent dispatch
-  app.js            Graph init, node interaction handlers, event listeners
-```
+## Architectural Boundaries
 
-Scripts load in this exact order (each can rely on everything before it):
+The modular monolith contains only application-backend behavior and its
+administrative commands:
 
-```
-config → state → graph-utils → rendering → level-circles → animation → persistence → editor → ui → app
-```
+- creator/profile manifest installation
+- profile and graph queries
+- Wikipedia resolution, fetch, sanitization, and import
+- background seed orchestration and status
+- explicit legacy migration into Personal
+- database migrations and local HTTP composition
 
----
+Training, model serving, and parameter synchronization are separate boundaries
+from day one. They are not linked into the backend, represented as backend
+modules, or deployed yet. The current slice requires no GPU.
 
-## Module reference
+PostgreSQL stores sanitized Quill-compatible HTML as the only content
+representation. It does not store normalized text or embedding input. A future
+training component must derive its model input from that HTML at training time
+without adding a second persisted content copy to this application schema.
 
-### `Config` (`js/config.js`)
+## Codebase Map
 
-A frozen plain object. All magic numbers live here — colors, physics constants, timing, node sizes, edge appearance, lighting. Never written to at runtime.
+```text
+CMakeLists.txt / CMakePresets.json    C++20 build and dev/test presets
+vcpkg.json / vcpkg-configuration.json
+                                      pinned native dependency manifest
+compose.yaml                          local pgvector PostgreSQL service
+Justfile                              db, build, test, start, migration workflows
 
-Key sections:
+backend/
+  include/babel/domain/               typed IDs and domain models
+  include/babel/application/          ports, DTOs, services, manifest
+  include/babel/adapters/             PostgreSQL, MediaWiki, HTML adapters
+  include/babel/http/                 profile/admin controllers and security
+  include/babel/runtime/              command parsing and composition root
+  src/application/                    use-case implementations
+  src/adapters/postgres/              migrations and repositories
+  src/adapters/wikipedia/             MediaWiki HTTP adapter
+  src/adapters/html/                  libxml2 allowlist sanitizer
+  src/http/                           JSON/static dashboard controllers
+  src/runtime/                        process lease, server, seed runner
+  migrations/                         ordered PostgreSQL migrations
+  admin/                              dark dashboard HTML, CSS, and JavaScript
+  tests/unit/                         service and domain tests
+  tests/integration/                  PostgreSQL and HTTP contract tests
+  tests/fixtures/                     fixed Wikipedia and legacy inputs
 
-| Key | Purpose |
-|-----|---------|
-| `Config.colors.bright` | 10 color presets for babels |
-| `Config.graph` | Background color, DAG mode, level distance |
-| `Config.physics` | Force-simulation tuning |
-| `Config.animation` | Edge flash timing, circle update interval |
-| `Config.node` | Sphere radius, glow, selection ring dimensions |
-| `Config.edge` | Base line color/opacity, flash opacity |
-| `Config.levelCircle` | Dashed circle rendering, tolerance for Y grouping |
-| `Config.lighting` | Ambient, main, fill, point light settings |
-| `Config.ui` | Hold duration, toast duration, double-click threshold |
-| `Config.storage` | localStorage key |
-
----
-
-### `State` (`js/state.js`)
-
-The single source of truth for all runtime data. Modules read and mutate State — it is a mutable global singleton, not a reactive store. You have to manually tell the UI to re-render after changing a value.
-
-**Data:**
-
-```js
-State.babels        // Array of babel objects: { id, title, description, color }
-State.edges         // Array of edge objects: { id, source, target }
-```
-
-**Interaction state:**
-
-```js
-State.selectedBabel         // Currently selected babel (or null)
-State.comparisonBabels      // Array of 0–2 babels being compared
-State.editingBabel          // Babel open in the rich-text editor
-State.isCreating            // Whether creation hold is in progress
-State.selectedColor         // Color chosen in the creation/edit palette
-State.selectedSimilarBabels // IDs chosen in the creation form
-State.deleteWarningBabel    // Babel currently in delete-confirm state
-State.deleteWarningTimeout  // setTimeout handle for delete warning
-State.isPhysicsPaused       // (reserved)
+main.js                               secure Electron main process and IPC
+preload.js                            two-method read-only renderer bridge
+index.html / styles.css               profile selector and graph shell
+js/profile-selector.js                backend DTO validation and graph mapping
+js/ui.js                              profile wheel, loading, switching, overlays
+js/state.js                           renderer graph and mutation guards
+js/app.js                             Three.js graph coordinator
+js/rendering.js                       Three.js objects, materials, shaders
+js/graph-utils.js                     DAG and reciprocal-edge algorithms
+js/editor.js                          legacy editor UI, disabled for loaded profiles
+js/persistence.js                     disabled persistence facade (all methods are no-ops)
+tests/js/                             dashboard, Electron, Justfile, selector tests
 ```
 
-**Methods:**
+## Domain Vocabulary
 
-| Method | What it does |
-|--------|-------------|
-| `State.reset()` | Wipes everything back to initial values |
-| `State.addBabel(babel)` | Appends to `babels` |
-| `State.removeBabel(id)` | Removes babel and all its edges |
-| `State.getBabel(id)` | Returns babel by id |
-| `State.addEdge(source, target)` | Adds edge if not already present; returns bool |
-| `State.removeEdge(source, target)` | Removes edge; returns bool |
-| `State.hasEdge(source, target)` | Checks existence |
-| `State.getValidEdges()` | Filters out edges whose nodes no longer exist |
+**Creator / profile:** An owner and selector entry. The fixed manifest contains
+Personal at order 0 and 20 generated creator profiles at orders 1 through 20.
 
----
+**Babel:** An owned graph node with a title, color, revision, content hash, and
+sanitized Quill-compatible HTML body.
 
-### `GraphUtils` (`js/graph-utils.js`)
+**Edge:** An owned directed relationship between two Babels of the same creator.
+Cross-owner edges and self-loops are rejected. Reciprocal pairs represent an
+association and are excluded from DAG layout.
 
-Pure DAG algorithms. **None of these functions mutate State** — callers receive arrays of edges to remove and apply them via `State.removeEdge`.
+**Seed assignment:** A stable manifest association among one generated creator,
+one declared Wikipedia title, and one assignment UUID. There are 80 assignments,
+four per generated creator. Personal has none.
 
-| Method | Signature | What it does |
-|--------|-----------|-------------|
-| `getDependencyEdges` | `(edges)` | Returns only one-directional edges (filters out mutual/association edges) |
-| `buildAdjacencyList` | `(edges, excludeEdge?)` | Returns a `Map<id, id[]>` adjacency list |
-| `hasPath` | `(sourceId, targetId, edges, excludeDirectEdge?)` | BFS reachability check |
-| `wouldCreateCycle` | `(sourceId, targetId, edges)` | Returns true if adding this edge would form a cycle |
-| `pruneTransitiveEdges` | `(edges)` | Returns edges that are redundant (path exists without them) |
-| `breakCycles` | `(edges)` | Returns edges whose removal makes the graph acyclic |
-| `cleanGraphOnLoad` | `()` | Runs break+prune, applies results to State — called once on startup |
-| `identifyMutualEdges` | `(edges)` | Stamps `.isMutual = true` on bidirectional pairs |
-| `getDagEdges` | `(edges)` | Filters mutual edges, returning only DAG-compatible edges for layout |
+**Seed run:** A durable snapshot of all assignments and their outcomes. A run can
+be queued, running, completed, completed with errors, failed, or interrupted.
 
-**Edge types:**
-- **Dependency edge** — one direction only: A → B but not B → A. Participates in DAG layout.
-- **Mutual/association edge** — A → B and B → A both exist. Rendered as a link but excluded from DAG layout (would break the acyclic constraint).
+**Wikipedia source:** Provenance attached to a Babel: numeric page ID, canonical
+HTTPS URL, optional source revision, fetch time, declared title, and optional
+seed assignment.
 
----
+**Personal migration:** A digest-addressed, atomic conversion of one legacy JSON
+file into Babels and edges owned only by Personal.
 
-### `Rendering` (`js/rendering.js`)
+## Local Lifecycle
 
-Owns all Three.js object construction: procedural planet textures, custom GLSL shaders, node meshes, scene lighting, and the edit-mode 3D preview. **Does not read State** — callers pass in all the data Rendering needs.
+`just db-up` is an explicit prerequisite. It starts only the Compose `postgres`
+service and its dedicated `babel_postgres_data` volume.
 
-**Shaders:**
+`just start` performs this sequence:
 
-Two inline GLSL strings — `HOLE_VERTEX_SHADER` and `HOLE_FRAGMENT_SHADER`. The fragment shader renders a "murky hole" effect on the hovered babel's sphere: a jittery dark vortex that follows the mouse cursor's UV position.
+1. Configure and build the development preset.
+2. Run the backend `migrate` command.
+3. Generate a random 64-hex instance token.
+4. Start `babel_backend serve` as a child.
+5. Poll `/health` until the response contains that exact child token and the
+   child is still alive.
+6. Print `http://127.0.0.1:8787/admin`.
+7. Launch Electron through `npm start`.
+8. On interruption or Electron exit, terminate the backend child and remove its
+   temporary log.
 
-**Key methods:**
+It neither starts Docker nor starts a seed run. PostgreSQL intentionally outlives
+the app command.
 
-| Method | What it does |
-|--------|-------------|
-| `createPlanetTexture(color, size?)` | Generates a procedural Neptune-like texture on a `<canvas>`. Atmospheric bands, turbulence noise, storm spots. |
-| `getPlanetTexture(color)` | Cache wrapper around `createPlanetTexture`. One texture per color hex string. |
-| `createHoleMaterial(texture, color)` | Returns a `THREE.ShaderMaterial` with the hole/hover uniforms. |
-| `pointToUV(localPoint, radius)` | Converts a 3D intersection point on a sphere to UV coordinates for the hole shader. |
-| `updateHolePosition(uv)` | Pushes a new UV into the hovered material's `holeCenter` uniform. |
-| `setHoverState(material, isHovering)` | Toggles the hole effect on/off; tracks `hoveredMaterial` and `hoverStartTime`. |
-| `updateTime()` | Advances the `time` uniform on the hovered material — called every frame. |
-| `createNodeObject(node, { isSelected, isDeleteWarning })` | Builds the full Three.js `Group` for a babel node: main sphere + glow sphere + optional selection ring. Flags are passed by the caller; Rendering does not read State. |
-| `setupLighting(scene)` | Adds ambient, main directional, fill directional, and point lights to the scene. |
-| `createPreview(container, color)` | Sets up a self-contained Three.js preview (scene, camera, renderer, lighting, rotation loop) inside `container`. Returns a handle: `{ updateColor(color), destroy() }`. |
+The backend takes a PostgreSQL advisory lock before migrations, Personal import,
+or serving. Concurrent application-backend instances fail before database
+mutation rather than sharing mutable runtime state.
 
-**Texture cache:** `Rendering.textureCache` is a `Map`. It is cleared in `UI.closeEdit()` so that color changes in the editor are immediately reflected in the main graph on the next render pass.
+## HTTP Contract
 
----
+The server is fixed to loopback and intentionally emits no CORS allow header.
 
-### `LevelCircles` (`js/level-circles.js`)
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/health` | health plus per-process instance token |
+| `GET` | `/api/v1/profiles` | ordered 21-profile roster |
+| `GET` | `/api/v1/profiles/{uuid}/graph` | complete owned graph, including empty graphs |
+| `GET` | `/admin` | nonce-injected dashboard document |
+| `GET` | `/admin/dashboard.css` | dashboard stylesheet |
+| `GET` | `/admin/dashboard.js` | dashboard controller |
+| `GET` | `/admin/seed-status.js` | seed status view model |
+| `GET` | `/admin/api/v1/seed` | latest durable seed status |
+| `POST` | `/admin/api/v1/seed` | start or attach to a seed run |
 
-Manages the dashed concentric circles that visualize DAG hierarchy levels. Also owns all drag-animation state so that circles update smoothly while a node is being dragged.
+Profile responses use camelCase JSON. The graph response contains `profile`,
+`babels`, and `edges`; an existing profile with no content returns empty arrays,
+not a not-found error.
 
-**State:**
+Admin mutations require the exact local Host and Origin plus the random nonce
+injected into the rendered dashboard. Assets and admin JSON use `Cache-Control:
+no-store`. A missing or incorrect nonce returns 403. Starting while another run
+is active returns 409 with the active status, which the dashboard treats as an
+attachment rather than a second job.
 
-```js
-LevelCircles.levelCirclesGroup  // THREE.Group currently in the scene
-LevelCircles.dragState          // Drag tracking: isDragging, node, levelY, levelNodes, originalCenter, …
+The admin mutation endpoint exists to support the served dashboard. Operational
+practice is stricter than HTTP reachability: population is started only by
+pressing the visible dashboard button, never by scripts, CLI commands, Electron,
+or direct API requests.
+
+## Wikipedia Population
+
+The manifest gives the seed service 80 stable assignments. The dashboard button
+creates a run that snapshots all 80 items, then the background runner processes
+at most four assignments concurrently.
+
+For each missing assignment the application:
+
+1. Resolves the declared title through the MediaWiki API.
+2. Fetches the rendered article by numeric page ID.
+3. Verifies that the fetched identity matches the resolved page.
+4. Sanitizes the rendered HTML through the Quill allowlist.
+5. Inserts the owned Babel and Wikipedia source atomically.
+6. Attaches the stable assignment and declared title.
+
+The canonical reusable application operation is
+`WikipediaImportService::importWikipediaBabel(creatorId, pageId, context)`. Its
+page-ID overload is the predefined path for importing a known Wikipedia ID into
+a profile. The seed path resolves manifest titles first and then calls this
+numeric-ID operation with seed context. There is no public Electron or dashboard
+form for arbitrary page IDs yet.
+
+Unavailable MediaWiki requests are retried twice inside one assignment with a
+fixed backoff. Permanent failures are recorded immediately. Assignment failures
+do not discard successful imports; the run reaches `completed_with_errors` and
+the dashboard shows every durable error.
+
+A later dashboard button press snapshots all 80 assignments again. Already
+attached assignments become skipped without a network request, while missing
+assignments are retried. PostgreSQL uniqueness constraints prevent duplicate
+owner/page and seed-assignment rows.
+
+## HTML Storage And Sanitization
+
+The libxml2 adapter reconstructs content from an allowlist instead of trusting
+the source tree. It removes executable markup, event handlers, unsafe URL
+schemes, Wikipedia UI/citation subtrees, and unsupported containers while
+preserving safe prose, headings, lists, tables, code, links, and HTTPS images in
+a Quill-compatible representation.
+
+`babels.content_html` stores only the sanitized result. `babel_sources` stores
+provenance separately. There is no normalized-text column. Renderer helpers may
+derive plain text for presentation, but they are not a training implementation
+or persisted embedding pipeline.
+
+## Personal Migration
+
+`just migrate-personal /absolute/path.json` builds, verifies the schema, and runs
+the explicit migration command. The service accepts a bounded regular file,
+rejects symlinks and malformed graph invariants, hashes its exact bytes, and does
+not rewrite the source or its mtime.
+
+Legacy Babel and edge UUIDs are deterministic UUIDv5 values derived from the
+Personal creator identity and length-prefixed legacy identities. Reordering the
+legacy JSON arrays therefore preserves entity identity and connectivity.
+
+Blank legacy descriptions become canonical empty Quill HTML. Nonblank content
+passes through the same sanitizer as Wikipedia content. The repository claims
+the SHA-256 digest and writes the complete Personal graph in one transaction. A
+second import of the same bytes returns `already_migrated`; a failed graph write
+rolls back both graph rows and the digest claim.
+
+Personal cannot be populated by the dashboard. Generated seed assignments
+cannot be attached to Personal. Stop the serving backend before invoking the
+command because the application permits only one active backend instance.
+
+## Electron Profile Flow
+
+Electron is the supported application. The main process uses context isolation,
+sandboxing, no renderer Node integration, guarded IPC, blocked arbitrary
+navigation, and credential-free HTTPS-only external links.
+
+The preload bridge exposes exactly:
+
+```text
+listProfiles()
+loadProfileGraph(profileId)
 ```
 
-**Methods:**
+Both methods issue bounded, timeout-controlled JSON GETs to the loopback backend.
+They reject redirects, unexpected origins, non-JSON bodies, oversized responses,
+and malformed DTOs.
 
-| Method | What it does |
-|--------|-------------|
-| `updateLevelCircles(graph)` | Groups all nodes by Y position (within `Config.levelCircle.tolerance`), computes the bounding circle for each group, redraws. Called periodically from the animation loop and after graph updates. |
-| `updateDraggedLevelCircle(graph, overrideX, overrideZ)` | Same as above but substitutes the dragged node's current XZ position instead of its graph position. Called every drag frame. |
-| `_drawCircle(centerX, levelY, centerZ, radius, cfg)` | Appends a single dashed `THREE.Line` circle to `levelCirclesGroup`. |
-| `startDrag(node, graph)` | Captures drag state: level Y, sibling nodes, original center. |
-| `endDrag(graph)` | Animates the circle back to its settled position over `Config.animation.dragReturnDuration` ms, then calls `updateLevelCircles`. |
+Startup loads the 21-profile roster and displays Personal first in a colored
+wheel. Wheel motion, arrow keys, mouse selection, and Enter change or open the
+active profile. Selecting a profile replaces renderer state with the backend
+graph, including a legitimate empty graph. Switch Profile clears transient graph
+selection and returns to the wheel.
 
----
+Every backend-loaded graph sets `State.isReadOnlyProfile`. State mutation
+methods, editor writes, edge changes, creation, deletion, and persistence paths
+then reject work. The app does not call the legacy localStorage loader as an
+offline fallback. A stopped backend produces a visible connection error and
+retry action.
 
-### `Animation` (`js/animation.js`)
+## PostgreSQL Schema
 
-Owns the edge flash animation and the main `requestAnimationFrame` loop. Level-circle logic was separated into `LevelCircles`.
+- `creators`: stable selector identities, colors, kind, and order
+- `babels`: owned sanitized content and revision/hash metadata
+- `babel_sources`: one-to-one Wikipedia provenance and seed attachment
+- `edges`: same-owner directed graph relationships
+- `seed_runs`: durable run lifecycle
+- `seed_run_items`: assignment snapshot, attempts, result, and error detail
+- `legacy_migrations`: exact source digest and imported Personal counts
+- `schema_migrations`: applied migration versions
 
-**Methods:**
+The pgvector extension is enabled now so the database boundary is ready for
+eventual vector data, but this release creates no embeddings, runs no models, and
+performs no parameter synchronization.
 
-| Method | What it does |
-|--------|-------------|
-| `updateEdge(obj, start, end, link)` | Rebuilds the Three.js geometry for one edge every frame: a dim base line plus a short moving gradient flash whose progress is derived from `Date.now()`. |
-| `startLoop(graph)` | Starts the RAF loop. Each tick: advances the hole shader time uniform, redraws all edges, and periodically calls `LevelCircles.updateLevelCircles` (every `Config.animation.levelCircleUpdateInterval` ms, skipped during drag). |
+## Testing And Operations
 
----
+`just test` builds the test preset, runs Catch2 tests through CTest, and runs the
+Node test suite. Native integration tests exercise PostgreSQL transactions,
+constraints, locks, repositories, and HTTP-controller contracts. Unit tests use
+fixed MediaWiki and legacy fixtures; automated tests do not populate from the
+live network.
 
-### `Persistence` (`js/persistence.js`)
+Population and its operational retry check are performed through the rendered
+dashboard only. This rule does not move the automated C++ or Node test suite into
+the dashboard.
 
-Serializes and deserializes the graph to/from `localStorage` under `Config.storage.key`.
+Useful checks while `just start` is running:
 
-| Method | What it does |
-|--------|-------------|
-| `save()` | JSON-serializes `State.babels` and `State.edges` to localStorage. |
-| `load()` | Reads and parses localStorage, writes into `State.babels` / `State.edges`. |
-| `exportJSON()` | Downloads the graph as a `.json` file via a temporary anchor element. |
-| `importJSON(file)` | Reads a `File` object, parses JSON, writes into State. Returns a Promise. |
-| `clear()` | Removes the localStorage entry and calls `State.reset()`. |
-
----
-
-### `Editor` (`js/editor.js`)
-
-Owns all Quill editor concerns: blot registration, instance creation, keyboard shortcuts, paste handling, auto-save, and persistence of the currently open babel. **Reads `UI.elements.editTitle`** for the title field value, and reads `State.editingBabel` / `State.selectedColor` when saving.
-
-**Properties:**
-
-| Property | Purpose |
-|----------|---------|
-| `Editor.editor` | The live `Quill` instance (null until first `openEdit`) |
-| `Editor.autoSaveTimer` | `setTimeout` handle for the 2-second debounce |
-| `Editor.blotsRegistered` | Guard so Quill blots are registered only once |
-
-**Methods:**
-
-| Method | What it does |
-|--------|-------------|
-| `initEditor()` | Registers custom blots (first call only), then creates the Quill instance. Safe to call repeatedly. |
-| `createQuillInstance()` | Creates the `Quill` object, wires `text-change`, paste, click, and `@`-mention handlers. |
-| `setupEditorShortcuts()` | Attaches `keydown` listener on the Quill root for Ctrl+B/I/H/+/- etc. |
-| `cycleHeading(direction)` | Rotates heading level at selection: 0→1→2→3→0. `direction` 1 = increase, -1 = decrease. |
-| `handlePaste(e)` | Intercepts paste events to auto-embed PDFs and YouTube URLs. |
-| `embedYouTube(url)` | Inserts a `YouTubeBlot` pill at the current cursor position. |
-| `embedPDF(file)` | Creates an object URL for the file and inserts a `PDFBlot` pill. |
-| `checkForBabelMention()` | Scans backwards from cursor for `@`, calls `showBabelSelector` if found. |
-| `showBabelSelector(atPosition)` | Stub — will show a popup with `getRecommendedBabels()` results. |
-| `getRecommendedBabels()` | Returns `[]` for now; will return neighbor/nested babels. |
-| `triggerAutoSave()` | Debounces `saveCurrentBabel()` by 2 seconds. |
-| `saveCurrentBabel()` | Reads title from `UI.elements.editTitle`, HTML from `Editor.editor`, color from `State.selectedColor`, writes into `State.editingBabel`, calls `Persistence.save()`. |
-
-**Custom Quill blots** (registered once on first `initEditor` call):
-
-| Blot | Tag | Behaviour |
-|------|-----|-----------|
-| `HighlightBlot` | `<mark>` | Yellow background highlight |
-| `YouTubeBlot` | `<span class="youtube-embed">` | Inline pill; click copies URL to clipboard |
-| `PDFBlot` | `<span class="pdf-embed">` | Inline pill; click opens file URL in new tab |
-
-**Babel mention (`@`):** Partially implemented. Typing `@` triggers `checkForBabelMention` → `showBabelSelector` → `getRecommendedBabels` (returns `[]`).
-
----
-
-### `UI` (`js/ui.js`)
-
-Owns all DOM interaction: overlay lifecycle, color palette, the 3D edit-mode preview, and keyboard/button event handling. Delegates all Quill editor concerns to `Editor`. Communicates back to `app.js` exclusively via `CustomEvent`s dispatched on `document`.
-
-**Events fired by UI:**
-
-| Event | When |
-|-------|------|
-| `babel:create` | Create button clicked or Enter pressed in creation form |
-| `babel:toggle-edge` | Edge arrow clicked in comparison overlay (`detail.direction`: `'left-to-right'` or `'right-to-left'`) |
-| `babel:deselect` | Escape pressed with a selected babel but no active overlay |
-| `babel:delete` | Delete/Backspace pressed with a selected babel |
-| `babel:reset-camera` | Space pressed |
-| `babel:save` | Ctrl+S pressed |
-| `babel:comparison-closed` | Comparison overlay animation finishes closing |
-| `babel:edit-closed` | Edit overlay closes |
-
-**Key methods:**
-
-| Method | What it does |
-|--------|-------------|
-| `init()` | Caches all DOM element references into `UI.elements`. |
-| `setupColorPalette()` | Populates both the creation-form and edit-mode color swatches from `Config.colors.bright`. |
-| `setupEventListeners()` | Wires all buttons and global key handlers. Fires CustomEvents for app-level actions. |
-| `startCreation()` / `cancelCreation()` | Shows/hides the creation hold animation. |
-| `showCreationForm()` | Transitions from hold animation into the creation form panel. |
-| `openComparison()` | Populates and shows the comparison overlay for `State.comparisonBabels[0]` and `[1]`. |
-| `closeComparison()` | Saves inline edits, animates panels closed, fires `babel:comparison-closed`. |
-| `openEdit(babel)` | Sets `State.editingBabel`, calls `Editor.initEditor()`, loads content into editor and title field, shows edit overlay, initializes 3D preview. |
-| `closeEdit()` | Calls `Editor.saveCurrentBabel()`, cancels auto-save timer, cleans up preview, fires `babel:edit-closed`. |
-| `initPreview(color)` | Delegates to `Rendering.createPreview`; stores the returned handle in `UI.preview`. |
-| `updatePreviewColor(color)` | Calls `UI.preview.updateColor(color)`. |
-| `cleanupPreview()` | Calls `UI.preview.destroy()`. |
-
----
-
-### `app.js` (`js/app.js`)
-
-Application entry point and coordinator. Initializes the graph, wires up 3d-force-graph event handlers, listens for CustomEvents from UI, and owns functions that require access to the `Graph` object.
-
-**Startup sequence (`init`):**
-1. `UI.init()` — cache DOM
-2. `initGraph()` — create ForceGraph3D instance
-3. `Rendering.setupLighting(scene)` — add lights
-4. `Persistence.load()` — restore saved data
-5. `GraphUtils.cleanGraphOnLoad()` — fix any corrupted edges
-6. `UI.setupColorPalette()` — populate swatches
-7. `UI.setupEventListeners()` — wire DOM
-8. Register CustomEvent listeners on `document`
-9. `updateGraph()` — push data into the graph library
-10. `Animation.startLoop(Graph)` — begin RAF loop
-11. Register `mousemove` / `mouseleave` listeners for the hole raycaster
-
-**ForceGraph3D callbacks:**
-
-| Callback | Handler | Notes |
-|----------|---------|-------|
-| `nodeThreeObject` | `Rendering.createNodeObject(node, flags)` | Flags computed from State at call time |
-| `linkThreeObject` | Creates a `THREE.Group` tagged with the link | Geometry filled in by `linkPositionUpdate` |
-| `linkPositionUpdate` | `Animation.updateEdge(...)` | Redraws edge geometry each frame |
-| `onNodeClick` | `handleNodeClick` | Single click = select; double-click = focus camera |
-| `onNodeRightClick` | `handleNodeRightClick` | First right-click stages for comparison; second opens comparison overlay |
-| `onNodeHover` | `handleNodeHover` | Tracks which node the cursor is over for the raycaster |
-| `onBackgroundClick` | `handleBackgroundClick` | Deselects and clears comparison staging |
-| `onNodeDrag` | `handleNodeDrag` | Fixes node position, delegates to `LevelCircles` |
-| `onNodeDragEnd` | `handleNodeDragEnd` | Releases fix, animates Y back to DAG level, ends LevelCircles drag |
-| `onEngineStop` | `LevelCircles.updateLevelCircles` | Redraws circles once physics settle |
-
-**Hover raycasting:** `handleMouseMove` runs every `mousemove` event on the graph container. It uses `THREE.Raycaster` to find the first intersected mesh tagged `isMainSphere`, then converts the 3D hit point to UV and passes it to `Rendering.updateHolePosition`. This drives the hole shader on the hovered babel.
-
-**`updateGraph()`:** Calls `State.getValidEdges()`, then `GraphUtils.getDagEdges()` to strip mutual edges, then feeds the result into `Graph.graphData()`. Schedules two `LevelCircles.updateLevelCircles` calls at 500 ms and 1500 ms to catch the physics settling.
-
----
-
-## Data flow
-
-```
-User action
-    │
-    ├─ Keyboard/button ──► UI fires CustomEvent ──► app.js listener
-    │                                                    │
-    │                                              mutates State
-    │                                              calls updateGraph()
-    │                                                    │
-    ├─ Node click/drag ──► app.js handler ─────────► Graph.nodeThreeObject()
-    │                                                    │
-    │                                         Rendering.createNodeObject()
-    │                                         (reads flags from State at call time)
-    │
-    └─ RAF loop (Animation.startLoop)
-           │
-           ├─ Rendering.updateTime()          ← hole shader
-           ├─ Animation.updateEdge()          ← edge flash
-           └─ LevelCircles.updateLevelCircles() ← hierarchy circles
+```bash
+curl --fail --silent http://127.0.0.1:8787/health
+curl --fail --silent http://127.0.0.1:8787/api/v1/profiles
 ```
 
----
-
-## Key design decisions
-
-**No bundler.** All modules are plain `<script>` tags loaded in dependency order. No imports, no build step. Everything is a global object.
-
-**State is a global mutable singleton.** Modules read `State` freely. `GraphUtils` and `Rendering` were refactored to be pure (taking data as arguments) so they can be reasoned about without State setup.
-
-**CustomEvent seam between UI and app.** UI fires named browser events (`babel:create`, `babel:delete`, etc.) rather than calling passed-in callbacks. This lets UI be changed without touching app.js's event wiring, and vice versa.
-
-**GraphUtils is pure.** `pruneTransitiveEdges(edges)` and `breakCycles(edges)` return lists of edges to remove; they never call `State.removeEdge` themselves. The caller (app.js or `cleanGraphOnLoad`) applies the results.
-
-**Rendering is pure.** `createNodeObject(node, { isSelected, isDeleteWarning })` takes flags from its caller. It does not read `State.selectedBabel` or `State.deleteWarningBabel` directly.
-
-**Preview lives in Rendering.** `Rendering.createPreview(container, color)` owns the Three.js scene, camera, renderer, and rotation loop for the edit-mode babel preview. UI holds only the returned handle (`{ updateColor, destroy }`).
-
-**LevelCircles owns drag state.** All circle-drawing logic (static and drag-aware) and the drag tracking state live in one module. `Animation` only owns the edge flash and the RAF loop coordination.
+For live MediaWiki 429 responses, keep the successful partial imports, wait for
+the remote rate limit to cool down, then press the dashboard retry button. The
+retry is idempotent and targets only assignments that are still missing.
