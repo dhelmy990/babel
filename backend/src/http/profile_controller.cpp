@@ -17,26 +17,6 @@ Json profileJson(const ProfileSummaryDto& profile) {
               {"order", profile.order}};
 }
 
-Json graphJson(const ProfileGraphDto& graph) {
-  Json babels = Json::array();
-  for (const auto& babel : graph.babels) {
-    babels.push_back(Json{{"id", babel.id.value},
-                         {"title", babel.title},
-                         {"contentHtml", babel.content_html},
-                         {"color", babel.color},
-                         {"contentRevision", babel.content_revision}});
-  }
-  Json edges = Json::array();
-  for (const auto& edge : graph.edges) {
-    edges.push_back(Json{{"id", edge.id.value},
-                        {"sourceId", edge.source_id.value},
-                        {"targetId", edge.target_id.value}});
-  }
-  return Json{{"profile", profileJson(graph.profile)},
-              {"babels", std::move(babels)},
-              {"edges", std::move(edges)}};
-}
-
 drogon::HttpResponsePtr response(drogon::HttpStatusCode status, Json payload) {
   auto result = drogon::HttpResponse::newHttpResponse();
   result->setStatusCode(status);
@@ -135,8 +115,8 @@ void ProfileController::graph(const drogon::HttpRequestPtr&, Callback callback,
     callback(applicationError(graph.error()));
     return;
   }
-  const auto serialized = graphJson(*graph).dump();
-  if (serialized.size() > kMaxGraphJsonBytes) {
+  const auto serialized = serializeProfileGraphJson(*graph);
+  if (serialized.size() > kMaxProfileGraphJsonBytes) {
     callback(response(drogon::k413RequestEntityTooLarge,
                       Json{{"error", Json{{"code", "response_too_large"},
                                            {"message", "Profile graph exceeds the 64 MiB response limit"}}}}));

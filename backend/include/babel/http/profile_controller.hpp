@@ -7,6 +7,7 @@
 #include <drogon/HttpRequest.h>
 #include <drogon/HttpResponse.h>
 
+#include "babel/application/profile_graph_json.hpp"
 #include "babel/application/profile_query_service.hpp"
 
 namespace babel {
@@ -17,7 +18,7 @@ class ProfileController final {
   using ListProfiles = std::function<Result<std::vector<ProfileSummaryDto>>()>;
   using LoadGraph = std::function<Result<ProfileGraphDto>(CreatorId)>;
 
-  static constexpr std::size_t kMaxGraphJsonBytes = 64U * 1024U * 1024U;
+  static constexpr std::size_t kMaxGraphJsonBytes = kMaxProfileGraphJsonBytes;
 
   ProfileController(ProfileQueryService&, std::string instance_token);
   ProfileController(ListProfiles, LoadGraph, std::string instance_token = "test-instance");

@@ -855,7 +855,12 @@ TEST_CASE("legacy migration targets Personal and preserves edge identity") {
 
 - [ ] **Step 2: Write failing validation and idempotency tests**
 
-Assert malformed JSON, duplicate legacy IDs, invalid colors, and edges referencing missing nodes fail before repository writes. Hash the complete source bytes; a second completed migration with the same SHA-256 returns `already_migrated` and performs no inserts. Verify the fixture bytes are unchanged before and after.
+Assert malformed JSON, duplicate legacy IDs, invalid colors, edges referencing
+missing nodes, non-reciprocal directed cycles, and complete serialized graphs
+over the shared 64 MiB response limit fail before repository writes. Reciprocal
+edge pairs remain valid mutual relationships. Hash the complete source bytes; a
+second completed migration with the same SHA-256 returns `already_migrated` and
+performs no inserts. Verify the fixture bytes are unchanged before and after.
 
 - [ ] **Step 3: Run migration tests and verify failure**
 
@@ -865,7 +870,11 @@ Expected: compile fails because the service is absent.
 
 - [ ] **Step 4: Implement strict legacy parsing**
 
-Require root arrays `babels` and `edges`. Accept legacy Babel fields `id`, `title`, `description`, and `color`; ignore `contentDelta`; sanitize `description` into canonical `content_html`. Validate the entire graph before opening a write transaction.
+Require root arrays `babels` and `edges`. Accept legacy Babel fields `id`,
+`title`, `description`, and `color`; ignore `contentDelta`; sanitize
+`description` into canonical `content_html`. Validate reciprocal-aware DAG
+semantics and measure the exact public graph JSON against the shared 64 MiB
+limit before opening a write transaction.
 
 - [ ] **Step 4a: Make migrated identities stable**
 

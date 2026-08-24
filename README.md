@@ -78,8 +78,11 @@ just migrate-personal /absolute/path/to/legacy-graph.json
 
 The command reads but never rewrites the source. It hashes the exact bytes,
 sanitizes legacy rich text into the same Quill-compatible HTML representation,
-and atomically imports the Personal Babels and edges. Running the command again
-with identical bytes reports `already_migrated` and creates no duplicates.
+and atomically imports the Personal Babels and edges. Reciprocal edge pairs are
+valid, while other directed cycles and complete profile JSON over 64 MiB are
+rejected before database writes so Electron can always load an imported graph.
+Running the command again with identical bytes reports `already_migrated` and
+creates no duplicates.
 
 Only an explicit `just migrate-personal` command can populate Personal. The
 dashboard and generated-profile seed job cannot target it.

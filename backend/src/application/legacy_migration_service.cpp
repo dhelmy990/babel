@@ -4,6 +4,7 @@
 #include <array>
 #include <cerrno>
 #include <cctype>
+#include <deque>
 #include <exception>
 #include <initializer_list>
 #include <set>
@@ -22,6 +23,7 @@
 #include <unistd.h>
 
 #include "babel/application/profile_manifest.hpp"
+#include "babel/application/profile_graph_json.hpp"
 
 namespace babel {
 namespace {
@@ -203,6 +205,37 @@ Result<LegacyGraph> validateGraph(const nlohmann::json& graph) {
     }
     result.edges.push_back(std::move(parsed));
   }
+
+  std::unordered_map<std::string, std::size_t> indegree;
+  std::unordered_map<std::string, std::vector<std::string>> outgoing;
+  for (const auto& id : babel_ids) {
+    indegree.emplace(id, 0U);
+    outgoing.emplace(id, std::vector<std::string>{});
+  }
+  for (const auto& edge : result.edges) {
+    if (endpoint_pairs.contains({edge.target, edge.source})) continue;
+    outgoing.at(edge.source).push_back(edge.target);
+    ++indegree.at(edge.target);
+  }
+  std::deque<std::string> ready;
+  for (const auto& [id, count] : indegree) {
+    if (count == 0U) ready.push_back(id);
+  }
+  std::size_t visited = 0;
+  while (!ready.empty()) {
+    auto id = std::move(ready.front());
+    ready.pop_front();
+    ++visited;
+    for (const auto& target : outgoing.at(id)) {
+      auto& count = indegree.at(target);
+      --count;
+      if (count == 0U) ready.push_back(target);
+    }
+  }
+  if (visited != babel_ids.size()) {
+    return tl::make_unexpected(
+        invalidLegacy("Legacy graph contains a non-reciprocal directed cycle"));
+  }
   return result;
 }
 
@@ -372,6 +405,40 @@ Result<LegacyMigrationResult> LegacyMigrationService::migrateFile(
           .source_id = id_map.at(legacy.source),
           .target_id = id_map.at(legacy.target),
       });
+    }
+
+    const auto& personal = manifest.front();
+    ProfileGraphDto projected_graph{
+        .profile = ProfileSummaryDto{
+            .id = personal.id,
+            .display_name = personal.display_name,
+            .color = personal.color,
+            .order = personal.order,
+        },
+        .babels = {},
+        .edges = {},
+    };
+    projected_graph.babels.reserve(babels.size());
+    for (const auto& babel : babels) {
+      projected_graph.babels.push_back(BabelDto{
+          .id = babel.id,
+          .title = babel.title,
+          .content_html = babel.content_html,
+          .color = babel.color,
+          .content_revision = babel.content_revision,
+      });
+    }
+    projected_graph.edges.reserve(edges.size());
+    for (const auto& edge : edges) {
+      projected_graph.edges.push_back(EdgeDto{
+          .id = edge.id,
+          .source_id = edge.source_id,
+          .target_id = edge.target_id,
+      });
+    }
+    if (serializeProfileGraphJson(projected_graph).size() > kMaxProfileGraphJsonBytes) {
+      return tl::make_unexpected(
+          invalidLegacy("Legacy graph exceeds the 64 MiB profile response limit"));
     }
 
     auto imported = repository_.importPersonalGraph(*source_digest, babels, edges);

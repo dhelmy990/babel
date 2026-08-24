@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include <catch2/catch_test_macros.hpp>
+#include <nlohmann/json.hpp>
 
 #include "babel/adapters/html/libxml_html_sanitizer.hpp"
 #include "babel/application/legacy_migration_service.hpp"
@@ -87,6 +88,17 @@ class CountingLibxmlSanitizer final : public HtmlSanitizer {
 
  private:
   LibxmlHtmlSanitizer sanitizer_;
+};
+
+class MaximumSizedSanitizer final : public HtmlSanitizer {
+ public:
+  Result<SanitizedHtml> sanitize(std::string_view, std::string_view) override {
+    ++sanitize_count;
+    constexpr std::size_t max_sanitized_bytes = 5U * 1024U * 1024U;
+    return SanitizedHtml{.value = "<p>" + std::string(max_sanitized_bytes - 7U, 'x') + "</p>"};
+  }
+
+  int sanitize_count{0};
 };
 
 CreatorId personalCreatorId() { return ProfileManifest::creators().front().id; }
@@ -382,6 +394,56 @@ TEST_CASE("legacy migration rejects invalid graph schemas and invariants before 
       CHECK(sanitizer.inputs.empty());
     }
   }
+}
+
+TEST_CASE("legacy migration accepts reciprocal edges but rejects remaining directed cycles") {
+  TemporaryLegacyFile reciprocal(
+      R"({"babels":[{"id":"a","title":"A","description":"<p>A</p>","color":"#123456"},{"id":"b","title":"B","description":"<p>B</p>","color":"#654321"}],"edges":[{"id":"ab","source":"a","target":"b"},{"id":"ba","source":"b","target":"a"}]})");
+  FakeLegacyMigrationRepository reciprocal_repository;
+  RecordingSanitizer reciprocal_sanitizer;
+  LegacyMigrationService reciprocal_service(personalCreatorId(), reciprocal_repository,
+                                             reciprocal_sanitizer);
+
+  const auto reciprocal_result = reciprocal_service.migrateFile(reciprocal.path());
+
+  REQUIRE(reciprocal_result.has_value());
+  CHECK(reciprocal_repository.transaction_count == 1);
+  CHECK(reciprocal_repository.imported_edges.size() == 2);
+
+  TemporaryLegacyFile cycle(
+      R"({"babels":[{"id":"a","title":"A","description":"<p>A</p>","color":"#123456"},{"id":"b","title":"B","description":"<p>B</p>","color":"#654321"},{"id":"c","title":"C","description":"<p>C</p>","color":"#ABCDEF"}],"edges":[{"id":"ab","source":"a","target":"b"},{"id":"bc","source":"b","target":"c"},{"id":"ca","source":"c","target":"a"}]})");
+  FakeLegacyMigrationRepository cycle_repository;
+  RecordingSanitizer cycle_sanitizer;
+  LegacyMigrationService cycle_service(personalCreatorId(), cycle_repository, cycle_sanitizer);
+
+  const auto cycle_result = cycle_service.migrateFile(cycle.path());
+
+  REQUIRE_FALSE(cycle_result.has_value());
+  CHECK(cycle_result.error().code == ErrorCode::invalid_legacy_file);
+  CHECK(cycle_repository.transaction_count == 0);
+  CHECK(cycle_sanitizer.inputs.empty());
+}
+
+TEST_CASE("legacy migration rejects a sanitized graph above the shared response limit") {
+  nlohmann::json graph{{"babels", nlohmann::json::array()},
+                       {"edges", nlohmann::json::array()}};
+  for (int index = 0; index < 13; ++index) {
+    graph["babels"].push_back({{"id", "babel-" + std::to_string(index)},
+                                {"title", "Babel " + std::to_string(index)},
+                                {"description", "<p>expand</p>"},
+                                {"color", "#123456"}});
+  }
+  TemporaryLegacyFile file(graph.dump());
+  FakeLegacyMigrationRepository repository;
+  MaximumSizedSanitizer sanitizer;
+  LegacyMigrationService service(personalCreatorId(), repository, sanitizer);
+
+  const auto result = service.migrateFile(file.path());
+
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == ErrorCode::invalid_legacy_file);
+  CHECK(repository.transaction_count == 0);
+  CHECK(sanitizer.sanitize_count == 13);
 }
 
 TEST_CASE("embedded NUL in any legacy identity or content prevents sanitization and writes") {

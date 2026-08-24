@@ -221,10 +221,14 @@ Personal creator identity and length-prefixed legacy identities. Reordering the
 legacy JSON arrays therefore preserves entity identity and connectivity.
 
 Blank legacy descriptions become canonical empty Quill HTML. Nonblank content
-passes through the same sanitizer as Wikipedia content. The repository claims
-the SHA-256 digest and writes the complete Personal graph in one transaction. A
-second import of the same bytes returns `already_migrated`; a failed graph write
-rolls back both graph rows and the digest claim.
+passes through the same sanitizer as Wikipedia content. Reciprocal edge pairs
+are treated as mutual relationships; all remaining directed dependencies must
+be acyclic. The migration also serializes the exact public graph DTO and rejects
+it above the shared 64 MiB backend/Electron limit before opening a write
+transaction. The repository claims the SHA-256 digest and writes the complete
+Personal graph in one transaction. A second import of the same bytes returns
+`already_migrated`; a failed graph write rolls back both graph rows and the
+digest claim.
 
 Personal cannot be populated by the dashboard. Generated seed assignments
 cannot be attached to Personal. Stop the serving backend before invoking the
