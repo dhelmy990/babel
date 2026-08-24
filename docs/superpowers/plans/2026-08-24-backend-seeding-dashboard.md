@@ -841,7 +841,7 @@ git commit -m "feat: add durable background profile seeding"
 TEST_CASE("legacy migration targets Personal and preserves edge identity") {
     FakeLegacyMigrationRepository repository;
     FakeHtmlSanitizer sanitizer = passThroughSanitizer();
-    LegacyMigrationService service(personalCreatorId(), repository, sanitizer, fixedUuidGenerator());
+    LegacyMigrationService service(personalCreatorId(), repository, sanitizer);
 
     auto result = service.migrateFile(fixturePath("legacy_graph.json")).value();
 
@@ -865,7 +865,14 @@ Expected: compile fails because the service is absent.
 
 - [ ] **Step 4: Implement strict legacy parsing**
 
-Require root arrays `babels` and `edges`. Accept legacy Babel fields `id`, `title`, `description`, and `color`; ignore `contentDelta`; sanitize `description` into canonical `content_html`. Convert every legacy ID to a generated UUID through an in-memory map, then resolve edge endpoints through that map. Validate the entire graph before opening a write transaction.
+Require root arrays `babels` and `edges`. Accept legacy Babel fields `id`, `title`, `description`, and `color`; ignore `contentDelta`; sanitize `description` into canonical `content_html`. Validate the entire graph before opening a write transaction.
+
+- [ ] **Step 4a: Make migrated identities stable**
+
+Convert every legacy Babel ID to UUIDv5 using the length-prefixed name
+`legacy:<Personal UUID>:babel:<legacy-id-length>:<legacy-id>`. Derive edge IDs
+from both length-prefixed endpoint IDs. This keeps Personal graph identities
+stable across source ordering and repeated migrations.
 
 - [ ] **Step 5: Implement atomic PostgreSQL import**
 
