@@ -345,23 +345,37 @@ Result<void> PostgresWikipediaBabelRepository::attachSeedAssignment(
         UPDATE babel_sources
         SET seed_assignment_id = $2, declared_title = $3
         WHERE babel_id = $1
-          AND (seed_assignment_id IS NULL OR seed_assignment_id = $2)
+          AND seed_assignment_id IS NULL
       )",
                                          pqxx::params{babel_id.value, assignment_id.value,
                                                       declared_title});
     if (result.affected_rows() == 0) {
       const auto existing = transaction.exec(
-          "SELECT seed_assignment_id FROM babel_sources WHERE babel_id = $1",
+          "SELECT seed_assignment_id, declared_title FROM babel_sources WHERE babel_id = $1",
           pqxx::params{babel_id.value});
-      if (!existing.empty() && !existing.one_field().is_null()) {
+      if (existing.empty()) {
+        return tl::make_unexpected(ApplicationError{
+            .code = ErrorCode::not_found,
+            .message = "Wikipedia source not found for Babel: " + babel_id.value,
+        });
+      }
+
+      const auto row = existing.one_row();
+      if (!row["seed_assignment_id"].is_null() &&
+          row["seed_assignment_id"].as<std::string>() == assignment_id.value &&
+          row["declared_title"].as<std::string>() == declared_title) {
+        transaction.commit();
+        return {};
+      }
+      if (!row["seed_assignment_id"].is_null()) {
         return tl::make_unexpected(ApplicationError{
             .code = ErrorCode::conflict,
-            .message = "Wikipedia source already belongs to another seed assignment",
+            .message = "Wikipedia source already has different seed provenance",
         });
       }
       return tl::make_unexpected(ApplicationError{
-          .code = ErrorCode::not_found,
-          .message = "Wikipedia source not found for Babel: " + babel_id.value,
+          .code = ErrorCode::conflict,
+          .message = "Wikipedia source seed provenance changed concurrently",
       });
     }
     transaction.commit();

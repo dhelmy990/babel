@@ -1,6 +1,8 @@
 #include "babel/application/wikipedia_import_service.hpp"
 
+#include <algorithm>
 #include <array>
+#include <cctype>
 #include <utility>
 
 #include <openssl/evp.h>
@@ -30,6 +32,12 @@ Result<std::string> sha256(std::string_view value) {
   return encoded;
 }
 
+bool hasNonWhitespace(std::string_view value) {
+  return std::ranges::any_of(value, [](unsigned char character) {
+    return !std::isspace(character);
+  });
+}
+
 }  // namespace
 
 WikipediaImportService::WikipediaImportService(CreatorRepository& creators,
@@ -46,6 +54,9 @@ Result<ImportWikipediaBabelResult> WikipediaImportService::importWikipediaBabel(
 
 Result<ImportWikipediaBabelResult> WikipediaImportService::importWikipediaBabel(
     CreatorId creator_id, WikipediaPageId page_id, SeedImportContext context) {
+  if (!hasNonWhitespace(context.declared_title)) {
+    return invalidArgument("seed import declared title must not be blank");
+  }
   return importCanonical(std::move(creator_id), page_id, std::move(context));
 }
 
@@ -61,6 +72,12 @@ Result<ImportWikipediaBabelResult> WikipediaImportService::importCanonical(
 
   auto article = source_.fetchByPageId(page_id);
   if (!article) return tl::make_unexpected(article.error());
+  if (article->page_id != page_id) {
+    return tl::make_unexpected(ApplicationError{
+        .code = ErrorCode::internal,
+        .message = "Wikipedia source returned a different page ID than requested",
+    });
+  }
 
   auto sanitized = sanitizer_.sanitize(article->rendered_html, article->canonical_url);
   if (!sanitized) return tl::make_unexpected(sanitized.error());
@@ -81,7 +98,7 @@ Result<ImportWikipediaBabelResult> WikipediaImportService::importCanonical(
       .babel_id = babel_id,
       .owner_id = creator_id,
       .provider = "wikipedia",
-      .external_page_id = article->page_id,
+      .external_page_id = page_id,
       .canonical_url = article->canonical_url,
       .source_revision_id = article->revision_id,
       .seed_assignment_id = context ? std::optional<SeedAssignmentId>{context->assignment_id}

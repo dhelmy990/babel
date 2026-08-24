@@ -297,6 +297,38 @@ TEST_CASE_METHOD(PostgresFixture, "seed assignments attach to existing Wikipedia
   REQUIRE(row["declared_title"].as<std::string>() == assignment.declared_title);
   REQUIRE(seed_runs_.assignmentExists(assignment.id).value());
 
+  REQUIRE(wikipedia_babels_
+              .attachSeedAssignment(article.id, assignment.id, assignment.declared_title)
+              .has_value());
+
+  const auto changed_title = wikipedia_babels_.attachSeedAssignment(
+      article.id, assignment.id, assignment.declared_title + " changed");
+  REQUIRE_FALSE(changed_title.has_value());
+  REQUIRE(changed_title.error().code == babel::ErrorCode::conflict);
+  const auto title_preserved = transaction
+                                   .exec("SELECT seed_assignment_id, declared_title "
+                                         "FROM babel_sources WHERE babel_id = $1",
+                                         pqxx::params{article.id.value})
+                                   .one_row();
+  REQUIRE(title_preserved["seed_assignment_id"].as<std::string>() == assignment.id.value);
+  REQUIRE(title_preserved["declared_title"].as<std::string>() == assignment.declared_title);
+
+  const auto second_article = makeBabel(assignment.creator_id, "Second assigned article");
+  const auto second_source = makeSource(second_article, 304);
+  REQUIRE(wikipedia_babels_.insertWikipediaBabel(second_article, second_source).has_value());
+  const auto reused_assignment = wikipedia_babels_.attachSeedAssignment(
+      second_article.id, assignment.id, assignment.declared_title);
+  REQUIRE_FALSE(reused_assignment.has_value());
+  REQUIRE(reused_assignment.error().code == babel::ErrorCode::conflict);
+  const auto second_preserved = transaction
+                                    .exec("SELECT seed_assignment_id, declared_title "
+                                          "FROM babel_sources WHERE babel_id = $1",
+                                          pqxx::params{second_article.id.value})
+                                    .one_row();
+  REQUIRE(second_preserved["seed_assignment_id"].is_null());
+  REQUIRE(second_preserved["declared_title"].as<std::string>() ==
+          second_source.declared_title);
+
   const auto other_assignment = babel::ProfileManifest::seedAssignments().at(1);
   const auto conflict = wikipedia_babels_.attachSeedAssignment(
       article.id, other_assignment.id, other_assignment.declared_title);
