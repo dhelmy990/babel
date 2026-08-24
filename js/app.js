@@ -21,7 +21,7 @@ function initGraph() {
             isSelected: State.selectedBabel?.id === node.id,
             isDeleteWarning: State.deleteWarningBabel?.id === node.id
         }))
-        .nodeLabel(node => node.title || 'Untitled')
+        .nodeLabel(node => ProfileSelector.escapeHtml(node.title || 'Untitled'))
         .linkWidth(0)
         .linkColor(() => 'rgba(0,0,0,0)')
         .linkThreeObjectExtend(true)
@@ -217,6 +217,7 @@ function deselectBabel() {
 }
 
 function createBabel() {
+    if (!ProfileSelector.canMutate(State)) return;
     const title = document.getElementById('babel-title').value.trim();
     const description = document.getElementById('babel-description').value.trim();
 
@@ -245,6 +246,7 @@ function createBabel() {
 }
 
 function handleDelete() {
+    if (!ProfileSelector.canMutate(State) || !State.selectedBabel) return;
     if (State.deleteWarningBabel?.id === State.selectedBabel.id) {
         State.removeBabel(State.selectedBabel.id);
         State.selectedBabel = null;
@@ -264,6 +266,7 @@ function handleDelete() {
 }
 
 function toggleEdge(direction) {
+    if (!ProfileSelector.canMutate(State) || State.comparisonBabels.length !== 2) return;
     const [left, right] = State.comparisonBabels;
     const sourceId = direction === 'left-to-right' ? left.id : right.id;
     const targetId = direction === 'left-to-right' ? right.id : left.id;
@@ -298,7 +301,7 @@ function resetCamera() {
 // ============================================
 
 function updateGraph() {
-    const validEdges = State.getValidEdges();
+    const validEdges = State.getValidEdges().map(edge => ({ ...edge }));
     const dagEdges = GraphUtils.getDagEdges(validEdges);
 
     const graphData = {
@@ -330,8 +333,6 @@ async function init() {
     UI.init();
     initGraph();
     Rendering.setupLighting(Graph.scene());
-    await Persistence.load();
-    GraphUtils.cleanGraphOnLoad();
     UI.setupColorPalette();
 
     UI.setupEventListeners();
@@ -344,7 +345,9 @@ async function init() {
     document.addEventListener('babel:save', () => Persistence.save());
 
     document.addEventListener('keydown', async (e) => {
-        if (e.ctrlKey && e.shiftKey && e.key === 'I') {
+        const selectorVisible = !UI.elements.profileSelector.classList.contains('hidden');
+        if (!selectorVisible && ProfileSelector.canMutate(State)
+            && e.ctrlKey && e.shiftKey && e.key === 'I') {
             e.preventDefault();
             const ok = await Persistence.importJSON();
             if (ok) { updateGraph(); UI.updateHintText(); }
@@ -407,6 +410,7 @@ async function init() {
     }
 
     attachContextLossHandler();
+    await UI.initProfileSelector();
 }
 
 // Start the application
