@@ -91,6 +91,28 @@ def test_building_readiness_can_defer_remote_commit() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "field,value",
+    [("verified_shards", []), ("remote_verified", False), ("remote_commit_sha", None)],
+)
+def test_pilot_ready_requires_published_evidence(field: str, value: object) -> None:
+    readiness = json.loads(
+        (REPOSITORY_ROOT / "fixtures" / "distillation" / "readiness.json").read_text()
+    )
+    readiness["state"] = "pilot_ready"
+    readiness[field] = value
+    with pytest.raises(ValidationError):
+        validate_document("dataset-readiness-v1", readiness)
+
+
+def test_readiness_rejects_contradictory_remote_pair() -> None:
+    readiness = {"state": "building", "schema_version": 1, "teacher_dimension": 100,
+                 "available_examples": 0, "verified_shards": [], "source_checksums": {},
+                 "remote_verified": True, "remote_commit_sha": None}
+    with pytest.raises(ValidationError):
+        validate_document("dataset-readiness-v1", readiness)
+
+
 def test_provenance_schema_loads() -> None:
     assert load_schema("provenance-v1")["title"] == "Distillation provenance v1"
 
@@ -133,3 +155,10 @@ def test_installed_wheel_contains_schema_resources(tmp_path: Path) -> None:
     wheel = next(wheel_directory.glob("babel_data-*.whl"))
     with zipfile.ZipFile(wheel) as archive:
         assert "babel_data/schemas/distillation-example-v1.json" in archive.namelist()
+
+
+def test_packaged_schemas_exactly_match_canonical_contracts() -> None:
+    for schema in ("distillation-example-v1", "dataset-readiness-v1", "provenance-v1"):
+        canonical = (REPOSITORY_ROOT / "schemas" / f"{schema}.json").read_bytes()
+        packaged = (REPOSITORY_ROOT / "data_pipeline" / "src" / "babel_data" / "schemas" / f"{schema}.json").read_bytes()
+        assert packaged == canonical
