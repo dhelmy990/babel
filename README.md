@@ -62,7 +62,8 @@ profile/article, and live errors. It remains usable if individual imports fail:
 - A second dashboard request while a run is active attaches to the active run.
 - Wikipedia HTTP 429 or transient network failures are shown as retryable errors;
   wait for the remote service to cool down before pressing retry.
-- Failed profiles remain selectable in Electron and display an empty graph.
+- Profiles with failed assignments remain selectable and display every durable
+  success they have, which may still be an empty graph.
 
 The dashboard never populates `Personal`.
 
@@ -120,6 +121,10 @@ future training boundary and must be derived transiently. Training, model
 serving, and parameter synchronization are separate architectural boundaries
 from day one and are not deployed by this repository yet. A GPU is not required
 for this application slice.
+
+Also deferred are recommendations, personalized PageRank (PPR), FAISS or other
+vector-indexing jobs, simulator behavior, and metrics/monitoring beyond the seed
+status dashboard. None belongs in the current modular monolith.
 
 ## Troubleshooting
 

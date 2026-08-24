@@ -32,6 +32,11 @@ Training, model serving, and parameter synchronization are separate boundaries
 from day one. They are not linked into the backend, represented as backend
 modules, or deployed yet. The current slice requires no GPU.
 
+Recommendations, personalized PageRank (PPR), FAISS or other vector-indexing
+jobs, simulator behavior, and metrics/monitoring beyond the current seed status
+are explicit non-goals for this slice. They must not be folded into the
+application modular monolith as incidental extensions.
+
 PostgreSQL stores sanitized Quill-compatible HTML as the only content
 representation. It does not store normalized text or embedding input. A future
 training component must derive its model input from that HTML at training time
@@ -41,8 +46,7 @@ without adding a second persisted content copy to this application schema.
 
 ```text
 CMakeLists.txt / CMakePresets.json    C++20 build and dev/test presets
-vcpkg.json / vcpkg-configuration.json
-                                      pinned native dependency manifest
+vcpkg.json                            pinned native dependency manifest
 compose.yaml                          local pgvector PostgreSQL service
 Justfile                              db, build, test, start, migration workflows
 
@@ -197,8 +201,8 @@ owner/page and seed-assignment rows.
 The libxml2 adapter reconstructs content from an allowlist instead of trusting
 the source tree. It removes executable markup, event handlers, unsafe URL
 schemes, Wikipedia UI/citation subtrees, and unsupported containers while
-preserving safe prose, headings, lists, tables, code, links, and HTTPS images in
-a Quill-compatible representation.
+preserving safe prose, headings, lists, code, links, and HTTPS images in a
+Quill-compatible representation. Table subtrees are dropped rather than stored.
 
 `babels.content_html` stores only the sanitized result. `babel_sources` stores
 provenance separately. There is no normalized-text column. Renderer helpers may
