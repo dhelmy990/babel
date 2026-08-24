@@ -297,7 +297,9 @@ public:
 class LegacyMigrationRepository {
 public:
     virtual Result<bool> digestExists(std::string_view sha256) = 0;
-    virtual Result<void> importPersonalGraph(std::string_view sha256, std::span<const Babel>, std::span<const Edge>) = 0;
+    // Return true when this call imported the graph and false when the digest
+    // was already claimed; graph rows and the digest commit atomically.
+    virtual Result<bool> importPersonalGraph(std::string_view sha256, std::span<const Babel>, std::span<const Edge>) = 0;
 };
 class ArticleSource {
 public:
@@ -867,7 +869,11 @@ Require root arrays `babels` and `edges`. Accept legacy Babel fields `id`, `titl
 
 - [ ] **Step 5: Implement atomic PostgreSQL import**
 
-Insert all Personal Babels, all valid edges, and one `legacy_migrations` record in a single transaction. Never create `babel_sources` rows for local legacy content. Re-query the digest inside the transaction to make concurrent duplicate runs harmless.
+Atomically claim the digest with `INSERT ... ON CONFLICT DO NOTHING RETURNING`.
+Only the caller that claims it inserts all Personal Babels and valid edges in
+that same transaction and returns `true`; a concurrent duplicate performs no
+graph writes and returns `false`. Never create `babel_sources` rows for local
+legacy content.
 
 - [ ] **Step 6: Run unit and PostgreSQL migration tests**
 
