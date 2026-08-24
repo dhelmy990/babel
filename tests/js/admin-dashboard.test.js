@@ -61,12 +61,12 @@ test('partial completion offers retry and preserves errors', () => {
   assert.equal(model.percent, 96);
 });
 
-test('interrupted work resumes only assignments not already terminal', () => {
+test('interrupted work resumes every assignment that remains unimported', () => {
   const model = seedViewModel({
     state: 'interrupted', total: 80, completed: 40, skipped: 10, failed: 2,
   });
 
-  assert.equal(model.label, 'Resume 28 remaining');
+  assert.equal(model.label, 'Resume 30 remaining');
 });
 
 test('queued and running states are the only disabled actions', () => {
@@ -169,4 +169,37 @@ test('a failed POST followed by a failed recovery GET re-enables the seed action
 
   assert.equal(documentRef.elements.get('seed-action').disabled, false);
   assert.match(documentRef.elements.get('seed-status').textContent, /Unable to reach seed service/);
+});
+
+test('a slow poll GET is not superseded by the next interval tick', async () => {
+  const documentRef = fakeDocument();
+  const slowStatus = deferred();
+  const intervals = [];
+  const cleared = [];
+  let getCalls = 0;
+  const controller = dashboard.createDashboardController({
+    document: documentRef,
+    fetchImpl: async () => {
+      getCalls += 1;
+      if (getCalls === 1) {
+        return { ok: true, status: 200, json: async () => ({ state: 'running', total: 80, completed: 1 }) };
+      }
+      return slowStatus.promise;
+    },
+    setIntervalImpl: (callback, delay) => {
+      intervals.push({ callback, delay });
+      return intervals.length;
+    },
+    clearIntervalImpl: (id) => cleared.push(id),
+  });
+
+  await controller.refresh();
+  const firstTick = intervals[0].callback();
+  const secondTick = intervals[0].callback();
+  assert.equal(getCalls, 2);
+
+  slowStatus.resolve({ ok: true, status: 200, json: async () => ({ state: 'completed', total: 80, completed: 80 }) });
+  await Promise.all([firstTick, secondTick]);
+  assert.equal(documentRef.elements.get('seed-status').textContent, 'All 80 Wikipedia Babels imported');
+  assert.deepEqual(cleared, [1]);
 });

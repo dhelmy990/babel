@@ -76,8 +76,8 @@
         view.summary = `Seed run failed; ${retryCount} need retry`;
         break;
       case 'interrupted':
-        view.label = `Resume ${remaining} remaining`;
-        view.summary = `Seed run interrupted; ${remaining} remain`;
+        view.label = `Resume ${retryCount} remaining`;
+        view.summary = `Seed run interrupted; ${retryCount} remain`;
         break;
       case 'not_started':
       default:

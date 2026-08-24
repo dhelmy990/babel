@@ -85,7 +85,9 @@
     let pollTimer = null;
     let starting = false;
     let lastStatus = null;
-    let requestGeneration = 0;
+    let lifecycleGeneration = 0;
+    let refreshPromise = null;
+    let refreshGeneration = null;
 
     function renderErrors(errors) {
       elements.errors.replaceChildren();
@@ -147,29 +149,43 @@
     }
 
     async function refresh() {
-      const responseGeneration = ++requestGeneration;
-      try {
-        const status = await requestSeedStatus(fetchImpl);
-        if (responseGeneration === requestGeneration) {
-          lastStatus = status;
-          render(status);
-        }
-        return status;
-      } catch (error) {
-        if (responseGeneration === requestGeneration) {
-          renderError(error.message);
-        }
-        return undefined;
+      const responseGeneration = lifecycleGeneration;
+      if (refreshPromise && refreshGeneration === responseGeneration) {
+        return refreshPromise;
       }
+
+      const pending = requestSeedStatus(fetchImpl)
+        .then((status) => {
+          if (responseGeneration === lifecycleGeneration) {
+            lastStatus = status;
+            render(status);
+          }
+          return status;
+        })
+        .catch((error) => {
+          if (responseGeneration === lifecycleGeneration) {
+            renderError(error.message);
+          }
+          return undefined;
+        })
+        .finally(() => {
+          if (refreshPromise === pending) {
+            refreshPromise = null;
+            refreshGeneration = null;
+          }
+        });
+      refreshPromise = pending;
+      refreshGeneration = responseGeneration;
+      return pending;
     }
 
     async function start() {
       if (starting) return;
       starting = true;
+      lifecycleGeneration += 1;
       renderAction(lastStatus || { state: 'not_started', total: 0, completed: 0, skipped: 0, failed: 0 });
       try {
         const result = await startSeedRun(fetchImpl, nonce);
-        requestGeneration += 1;
         if (result.status && result.status.state) {
           lastStatus = result.status;
           render(result.status);
