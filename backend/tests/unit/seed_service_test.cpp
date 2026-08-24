@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <iterator>
 #include <mutex>
@@ -48,7 +49,12 @@ class RecordingSeedRepository final : public SeedRunRepository {
   }
 
   Result<bool> assignmentExists(SeedAssignmentId assignment_id) override {
-    std::scoped_lock lock(mutex_);
+    std::unique_lock lock(mutex_);
+    if (block_assignment_exists) {
+      assignment_exists_entered_ = true;
+      changed_.notify_all();
+      changed_.wait(lock, [&] { return assignment_exists_released_; });
+    }
     if (assignment_exists_error) return tl::make_unexpected(*assignment_exists_error);
     ++assignment_checks;
     return existing.contains(assignment_id);
@@ -56,11 +62,16 @@ class RecordingSeedRepository final : public SeedRunRepository {
 
   Result<void> recordItemState(SeedRunId, SeedAssignmentId assignment_id,
                                const SeedItemUpdate& update) override {
-    std::scoped_lock lock(mutex_);
+    std::unique_lock lock(mutex_);
     ++record_calls;
     if (record_error_at && record_calls == *record_error_at) {
       return tl::make_unexpected(
           testError(ErrorCode::database_unavailable, "seed item persistence unavailable"));
+    }
+    if (blocked_item_state && update.state == *blocked_item_state) {
+      item_state_entered_ = true;
+      changed_.notify_all();
+      changed_.wait(lock, [&] { return item_state_released_; });
     }
     transitions.push_back(Transition{.assignment_id = assignment_id, .update = update});
     return {};
@@ -77,7 +88,13 @@ class RecordingSeedRepository final : public SeedRunRepository {
   }
 
   Result<SeedStatusDto> status(SeedRunId) override {
-    std::scoped_lock lock(mutex_);
+    std::unique_lock lock(mutex_);
+    if (block_status) {
+      status_entered_ = true;
+      changed_.notify_all();
+      changed_.wait(lock, [&] { return status_released_; });
+    }
+    if (status_error) return tl::make_unexpected(*status_error);
     SeedStatusDto result{
         .kind = SeedStatusKind::persisted,
         .run_id = run_id,
@@ -107,13 +124,52 @@ class RecordingSeedRepository final : public SeedRunRepository {
     return {};
   }
 
+  bool waitForAssignmentExists() {
+    std::unique_lock lock(mutex_);
+    return changed_.wait_for(lock, std::chrono::seconds(2),
+                             [&] { return assignment_exists_entered_; });
+  }
+
+  void releaseAssignmentExists() {
+    std::scoped_lock lock(mutex_);
+    assignment_exists_released_ = true;
+    changed_.notify_all();
+  }
+
+  bool waitForItemState() {
+    std::unique_lock lock(mutex_);
+    return changed_.wait_for(lock, std::chrono::seconds(2),
+                             [&] { return item_state_entered_; });
+  }
+
+  void releaseItemState() {
+    std::scoped_lock lock(mutex_);
+    item_state_released_ = true;
+    changed_.notify_all();
+  }
+
+  bool waitForStatus() {
+    std::unique_lock lock(mutex_);
+    return changed_.wait_for(lock, std::chrono::seconds(2), [&] { return status_entered_; });
+  }
+
+  void releaseStatus() {
+    std::scoped_lock lock(mutex_);
+    status_released_ = true;
+    changed_.notify_all();
+  }
+
   SeedRunId run_id{SeedRunId::v5("seed-run-test").value()};
   std::unordered_set<SeedAssignmentId> existing;
   std::vector<SeedAssignment> snapshot;
   std::vector<Transition> transitions;
   std::vector<SeedRunState> state_history;
   std::optional<ApplicationError> assignment_exists_error;
+  std::optional<ApplicationError> status_error;
   std::optional<int> record_error_at;
+  std::optional<SeedItemState> blocked_item_state;
+  bool block_assignment_exists{false};
+  bool block_status{false};
   bool throw_setting_running{false};
   int assignment_checks{0};
   int record_calls{0};
@@ -121,6 +177,13 @@ class RecordingSeedRepository final : public SeedRunRepository {
 
  private:
   std::mutex mutex_;
+  std::condition_variable changed_;
+  bool assignment_exists_entered_{false};
+  bool assignment_exists_released_{false};
+  bool item_state_entered_{false};
+  bool item_state_released_{false};
+  bool status_entered_{false};
+  bool status_released_{false};
 };
 
 class ResolvingSource final : public ArticleSource {
@@ -229,6 +292,123 @@ class ScriptedImporter final : public WikipediaImporter {
 
  private:
   std::mutex mutex_;
+};
+
+class BlockingResolutionSource final : public ArticleSource {
+ public:
+  Result<ResolvedWikipediaPage> resolveTitle(std::string_view) override {
+    std::unique_lock lock(mutex_);
+    entered_ = true;
+    changed_.notify_all();
+    changed_.wait(lock, [&] { return released_; });
+    return ResolvedWikipediaPage{
+        .page_id = WikipediaPageId::fromInt(71).value(),
+        .canonical_title = "Resolved",
+        .canonical_url = "https://en.wikipedia.org/wiki/Resolved",
+    };
+  }
+
+  Result<RawWikipediaArticle> fetchByPageId(WikipediaPageId) override {
+    return tl::make_unexpected(testError(ErrorCode::internal, "unexpected fetch"));
+  }
+
+  bool waitUntilEntered() {
+    std::unique_lock lock(mutex_);
+    return changed_.wait_for(lock, std::chrono::seconds(2), [&] { return entered_; });
+  }
+
+  void release() {
+    std::scoped_lock lock(mutex_);
+    released_ = true;
+    changed_.notify_all();
+  }
+
+ private:
+  std::mutex mutex_;
+  std::condition_variable changed_;
+  bool entered_{false};
+  bool released_{false};
+};
+
+class BlockingImporter final : public WikipediaImporter {
+ public:
+  Result<ImportWikipediaBabelResult> importWikipediaBabel(CreatorId,
+                                                          WikipediaPageId) override {
+    return tl::make_unexpected(testError(ErrorCode::internal, "seed context required"));
+  }
+
+  Result<ImportWikipediaBabelResult> importWikipediaBabel(
+      CreatorId, WikipediaPageId, SeedImportContext context) override {
+    std::unique_lock lock(mutex_);
+    entered_ = true;
+    changed_.notify_all();
+    changed_.wait(lock, [&] { return released_; });
+    return ImportWikipediaBabelResult{
+        .status = ImportWikipediaStatus::imported,
+        .babel_id = BabelId::v5("blocking-import:" + context.assignment_id.value).value(),
+        .canonical_title = "Resolved",
+    };
+  }
+
+  bool waitUntilEntered() {
+    std::unique_lock lock(mutex_);
+    return changed_.wait_for(lock, std::chrono::seconds(2), [&] { return entered_; });
+  }
+
+  void release() {
+    std::scoped_lock lock(mutex_);
+    released_ = true;
+    changed_.notify_all();
+  }
+
+ private:
+  std::mutex mutex_;
+  std::condition_variable changed_;
+  bool entered_{false};
+  bool released_{false};
+};
+
+class ThrowingSource final : public ArticleSource {
+ public:
+  Result<ResolvedWikipediaPage> resolveTitle(std::string_view title) override {
+    if (title == "Source standard exception") {
+      throw std::runtime_error("source <standard> & failure");
+    }
+    if (title == "Source unknown exception") throw 42;
+    auto page = 83;
+    if (title == "Importer standard exception") page = 81;
+    if (title == "Importer unknown exception") page = 82;
+    return ResolvedWikipediaPage{
+        .page_id = WikipediaPageId::fromInt(page).value(),
+        .canonical_title = std::string{title},
+        .canonical_url = "https://en.wikipedia.org/wiki/Resolved",
+    };
+  }
+
+  Result<RawWikipediaArticle> fetchByPageId(WikipediaPageId) override {
+    return tl::make_unexpected(testError(ErrorCode::internal, "unexpected fetch"));
+  }
+};
+
+class ThrowingImporter final : public WikipediaImporter {
+ public:
+  Result<ImportWikipediaBabelResult> importWikipediaBabel(CreatorId,
+                                                          WikipediaPageId) override {
+    return tl::make_unexpected(testError(ErrorCode::internal, "seed context required"));
+  }
+
+  Result<ImportWikipediaBabelResult> importWikipediaBabel(
+      CreatorId, WikipediaPageId, SeedImportContext context) override {
+    if (context.declared_title == "Importer standard exception") {
+      throw std::runtime_error("importer <standard> & failure");
+    }
+    if (context.declared_title == "Importer unknown exception") throw 42;
+    return ImportWikipediaBabelResult{
+        .status = ImportWikipediaStatus::imported,
+        .babel_id = BabelId::v5("throwing-import:" + context.assignment_id.value).value(),
+        .canonical_title = "Resolved",
+    };
+  }
 };
 
 class SelectiveSource final : public ArticleSource {
@@ -503,6 +683,216 @@ TEST_CASE("seed converts thrown execution failures into a failed durable run",
   REQUIRE_FALSE(result->has_value());
   CHECK(result->error().code == ErrorCode::internal);
   CHECK(result->error().message == "seed repository threw during run preflight");
+  CHECK(runs.run_state == SeedRunState::failed);
+}
+
+TEST_CASE("cancellation after assignment lookup does not publish skipped",
+          "[seed_service]") {
+  const std::vector manifest{assignment("cancel-lookup", "Existing")};
+  RecordingSeedRepository runs;
+  runs.existing.insert(manifest.front().id);
+  runs.block_assignment_exists = true;
+  ScriptedSource source;
+  ScriptedImporter importer;
+  SeedService service(manifest, runs, source, importer, SeedRetryPolicy::withoutDelay());
+  REQUIRE(runs.createRun("test-v1", manifest).has_value());
+  std::optional<Result<void>> result;
+  std::jthread worker([&](std::stop_token token) { result = service.run(runs.run_id, token); });
+  REQUIRE(runs.waitForAssignmentExists());
+
+  worker.request_stop();
+  runs.releaseAssignmentExists();
+  worker.join();
+
+  REQUIRE(result.has_value());
+  REQUIRE(result->has_value());
+  CHECK(runs.transitions.empty());
+  CHECK(runs.run_state == SeedRunState::interrupted);
+}
+
+TEST_CASE("cancellation while resolving does not publish importing or imported",
+          "[seed_service]") {
+  const std::vector manifest{assignment("cancel-resolve", "Blocking resolution")};
+  RecordingSeedRepository runs;
+  BlockingResolutionSource source;
+  ScriptedImporter importer;
+  SeedService service(manifest, runs, source, importer, SeedRetryPolicy::withoutDelay());
+  REQUIRE(runs.createRun("test-v1", manifest).has_value());
+  std::optional<Result<void>> result;
+  std::jthread worker([&](std::stop_token token) { result = service.run(runs.run_id, token); });
+  REQUIRE(source.waitUntilEntered());
+
+  worker.request_stop();
+  source.release();
+  worker.join();
+
+  REQUIRE(result.has_value());
+  REQUIRE(result->has_value());
+  const auto transitions = transitionsFor(runs, manifest.front().id);
+  REQUIRE(transitions.size() == 1);
+  CHECK(transitions.front().update.state == SeedItemState::resolving);
+  CHECK(importer.contexts.empty());
+  CHECK(runs.run_state == SeedRunState::interrupted);
+}
+
+TEST_CASE("cancellation after importing persistence does not invoke the importer",
+          "[seed_service]") {
+  const std::vector manifest{assignment("cancel-importing-state", "Blocking state")};
+  RecordingSeedRepository runs;
+  runs.blocked_item_state = SeedItemState::importing;
+  ScriptedSource source;
+  ScriptedImporter importer;
+  SeedService service(manifest, runs, source, importer, SeedRetryPolicy::withoutDelay());
+  REQUIRE(runs.createRun("test-v1", manifest).has_value());
+  std::optional<Result<void>> result;
+  std::jthread worker([&](std::stop_token token) { result = service.run(runs.run_id, token); });
+  REQUIRE(runs.waitForItemState());
+
+  worker.request_stop();
+  runs.releaseItemState();
+  worker.join();
+
+  REQUIRE(result.has_value());
+  REQUIRE(result->has_value());
+  CHECK(importer.contexts.empty());
+  const auto transitions = transitionsFor(runs, manifest.front().id);
+  REQUIRE(transitions.size() == 2);
+  CHECK(transitions.back().update.state == SeedItemState::importing);
+  CHECK(runs.run_state == SeedRunState::interrupted);
+}
+
+TEST_CASE("cancellation while importing does not publish imported", "[seed_service]") {
+  const std::vector manifest{assignment("cancel-import", "Blocking import")};
+  RecordingSeedRepository runs;
+  ScriptedSource source;
+  BlockingImporter importer;
+  SeedService service(manifest, runs, source, importer, SeedRetryPolicy::withoutDelay());
+  REQUIRE(runs.createRun("test-v1", manifest).has_value());
+  std::optional<Result<void>> result;
+  std::jthread worker([&](std::stop_token token) { result = service.run(runs.run_id, token); });
+  REQUIRE(importer.waitUntilEntered());
+
+  worker.request_stop();
+  importer.release();
+  worker.join();
+
+  REQUIRE(result.has_value());
+  REQUIRE(result->has_value());
+  const auto transitions = transitionsFor(runs, manifest.front().id);
+  REQUIRE(transitions.size() == 2);
+  CHECK(transitions.back().update.state == SeedItemState::importing);
+  CHECK(runs.run_state == SeedRunState::interrupted);
+}
+
+TEST_CASE("cancellation during final status read does not publish completed",
+          "[seed_service]") {
+  const std::vector manifest{assignment("cancel-status", "Final status")};
+  RecordingSeedRepository runs;
+  runs.block_status = true;
+  ScriptedSource source;
+  ScriptedImporter importer;
+  SeedService service(manifest, runs, source, importer, SeedRetryPolicy::withoutDelay());
+  REQUIRE(runs.createRun("test-v1", manifest).has_value());
+  std::optional<Result<void>> result;
+  std::jthread worker([&](std::stop_token token) { result = service.run(runs.run_id, token); });
+  REQUIRE(runs.waitForStatus());
+
+  worker.request_stop();
+  runs.releaseStatus();
+  worker.join();
+
+  REQUIRE(result.has_value());
+  REQUIRE(result->has_value());
+  CHECK(runs.run_state == SeedRunState::interrupted);
+  CHECK(std::ranges::none_of(runs.state_history, [](SeedRunState state) {
+    return state == SeedRunState::completed || state == SeedRunState::completed_with_errors;
+  }));
+}
+
+TEST_CASE("source and importer exceptions fail only their assignments",
+          "[seed_service]") {
+  const std::vector manifest{
+      assignment("source-std", "Source standard exception"),
+      assignment("source-unknown", "Source unknown exception"),
+      assignment("importer-std", "Importer standard exception"),
+      assignment("importer-unknown", "Importer unknown exception"),
+      assignment("exception-success", "Successful assignment"),
+  };
+  RecordingSeedRepository runs;
+  ThrowingSource source;
+  ThrowingImporter importer;
+  SeedService service(manifest, runs, source, importer, SeedRetryPolicy::withoutDelay());
+  REQUIRE(runs.createRun("test-v1", manifest).has_value());
+
+  const auto result = service.run(runs.run_id);
+
+  REQUIRE(result.has_value());
+  const auto status = runs.status(runs.run_id).value();
+  CHECK(status.failed == 4);
+  CHECK(status.imported == 1);
+  CHECK(runs.run_state == SeedRunState::completed_with_errors);
+
+  const auto source_standard = transitionsFor(runs, manifest.at(0).id).back().update;
+  REQUIRE(source_standard.error.has_value());
+  CHECK(source_standard.state == SeedItemState::failed);
+  CHECK(source_standard.attempt_count == 1);
+  CHECK_FALSE(source_standard.resolved_page_id.has_value());
+  CHECK(source_standard.error->code == ErrorCode::internal);
+  CHECK(source_standard.error->message == "source &lt;standard&gt; &amp; failure");
+
+  const auto source_unknown = transitionsFor(runs, manifest.at(1).id).back().update;
+  REQUIRE(source_unknown.error.has_value());
+  CHECK(source_unknown.error->message == "unexpected Wikipedia title resolution failure");
+  CHECK_FALSE(source_unknown.resolved_page_id.has_value());
+
+  const auto importer_standard = transitionsFor(runs, manifest.at(2).id).back().update;
+  REQUIRE(importer_standard.error.has_value());
+  CHECK(importer_standard.state == SeedItemState::failed);
+  CHECK(importer_standard.attempt_count == 1);
+  REQUIRE(importer_standard.resolved_page_id.has_value());
+  CHECK(importer_standard.resolved_page_id->value == 81);
+  CHECK(importer_standard.error->code == ErrorCode::internal);
+  CHECK(importer_standard.error->message == "importer &lt;standard&gt; &amp; failure");
+
+  const auto importer_unknown = transitionsFor(runs, manifest.at(3).id).back().update;
+  REQUIRE(importer_unknown.error.has_value());
+  CHECK(importer_unknown.error->message == "unexpected Wikipedia import failure");
+  REQUIRE(importer_unknown.resolved_page_id.has_value());
+  CHECK(importer_unknown.resolved_page_id->value == 82);
+}
+
+TEST_CASE("seed transition persistence failure aborts the run coherently",
+          "[seed_service]") {
+  const std::vector manifest{assignment("transition-failure", "Transition failure")};
+  RecordingSeedRepository runs;
+  runs.record_error_at = 1;
+  ScriptedSource source;
+  ScriptedImporter importer;
+  SeedService service(manifest, runs, source, importer, SeedRetryPolicy::withoutDelay());
+  REQUIRE(runs.createRun("test-v1", manifest).has_value());
+
+  const auto result = service.run(runs.run_id);
+
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == ErrorCode::database_unavailable);
+  CHECK(runs.run_state == SeedRunState::failed);
+  CHECK(source.titles.empty());
+  CHECK(importer.contexts.empty());
+}
+
+TEST_CASE("seed status persistence failure aborts the run coherently", "[seed_service]") {
+  const std::vector manifest{assignment("status-failure", "Status failure")};
+  RecordingSeedRepository runs;
+  runs.status_error = testError(ErrorCode::database_unavailable, "status unavailable");
+  ScriptedSource source;
+  ScriptedImporter importer;
+  SeedService service(manifest, runs, source, importer, SeedRetryPolicy::withoutDelay());
+  REQUIRE(runs.createRun("test-v1", manifest).has_value());
+
+  const auto result = service.run(runs.run_id);
+
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == ErrorCode::database_unavailable);
   CHECK(runs.run_state == SeedRunState::failed);
 }
 

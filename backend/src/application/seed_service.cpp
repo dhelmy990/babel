@@ -188,16 +188,13 @@ Result<void> SeedService::runImpl(SeedRunId run_id, std::stop_token stop_token) 
   for (auto& thread : workers) thread.join();
 
   if (run_failure) return failRun(run_id, *run_failure);
-  if (stop_token.stop_requested()) {
-    const auto interrupted = runs_.setRunState(run_id, SeedRunState::interrupted);
-    if (!interrupted) return tl::make_unexpected(interrupted.error());
-    return {};
-  }
-
+  if (stop_token.stop_requested()) return interruptRun(run_id);
   const auto status = runs_.status(run_id);
+  if (stop_token.stop_requested()) return interruptRun(run_id);
   if (!status) return failRun(run_id, status.error());
   const auto terminal = status->failed == 0 ? SeedRunState::completed
                                             : SeedRunState::completed_with_errors;
+  if (stop_token.stop_requested()) return interruptRun(run_id);
   const auto completed = runs_.setRunState(run_id, terminal);
   if (!completed) return failRun(run_id, completed.error());
   return {};
@@ -207,8 +204,10 @@ Result<void> SeedService::processAssignment(SeedRunId run_id,
                                             const SeedAssignment& assignment,
                                             std::stop_token stop_token) {
   const auto exists = runs_.assignmentExists(assignment.id);
+  if (stop_token.stop_requested()) return {};
   if (!exists) return tl::make_unexpected(exists.error());
   if (exists.value()) {
+    if (stop_token.stop_requested()) return {};
     return runs_.recordItemState(
         run_id, assignment.id,
         SeedItemUpdate{
@@ -233,11 +232,29 @@ Result<void> SeedService::processAssignment(SeedRunId run_id,
             .error = std::nullopt,
         });
     if (!resolving) return tl::make_unexpected(resolving.error());
+    if (stop_token.stop_requested()) return {};
 
-    const auto resolved = source_.resolveTitle(assignment.declared_title);
+    const auto resolved = [&]() -> Result<ResolvedWikipediaPage> {
+      try {
+        return source_.resolveTitle(assignment.declared_title);
+      } catch (const std::exception& exception) {
+        return tl::make_unexpected(ApplicationError{
+            .code = ErrorCode::internal,
+            .message = exception.what(),
+        });
+      } catch (...) {
+        return tl::make_unexpected(ApplicationError{
+            .code = ErrorCode::internal,
+            .message = "unexpected Wikipedia title resolution failure",
+        });
+      }
+    }();
+    if (stop_token.stop_requested()) return {};
     if (!resolved) {
       if (retryable(resolved.error()) && attempt < retry_policy_.maxAttempts()) {
+        if (stop_token.stop_requested()) return {};
         retry_policy_.waitBeforeRetry(attempt);
+        if (stop_token.stop_requested()) return {};
         continue;
       }
       return recordFailure(run_id, assignment, attempt, std::nullopt, resolved.error());
@@ -253,16 +270,34 @@ Result<void> SeedService::processAssignment(SeedRunId run_id,
             .error = std::nullopt,
         });
     if (!importing) return tl::make_unexpected(importing.error());
+    if (stop_token.stop_requested()) return {};
 
-    const auto imported = importer_.importWikipediaBabel(
-        assignment.creator_id, resolved->page_id,
-        SeedImportContext{
-            .assignment_id = assignment.id,
-            .declared_title = assignment.declared_title,
+    const auto imported = [&]() -> Result<ImportWikipediaBabelResult> {
+      try {
+        return importer_.importWikipediaBabel(
+            assignment.creator_id, resolved->page_id,
+            SeedImportContext{
+                .assignment_id = assignment.id,
+                .declared_title = assignment.declared_title,
+            });
+      } catch (const std::exception& exception) {
+        return tl::make_unexpected(ApplicationError{
+            .code = ErrorCode::internal,
+            .message = exception.what(),
         });
+      } catch (...) {
+        return tl::make_unexpected(ApplicationError{
+            .code = ErrorCode::internal,
+            .message = "unexpected Wikipedia import failure",
+        });
+      }
+    }();
+    if (stop_token.stop_requested()) return {};
     if (!imported) {
       if (retryable(imported.error()) && attempt < retry_policy_.maxAttempts()) {
+        if (stop_token.stop_requested()) return {};
         retry_policy_.waitBeforeRetry(attempt);
+        if (stop_token.stop_requested()) return {};
         continue;
       }
       return recordFailure(run_id, assignment, attempt, resolved->page_id, imported.error());
@@ -299,6 +334,10 @@ Result<void> SeedService::recordFailure(SeedRunId run_id,
           .babel_id = std::nullopt,
           .error = durableError(error),
       });
+}
+
+Result<void> SeedService::interruptRun(SeedRunId run_id) {
+  return runs_.setRunState(run_id, SeedRunState::interrupted);
 }
 
 Result<void> SeedService::failRun(SeedRunId run_id, const ApplicationError& error) {

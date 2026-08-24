@@ -3,6 +3,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -55,7 +56,12 @@ class RunnerSeedRepository final : public SeedRunRepository {
   }
 
   Result<void> setRunState(SeedRunId, SeedRunState next) override {
-    std::scoped_lock lock(mutex_);
+    std::unique_lock lock(mutex_);
+    if (blocked_run_state && next == *blocked_run_state) {
+      run_state_write_entered_ = true;
+      changed_.notify_all();
+      changed_.wait(lock, [&] { return run_state_write_released_; });
+    }
     state = next;
     state_history.push_back(next);
     changed_.notify_all();
@@ -132,6 +138,18 @@ class RunnerSeedRepository final : public SeedRunRepository {
     return captured_assignments;
   }
 
+  bool waitForRunStateWrite() {
+    std::unique_lock lock(mutex_);
+    return changed_.wait_for(lock, std::chrono::seconds(2),
+                             [&] { return run_state_write_entered_; });
+  }
+
+  void releaseRunStateWrite() {
+    std::scoped_lock lock(mutex_);
+    run_state_write_released_ = true;
+    changed_.notify_all();
+  }
+
   int create_count{0};
   int mark_interrupted_calls{0};
   int latest_status_calls{0};
@@ -142,12 +160,15 @@ class RunnerSeedRepository final : public SeedRunRepository {
   std::vector<SeedRunState> state_history;
   std::deque<Result<SeedRunId>> create_results;
   std::deque<Result<bool>> assignment_exists_results;
+  std::optional<SeedRunState> blocked_run_state;
   SeedRunId latest_run{SeedRunId::v5("runner-run:initial").value()};
   SeedRunState state{SeedRunState::queued};
 
  private:
   mutable std::mutex mutex_;
   std::condition_variable changed_;
+  bool run_state_write_entered_{false};
+  bool run_state_write_released_{false};
 };
 
 class BlockingSource final : public ArticleSource {
@@ -324,6 +345,39 @@ TEST_CASE("seed runner releases its guard after a terminal run", "[seed_job_runn
   CHECK(runs.createCount() == 2);
 }
 
+TEST_CASE("destroying an inactive seed runner preserves natural completion",
+          "[seed_job_runner]") {
+  const std::vector assignments{runnerAssignment()};
+  RunnerSeedRepository runs;
+  BlockingSource source;
+  RunnerImporter importer;
+  SeedService service(assignments, runs, source, importer, SeedRetryPolicy::withoutDelay());
+  auto runner = std::make_unique<SeedJobRunner>("manifest-test-v1", service, runs);
+  REQUIRE(runner->start().has_value());
+  REQUIRE(source.waitUntilEntered());
+  source.release();
+  REQUIRE(runs.waitForState(SeedRunState::completed));
+
+  runs.create_results.push_back(tl::make_unexpected(ApplicationError{
+      .code = ErrorCode::database_unavailable,
+      .message = "guard release probe",
+  }));
+  auto probe = runner->start();
+  for (int retry = 0; !probe && probe.error().code == ErrorCode::conflict && retry < 100;
+       ++retry) {
+    std::this_thread::yield();
+    probe = runner->start();
+  }
+  REQUIRE_FALSE(probe.has_value());
+  CHECK(probe.error().code == ErrorCode::database_unavailable);
+
+  runner.reset();
+
+  const auto status = runs.latestStatus();
+  REQUIRE(status.has_value());
+  CHECK(status->run_state == SeedRunState::completed);
+}
+
 TEST_CASE("seed runner releases its guard when run creation fails", "[seed_job_runner]") {
   const std::vector assignments{runnerAssignment()};
   RunnerSeedRepository runs;
@@ -421,6 +475,31 @@ TEST_CASE("destroying an active seed runner persists interruption before returni
     REQUIRE(runner.start().has_value());
     REQUIRE(source.waitUntilEntered());
   }
+
+  const auto status = runs.latestStatus();
+  REQUIRE(status.has_value());
+  CHECK(status->run_state == SeedRunState::interrupted);
+  CHECK(status->imported == 0);
+}
+
+TEST_CASE("runner destruction overrides a racing completed write with interrupted",
+          "[seed_job_runner]") {
+  const std::vector assignments{runnerAssignment()};
+  RunnerSeedRepository runs;
+  runs.blocked_run_state = SeedRunState::completed;
+  SlowSource source;
+  RunnerImporter importer;
+  SeedService service(assignments, runs, source, importer, SeedRetryPolicy::withoutDelay());
+  auto runner = std::make_unique<SeedJobRunner>("manifest-test-v1", service, runs);
+  REQUIRE(runner->start().has_value());
+  REQUIRE(runs.waitForRunStateWrite());
+
+  std::thread releasing([&] {
+    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    runs.releaseRunStateWrite();
+  });
+  runner.reset();
+  releasing.join();
 
   const auto status = runs.latestStatus();
   REQUIRE(status.has_value());

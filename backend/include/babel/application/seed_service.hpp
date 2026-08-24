@@ -46,6 +46,7 @@ class SeedService final {
   Result<void> processAssignment(SeedRunId, const SeedAssignment&, std::stop_token);
   Result<void> recordFailure(SeedRunId, const SeedAssignment&, std::uint32_t,
                              std::optional<WikipediaPageId>, const ApplicationError&);
+  Result<void> interruptRun(SeedRunId);
   Result<void> failRun(SeedRunId, const ApplicationError&);
 
   std::vector<SeedAssignment> assignments_;

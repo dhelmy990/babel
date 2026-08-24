@@ -10,13 +10,23 @@ SeedJobRunner::SeedJobRunner(std::string manifest_version, SeedService& service,
     : manifest_version_(std::move(manifest_version)), service_(service), runs_(runs) {}
 
 SeedJobRunner::~SeedJobRunner() {
+  std::optional<SeedRunId> interrupted_run_id;
   std::jthread worker;
   {
     std::scoped_lock lock(mutex_);
-    if (worker_.joinable()) worker_.request_stop();
+    if (active_ && active_run_id_) {
+      interrupted_run_id = active_run_id_;
+      if (worker_.joinable()) worker_.request_stop();
+    }
     worker = std::move(worker_);
   }
   if (worker.joinable()) worker.join();
+  if (interrupted_run_id) {
+    try {
+      (void)runs_.setRunState(*interrupted_run_id, SeedRunState::interrupted);
+    } catch (...) {
+    }
+  }
 }
 
 Result<SeedRunId> SeedJobRunner::start() {
@@ -32,11 +42,13 @@ Result<SeedRunId> SeedJobRunner::start() {
   if (!run_id) return tl::make_unexpected(run_id.error());
 
   active_ = true;
+  active_run_id_ = run_id.value();
   try {
     worker_ = std::jthread(
         [this, id = run_id.value()](std::stop_token token) { execute(id, token); });
   } catch (const std::exception& exception) {
     active_ = false;
+    active_run_id_.reset();
     const ApplicationError error{
         .code = ErrorCode::internal,
         .message = exception.what(),
@@ -57,24 +69,33 @@ Result<void> SeedJobRunner::markInterruptedRuns() {
 }
 
 void SeedJobRunner::execute(SeedRunId run_id, std::stop_token stop_token) noexcept {
+  const auto persistTerminal = [&](SeedRunState state) noexcept {
+    try {
+      (void)runs_.setRunState(run_id, state);
+    } catch (...) {
+    }
+  };
   try {
     const auto result = service_.run(run_id, stop_token);
-    if (!result) {
-      const auto terminal = stop_token.stop_requested() ? SeedRunState::interrupted
-                                                        : SeedRunState::failed;
-      (void)runs_.setRunState(run_id, terminal);
+    if (stop_token.stop_requested()) {
+      persistTerminal(SeedRunState::interrupted);
+    } else if (!result) {
+      persistTerminal(SeedRunState::failed);
     }
   } catch (...) {
     const auto terminal = stop_token.stop_requested() ? SeedRunState::interrupted
                                                       : SeedRunState::failed;
-    (void)runs_.setRunState(run_id, terminal);
+    persistTerminal(terminal);
   }
-  releaseActiveGuard();
+  releaseActiveGuard(run_id);
 }
 
-void SeedJobRunner::releaseActiveGuard() noexcept {
+void SeedJobRunner::releaseActiveGuard(SeedRunId run_id) noexcept {
   std::scoped_lock lock(mutex_);
-  active_ = false;
+  if (active_run_id_ == run_id) {
+    active_ = false;
+    active_run_id_.reset();
+  }
 }
 
 }  // namespace babel
