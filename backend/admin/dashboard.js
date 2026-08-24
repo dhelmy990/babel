@@ -45,7 +45,7 @@
     return status;
   }
 
-  async function startSeedRun(fetchImpl, nonce) {
+  async function startSeedRun(fetchImpl, nonce, signal) {
     let response;
     try {
       response = await fetchImpl(ENDPOINT, {
@@ -56,6 +56,7 @@
           'X-Babel-Admin-Nonce': nonce || '',
         },
         body: '{}',
+        signal,
       });
     } catch (error) {
       throw new Error(`Unable to start seed run: ${error.message || 'network error'}`);
@@ -94,6 +95,7 @@
     let refreshPromise = null;
     let refreshGeneration = null;
     let activeAbort = null;
+    let activePostAbort = null;
     let disposed = false;
 
     function renderErrors(errors) {
@@ -193,18 +195,26 @@
       if (disposed || starting) return;
       starting = true;
       lifecycleGeneration += 1;
+      const startGeneration = lifecycleGeneration;
+      const postAbortController = typeof root.AbortController === 'function' ? new root.AbortController() : null;
+      activePostAbort = postAbortController;
+      const postTimeout = setTimeoutImpl(() => postAbortController?.abort(), 10000);
       renderAction(lastStatus || { state: 'not_started', total: 0, completed: 0, skipped: 0, failed: 0 });
       try {
-        const result = await startSeedRun(fetchImpl, nonce);
-        if (result.status && result.status.state) {
+        const result = await startSeedRun(fetchImpl, nonce, postAbortController?.signal);
+        if (!disposed && startGeneration === lifecycleGeneration && result.status && result.status.state) {
           lastStatus = result.status;
           render(result.status);
         }
       } catch (error) {
-        renderError(error.message);
+        if (!disposed && startGeneration === lifecycleGeneration) renderError(error.message);
       } finally {
-        await refresh();
-        if (!disposed) {
+        clearTimeoutImpl(postTimeout);
+        if (activePostAbort === postAbortController) activePostAbort = null;
+        if (!disposed && startGeneration === lifecycleGeneration) {
+          await refresh();
+        }
+        if (!disposed && startGeneration === lifecycleGeneration) {
           starting = false;
           renderAction(lastStatus || { state: 'not_started', total: 0, completed: 0, skipped: 0, failed: 0 });
         }
@@ -217,6 +227,7 @@
       lifecycleGeneration += 1;
       stopPolling();
       activeAbort?.abort();
+      activePostAbort?.abort();
     }
     return { refresh, start, stop };
   }

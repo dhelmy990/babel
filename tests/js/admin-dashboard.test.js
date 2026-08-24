@@ -276,3 +276,44 @@ test('stop aborts an active GET and prevents its result from rendering', async (
   await refresh;
   assert.equal(documentRef.elements.get('seed-status').textContent, '');
 });
+
+test('a hung POST times out and unlocks the action after recovery', async () => {
+  const documentRef = fakeDocument();
+  const timers = [];
+  let postSignal;
+  const controller = dashboard.createDashboardController({
+    document: documentRef,
+    fetchImpl: async (_url, options = {}) => {
+      if (options.method === 'POST') {
+        postSignal = options.signal;
+        return new Promise((_, reject) => options.signal.addEventListener('abort', () => reject(new Error('timed out'))));
+      }
+      return { ok: true, status: 200, json: async () => ({ state: 'completed', total: 1, completed: 1 }) };
+    },
+    setTimeoutImpl: (callback) => { timers.push(callback); return timers.length; },
+    clearTimeoutImpl() {},
+  });
+  const start = controller.start();
+  await new Promise((resolve) => setImmediate(resolve));
+  timers[0]();
+  await start;
+  assert.equal(postSignal.aborted, true);
+  assert.equal(documentRef.elements.get('seed-action').disabled, false);
+});
+
+test('a late POST response after stop cannot render or start polling', async () => {
+  const documentRef = fakeDocument();
+  const post = deferred();
+  const intervals = [];
+  const controller = dashboard.createDashboardController({
+    document: documentRef,
+    fetchImpl: async () => post.promise,
+    setIntervalImpl: (callback) => { intervals.push(callback); return intervals.length; },
+  });
+  const start = controller.start();
+  controller.stop();
+  post.resolve({ ok: true, status: 202, json: async () => ({ state: 'queued', total: 1 }) });
+  await start;
+  assert.equal(documentRef.elements.get('seed-status').textContent, '');
+  assert.equal(intervals.length, 0);
+});
