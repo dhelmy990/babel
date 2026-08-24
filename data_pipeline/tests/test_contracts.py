@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -63,5 +65,71 @@ def test_readiness_fixture_matches_v1_schema() -> None:
     validate_document("dataset-readiness-v1", readiness)
 
 
+def test_complete_readiness_requires_remote_verification_and_evidence() -> None:
+    readiness = json.loads(
+        (REPOSITORY_ROOT / "fixtures" / "distillation" / "readiness.json").read_text()
+    )
+    readiness["remote_verified"] = False
+
+    with pytest.raises(ValidationError):
+        validate_document("dataset-readiness-v1", readiness)
+
+
+def test_building_readiness_can_defer_remote_commit() -> None:
+    validate_document(
+        "dataset-readiness-v1",
+        {
+            "state": "building",
+            "schema_version": 1,
+            "teacher_dimension": 100,
+            "available_examples": 0,
+            "verified_shards": [],
+            "source_checksums": {},
+            "remote_verified": False,
+            "remote_commit_sha": None,
+        },
+    )
+
+
 def test_provenance_schema_loads() -> None:
     assert load_schema("provenance-v1")["title"] == "Distillation provenance v1"
+
+
+def test_provenance_contract_validates_source_and_report_identity() -> None:
+    provenance = {
+        "schema_version": 1,
+        "sources": [{
+            "filename": "vectors.bin",
+            "url": "https://example.test/vectors.bin",
+            "size": 12,
+            "md5": "a" * 32,
+            "sha1": "b" * 40,
+            "downloaded_at": "2016-10-01",
+        }],
+        "artifacts": {"shard": {"sha256": "c" * 64, "size": 12}},
+        "reports": {
+            "row_counts": {"input": 2, "matched": 1},
+            "match_rate": 0.5,
+            "exclusion_counts": {"unmatched": 1},
+            "text_statistics": {"mean_length": 10.0},
+            "vector_statistics": {"dimension": 100, "mean_norm": 1.0},
+        },
+    }
+    validate_document("provenance-v1", provenance)
+
+    provenance["sources"][0]["url"] = "not a uri"
+    with pytest.raises(ValidationError):
+        validate_document("provenance-v1", provenance)
+
+
+def test_installed_wheel_contains_schema_resources(tmp_path: Path) -> None:
+    wheel_directory = tmp_path / "wheel"
+    subprocess.run(
+        [sys.executable, "-m", "pip", "wheel", "--no-deps", "--wheel-dir", str(wheel_directory), str(REPOSITORY_ROOT / "data_pipeline")],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    wheel = next(wheel_directory.glob("babel_data-*.whl"))
+    with zipfile.ZipFile(wheel) as archive:
+        assert "babel_data/schemas/distillation-example-v1.json" in archive.namelist()
