@@ -5,14 +5,17 @@
 ## Purpose
 
 This milestone establishes a narrow backend foundation for Babel. It provides a
-PostgreSQL-backed set of synthetic creator profiles, a local C++ administration
-dashboard that seeds those profiles from Wikipedia, and an Electron profile
-selector that can load each profile's current graph.
+PostgreSQL-backed set of synthetic creator profiles plus a `Personal` profile,
+a local C++ administration dashboard that seeds the generated profiles from
+Wikipedia, and an Electron profile selector that can load each profile's
+current graph.
 
-The dashboard is the only operator-facing entry point for population and
-operational ingestion checks. Before the dashboard seed action runs, all
-generated profiles exist but contain no Babels. After a successful seed, each
-profile owns four Wikipedia-derived Babels.
+The dashboard is the only operator-facing entry point for generated Wikipedia
+population and operational ingestion checks. Before the dashboard seed action
+runs, all generated profiles exist but contain no Babels. After a successful
+seed, each generated profile owns four Wikipedia-derived Babels. `Personal` is
+never populated by the dashboard; it has a separate, explicit legacy-migration
+command.
 
 This milestone does not implement recommendation, training, model serving,
 embeddings, FAISS, PPR, or mutable graph editing.
@@ -25,6 +28,8 @@ embeddings, FAISS, PPR, or mutable graph editing.
 - PostgreSQL with the pgvector extension available through Docker Compose.
 - Twenty generated creator profiles defined by
   `prompts/wikipedia_user_profiles.md`.
+- One independently provisioned `Personal` profile and a non-destructive
+  `just migrate-personal <source-json>` command.
 - Four fixed Wikipedia seed articles per generated profile, for 80 expected
   profile/Babel assignments.
 - Full rendered Wikipedia article HTML converted to a sanitized,
@@ -40,7 +45,6 @@ embeddings, FAISS, PPR, or mutable graph editing.
 
 ### Deferred
 
-- The `Personal` profile and legacy persistence migration.
 - Creating, editing, deleting, or linking database-backed Babels in Electron.
 - Authentication and authorization between profiles.
 - Embedding generation or storage, normalized-text storage, FAISS, and vector
@@ -71,6 +75,7 @@ Electron main adapter
 | C++ application backend                              |
 |                                                      |
 | Profile queries | graph queries | seed administration|
+| Wikipedia import service | Personal legacy migration |
 |                                                      |
 | Domain -> application services -> ports -> adapters  |
 +---------------------------+--------------------------+
@@ -101,6 +106,7 @@ domain
        ^
 application
   ProfileQueryService | GraphQueryService | SeedService
+  WikipediaImportService | LegacyMigrationService
        ^
 ports
   CreatorRepository | BabelRepository | EdgeRepository
@@ -127,13 +133,14 @@ dimension are selected.
 - `slug`: stable unique machine name.
 - `display_name`: archetype name shown by Electron.
 - `profile_color`: validated display color.
-- `profile_kind`: `generated` for this milestone.
+- `profile_kind`: `generated` or `personal`.
 - `selector_order`: stable unique wheel position.
 - `created_at`, `updated_at`.
 
-The 20 creator rows are installed independently of Wikipedia seeding as part of
+All 21 creator rows are installed independently of Wikipedia seeding as part of
 database initialization. Therefore the profile selector works against a fresh,
-unseeded database.
+unseeded database. `Personal` has a stable UUID and sorts before the 20
+generated profiles.
 
 ### `babels`
 
@@ -199,6 +206,15 @@ and the table establishes PostgreSQL ownership for later graph editing.
 
 These rows make dashboard status durable across refreshes and backend restarts.
 
+### `legacy_migrations`
+
+- Source-file SHA-256 digest as the idempotency key.
+- Target creator UUID, constrained to `Personal` by the application service.
+- Imported Babel and edge counts.
+- Completion timestamp.
+
+The legacy source file is never modified or deleted.
+
 ## Profile and Seed Manifest
 
 The backend owns a structured, versioned manifest derived from
@@ -216,12 +232,32 @@ All four declared seed titles are used for every profile. PPR weights, PPR
 computation, archetype expansion, and simulated users are ignored. Profile
 names are display metadata and are not future recommender features.
 
-Stable UUIDs, slugs, ordering, seed-assignment UUIDs, and 20 distinct fixed hex
+Stable UUIDs, slugs, ordering, seed-assignment UUIDs, and 21 distinct fixed hex
 colors are checked by automated tests. Every profile color must remain legible
 against the black selector background. The same Wikipedia page may appear under
 more than one profile.
 
 ## Wikipedia Ingestion
+
+All Wikipedia-to-Babel ingestion passes through one application service:
+
+```cpp
+ImportWikipediaBabelResult importWikipediaBabel(
+    CreatorId profileId,
+    WikipediaPageId pageId
+);
+```
+
+The result distinguishes `Imported` from `AlreadyExists` and returns the Babel
+ID and canonical title. Fetch, resolution, sanitization, and persistence
+failures use typed application errors. The service validates the profile,
+fetches the canonical article by page ID, sanitizes its HTML, and atomically
+stores the owned Babel and Wikipedia provenance.
+
+The seed job first resolves each manifest title to a canonical page ID and then
+calls `importWikipediaBabel`. Automated tests use the same service through fake
+ports. A future manual importer may reuse it, but this milestone exposes no
+standalone HTTP endpoint or dashboard control for arbitrary page IDs.
 
 The seed job processes each missing profile/title assignment through this flow:
 
@@ -255,8 +291,9 @@ stored sanitized HTML to temporary plain text at training or embedding time.
 
 ## Seed Job Behavior
 
-The dashboard is the only operator-facing way to start population. There is no
-`seed` CLI command and normal backend startup never contacts Wikipedia.
+The dashboard is the only operator-facing way to start generated Wikipedia
+population. There is no `seed` CLI command and normal backend startup never
+contacts Wikipedia.
 
 `POST /admin/api/v1/seed` creates a background run and returns immediately. The
 dashboard polls its status. Only one run may be active at a time.
@@ -274,6 +311,32 @@ requires another dashboard action.
 
 An article is not persisted if canonical resolution, HTML retrieval, or
 sanitization fails. The run records an article-specific error and continues.
+
+## Personal Legacy Migration
+
+`Personal` is visible in Electron from the first database migration and renders
+an empty graph until explicitly populated. It is never affected by the
+dashboard seed action.
+
+```text
+just migrate-personal <source-json>
+        |
+        v
+validate legacy babel-graph JSON
+        |
+        v
+map legacy Babel IDs to stable UUIDs
+        |
+        v
+insert Personal Babels, then valid edges, in one transaction
+        |
+        v
+record source-file digest without modifying the source
+```
+
+Repeating a completed migration for the same file digest is a no-op. Invalid
+input fails before database writes. This command is the explicit exception to
+the rule that generated-data population originates from the dashboard.
 
 ## Dashboard
 
@@ -293,8 +356,9 @@ There is no separate operational-test control in this milestone. Schema,
 manifest, Wikipedia, sanitizer, and persistence checks occur as seed preflight
 or seed stages and surface through the same progress/error model. Later metrics
 and monitoring panels can extend this control plane without changing seed
-services. Any future manual population or operational-test action must also be
-initiated from this dashboard; deterministic automated tests remain external.
+services. Any future generated-data population or operational-test action must
+also be initiated from this dashboard; deterministic automated tests and the
+explicit `Personal` legacy migration remain external.
 
 ## HTTP Contracts
 
@@ -351,14 +415,15 @@ localhost backend API
 ```
 
 Every app launch starts on the profile selector. The selector is a vertical
-wheel on a mostly black screen. It lists the 20 generated profiles in stable
-order and uses each profile's color as its accent. There is no authentication
-or persisted session.
+wheel on a mostly black screen. It lists `Personal` first followed by the 20
+generated profiles in stable order and uses each profile's color as its accent.
+There is no authentication or persisted session.
 
 Selecting a profile replaces `State.babels` and `State.edges` with the graph
 response and opens the existing visualization. Before seeding, that response is
 empty and the existing empty state is shown. After seeding, each profile shows
-its four imported Babels.
+its four imported Babels. `Personal` remains empty until its explicit migration
+command succeeds.
 
 Creation, editing, deletion, and edge mutation are disabled for database-loaded
 profiles in this milestone. Navigation and read-only viewing remain available.
@@ -382,6 +447,10 @@ just start
 
 just test
     run deterministic automated tests outside the dashboard
+
+just migrate-personal <source-json>
+    validate and import one legacy graph into Personal
+    leave the source file untouched
 ```
 
 `just start` does not seed and does not contact Wikipedia. The dashboard seed
@@ -420,9 +489,12 @@ Automated tests do not run through the dashboard.
 
 ### Unit tests
 
-- The manifest has exactly 20 stable profiles and 80 profile/title assignments.
-- Every seed assignment has a stable UUID and every profile has a distinct,
-  black-background-safe color.
+- The database roster has `Personal` plus exactly 20 stable generated profiles,
+  and the seed manifest has 80 profile/title assignments.
+- Every seed assignment has a stable UUID and every one of the 21 profiles has
+  a distinct, black-background-safe color.
+- `WikipediaImportService` validates ownership, returns `Imported` or
+  `AlreadyExists`, and persists no partial record after a typed failure.
 - Sanitization preserves supported content and removes scripts, event handlers,
   unsafe URLs, unsupported structures, and unwanted Wikipedia chrome.
 - Seed behavior imports missing assignments, skips existing assignments, and
@@ -432,12 +504,15 @@ Automated tests do not run through the dashboard.
 
 ### PostgreSQL integration tests
 
-- Migrations install all 20 profiles in an otherwise empty database.
+- Migrations install `Personal` plus all 20 generated profiles in an otherwise
+  empty database.
 - A fresh profile graph contains empty Babel and edge arrays.
 - Source uniqueness prevents duplicate profile/page imports.
 - Edge ownership constraints reject cross-profile endpoints.
 - Babel and source provenance commit atomically.
 - Seed progress and errors survive repository reloads.
+- Personal migration is transactional, idempotent by source digest, and never
+  changes its source file.
 
 ### HTTP contract tests
 
@@ -448,7 +523,8 @@ Automated tests do not run through the dashboard.
 
 ### Electron adapter tests
 
-- Profile DTOs populate the selector in stable order.
+- Profile DTOs populate `Personal` first and the 20 generated profiles in stable
+  order.
 - Selecting an unseeded profile replaces local state with an empty graph.
 - Selecting a seeded profile loads only that profile's four Babels.
 - Mutation controls are unavailable in read-only profile mode.
@@ -459,7 +535,7 @@ Automated tests do not run through the dashboard.
 just db-up
 just start
     -> dashboard is available
-    -> Electron lists 20 profiles
+    -> Electron lists Personal plus 20 generated profiles
 
 select any profile before seeding
     -> empty graph
@@ -473,6 +549,10 @@ select profiles after seeding
 press the seed button again
     -> existing assignments are skipped
     -> only missing articles are retried
+
+just migrate-personal /path/to/babel-graph.json
+    -> Personal loads the migrated graph
+    -> the source file remains unchanged
 ```
 
 Live Wikipedia is not part of deterministic automated tests. Dashboard-driven
