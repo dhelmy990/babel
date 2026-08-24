@@ -83,8 +83,9 @@
     };
     const nonce = documentRef.querySelector('meta[name="babel-admin-nonce"]')?.content || '';
     let pollTimer = null;
-    let refreshPromise = null;
     let starting = false;
+    let lastStatus = null;
+    let requestGeneration = 0;
 
     function renderErrors(errors) {
       elements.errors.replaceChildren();
@@ -95,8 +96,16 @@
       }
     }
 
-    function render(status) {
+    function renderAction(status) {
       const model = seedStatus.seedViewModel(status);
+
+      elements.action.textContent = model.label;
+      elements.action.disabled = model.disabled || starting;
+      return model;
+    }
+
+    function render(status) {
+      const model = renderAction(status);
       const completed = Number(status.completed) || 0;
       const total = Number(status.total) || 0;
       const skipped = Number(status.skipped) || 0;
@@ -104,8 +113,6 @@
       const profile = status.current_profile || status.currentProfile || 'No profile active';
       const article = status.current_article || status.currentArticle || 'No article active';
 
-      elements.action.textContent = model.label;
-      elements.action.disabled = model.disabled || starting;
       elements.status.textContent = model.summary;
       elements.counts.textContent = `${completed}/${total} imported | ${skipped} skipped | ${failed} failed`;
       elements.progress.value = model.percent;
@@ -116,6 +123,7 @@
     }
 
     function renderError(message) {
+      renderAction(lastStatus || { state: 'not_started', total: 0, completed: 0, skipped: 0, failed: 0 });
       elements.status.textContent = message;
       elements.errors.replaceChildren();
       const item = documentRef.createElement('li');
@@ -139,25 +147,38 @@
     }
 
     async function refresh() {
-      if (refreshPromise) return refreshPromise;
-      refreshPromise = requestSeedStatus(fetchImpl)
-        .then(render)
-        .catch((error) => renderError(error.message))
-        .finally(() => { refreshPromise = null; });
-      return refreshPromise;
+      const responseGeneration = ++requestGeneration;
+      try {
+        const status = await requestSeedStatus(fetchImpl);
+        if (responseGeneration === requestGeneration) {
+          lastStatus = status;
+          render(status);
+        }
+        return status;
+      } catch (error) {
+        if (responseGeneration === requestGeneration) {
+          renderError(error.message);
+        }
+        return undefined;
+      }
     }
 
     async function start() {
       if (starting) return;
       starting = true;
-      elements.action.disabled = true;
+      renderAction(lastStatus || { state: 'not_started', total: 0, completed: 0, skipped: 0, failed: 0 });
       try {
         const result = await startSeedRun(fetchImpl, nonce);
-        render(result.status);
+        requestGeneration += 1;
+        if (result.status && result.status.state) {
+          lastStatus = result.status;
+          render(result.status);
+        }
       } catch (error) {
         renderError(error.message);
       } finally {
         starting = false;
+        renderAction(lastStatus || { state: 'not_started', total: 0, completed: 0, skipped: 0, failed: 0 });
         await refresh();
       }
     }

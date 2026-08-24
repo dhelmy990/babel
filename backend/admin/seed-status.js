@@ -43,8 +43,8 @@
     const failed = count(source.failed);
     const state = String(source.state || 'not_started');
     const percent = total === 0 ? 0 : Math.min(100, Math.floor((completed / total) * 100));
-    const remaining = Math.max(0, total - completed - skipped);
-    const retryCount = failed > 0 ? failed : remaining;
+    const remaining = Math.max(0, total - completed - skipped - failed);
+    const retryCount = Math.max(0, total - completed - skipped);
     const disabled = state === 'queued' || state === 'running';
 
     const view = {
@@ -76,8 +76,8 @@
         view.summary = `Seed run failed; ${retryCount} need retry`;
         break;
       case 'interrupted':
-        view.label = `Resume ${retryCount} remaining`;
-        view.summary = `Seed run interrupted; ${retryCount} remain`;
+        view.label = `Resume ${remaining} remaining`;
+        view.summary = `Seed run interrupted; ${remaining} remain`;
         break;
       case 'not_started':
       default:

@@ -8,6 +8,38 @@ const {
 } = require('../../backend/admin/seed-status.js');
 const dashboard = require('../../backend/admin/dashboard.js');
 
+function deferred() {
+  let resolve;
+  const promise = new Promise((completion) => { resolve = completion; });
+  return { promise, resolve };
+}
+
+function fakeDocument() {
+  const elements = new Map();
+  const element = () => ({
+    children: [],
+    disabled: false,
+    textContent: '',
+    value: 0,
+    attributes: new Map(),
+    addEventListener() {},
+    appendChild(child) { this.children.push(child); },
+    replaceChildren() { this.children = []; },
+    setAttribute(name, value) { this.attributes.set(name, value); },
+  });
+
+  for (const id of ['seed-action', 'seed-status', 'seed-counts', 'seed-progress', 'seed-current', 'seed-errors']) {
+    elements.set(id, element());
+  }
+
+  return {
+    elements,
+    createElement: element,
+    getElementById(id) { return elements.get(id); },
+    querySelector() { return { content: 'test-nonce' }; },
+  };
+}
+
 test('unseeded state offers the initial action', () => {
   assert.deepEqual(seedViewModel({
     state: 'not_started', total: 80, completed: 0, skipped: 0, failed: 0,
@@ -27,6 +59,14 @@ test('partial completion offers retry and preserves errors', () => {
   assert.equal(model.label, 'Retry 3 missing');
   assert.equal(model.disabled, false);
   assert.equal(model.percent, 96);
+});
+
+test('interrupted work resumes only assignments not already terminal', () => {
+  const model = seedViewModel({
+    state: 'interrupted', total: 80, completed: 40, skipped: 10, failed: 2,
+  });
+
+  assert.equal(model.label, 'Resume 28 remaining');
 });
 
 test('queued and running states are the only disabled actions', () => {
@@ -76,4 +116,57 @@ test('request helpers use the fixed endpoint and attach to a conflicting active 
 
   assert.equal(status.state, 'queued');
   assert.deepEqual(result, { attached: true, status: { state: 'running' } });
+});
+
+test('an initial stale status cannot stop polling started by a successful seed request', async () => {
+  const documentRef = fakeDocument();
+  const initial = deferred();
+  const recovery = deferred();
+  const intervals = [];
+  const cleared = [];
+  let getCalls = 0;
+  const controller = dashboard.createDashboardController({
+    document: documentRef,
+    fetchImpl: async (_url, options = {}) => {
+      if (options.method === 'POST') {
+        return { ok: true, status: 202, json: async () => ({ state: 'queued', total: 80 }) };
+      }
+      getCalls += 1;
+      return getCalls === 1 ? initial.promise : recovery.promise;
+    },
+    setIntervalImpl: (callback, delay) => {
+      intervals.push({ callback, delay });
+      return intervals.length;
+    },
+    clearIntervalImpl: (id) => cleared.push(id),
+  });
+
+  const initialRefresh = controller.refresh();
+  const start = controller.start();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(intervals.length, 1);
+
+  initial.resolve({ ok: true, status: 200, json: async () => ({ state: 'completed', total: 80, completed: 80 }) });
+  await initialRefresh;
+  assert.deepEqual(cleared, []);
+
+  recovery.resolve({ ok: true, status: 200, json: async () => ({ state: 'queued', total: 80 }) });
+  await start;
+  assert.equal(documentRef.elements.get('seed-status').textContent, 'Preparing Wikipedia imports');
+  assert.equal(intervals[0].delay, 1000);
+});
+
+test('a failed POST followed by a failed recovery GET re-enables the seed action', async () => {
+  const documentRef = fakeDocument();
+  const controller = dashboard.createDashboardController({
+    document: documentRef,
+    fetchImpl: async () => { throw new Error('offline'); },
+    setIntervalImpl: () => 1,
+    clearIntervalImpl() {},
+  });
+
+  await controller.start();
+
+  assert.equal(documentRef.elements.get('seed-action').disabled, false);
+  assert.match(documentRef.elements.get('seed-status').textContent, /Unable to reach seed service/);
 });
