@@ -2,12 +2,17 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iterator>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
+
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -106,6 +111,25 @@ class TemporaryLegacyFile {
   }
 
   ~TemporaryLegacyFile() {
+    std::error_code ignored;
+    std::filesystem::remove(path_, ignored);
+  }
+
+  const std::filesystem::path& path() const { return path_; }
+
+ private:
+  std::filesystem::path path_;
+};
+
+class TemporaryPath {
+ public:
+  explicit TemporaryPath(std::string_view suffix)
+      : path_(std::filesystem::temp_directory_path() /
+              ("babel-legacy-entry-" +
+               std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+               std::string(suffix))) {}
+
+  ~TemporaryPath() {
     std::error_code ignored;
     std::filesystem::remove(path_, ignored);
   }
@@ -242,6 +266,71 @@ TEST_CASE("malformed and unreadable legacy files return typed errors without wri
   CHECK(malformed.error().code == ErrorCode::invalid_legacy_file);
   REQUIRE_FALSE(unreadable.has_value());
   CHECK(unreadable.error().code == ErrorCode::invalid_legacy_file);
+  CHECK(repository.transaction_count == 0);
+}
+
+TEST_CASE("oversized regular legacy files are rejected before hashing or allocation") {
+  constexpr std::uintmax_t expected_source_limit = 64U * 1024U * 1024U;
+  TemporaryPath file(".json");
+  {
+    std::ofstream output(file.path(), std::ios::binary);
+    REQUIRE(output.is_open());
+    output.seekp(static_cast<std::streamoff>(expected_source_limit));
+    output.put('x');
+    REQUIRE(output.good());
+  }
+  REQUIRE(std::filesystem::file_size(file.path()) == expected_source_limit + 1U);
+  FakeLegacyMigrationRepository repository;
+  RecordingSanitizer sanitizer;
+  LegacyMigrationService service(personalCreatorId(), repository, sanitizer);
+
+  const auto result = service.migrateFile(file.path());
+
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == ErrorCode::invalid_legacy_file);
+  CHECK(repository.digest_count == 0);
+  CHECK(repository.transaction_count == 0);
+  CHECK(sanitizer.inputs.empty());
+  CHECK(std::filesystem::file_size(file.path()) == expected_source_limit + 1U);
+}
+
+TEST_CASE("legacy migration rejects a FIFO promptly without waiting for a writer") {
+  TemporaryPath fifo(".fifo");
+  REQUIRE(::mkfifo(fifo.path().c_str(), 0600) == 0);
+  FakeLegacyMigrationRepository repository;
+  RecordingSanitizer sanitizer;
+  LegacyMigrationService service(personalCreatorId(), repository, sanitizer);
+
+  auto migration = std::async(std::launch::async, [&] { return service.migrateFile(fifo.path()); });
+  const auto completion = migration.wait_for(std::chrono::seconds(1));
+  if (completion != std::future_status::ready) {
+    const int unblock = ::open(fifo.path().c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    REQUIRE(unblock >= 0);
+    REQUIRE(::close(unblock) == 0);
+  }
+  const auto result = migration.get();
+
+  CHECK(completion == std::future_status::ready);
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == ErrorCode::invalid_legacy_file);
+  CHECK(repository.digest_count == 0);
+  CHECK(repository.transaction_count == 0);
+}
+
+TEST_CASE("legacy migration rejects symlinks instead of following their target") {
+  TemporaryPath link(".json");
+  std::error_code link_error;
+  std::filesystem::create_symlink(fixturePath("legacy_graph.json"), link.path(), link_error);
+  REQUIRE_FALSE(link_error);
+  FakeLegacyMigrationRepository repository;
+  RecordingSanitizer sanitizer;
+  LegacyMigrationService service(personalCreatorId(), repository, sanitizer);
+
+  const auto result = service.migrateFile(link.path());
+
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == ErrorCode::invalid_legacy_file);
+  CHECK(repository.digest_count == 0);
   CHECK(repository.transaction_count == 0);
 }
 

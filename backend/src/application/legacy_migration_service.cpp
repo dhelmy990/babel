@@ -2,11 +2,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cctype>
 #include <exception>
-#include <fstream>
 #include <initializer_list>
-#include <iterator>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -16,8 +15,11 @@
 #include <utility>
 #include <vector>
 
+#include <fcntl.h>
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "babel/application/profile_manifest.hpp"
 
@@ -27,6 +29,10 @@ namespace {
 // `.invalid` is reserved and cannot resolve on the public Internet. It gives the sanitizer a
 // deterministic HTTPS parser base without attributing local legacy content to a real publisher.
 constexpr std::string_view kLegacyCanonicalBase = "https://legacy.babel.invalid/graph";
+// Local graph exports are expected to be small. This generous cap bounds memory and hashing work
+// while allowing many maximum-sized editor documents in one source file.
+constexpr std::size_t kMaxLegacySourceBytes = 64U * 1024U * 1024U;
+constexpr std::size_t kSourceReadBufferBytes = 64U * 1024U;
 
 ApplicationError invalidLegacy(std::string message) {
   return ApplicationError{.code = ErrorCode::invalid_legacy_file, .message = std::move(message)};
@@ -53,6 +59,22 @@ struct LegacyGraph {
 class DuplicateJsonKey final : public std::exception {
  public:
   const char* what() const noexcept override { return "duplicate JSON object key"; }
+};
+
+class FileDescriptor final {
+ public:
+  explicit FileDescriptor(int value) : value_(value) {}
+  ~FileDescriptor() {
+    if (value_ >= 0) ::close(value_);
+  }
+
+  FileDescriptor(const FileDescriptor&) = delete;
+  FileDescriptor& operator=(const FileDescriptor&) = delete;
+
+  int get() const { return value_; }
+
+ private:
+  int value_;
 };
 
 bool hasNonWhitespace(std::string_view value) {
@@ -207,12 +229,39 @@ Result<std::string> sha256(std::string_view bytes, std::string_view subject) {
 }
 
 Result<std::string> readSource(const std::filesystem::path& source_path) {
-  std::ifstream input(source_path, std::ios::binary);
-  if (!input.is_open()) {
-    return tl::make_unexpected(invalidLegacy("Legacy graph file could not be opened"));
+  const FileDescriptor input(
+      ::open(source_path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK));
+  if (input.get() < 0) {
+    return tl::make_unexpected(
+        invalidLegacy("Legacy graph source must be an accessible non-symlink regular file"));
   }
-  std::string bytes(std::istreambuf_iterator<char>(input), {});
-  if (input.bad()) {
+
+  struct stat metadata {};
+  if (::fstat(input.get(), &metadata) != 0 || !S_ISREG(metadata.st_mode)) {
+    return tl::make_unexpected(
+        invalidLegacy("Legacy graph source must be a regular file"));
+  }
+  if (metadata.st_size < 0 ||
+      static_cast<std::uintmax_t>(metadata.st_size) > kMaxLegacySourceBytes) {
+    return tl::make_unexpected(invalidLegacy("Legacy graph source exceeds the 64 MiB size limit"));
+  }
+
+  std::string bytes;
+  bytes.reserve(static_cast<std::size_t>(metadata.st_size));
+  std::array<char, kSourceReadBufferBytes> buffer{};
+  while (true) {
+    const auto count = ::read(input.get(), buffer.data(), buffer.size());
+    if (count > 0) {
+      const auto byte_count = static_cast<std::size_t>(count);
+      if (byte_count > kMaxLegacySourceBytes - bytes.size()) {
+        return tl::make_unexpected(
+            invalidLegacy("Legacy graph source exceeds the 64 MiB size limit"));
+      }
+      bytes.append(buffer.data(), byte_count);
+      continue;
+    }
+    if (count == 0) break;
+    if (errno == EINTR) continue;
     return tl::make_unexpected(invalidLegacy("Legacy graph file could not be read completely"));
   }
   return bytes;
