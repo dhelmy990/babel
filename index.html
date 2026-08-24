@@ -3,13 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; media-src 'self' blob:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; connect-src 'none'">
     <title>Babel - Knowledge Graph</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="styles.css">
-    <!-- Quill Editor (Tiptap requires bundler, Quill works via CDN) -->
-    <link href="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.snow.css" rel="stylesheet">
+    <link href="node_modules/quill/dist/quill.snow.css" rel="stylesheet">
 </head>
 <body>
     <main id="profile-selector" class="profile-selector" tabindex="-1" aria-labelledby="profile-selector-title">
@@ -136,10 +133,10 @@
     <!-- Save toast -->
     <div id="save-toast">Saved</div>
 
-    <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
-    <script src="https://unpkg.com/d3@7"></script>
-    <script src="https://unpkg.com/3d-force-graph@1.73.0/dist/3d-force-graph.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.js"></script>
+    <script src="node_modules/three/build/three.min.js"></script>
+    <script src="node_modules/d3/dist/d3.min.js"></script>
+    <script src="node_modules/3d-force-graph/dist/3d-force-graph.min.js"></script>
+    <script src="node_modules/quill/dist/quill.js"></script>
 
     <script src="js/config.js"></script>
     <script src="js/state.js"></script>

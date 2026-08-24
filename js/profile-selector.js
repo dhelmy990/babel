@@ -7,6 +7,9 @@
     const DEFAULT_TIMEOUT_MS = 5000;
     const MAX_BODY_LENGTH = 2 * 1024 * 1024;
     const COLOR_PATTERN = /^#[0-9a-f]{3}(?:[0-9a-f]{3})?(?:[0-9a-f]{2})?$/i;
+    const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+    const MAX_DISPLAY_NAME_LENGTH = 200;
+    const MAX_TITLE_LENGTH = 512;
 
     function requireObject(value, label) {
         if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -15,17 +18,67 @@
         return value;
     }
 
-    function requireString(value, label, allowEmpty = false) {
+    function requireString(value, label, allowEmpty = false, maxLength = MAX_BODY_LENGTH) {
         if (typeof value !== 'string' || (!allowEmpty && value.trim() === '')) {
             throw new TypeError(`${label} must be a non-empty string`);
+        }
+        if (value.length > maxLength) throw new TypeError(`${label} is too long`);
+        return value;
+    }
+
+    function requireUuid(value, label) {
+        if (typeof value !== 'string' || !UUID_PATTERN.test(value)) {
+            throw new TypeError(`${label} must be a canonical lowercase UUID`);
         }
         return value;
     }
 
+    function escapeHtml(value) {
+        return String(value).replace(/[&<>"']/g, (character) => ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;',
+        })[character]);
+    }
+
+    function decodeHtmlEntities(value) {
+        const named = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+        return value.replace(/&(#(?:x[0-9a-f]+|\d+)|[a-z]+);/gi, (match, entity) => {
+            if (entity[0] !== '#') return named[entity.toLowerCase()] ?? match;
+            const hexadecimal = entity[1]?.toLowerCase() === 'x';
+            const codePoint = Number.parseInt(entity.slice(hexadecimal ? 2 : 1), hexadecimal ? 16 : 10);
+            try {
+                return Number.isFinite(codePoint) ? String.fromCodePoint(codePoint) : match;
+            } catch {
+                return match;
+            }
+        });
+    }
+
+    function htmlToPlainText(html) {
+        requireString(html, 'contentHtml', true);
+        return decodeHtmlEntities(html
+            .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '')
+            .replace(/<br\s*\/?>/gi, '\n')
+            .replace(/<\/(?:p|div|li|h[1-6]|blockquote|pre|tr)\s*>/gi, '\n')
+            .replace(/<[^>]*>/g, ''))
+            .replace(/\r/g, '')
+            .replace(/[ \t]+\n/g, '\n')
+            .replace(/\n{3,}/g, '\n\n')
+            .trim();
+    }
+
+    function wheelDirection(deltaX, deltaY) {
+        const primaryDelta = Math.abs(deltaY) >= Math.abs(deltaX) ? deltaY : deltaX;
+        return primaryDelta === 0 ? 0 : (primaryDelta > 0 ? 1 : -1);
+    }
+
     function validateProfile(profile, label = 'profile') {
         requireObject(profile, label);
-        requireString(profile.id, `${label} id`);
-        requireString(profile.displayName, `${label} displayName`);
+        requireUuid(profile.id, `${label} id`);
+        requireString(profile.displayName, `${label} displayName`, false, MAX_DISPLAY_NAME_LENGTH);
         requireString(profile.color, `${label} color`);
         if (!COLOR_PATTERN.test(profile.color)) {
             throw new TypeError(`${label} color must be a hex color`);
@@ -64,10 +117,10 @@
         const ids = new Set();
         const babels = graph.babels.map((babel, index) => {
             requireObject(babel, `babels[${index}]`);
-            const id = requireString(babel.id, `babels[${index}] id`);
+            const id = requireUuid(babel.id, `babels[${index}] id`);
             if (ids.has(id)) throw new TypeError('babel ids must be unique');
             ids.add(id);
-            requireString(babel.title, `babels[${index}] title`);
+            requireString(babel.title, `babels[${index}] title`, false, MAX_TITLE_LENGTH);
             requireString(babel.contentHtml, `babels[${index}] contentHtml`, true);
             requireString(babel.color, `babels[${index}] color`);
             if (!COLOR_PATTERN.test(babel.color)) {
@@ -87,9 +140,9 @@
         const edgeIds = new Set();
         const edges = graph.edges.map((edge, index) => {
             requireObject(edge, `edges[${index}]`);
-            const id = requireString(edge.id, `edges[${index}] id`);
-            const source = requireString(edge.sourceId, `edges[${index}] sourceId`);
-            const target = requireString(edge.targetId, `edges[${index}] targetId`);
+            const id = requireUuid(edge.id, `edges[${index}] id`);
+            const source = requireUuid(edge.sourceId, `edges[${index}] sourceId`);
+            const target = requireUuid(edge.targetId, `edges[${index}] targetId`);
             if (edgeIds.has(id)) throw new TypeError('edge ids must be unique');
             if (!ids.has(source) || !ids.has(target)) {
                 throw new TypeError(`edges[${index}] endpoint does not exist`);
@@ -97,6 +150,25 @@
             edgeIds.add(id);
             return { id, source, target };
         });
+
+        const adjacency = new Map(Array.from(ids, (id) => [id, []]));
+        const indegree = new Map(Array.from(ids, (id) => [id, 0]));
+        edges.forEach((edge) => {
+            adjacency.get(edge.source).push(edge.target);
+            indegree.set(edge.target, indegree.get(edge.target) + 1);
+        });
+        const ready = Array.from(ids).filter((id) => indegree.get(id) === 0);
+        let visitedCount = 0;
+        while (ready.length > 0) {
+            const id = ready.pop();
+            visitedCount += 1;
+            adjacency.get(id).forEach((target) => {
+                const remaining = indegree.get(target) - 1;
+                indegree.set(target, remaining);
+                if (remaining === 0) ready.push(target);
+            });
+        }
+        if (visitedCount !== ids.size) throw new TypeError('profile graph contains a cycle');
 
         return { babels, edges };
     }
@@ -128,8 +200,8 @@
     }
 
     function profileGraphPath(profileId) {
-        requireString(profileId, 'profile id');
-        return `/api/v1/profiles/${encodeURIComponent(profileId)}/graph`;
+        requireUuid(profileId, 'profile id');
+        return `/api/v1/profiles/${profileId}/graph`;
     }
 
     function normalizeBackendUrl(baseUrl) {
@@ -171,34 +243,86 @@
             }
             const controller = new AbortController();
             const timeout = setTimeoutImpl(() => controller.abort(), timeoutMs);
-            let response;
             try {
-                response = await fetchImpl(`${baseUrl}${pathname}`, {
-                    method: 'GET',
-                    headers: { Accept: 'application/json' },
-                    signal: controller.signal,
-                });
-            } catch {
-                if (controller.signal.aborted) throw new Error('Backend request timed out');
-                throw new Error('Unable to connect to the Babel backend');
-            }
-            try {
-                if (!response || typeof response.status !== 'number' || typeof response.text !== 'function') {
+                let response;
+                try {
+                    response = await fetchImpl(`${baseUrl}${pathname}`, {
+                        method: 'GET',
+                        headers: { Accept: 'application/json' },
+                        redirect: 'error',
+                        signal: controller.signal,
+                    });
+                } catch {
+                    if (controller.signal.aborted) throw new Error('Backend request timed out');
+                    throw new Error('Unable to connect to the Babel backend');
+                }
+                if (!response || typeof response.status !== 'number'
+                    || typeof response.url !== 'string'
+                    || typeof response.body?.getReader !== 'function') {
                     throw new Error('Backend returned an invalid response');
+                }
+                let responseUrl;
+                try {
+                    responseUrl = new URL(response.url);
+                } catch {
+                    throw new Error('Backend returned an invalid response origin');
+                }
+                if (responseUrl.origin !== baseUrl) {
+                    throw new Error('Backend returned a response from an unexpected origin');
                 }
                 if (!response.ok) throw new Error(`Backend request failed (${response.status})`);
                 const contentType = response.headers?.get?.('content-type') || '';
                 if (!/^application\/json(?:\s*;|$)/i.test(contentType)) {
                     throw new Error('Backend returned an invalid JSON response');
                 }
-                let body;
+                const contentLength = response.headers?.get?.('content-length');
+                if (contentLength) {
+                    if (!/^\d+$/.test(contentLength)) {
+                        throw new Error('Backend returned an invalid response');
+                    }
+                    if (Number(contentLength) > MAX_BODY_LENGTH) {
+                        throw new Error('Backend response was too large');
+                    }
+                }
+
+                const reader = response.body.getReader();
+                const chunks = [];
+                let byteLength = 0;
                 try {
-                    body = await response.text();
-                } catch {
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        if (!(value instanceof Uint8Array)) {
+                            throw new Error('Backend returned an invalid response');
+                        }
+                        byteLength += value.byteLength;
+                        if (byteLength > MAX_BODY_LENGTH) {
+                            try { await reader.cancel(); } catch { /* Ignore cancellation errors. */ }
+                            throw new Error('Backend response was too large');
+                        }
+                        chunks.push(value);
+                    }
+                } catch (error) {
                     if (controller.signal.aborted) throw new Error('Backend request timed out');
+                    if (error instanceof Error
+                        && (error.message === 'Backend response was too large'
+                            || error.message === 'Backend returned an invalid response')) {
+                        throw error;
+                    }
                     throw new Error('Backend returned an invalid response');
                 }
-                if (body.length > MAX_BODY_LENGTH) throw new Error('Backend response was too large');
+                const bytes = new Uint8Array(byteLength);
+                let offset = 0;
+                chunks.forEach((chunk) => {
+                    bytes.set(chunk, offset);
+                    offset += chunk.byteLength;
+                });
+                let body;
+                try {
+                    body = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+                } catch {
+                    throw new Error('Backend returned an invalid response');
+                }
                 let data;
                 try {
                     data = JSON.parse(body);
@@ -219,8 +343,11 @@
         canMutate,
         clearTransientState,
         createBackendRequest,
+        escapeHtml,
+        htmlToPlainText,
         orderedProfiles,
         profileGraphPath,
         toRendererGraph,
+        wheelDirection,
     };
 }));

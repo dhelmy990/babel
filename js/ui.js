@@ -12,6 +12,7 @@ const UI = {
     profiles: [],
     activeProfileIndex: 0,
     profileRequestVersion: 0,
+    profileRequestPending: false,
     retryProfileAction: null,
 
     /**
@@ -124,7 +125,8 @@ const UI = {
         this.elements.switchProfileBtn.addEventListener('click', () => this.showProfileSelector());
         this.elements.profileWheel.addEventListener('wheel', (event) => {
             event.preventDefault();
-            this.moveActiveProfile(event.deltaY > 0 ? 1 : -1);
+            const direction = ProfileSelector.wheelDirection(event.deltaX, event.deltaY);
+            if (direction !== 0) this.moveActiveProfile(direction);
         }, { passive: false });
 
         document.querySelector('.edge-arrow.left-to-right').addEventListener('click', () => {
@@ -368,13 +370,17 @@ const UI = {
         const leftPanel = document.getElementById('babel-panel-left');
         leftPanel.querySelector('.babel-sphere').style.backgroundColor = left.color;
         leftPanel.querySelector('.babel-edit-title').value = left.title;
-        leftPanel.querySelector('.babel-edit-description').value = left.description;
+        leftPanel.querySelector('.babel-edit-description').value = State.isReadOnlyProfile
+            ? ProfileSelector.htmlToPlainText(left.description)
+            : left.description;
         leftPanel.dataset.babelId = left.id;
 
         const rightPanel = document.getElementById('babel-panel-right');
         rightPanel.querySelector('.babel-sphere').style.backgroundColor = right.color;
         rightPanel.querySelector('.babel-edit-title').value = right.title;
-        rightPanel.querySelector('.babel-edit-description').value = right.description;
+        rightPanel.querySelector('.babel-edit-description').value = State.isReadOnlyProfile
+            ? ProfileSelector.htmlToPlainText(right.description)
+            : right.description;
         rightPanel.dataset.babelId = right.id;
 
         const readOnly = State.isReadOnlyProfile;
@@ -496,10 +502,13 @@ const UI = {
     },
 
     async loadProfiles() {
+        if (this.profileRequestPending) return;
+        this.profileRequestPending = true;
         const requestVersion = ++this.profileRequestVersion;
         this.retryProfileAction = () => this.loadProfiles();
         this.setProfileStatus('Connecting to the local archive...', false);
         this.elements.profileWheel.setAttribute('aria-busy', 'true');
+        this.elements.profileSelectorRetry.disabled = true;
 
         try {
             if (!window.electronAPI?.listProfiles) {
@@ -521,7 +530,9 @@ const UI = {
             this.setProfileStatus(error instanceof Error ? error.message : 'Unable to connect', true);
         } finally {
             if (requestVersion === this.profileRequestVersion) {
+                this.profileRequestPending = false;
                 this.elements.profileWheel.setAttribute('aria-busy', 'false');
+                this.elements.profileSelectorRetry.disabled = false;
             }
         }
     },
@@ -533,6 +544,7 @@ const UI = {
             row.type = 'button';
             row.className = 'profile-wheel-row';
             row.setAttribute('role', 'option');
+            row.id = `profile-option-${index}`;
             row.dataset.profileIndex = String(index);
             row.style.setProperty('--profile-color', profile.color);
             row.innerHTML = `<span class="profile-wheel-order">${String(profile.order).padStart(2, '0')}</span><span class="profile-wheel-name"></span>`;
@@ -561,10 +573,13 @@ const UI = {
             row.setAttribute('aria-selected', String(selected));
             row.tabIndex = selected ? 0 : -1;
         });
+        const activeRow = this.elements.profileWheelList.querySelector('.profile-wheel-row.active');
+        this.elements.profileWheel.setAttribute('aria-activedescendant', activeRow?.id || '');
     },
 
     moveActiveProfile(direction) {
         this.setActiveProfile(this.activeProfileIndex + direction);
+        this.elements.profileWheelList.querySelector('.profile-wheel-row.active')?.focus();
     },
 
     setProfileStatus(message, showRetry) {
@@ -574,10 +589,13 @@ const UI = {
     },
 
     async selectProfile(profile) {
+        if (this.profileRequestPending) return;
+        this.profileRequestPending = true;
         const requestVersion = ++this.profileRequestVersion;
         this.retryProfileAction = () => this.selectProfile(profile);
         this.setProfileStatus(`Opening ${profile.displayName}...`, false);
         this.elements.profileWheel.setAttribute('aria-busy', 'true');
+        this.elements.profileSelectorRetry.disabled = true;
 
         try {
             const result = await window.electronAPI.loadProfileGraph(profile.id);
@@ -603,13 +621,16 @@ const UI = {
             this.setProfileStatus(error instanceof Error ? error.message : 'Unable to load profile', true);
         } finally {
             if (requestVersion === this.profileRequestVersion) {
+                this.profileRequestPending = false;
                 this.elements.profileWheel.setAttribute('aria-busy', 'false');
+                this.elements.profileSelectorRetry.disabled = false;
             }
         }
     },
 
     showProfileSelector() {
         ++this.profileRequestVersion;
+        this.profileRequestPending = false;
         if (Editor.autoSaveTimer) clearTimeout(Editor.autoSaveTimer);
         Editor.autoSaveTimer = null;
         Editor.editor?.enable(false);

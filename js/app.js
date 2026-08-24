@@ -21,7 +21,7 @@ function initGraph() {
             isSelected: State.selectedBabel?.id === node.id,
             isDeleteWarning: State.deleteWarningBabel?.id === node.id
         }))
-        .nodeLabel(node => node.title || 'Untitled')
+        .nodeLabel(node => ProfileSelector.escapeHtml(node.title || 'Untitled'))
         .linkWidth(0)
         .linkColor(() => 'rgba(0,0,0,0)')
         .linkThreeObjectExtend(true)
