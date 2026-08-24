@@ -1011,6 +1011,9 @@ git commit -m "feat: load read-only creator profiles in Electron"
 **Interfaces:**
 - Consumes: Tasks 3 through 9.
 - Produces: runnable `babel_backend migrate`, `serve`, and `migrate-personal`; all HTTP contracts; `just db-up`, `just start`, `just test`, and `just migrate-personal`.
+- Contract: profile graph responses are capped at 64 MiB in the backend and in
+  Electron's bounded streaming reader. If a stored Personal graph exceeds that
+  wire limit, return a typed HTTP error rather than emitting a partial graph.
 
 - [ ] **Step 1: Write failing HTTP contract tests**
 
@@ -1043,6 +1046,9 @@ Expected: compile fails because controllers and composition root are absent.
 - [ ] **Step 3: Implement profile routes and JSON mapping**
 
 Expose `GET /health`, `GET /api/v1/profiles`, and `GET /api/v1/profiles/{profileId}/graph`. Use camelCase JSON fields expected by Task 9. Map `not_found` to 404, validation to 400, database unavailability to 503, and internal errors to a generic 500 body without leaking SQL.
+Serialize profile graphs with the shared 64 MiB whole-response ceiling and
+return a structured 413 response when the complete JSON representation would
+exceed it.
 
 - [ ] **Step 4: Implement dashboard/static and seed routes**
 
