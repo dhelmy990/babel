@@ -497,7 +497,7 @@ TEST_CASE("unsafe-only legacy HTML is rejected by the real sanitizer before writ
 
 TEST_CASE("blank legacy descriptions become canonical empty Quill HTML without sanitizing") {
   TemporaryLegacyFile file(
-      R"({"babels":[{"id":"empty","title":"Empty","description":"","color":"#123456"},{"id":"whitespace","title":"Whitespace","description":" \n\t","color":"#654321"}],"edges":[]})");
+      R"({"babels":[{"id":"empty","title":"Empty","description":"","color":"#123456"},{"id":"whitespace","title":"Whitespace","description":" \n\t","color":"#654321"},{"id":"quill-empty","title":"Quill Empty","description":"<p><br></p>","color":"#ABCDEF"}],"edges":[]})");
   FakeLegacyMigrationRepository repository;
   CountingLibxmlSanitizer sanitizer;
   LegacyMigrationService service(personalCreatorId(), repository, sanitizer);
@@ -506,9 +506,11 @@ TEST_CASE("blank legacy descriptions become canonical empty Quill HTML without s
 
   REQUIRE(result.has_value());
   CHECK(result->status == LegacyMigrationStatus::imported);
-  REQUIRE(repository.imported_babels.size() == 2);
+  REQUIRE(repository.imported_babels.size() == 3);
   CHECK(babelWithTitle(repository.imported_babels, "Empty").content_html == "<p><br></p>");
   CHECK(babelWithTitle(repository.imported_babels, "Whitespace").content_html ==
+        "<p><br></p>");
+  CHECK(babelWithTitle(repository.imported_babels, "Quill Empty").content_html ==
         "<p><br></p>");
   CHECK(sanitizer.sanitize_count == 0);
   CHECK(repository.transaction_count == 1);

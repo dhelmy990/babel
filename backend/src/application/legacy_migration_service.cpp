@@ -85,6 +85,19 @@ bool hasNonWhitespace(std::string_view value) {
   });
 }
 
+bool isLegacyEmptyDescription(std::string_view value) {
+  if (!hasNonWhitespace(value)) return true;
+
+  std::string compact;
+  compact.reserve(value.size());
+  for (const unsigned char character : value) {
+    if (std::isspace(character) == 0) {
+      compact.push_back(static_cast<char>(std::tolower(character)));
+    }
+  }
+  return compact == "<p><br></p>" || compact == "<p><br/></p>";
+}
+
 bool containsNul(std::string_view value) { return value.find('\0') != std::string_view::npos; }
 
 bool validColor(std::string_view color) {
@@ -354,7 +367,7 @@ Result<LegacyMigrationResult> LegacyMigrationService::migrateFile(
     babels.reserve(graph->babels.size());
     for (const auto& legacy : graph->babels) {
       std::string content_html;
-      if (hasNonWhitespace(legacy.description)) {
+      if (!isLegacyEmptyDescription(legacy.description)) {
         auto sanitized = sanitizer_.sanitize(legacy.description, kLegacyCanonicalBase);
         if (!sanitized) {
           return tl::make_unexpected(invalidLegacy("Legacy Babel description was rejected: " +
