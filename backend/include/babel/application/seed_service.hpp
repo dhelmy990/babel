@@ -15,7 +15,8 @@ namespace babel {
 
 class SeedRetryPolicy {
  public:
-  using Delay = std::function<void(std::chrono::milliseconds)>;
+  using Delay =
+      std::function<bool(std::chrono::milliseconds, std::stop_token)>;
 
   explicit SeedRetryPolicy(
       Delay delay,
@@ -26,7 +27,10 @@ class SeedRetryPolicy {
   [[nodiscard]] static SeedRetryPolicy withoutDelay();
 
   [[nodiscard]] std::size_t maxAttempts() const noexcept;
-  void waitBeforeRetry(std::size_t completed_attempt) const;
+  [[nodiscard]] bool waitBeforeRetry(
+      std::size_t completed_attempt,
+      std::optional<std::chrono::milliseconds> server_delay,
+      std::stop_token stop_token) const;
 
  private:
   Delay delay_;

@@ -22,8 +22,14 @@ namespace {
 
 using namespace babel;
 
-ApplicationError testError(ErrorCode code, std::string message) {
-  return ApplicationError{.code = code, .message = std::move(message)};
+ApplicationError testError(
+    ErrorCode code, std::string message,
+    std::optional<std::chrono::milliseconds> retry_after = std::nullopt) {
+  return ApplicationError{
+      .code = code,
+      .message = std::move(message),
+      .retry_after = retry_after,
+  };
 }
 
 SeedAssignment assignment(std::string_view name, std::string title) {
@@ -535,7 +541,11 @@ TEST_CASE("seed retries unavailable imports twice with fixed backoff", "[seed_se
   importer.results.push_back(
       tl::make_unexpected(testError(ErrorCode::wikipedia_unavailable, "timeout two")));
   std::vector<std::chrono::milliseconds> delays;
-  SeedRetryPolicy policy{[&](std::chrono::milliseconds delay) { delays.push_back(delay); }};
+  SeedRetryPolicy policy{
+      [&](std::chrono::milliseconds delay, std::stop_token) {
+        delays.push_back(delay);
+        return true;
+      }};
   SeedService service(manifest, runs, source, importer, std::move(policy));
   REQUIRE(runs.createRun("test-v1", manifest).has_value());
 
@@ -560,6 +570,36 @@ TEST_CASE("seed retries unavailable imports twice with fixed backoff", "[seed_se
     CHECK(transitions.at(index).update.attempt_count == expected_attempts.at(index));
   }
   CHECK(transitions.back().update.attempt_count == 3);
+}
+
+TEST_CASE("seed honors a longer server retry delay", "[seed_service]") {
+  const std::vector manifest{assignment("retry-after", "Rate limited article")};
+  RecordingSeedRepository runs;
+  ScriptedSource source;
+  ScriptedImporter importer;
+  importer.results.push_back(tl::make_unexpected(testError(
+      ErrorCode::wikipedia_unavailable, "rate limited", std::chrono::seconds{45})));
+  std::vector<std::chrono::milliseconds> delays;
+  SeedRetryPolicy policy{
+      [&](std::chrono::milliseconds delay, std::stop_token) {
+        delays.push_back(delay);
+        return true;
+      }};
+  SeedService service(manifest, runs, source, importer, std::move(policy));
+  REQUIRE(runs.createRun("test-v1", manifest).has_value());
+
+  REQUIRE(service.run(runs.run_id).has_value());
+
+  REQUIRE(delays.size() == 1);
+  CHECK(delays.front() == std::chrono::seconds{45});
+}
+
+TEST_CASE("default seed retry wait stops promptly when cancelled", "[seed_service]") {
+  const auto policy = SeedRetryPolicy::withDefaultDelay();
+  std::stop_source stop;
+  stop.request_stop();
+
+  CHECK_FALSE(policy.waitBeforeRetry(1, std::chrono::hours{1}, stop.get_token()));
 }
 
 TEST_CASE("seed retries unavailable title resolution and records the final failure",

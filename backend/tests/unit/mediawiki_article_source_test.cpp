@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <chrono>
 #include <string>
 #include <utility>
 #include <vector>
@@ -165,6 +166,33 @@ TEST_CASE("MediaWiki HTTP status classification distinguishes endpoint and reque
     REQUIRE_FALSE(result.has_value());
     REQUIRE(result.error().code == expected_code);
   }
+}
+
+TEST_CASE("MediaWiki HTTP 429 exposes the server retry delay") {
+  RecordingTransport transport;
+  transport.response = HttpResponse{
+      .status_code = 429,
+      .body = "rate limited",
+      .retry_after = std::chrono::seconds{45},
+  };
+  MediaWikiArticleSource source(transport);
+
+  const auto result = source.resolveTitle("Film");
+
+  REQUIRE_FALSE(result.has_value());
+  REQUIRE(result.error().code == ErrorCode::wikipedia_unavailable);
+  REQUIRE(result.error().retry_after == std::chrono::seconds{45});
+}
+
+TEST_CASE("MediaWiki HTTP 429 defaults to a one minute retry delay") {
+  RecordingTransport transport;
+  transport.response = HttpResponse{.status_code = 429, .body = "rate limited"};
+  MediaWikiArticleSource source(transport);
+
+  const auto result = source.resolveTitle("Film");
+
+  REQUIRE_FALSE(result.has_value());
+  REQUIRE(result.error().retry_after == std::chrono::seconds{60});
 }
 
 TEST_CASE("MediaWiki top-level missing errors map to wikipedia_not_found") {

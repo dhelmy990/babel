@@ -1,5 +1,7 @@
 #pragma once
 
+#include <chrono>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -22,6 +24,7 @@ enum class ErrorCode {
 struct ApplicationError {
   ErrorCode code;
   std::string message;
+  std::optional<std::chrono::milliseconds> retry_after{};
 
   friend bool operator==(const ApplicationError&, const ApplicationError&) = default;
 };

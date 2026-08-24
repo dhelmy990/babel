@@ -1,7 +1,9 @@
 #include "babel/adapters/wikipedia/mediawiki_article_source.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -32,6 +34,15 @@ using XmlUri = std::unique_ptr<xmlURI, XmlUriDeleter>;
 
 ApplicationError error(ErrorCode code, std::string message) {
   return ApplicationError{.code = code, .message = std::move(message)};
+}
+
+ApplicationError error(ErrorCode code, std::string message,
+                       std::chrono::milliseconds retry_after) {
+  return ApplicationError{
+      .code = code,
+      .message = std::move(message),
+      .retry_after = retry_after,
+  };
 }
 
 std::string lowerAscii(std::string_view value) {
@@ -127,8 +138,14 @@ HttpRequest requestFor(std::string query) {
 }
 
 Result<nlohmann::json> parsedJson(const HttpResponse& response) {
+  if (response.status_code == 429) {
+    return tl::make_unexpected(error(
+        ErrorCode::wikipedia_unavailable,
+        "MediaWiki endpoint returned HTTP status 429",
+        response.retry_after.value_or(std::chrono::seconds{60})));
+  }
   if (response.status_code == 404 || response.status_code == 408 ||
-      response.status_code == 429 || response.status_code >= 500) {
+      response.status_code >= 500) {
     return tl::make_unexpected(error(
         ErrorCode::wikipedia_unavailable,
         "MediaWiki endpoint returned HTTP status " + std::to_string(response.status_code)));
@@ -415,7 +432,27 @@ Result<HttpResponse> CurlHttpTransport::get(const HttpRequest& request) {
     return tl::make_unexpected(error(ErrorCode::wikipedia_unavailable,
                                      "libcurl could not read the HTTP status"));
   }
-  return HttpResponse{.status_code = status_code, .body = std::move(body)};
+
+  curl_off_t retry_after_seconds = 0;
+  if (curl_easy_getinfo(handle.value, CURLINFO_RETRY_AFTER, &retry_after_seconds) !=
+      CURLE_OK) {
+    return tl::make_unexpected(error(ErrorCode::wikipedia_unavailable,
+                                     "libcurl could not read Retry-After"));
+  }
+  std::optional<std::chrono::milliseconds> retry_after;
+  if (retry_after_seconds > 0) {
+    constexpr auto kMaxSeconds =
+        std::chrono::milliseconds::max().count() / 1000;
+    const auto seconds = std::min(
+        retry_after_seconds, static_cast<curl_off_t>(kMaxSeconds));
+    retry_after = std::chrono::milliseconds{
+        static_cast<std::chrono::milliseconds::rep>(seconds * 1000)};
+  }
+  return HttpResponse{
+      .status_code = status_code,
+      .body = std::move(body),
+      .retry_after = retry_after,
+  };
 }
 
 MediaWikiArticleSource::MediaWikiArticleSource(HttpTransport& transport) : transport_(transport) {}

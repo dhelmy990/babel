@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <condition_variable>
 #include <exception>
 #include <mutex>
 #include <optional>
@@ -74,24 +75,42 @@ ApplicationError unknownException() {
 SeedRetryPolicy::SeedRetryPolicy(
     Delay delay, std::array<std::chrono::milliseconds, 2> retry_delays)
     : delay_(std::move(delay)), retry_delays_(retry_delays) {
-  if (!delay_) delay_ = [](std::chrono::milliseconds) {};
+  if (!delay_) {
+    delay_ = [](std::chrono::milliseconds, std::stop_token stop_token) {
+      return !stop_token.stop_requested();
+    };
+  }
 }
 
 SeedRetryPolicy SeedRetryPolicy::withDefaultDelay() {
-  return SeedRetryPolicy{
-      [](std::chrono::milliseconds duration) { std::this_thread::sleep_for(duration); }};
+  return SeedRetryPolicy{[](std::chrono::milliseconds duration,
+                            std::stop_token stop_token) {
+    std::mutex mutex;
+    std::condition_variable_any changed;
+    std::unique_lock lock(mutex);
+    changed.wait_for(lock, stop_token, duration, [] { return false; });
+    return !stop_token.stop_requested();
+  }};
 }
 
 SeedRetryPolicy SeedRetryPolicy::withoutDelay() {
-  return SeedRetryPolicy{[](std::chrono::milliseconds) {}};
+  return SeedRetryPolicy{
+      [](std::chrono::milliseconds, std::stop_token stop_token) {
+        return !stop_token.stop_requested();
+      }};
 }
 
 std::size_t SeedRetryPolicy::maxAttempts() const noexcept {
   return retry_delays_.size() + 1;
 }
 
-void SeedRetryPolicy::waitBeforeRetry(std::size_t completed_attempt) const {
-  delay_(retry_delays_.at(completed_attempt - 1));
+bool SeedRetryPolicy::waitBeforeRetry(
+    std::size_t completed_attempt,
+    std::optional<std::chrono::milliseconds> server_delay,
+    std::stop_token stop_token) const {
+  const auto local_delay = retry_delays_.at(completed_attempt - 1);
+  return delay_(server_delay ? std::max(local_delay, *server_delay) : local_delay,
+                stop_token);
 }
 
 SeedService::SeedService(std::vector<SeedAssignment> assignments, SeedRunRepository& runs,
@@ -253,8 +272,10 @@ Result<void> SeedService::processAssignment(SeedRunId run_id,
     if (!resolved) {
       if (retryable(resolved.error()) && attempt < retry_policy_.maxAttempts()) {
         if (stop_token.stop_requested()) return {};
-        retry_policy_.waitBeforeRetry(attempt);
-        if (stop_token.stop_requested()) return {};
+        if (!retry_policy_.waitBeforeRetry(attempt, resolved.error().retry_after,
+                                           stop_token)) {
+          return {};
+        }
         continue;
       }
       return recordFailure(run_id, assignment, attempt, std::nullopt, resolved.error());
@@ -296,8 +317,10 @@ Result<void> SeedService::processAssignment(SeedRunId run_id,
     if (!imported) {
       if (retryable(imported.error()) && attempt < retry_policy_.maxAttempts()) {
         if (stop_token.stop_requested()) return {};
-        retry_policy_.waitBeforeRetry(attempt);
-        if (stop_token.stop_requested()) return {};
+        if (!retry_policy_.waitBeforeRetry(attempt, imported.error().retry_after,
+                                           stop_token)) {
+          return {};
+        }
         continue;
       }
       return recordFailure(run_id, assignment, attempt, resolved->page_id, imported.error());

@@ -1,6 +1,8 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -19,6 +21,7 @@ struct HttpRequest {
 struct HttpResponse {
   long status_code;
   std::string body;
+  std::optional<std::chrono::milliseconds> retry_after{};
 };
 
 class HttpTransport {
