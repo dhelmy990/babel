@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <functional>
 #include <string>
 #include <type_traits>
 
@@ -44,4 +45,28 @@ TEST_CASE("Wikipedia page identifiers require a positive value") {
   REQUIRE(accepted.has_value());
   CHECK(accepted->value == 1);
   REQUIRE_FALSE(rejected.has_value());
+}
+
+TEST_CASE("Creator UUID v5 generation uses the fixed Babel namespace") {
+  const auto generated = babel::CreatorId::v5("creator:personal");
+
+  REQUIRE(generated.has_value());
+  CHECK(generated->value == "4b98a489-2eef-5cf8-90db-e21c5f7e067c");
+}
+
+TEST_CASE("Creator UUID parsing rejects malformed input") {
+  const auto malformed = babel::CreatorId::parse("not-a-uuid");
+
+  REQUIRE_FALSE(malformed.has_value());
+}
+
+TEST_CASE("Creator UUID parsing canonicalizes case and preserves equality and hashing") {
+  const auto uppercase = babel::CreatorId::parse("ABCDEFAB-CDEF-5ABC-8DEF-ABCDEFABCDEF");
+  const auto lowercase = babel::CreatorId::parse("abcdefab-cdef-5abc-8def-abcdefabcdef");
+
+  REQUIRE(uppercase.has_value());
+  REQUIRE(lowercase.has_value());
+  CHECK(uppercase->value == "abcdefab-cdef-5abc-8def-abcdefabcdef");
+  CHECK(*uppercase == *lowercase);
+  CHECK(std::hash<babel::CreatorId>{}(*uppercase) == std::hash<babel::CreatorId>{}(*lowercase));
 }
