@@ -102,7 +102,8 @@ bool hasWikipediaUiId(const xmlNode& node) {
   }
   const auto normalized = lower(*id);
   return normalized == "references" || normalized == "toc" ||
-         normalized.starts_with("cite_note-") || normalized.starts_with("mw-navigation");
+         normalized.starts_with("cite_note-") || normalized.starts_with("cite_ref-") ||
+         normalized.starts_with("mw-navigation");
 }
 
 bool isEditControl(const xmlNode& node, std::string_view name) {
@@ -120,10 +121,9 @@ bool isEditControl(const xmlNode& node, std::string_view name) {
 
 bool shouldDropSubtree(const xmlNode& node, std::string_view name) {
   static const std::unordered_set<std::string> dropped_elements{
-      "script", "style",  "nav",      "table",  "template", "noscript",
-      "iframe", "object", "embed",    "svg",    "math",     "form",
-      "button", "input",  "textarea", "select", "option",   "link",
-      "meta",   "base",
+      "script",   "style",  "nav",      "table",  "template", "iframe",
+      "object",   "embed",  "svg",      "form",   "button",   "input",
+      "textarea", "select", "option",   "link",   "meta",     "base",
   };
   if (dropped_elements.contains(std::string(name)) || hasWikipediaUiClass(node) ||
       hasWikipediaUiId(node) || isEditControl(node, name)) {

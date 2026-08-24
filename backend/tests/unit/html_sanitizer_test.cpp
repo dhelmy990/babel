@@ -103,6 +103,42 @@ TEST_CASE("sanitizer preserves safe text while stripping unsupported containers"
   REQUIRE(result->value.find("<span") == std::string::npos);
 }
 
+TEST_CASE("sanitizer drops inline Wikipedia citation markers by cite_ref ID") {
+  LibxmlHtmlSanitizer sanitizer;
+
+  const auto result = sanitizer.sanitize(fixture("wikipedia_article_malicious.html"),
+                                         "https://en.wikipedia.org/wiki/Film");
+
+  REQUIRE(result.has_value());
+  REQUIRE(result->value.find("Released in 1895") != std::string::npos);
+  REQUIRE(result->value.find("cite_ref") == std::string::npos);
+  REQUIRE(result->value.find("[1]") == std::string::npos);
+}
+
+TEST_CASE("sanitizer unwraps noscript fallback prose") {
+  LibxmlHtmlSanitizer sanitizer;
+
+  const auto result = sanitizer.sanitize(fixture("wikipedia_article.html"),
+                                         "https://en.wikipedia.org/wiki/Film");
+
+  REQUIRE(result.has_value());
+  REQUIRE(result->value.find("<p>Fallback prose remains available.</p>") !=
+          std::string::npos);
+  REQUIRE(result->value.find("<noscript") == std::string::npos);
+}
+
+TEST_CASE("sanitizer unwraps safe MathML formula text") {
+  LibxmlHtmlSanitizer sanitizer;
+
+  const auto result = sanitizer.sanitize(fixture("wikipedia_article.html"),
+                                         "https://en.wikipedia.org/wiki/Film");
+
+  REQUIRE(result.has_value());
+  REQUIRE(result->value.find("E=mc2") != std::string::npos);
+  REQUIRE(result->value.find("<math") == std::string::npos);
+  REQUIRE(result->value.find("<mi") == std::string::npos);
+}
+
 TEST_CASE("sanitizer rejects unsafe base URLs and oversized input") {
   LibxmlHtmlSanitizer sanitizer;
 
