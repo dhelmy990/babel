@@ -41,7 +41,7 @@ class SeedRunRepository {
  public:
   virtual ~SeedRunRepository() = default;
 
-  // Atomically snapshot every assignment as a pending seed_run_items row for the new run.
+  // Atomically snapshot every assignment as a pending seed_run_items row and immutable total.
   virtual Result<SeedRunId> createRun(std::string_view manifest_version,
                                       std::span<const SeedAssignment> assignments) = 0;
   virtual Result<bool> assignmentExists(SeedAssignmentId) = 0;

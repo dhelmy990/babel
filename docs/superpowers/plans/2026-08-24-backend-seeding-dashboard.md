@@ -319,8 +319,9 @@ Also define `BabelSource`, `ProfileSummaryDto`, `BabelDto`, `EdgeDto`,
 must represent `not_started` separately from persisted run states.
 `SeedItemUpdate` carries the item state plus optional resolved page ID, imported
 Babel ID, and application error. Creating a run atomically snapshots every
-manifest assignment as a pending item; status counters are derived from those
-item rows rather than stored independently on `seed_runs`.
+manifest assignment as a pending item and records the immutable declared total
+from that same snapshot. Mutable progress counters are derived from item rows
+rather than stored independently on `seed_runs`.
 `WikipediaBabelRepository::insertWikipediaBabel` must atomically insert `Babel`
 and its source row. `GraphRepository::loadGraph` returns an empty successful
 graph for a creator with no content.
@@ -768,7 +769,7 @@ TEST_CASE("seed processes only missing assignments") {
     auto run_id = runs.createRun("test-v1", manifest).value();
     REQUIRE(service.run(run_id).has_value());
     REQUIRE(importer.calls.size() == 2);
-    REQUIRE(runs.status(run_id).completed == 2);
+    REQUIRE(runs.status(run_id).imported == 2);
     REQUIRE(runs.status(run_id).skipped == 1);
 }
 ```

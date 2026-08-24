@@ -26,10 +26,15 @@ CREATE TABLE seed_run_items (
   started_at timestamptz,
   finished_at timestamptz,
   PRIMARY KEY (seed_run_id, seed_assignment_id),
-  CONSTRAINT seed_run_items_imported_result_check
-    CHECK (state <> 'imported' OR (resolved_page_id IS NOT NULL AND babel_id IS NOT NULL)),
+  CONSTRAINT seed_run_items_resolved_page_check
+    CHECK (state NOT IN ('importing', 'imported') OR resolved_page_id IS NOT NULL),
+  CONSTRAINT seed_run_items_imported_babel_check
+    CHECK (state <> 'imported' OR babel_id IS NOT NULL),
   CONSTRAINT seed_run_items_failed_error_check
-    CHECK (state <> 'failed' OR (error_code IS NOT NULL AND char_length(error_code) > 0))
+    CHECK (state <> 'failed' OR (
+      error_code IS NOT NULL AND char_length(error_code) > 0 AND
+      error_detail IS NOT NULL AND char_length(error_detail) > 0
+    ))
 );
 
 ALTER TABLE seed_run_items ADD CONSTRAINT seed_run_items_babel_owner_fk
