@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.6-pg18-bookworm
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-babel}
+      POSTGRES_USER: ${POSTGRES_USER:-babel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-babel-local-dev}
+    ports:
+      - "127.0.0.1:${BABEL_POSTGRES_PORT:-54329}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    volumes:
+      - babel_postgres_data:/var/lib/postgresql/data
+
+volumes:
+  babel_postgres_data:
