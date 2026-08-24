@@ -75,23 +75,23 @@ TEST_CASE("sanitizer rejects malformed and credentialed HTTPS URLs") {
   REQUIRE(result->value.find("href=\"https://example.test/path\"") != std::string::npos);
 }
 
-TEST_CASE("sanitizer restricts image URLs to expected Wikimedia hosts") {
+TEST_CASE("sanitizer permits arbitrary absolute HTTPS image hosts") {
   LibxmlHtmlSanitizer sanitizer;
   const auto result = sanitizer.sanitize(
       "<p>images"
-      "<img src=\"https://upload.wikimedia.org.evil.test/bad.jpg\" alt=\"confused\">"
-      "<img src=\"https://user@upload.wikimedia.org/bad.jpg\" alt=\"credentialed\">"
-      "<img src=\"https://upload.wikimedia.org:0/bad.jpg\" alt=\"zero-port\">"
-      "<img src=\"https://commons.wikimedia.org/safe.jpg\" alt=\"commons\">"
+      "<img src=\"https://cdn.example.org/article.jpg\" alt=\"article\">"
+      "<img src=\"//cdn.example.org/protocol-relative.jpg\" alt=\"protocol-relative\">"
+      "<img src=\"https://user@cdn.example.org/bad.jpg\" alt=\"credentialed\">"
+      "<img src=\"https:///missing-host.jpg\" alt=\"malformed\">"
       "</p>",
       "https://en.wikipedia.org/wiki/Film");
 
   REQUIRE(result.has_value());
-  REQUIRE(result->value.find("confused") == std::string::npos);
-  REQUIRE(result->value.find("credentialed") == std::string::npos);
-  REQUIRE(result->value.find("zero-port") == std::string::npos);
-  REQUIRE(result->value.find("src=\"https://commons.wikimedia.org/safe.jpg\"") !=
+  REQUIRE(result->value.find("src=\"https://cdn.example.org/article.jpg\"") !=
           std::string::npos);
+  REQUIRE(result->value.find("protocol-relative") == std::string::npos);
+  REQUIRE(result->value.find("credentialed") == std::string::npos);
+  REQUIRE(result->value.find("malformed") == std::string::npos);
 }
 
 TEST_CASE("sanitizer rejects credentialed or malformed canonical base URLs") {

@@ -229,19 +229,22 @@ std::optional<std::string> sanitizedUrl(std::string_view raw, bool image) {
   }
 
   std::string resolved;
+  bool require_wikimedia_image_host = false;
   if (value.starts_with("https://")) {
     resolved = value;
   } else if (value.starts_with("//") && value.size() > 2 && value[2] != '/') {
     resolved = "https:" + std::string(value);
+    require_wikimedia_image_host = image;
   } else if (!image && value.starts_with("/wiki/")) {
     resolved = "https://en.wikipedia.org" + std::string(value);
   } else if (image && value.starts_with("/wikipedia/commons/")) {
     resolved = "https://upload.wikimedia.org" + std::string(value);
+    require_wikimedia_image_host = true;
   } else {
     return std::nullopt;
   }
 
-  if (!validHttpsUrl(resolved, image)) {
+  if (!validHttpsUrl(resolved, require_wikimedia_image_host)) {
     return std::nullopt;
   }
   return resolved;
