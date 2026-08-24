@@ -146,6 +146,7 @@
             if (!ids.has(source) || !ids.has(target)) {
                 throw new TypeError(`edges[${index}] endpoint does not exist`);
             }
+            if (source === target) throw new TypeError(`edges[${index}] must not be a self-loop`);
             edgeIds.add(id);
             return { id, source, target };
         });

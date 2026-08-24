@@ -221,6 +221,28 @@ test('graph mapping accepts reciprocal pairs because the DAG layout excludes mut
   assert.equal(toRendererGraph(graph).edges.length, 2);
 });
 
+test('graph mapping rejects self-loops before reciprocal-edge detection', () => {
+  const nodeId = '11111111-1111-4111-8111-111111111111';
+  assert.throws(
+    () => toRendererGraph({
+      profile: generated,
+      babels: [{
+        id: nodeId,
+        title: 'Self loop',
+        contentHtml: '<p>Safe</p>',
+        color: '#fff',
+        contentRevision: 1,
+      }],
+      edges: [{
+        id: '44444444-4444-4444-8444-444444444444',
+        sourceId: nodeId,
+        targetId: nodeId,
+      }],
+    }),
+    /self-loop/i,
+  );
+});
+
 test('graph mapping accepts backend titles longer than 512 characters', () => {
   const longTitle = `<${'a'.repeat(512)}>`;
   const graph = toRendererGraph({
