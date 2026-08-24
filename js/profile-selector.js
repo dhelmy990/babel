@@ -5,11 +5,10 @@
 }(typeof globalThis !== 'undefined' ? globalThis : this, () => {
     const DEFAULT_BACKEND_URL = 'http://127.0.0.1:8787';
     const DEFAULT_TIMEOUT_MS = 5000;
-    const MAX_BODY_LENGTH = 2 * 1024 * 1024;
+    const MAX_BODY_LENGTH = 64 * 1024 * 1024;
     const COLOR_PATTERN = /^#[0-9a-f]{3}(?:[0-9a-f]{3})?(?:[0-9a-f]{2})?$/i;
     const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
     const MAX_DISPLAY_NAME_LENGTH = 200;
-    const MAX_TITLE_LENGTH = 512;
 
     function requireObject(value, label) {
         if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -120,7 +119,7 @@
             const id = requireUuid(babel.id, `babels[${index}] id`);
             if (ids.has(id)) throw new TypeError('babel ids must be unique');
             ids.add(id);
-            requireString(babel.title, `babels[${index}] title`, false, MAX_TITLE_LENGTH);
+            requireString(babel.title, `babels[${index}] title`);
             requireString(babel.contentHtml, `babels[${index}] contentHtml`, true);
             requireString(babel.color, `babels[${index}] color`);
             if (!COLOR_PATTERN.test(babel.color)) {
@@ -153,7 +152,11 @@
 
         const adjacency = new Map(Array.from(ids, (id) => [id, []]));
         const indegree = new Map(Array.from(ids, (id) => [id, 0]));
-        edges.forEach((edge) => {
+        const edgePairs = new Set(edges.map((edge) => `${edge.source}>${edge.target}`));
+        const dependencyEdges = edges.filter(
+            (edge) => !edgePairs.has(`${edge.target}>${edge.source}`),
+        );
+        dependencyEdges.forEach((edge) => {
             adjacency.get(edge.source).push(edge.target);
             indegree.set(edge.target, indegree.get(edge.target) + 1);
         });

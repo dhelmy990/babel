@@ -195,6 +195,50 @@ test('graph mapping rejects a three-node cycle before DAG layout', () => {
   );
 });
 
+test('graph mapping accepts reciprocal pairs because the DAG layout excludes mutual edges', () => {
+  const leftId = '11111111-1111-4111-8111-111111111111';
+  const rightId = '22222222-2222-4222-8222-222222222222';
+  const graph = {
+    profile: generated,
+    babels: [leftId, rightId].map((id) => ({
+      id,
+      title: 'Mutual node',
+      contentHtml: '<p>Safe</p>',
+      color: '#fff',
+      contentRevision: 1,
+    })),
+    edges: [{
+      id: '44444444-4444-4444-8444-444444444444',
+      sourceId: leftId,
+      targetId: rightId,
+    }, {
+      id: '55555555-5555-4555-8555-555555555555',
+      sourceId: rightId,
+      targetId: leftId,
+    }],
+  };
+
+  assert.equal(toRendererGraph(graph).edges.length, 2);
+});
+
+test('graph mapping accepts backend titles longer than 512 characters', () => {
+  const longTitle = `<${'a'.repeat(512)}>`;
+  const graph = toRendererGraph({
+    profile: generated,
+    babels: [{
+      id: '11111111-1111-4111-8111-111111111111',
+      title: longTitle,
+      contentHtml: '<p>Safe</p>',
+      color: '#fff',
+      contentRevision: 1,
+    }],
+    edges: [],
+  });
+
+  assert.equal(graph.babels[0].title, longTitle);
+  assert.equal(escapeHtml(graph.babels[0].title), `&lt;${'a'.repeat(512)}&gt;`);
+});
+
 test('tooltip titles are HTML escaped and comparison content is plain text', () => {
   assert.equal(
     escapeHtml('<img src=x onerror="alert(1)"> & Film'),
@@ -340,7 +384,7 @@ test('backend helper rejects oversized Content-Length before reading', async () 
       ok: true,
       status: 200,
       url: 'http://127.0.0.1:8787/api/v1/profiles',
-      headers: { get: (name) => name.toLowerCase() === 'content-length' ? '2097153' : 'application/json' },
+      headers: { get: (name) => name.toLowerCase() === 'content-length' ? '67108865' : 'application/json' },
       body: { getReader() { readerOpened = true; } },
     }),
   });
@@ -348,7 +392,25 @@ test('backend helper rejects oversized Content-Length before reading', async () 
   assert.equal(readerOpened, false);
 });
 
-test('backend helper cancels a streaming body once it exceeds two MiB', async () => {
+test('backend helper accepts the inclusive 64 MiB Content-Length boundary', async () => {
+  const request = createBackendRequest({
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      url: 'http://127.0.0.1:8787/api/v1/profiles',
+      headers: {
+        get: (name) => name.toLowerCase() === 'content-length'
+          ? '67108864'
+          : 'application/json',
+      },
+      body: new Response('{"profiles":[]}').body,
+    }),
+  });
+
+  assert.deepEqual(await request('/api/v1/profiles'), { profiles: [] });
+});
+
+test('backend helper cancels a streaming body once it exceeds 64 MiB', async () => {
   let canceled = false;
   let reads = 0;
   const request = createBackendRequest({
@@ -362,7 +424,7 @@ test('backend helper cancels a streaming body once it exceeds two MiB', async ()
           async read() {
             reads += 1;
             return reads === 1
-              ? { done: false, value: new Uint8Array(2 * 1024 * 1024 + 1) }
+              ? { done: false, value: new Uint8Array(64 * 1024 * 1024 + 1) }
               : { done: true };
           },
           async cancel() { canceled = true; },
