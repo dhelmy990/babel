@@ -1,6 +1,8 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 set positional-arguments := true
 
+export VCPKG_ROOT := env_var_or_default("VCPKG_ROOT", env_var("HOME") + "/.cache/vcpkg")
+
 db-up:
     docker compose up -d postgres
 

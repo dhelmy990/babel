@@ -13,7 +13,7 @@ There is no authentication in this local release.
 
 - Linux with a C++20 compiler
 - CMake 3.25 or newer
-- vcpkg, with `VCPKG_ROOT` pointing to its checkout
+- vcpkg; `just` defaults to `$HOME/.cache/vcpkg`, or honors `VCPKG_ROOT`
 - Docker with the Compose plugin
 - Node.js and npm
 - `just`, `curl`, and `openssl`
