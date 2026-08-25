@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -236,6 +236,61 @@ def _write_parquet(path: Path, rows: list[dict[str, object]]) -> None:
     pq.write_table(pa.Table.from_pylist(rows), path, compression="zstd")
 
 
+def _normalize_title(title: str) -> str:
+    normalized = " ".join(title.replace("_", " ").split())
+    if normalized and "a" <= normalized[0] <= "z":
+        normalized = normalized[0].upper() + normalized[1:]
+    return normalized
+
+
+def _validate_backend_seed_titles(
+    rows: Iterable[Mapping[str, object]],
+    *,
+    period: str,
+    authoritative_titles: set[str],
+) -> None:
+    catalog_rows = list(rows)
+    lookup: dict[str, int] = {}
+    page_ids: set[int] = set()
+    for index, row in enumerate(catalog_rows):
+        canonical = row.get("canonical_title")
+        redirects = row.get("redirect_titles")
+        if (
+            not isinstance(canonical, str)
+            or not canonical
+            or not isinstance(redirects, list)
+            or any(not isinstance(title, str) for title in redirects)
+        ):
+            raise ValueError(f"{period} backend seed title fields are invalid")
+        page_id = row.get("page_id")
+        if (
+            not isinstance(page_id, int)
+            or isinstance(page_id, bool)
+            or page_id <= 0
+            or page_id in page_ids
+        ):
+            raise ValueError(f"{period} backend seed page IDs must be positive and unique")
+        page_ids.add(page_id)
+        for title in (canonical, *redirects):
+            normalized = _normalize_title(title)
+            prior = lookup.get(normalized)
+            if prior is not None and prior != index:
+                raise ValueError(f"{period} backend seed title lookup is ambiguous")
+            lookup[normalized] = index
+    missing = sorted(authoritative_titles - set(lookup))
+    if missing:
+        raise ValueError(
+            f"{period} authoritative title does not resolve: {missing[0]}"
+        )
+    resolved_rows = {lookup[title] for title in authoritative_titles}
+    if len(catalog_rows) != len(authoritative_titles) or len(resolved_rows) != len(
+        authoritative_titles
+    ):
+        raise ValueError(
+            f"{period} authoritative titles must map one-to-one to source rows"
+        )
+
+
 def _stage_backend_seed(
     fixture: Path,
     output: Path,
@@ -249,7 +304,7 @@ def _stage_backend_seed(
     assert isinstance(expected_sha, str)
     source = fixture / relative
     source_checksum = source.with_name(f"{source.name}.sha256")
-    artifact_name = "resolved-catalog-v1.jsonl"
+    artifact_name = "resolved-catalog-v3.jsonl"
     expected_checksum = f"{expected_sha}  {artifact_name}\n".encode("ascii")
     if source_checksum.read_bytes() != expected_checksum:
         raise ValueError(f"{period} backend seed checksum companion mismatch")
@@ -262,9 +317,19 @@ def _stage_backend_seed(
 
 
 def prepare_demo_temporal_release(
-    fixture_root: str | Path, output_root: str | Path
+    fixture_root: str | Path,
+    output_root: str | Path,
+    *,
+    authoritative_seed_titles: Sequence[str],
 ) -> PreparedDemoRelease:
     """Validate one provenance-ready fixture and stage five demo configs."""
+    if not authoritative_seed_titles or any(
+        not isinstance(title, str) or not title for title in authoritative_seed_titles
+    ):
+        raise ValueError("authoritative seed titles must be nonblank strings")
+    authoritative_titles = {
+        _normalize_title(title) for title in authoritative_seed_titles
+    }
     fixture = Path(fixture_root)
     output = Path(output_root)
     document, manifest_sha = _read_manifest(fixture)
@@ -291,6 +356,11 @@ def prepare_demo_temporal_release(
         identities.extend(_identity(period, row) for row in loaded["articles"])
         artifacts_by_period[period] = loaded
         if period != "2016":
+            _validate_backend_seed_titles(
+                loaded["backend_seed_catalog"],
+                period=period,
+                authoritative_titles=authoritative_titles,
+            )
             seed_descriptor = descriptors["backend_seed_catalog"]
             assert isinstance(seed_descriptor, Mapping)
             backend_seed_paths[period] = _stage_backend_seed(

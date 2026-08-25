@@ -24,6 +24,7 @@ from babel_data.demo_temporal_release import (  # noqa: E402
 
 SOURCE_REVISION = "c8cbb81fdb81f71a3aa5d0e5beb10348843ede6b"
 PUBLISHED_REVISION = "d" * 40
+AUTHORITATIVE_TITLES = ("Exact requested title", "Exact requested title")
 
 
 def canonical_json(value: object) -> bytes:
@@ -44,7 +45,9 @@ def write_jsonl(path: Path, rows: list[dict[str, object]]) -> dict[str, object]:
     }
 
 
-def fixture(root: Path, *, leak: bool = False) -> Path:
+def fixture(
+    root: Path, *, leak: bool = False, unresolved_seed: bool = False
+) -> Path:
     fixture_root = root / "fixtures" / "monthly" / "demo"
     article_rows = {
         "2016": [
@@ -95,14 +98,28 @@ def fixture(root: Path, *, leak: bool = False) -> Path:
                 "edges": [{"source_page_id": 1, "target_page_id": 2}],
                 "clickstream": [{"source_page_id": 1, "target_page_id": 2, "n": 7}],
                 "hidden_archetypes": [{"profile_id": "curious", "seed_page_ids": [1]}],
-                "backend_seed_catalog": [{"article_key": article_rows[period][0]["article_key"]}],
+                "backend_seed_catalog": [
+                    {
+                        "article_key": article_rows[period][0]["article_key"],
+                        "snapshot": period,
+                        "page_id": article_rows[period][0]["page_id"],
+                        "canonical_title": article_rows[period][0]["canonical_title"],
+                        "article_text": "Resolved text.",
+                        "redirect_titles": (
+                            [] if unresolved_seed else ["Exact requested title"]
+                        ),
+                        "content_hash": hashlib.sha256(b"Resolved text.").hexdigest(),
+                        "source_revision_id": 10,
+                        "declared_title": "producer-owned label",
+                    }
+                ],
             }.items():
                 artifact = fixture_root / directory / f"{name}.jsonl"
                 artifacts[name] = write_jsonl(artifact, rows)
                 if name == "backend_seed_catalog":
                     digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
                     artifact.with_name(f"{artifact.name}.sha256").write_text(
-                        f"{digest}  resolved-catalog-v1.jsonl\n"
+                        f"{digest}  resolved-catalog-v3.jsonl\n"
                     )
         periods[period] = {"artifacts": artifacts}
     manifest = {
@@ -121,10 +138,16 @@ def fixture(root: Path, *, leak: bool = False) -> Path:
     return fixture_root
 
 
-def test_prepare_builds_only_five_demo_configs_and_crosswalk(tmp_path: Path) -> None:
-    prepared = prepare_demo_temporal_release(
-        fixture(tmp_path), tmp_path / "prepared"
+def prepare(fixture_root: Path, output_root: Path, *, titles=AUTHORITATIVE_TITLES):
+    return prepare_demo_temporal_release(
+        fixture_root,
+        output_root,
+        authoritative_seed_titles=titles,
     )
+
+
+def test_prepare_builds_only_five_demo_configs_and_crosswalk(tmp_path: Path) -> None:
+    prepared = prepare(fixture(tmp_path), tmp_path / "prepared")
 
     assert tuple(prepared.config_counts) == DEMO_CONFIGS
     assert prepared.config_counts == {
@@ -146,10 +169,10 @@ def test_prepare_builds_only_five_demo_configs_and_crosswalk(tmp_path: Path) -> 
             / "backend_seed_catalog.jsonl"
         )
         assert catalog.read_bytes() == source.read_bytes()
-        assert catalog.name == "resolved-catalog-v1.jsonl"
+        assert catalog.name == "resolved-catalog-v3.jsonl"
         assert checksum.read_text() == (
             f"{hashlib.sha256(source.read_bytes()).hexdigest()}  "
-            "resolved-catalog-v1.jsonl\n"
+            "resolved-catalog-v3.jsonl\n"
         )
     release_manifest = json.loads(prepared.release_manifest_path.read_text())
     assert release_manifest["fixture_provenance"]["readiness"] == "fixture_ready"
@@ -171,7 +194,7 @@ def test_prepare_rejects_a_fixture_checksum_mismatch(tmp_path: Path) -> None:
         output.write(b"{}\n")
 
     with pytest.raises(ValueError, match="checksum"):
-        prepare_demo_temporal_release(fixture_root, tmp_path / "prepared")
+        prepare(fixture_root, tmp_path / "prepared")
 
 
 def test_prepare_rejects_a_backend_seed_checksum_companion_mismatch(
@@ -179,15 +202,33 @@ def test_prepare_rejects_a_backend_seed_checksum_companion_mismatch(
 ) -> None:
     fixture_root = fixture(tmp_path)
     companion = fixture_root / "june" / "backend_seed_catalog.jsonl.sha256"
-    companion.write_text(f"{'0' * 64}  resolved-catalog-v1.jsonl\n")
+    companion.write_text(f"{'0' * 64}  resolved-catalog-v3.jsonl\n")
 
     with pytest.raises(ValueError, match="backend seed checksum companion"):
-        prepare_demo_temporal_release(fixture_root, tmp_path / "prepared")
+        prepare(fixture_root, tmp_path / "prepared")
 
 
 def test_prepare_rejects_hidden_fields_in_observable_articles(tmp_path: Path) -> None:
     with pytest.raises(HiddenFieldLeakage, match="outgoing_edges"):
-        prepare_demo_temporal_release(fixture(tmp_path, leak=True), tmp_path / "prepared")
+        prepare(fixture(tmp_path, leak=True), tmp_path / "prepared")
+
+
+def test_prepare_rejects_authoritative_title_that_does_not_resolve(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="authoritative title does not resolve"):
+        prepare(fixture(tmp_path, unresolved_seed=True), tmp_path / "prepared")
+
+
+def test_prepare_rejects_titles_that_do_not_match_authoritative_manifest(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="authoritative title does not resolve"):
+        prepare(
+            fixture(tmp_path),
+            tmp_path / "prepared",
+            titles=("Independent manifest title",),
+        )
 
 
 @dataclass
@@ -240,7 +281,7 @@ def loader_for(prepared, *, leak: bool = False):
 
 
 def test_publish_is_one_append_only_commit_and_preserves_distillation(tmp_path: Path) -> None:
-    prepared = prepare_demo_temporal_release(fixture(tmp_path), tmp_path / "prepared")
+    prepared = prepare(fixture(tmp_path), tmp_path / "prepared")
     api = FakeApi()
     before = api.files["distillation_2016/train/part.parquet"]
 
@@ -264,10 +305,10 @@ def test_publish_is_one_append_only_commit_and_preserves_distillation(tmp_path: 
         for path in paths
     )
     assert {
-        "backend-seed/2026-06/resolved-catalog-v1.jsonl",
-        "backend-seed/2026-06/resolved-catalog-v1.jsonl.sha256",
-        "backend-seed/2026-07/resolved-catalog-v1.jsonl",
-        "backend-seed/2026-07/resolved-catalog-v1.jsonl.sha256",
+        "backend-seed/2026-06/resolved-catalog-v3.jsonl",
+        "backend-seed/2026-06/resolved-catalog-v3.jsonl.sha256",
+        "backend-seed/2026-07/resolved-catalog-v3.jsonl",
+        "backend-seed/2026-07/resolved-catalog-v3.jsonl.sha256",
     } <= paths
     assert not any(path.startswith("distillation_2016/") for path in paths)
     assert api.files["distillation_2016/train/part.parquet"] == before
@@ -276,7 +317,7 @@ def test_publish_is_one_append_only_commit_and_preserves_distillation(tmp_path: 
 
 
 def test_remote_observable_scan_rejects_hidden_field_leakage(tmp_path: Path) -> None:
-    prepared = prepare_demo_temporal_release(fixture(tmp_path), tmp_path / "prepared")
+    prepared = prepare(fixture(tmp_path), tmp_path / "prepared")
 
     with pytest.raises(HiddenFieldLeakage, match="clickstream"):
         verify_demo_configs(

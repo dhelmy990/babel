@@ -11,14 +11,14 @@ claim is `representative_fixture_not_official_monthly_snapshot`.
 - Source revision: `c8cbb81fdb81f71a3aa5d0e5beb10348843ede6b`
 - Fixture manifest: `fixtures/monthly/demo/provenance.json`
 - Fixture manifest SHA-256:
-  `9474f2fc242935f26c18e39299a1115d8e53ca48b9f4bbec96ae1ebe4872b0ba`
+  `5802d7317760fc33f10baecdc3a9653529db63dcc19972daa81f2d4eeac3810e`
 - Temporal-config revision: `ca3128c5c5c23f901d7bbf105b6818b11a971d3c`
-- Final pinned revision: `3fc8c1a2d84d6c8d069876ed27f91d6ead7fab2b`
+- Final pinned revision: `e1acc648fcace8820dd5ee70bae9216ea4334555`
 
 The five temporal configs were published in one append-only commit on top of
 the source revision. Later append-only compatibility commits added backend
 seed transport objects required by the dashboard. The initial transport paths
-remain immutable but are superseded; consumers use only the resolved `v1`
+remain immutable but are superseded; consumers use only the resolved `v3`
 paths below. No commit added, replaced, or removed any `distillation_2016`
 object.
 
@@ -40,17 +40,24 @@ The final pinned revision also contains these exact fixture-producer bytes:
 
 | Transport object | SHA-256 |
 | --- | --- |
-| `backend-seed/2026-06/resolved-catalog-v1.jsonl` | `6d7c6c505cfc9ceefb67f6cd6c992cde75504390de5a0c256bb19d811e8c0a5a` |
-| `backend-seed/2026-06/resolved-catalog-v1.jsonl.sha256` | `12bc7413e6162ca16ba5749a54ca57a9591b36a599340f3b305ec88f3486f30c` |
-| `backend-seed/2026-07/resolved-catalog-v1.jsonl` | `061e3e2eebf67d36eabe447eb561eaca52a0171e322dabac256dba773bfc8c93` |
-| `backend-seed/2026-07/resolved-catalog-v1.jsonl.sha256` | `509c630e8c6428427b294d7a7881e391f14025b179d31ee3b837dd559cb32ecb` |
+| `backend-seed/2026-06/resolved-catalog-v3.jsonl` | `28733aff4f16f3f63a14c6a20626095d5009aaab5e27c68615bee046576e8bce` |
+| `backend-seed/2026-06/resolved-catalog-v3.jsonl.sha256` | `8005b3751f007c9855bd114a3d58e059ef53ba8a38b984c0380f21c5019b97af` |
+| `backend-seed/2026-07/resolved-catalog-v3.jsonl` | `65c1c5172921d2fa2d001e9d4c83c1b1a14161da85a0033cf8796dfbf14af578` |
+| `backend-seed/2026-07/resolved-catalog-v3.jsonl.sha256` | `a57573e243218eec7ff23421af1e656db8e5aa51058a3a12e7941da624bde86b` |
 
 Each companion contains the catalog digest, two spaces,
-`resolved-catalog-v1.jsonl`, and a trailing newline, matching the dashboard
+`resolved-catalog-v3.jsonl`, and a trailing newline, matching the dashboard
 adapter's pinned artifact contract. The real C++ adapter acceptance resolved
 the exact final commit, authenticated downloads, verified the companion and
-all per-row article-text hashes, parsed all 80 June rows, and matched the
-repository, config, and commit provenance.
+all per-row article-text hashes, parsed all 78 June source rows, and matched
+the repository, config, and commit provenance. The live dashboard run
+completed with 80 imports, zero failures, and 78 distinct source page IDs.
+
+Preparation requires the authoritative backend title list independently of
+the fixture. It normalizes all 80 assignments to 78 distinct lookup keys and
+requires those keys to map unambiguously and one-to-one onto exactly 78 unique
+source rows. This allows the two shared titles to reuse their source pages
+without trusting producer-owned `declared_title` fields.
 
 ## Identity rules and result
 
@@ -86,6 +93,7 @@ from babel_data.demo_temporal_release import prepare_demo_temporal_release
 prepared = prepare_demo_temporal_release(
     "fixtures/monthly/demo",
     "/home/dhelmy990/Data/babel-data/prepared/friday-demo-temporal-release",
+    authoritative_seed_titles=profile_manifest_titles,
 )
 ```
 
