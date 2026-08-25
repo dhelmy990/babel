@@ -782,6 +782,26 @@ def write_shards(
                 )
 
         shard_documents = [item.to_document() for item in shard_infos]
+        counts = {
+            "total": len(selected),
+            **{
+                split: sum(item.rows for item in shard_infos if item.split == split)
+                for split in ("train", "validation", "test")
+            },
+        }
+        aggregate_sha256 = hashlib.sha256(
+            _canonical_json(shard_documents)
+        ).hexdigest()
+        rows_sha256 = identity_rows_sha256([item[2] for item in selected])
+        reports = checked_provenance["reports"]
+        assert isinstance(reports, dict)
+        reports.update(
+            {
+                "dataset_aggregate_sha256": aggregate_sha256,
+                "dataset_rows_sha256": rows_sha256,
+                "dataset_counts": counts,
+            }
+        )
         manifest: dict[str, Any] = {
             "manifest_version": MANIFEST_VERSION,
             "schema_version": 1,
@@ -789,18 +809,10 @@ def write_shards(
             "schema": "distillation-example-v1",
             "dataset_config": DATASET_CONFIG,
             "pilot_article_keys": list(pilot_keys),
-            "counts": {
-                "total": len(selected),
-                **{
-                    split: sum(item.rows for item in shard_infos if item.split == split)
-                    for split in ("train", "validation", "test")
-                },
-            },
+            "counts": counts,
             "shards": shard_documents,
-            "aggregate_sha256": hashlib.sha256(
-                _canonical_json(shard_documents)
-            ).hexdigest(),
-            "rows_sha256": identity_rows_sha256([item[2] for item in selected]),
+            "aggregate_sha256": aggregate_sha256,
+            "rows_sha256": rows_sha256,
             "provenance": {
                 "schema": "provenance-v1",
                 "identifiers": {

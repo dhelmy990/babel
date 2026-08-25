@@ -26,6 +26,7 @@ from .shard import load_readiness, write_shards
 
 
 DEFAULT_DATA_ROOT = Path("/home/dhelmy990/Data/babel-data")
+_REGISTERED_SECRETS: set[str] = set()
 
 
 class _UsageError(ValueError):
@@ -47,7 +48,15 @@ def _token(arguments: argparse.Namespace) -> str:
     token = arguments.token or os.environ.get("HF_TOKEN")
     if not token:
         raise ValueError("a private-Hub token is required via --token or HF_TOKEN")
+    _REGISTERED_SECRETS.add(token)
     return token
+
+
+def _sanitized_message(error: BaseException) -> str:
+    message = str(error)
+    for secret in sorted(_REGISTERED_SECRETS, key=len, reverse=True):
+        message = message.replace(secret, "[REDACTED]")
+    return message
 
 
 def _jsonl(path: Path) -> Iterator[dict[str, object]]:
@@ -222,6 +231,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    _REGISTERED_SECRETS.clear()
     effective_argv = list(argv) if argv is not None else sys.argv[1:]
     try:
         arguments = _parser().parse_args(effective_argv)
@@ -242,17 +252,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         result = arguments.handler(arguments)
     except BaseException as error:
-        token = getattr(arguments, "token", None)
-        message = str(error)
-        if token:
-            message = message.replace(token, "[REDACTED]")
         print(
             json.dumps(
                 {
                     "status": "error",
                     "command": arguments.command,
                     "error": type(error).__name__,
-                    "message": message,
+                    "message": _sanitized_message(error),
                 },
                 sort_keys=True,
             ),

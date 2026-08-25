@@ -90,7 +90,7 @@ def manifest_document() -> dict[str, object]:
         "min_rank": "1" * 64,
         "max_rank": "1" * 64,
     }
-    return {
+    manifest = {
         "manifest_version": 1,
         "schema_version": 1,
         "state": "prepared",
@@ -112,6 +112,15 @@ def manifest_document() -> dict[str, object]:
             "document": provenance_document(),
         },
     }
+    reports = manifest["provenance"]["document"]["reports"]  # type: ignore[index]
+    reports.update(
+        {
+            "dataset_aggregate_sha256": manifest["aggregate_sha256"],
+            "dataset_rows_sha256": manifest["rows_sha256"],
+            "dataset_counts": manifest["counts"],
+        }
+    )
+    return manifest
 
 
 def test_debug_rows_match_v1_schema() -> None:
@@ -322,6 +331,32 @@ def test_readiness_requires_provenance_bound_accepted_input() -> None:
         "remote_commit_sha": None,
     }
     with pytest.raises(ValueError, match="accepted JSONL"):
+        validate_readiness_alignment(readiness, manifest)
+
+
+@pytest.mark.parametrize("conflicting", [False, True])
+def test_readiness_rejects_duplicate_shard_identity(conflicting: bool) -> None:
+    manifest = manifest_document()
+    item = manifest["shards"][0]  # type: ignore[index]
+    duplicate = {
+        "path": item["path"],
+        "sha256": "0" * 64 if conflicting else item["sha256"],
+        "examples": item["rows"],
+    }
+    readiness = {
+        "state": "building",
+        "schema_version": 1,
+        "teacher_dimension": 100,
+        "available_examples": 1,
+        "verified_shards": [
+            {"path": item["path"], "sha256": item["sha256"], "examples": item["rows"]},
+            duplicate,
+        ],
+        "source_checksums": {"accepted_jsonl": "c" * 64},
+        "remote_verified": False,
+        "remote_commit_sha": None,
+    }
+    with pytest.raises(ValueError, match="duplicate|one-to-one"):
         validate_readiness_alignment(readiness, manifest)
 
 

@@ -108,6 +108,13 @@ def validate_manifest_document(
     aggregate = hashlib.sha256(canonical_json(shards)).hexdigest()
     if document["aggregate_sha256"] != aggregate:
         raise _manifest_error(label, "aggregate checksum is invalid")
+    reports = provenance["document"]["reports"]  # type: ignore[index]
+    if (
+        reports.get("dataset_aggregate_sha256") != aggregate
+        or reports.get("dataset_rows_sha256") != document["rows_sha256"]
+        or reports.get("dataset_counts") != expected_counts
+    ):
+        raise _manifest_error(label, "provenance report binding is stale")
     return document
 
 
@@ -119,23 +126,6 @@ def validate_manifest_bytes(value: bytes, *, label: str = "dataset") -> dict[str
     if not isinstance(document, dict):
         raise _manifest_error(label, "is malformed")
     return validate_manifest_document(document, label=label)
-
-
-def _is_monotonic_value(old: object, new: object) -> bool:
-    if isinstance(old, dict):
-        return isinstance(new, dict) and all(
-            key in new and _is_monotonic_value(value, new[key])
-            for key, value in old.items()
-        )
-    if isinstance(old, list):
-        return isinstance(new, list) and new[: len(old)] == old
-    if isinstance(old, (int, float)) and not isinstance(old, bool):
-        return (
-            isinstance(new, (int, float))
-            and not isinstance(new, bool)
-            and new >= old
-        )
-    return new == old
 
 
 def validate_manifest_extension(old_bytes: bytes, new_bytes: bytes) -> None:
@@ -154,8 +144,31 @@ def validate_manifest_extension(old_bytes: bytes, new_bytes: bytes) -> None:
     assert isinstance(old_pilot, list) and isinstance(new_pilot, list)
     if new_pilot[: len(old_pilot)] != old_pilot:
         raise ValueError("manifest extension is not monotonic: pilot keys changed")
-    if not _is_monotonic_value(old["provenance"], new["provenance"]):
-        raise ValueError("manifest extension is not monotonic: provenance regressed")
+    old_provenance = old["provenance"]
+    new_provenance = new["provenance"]
+    assert isinstance(old_provenance, dict) and isinstance(new_provenance, dict)
+    if (
+        old_provenance["schema"] != new_provenance["schema"]
+        or old_provenance["identifiers"] != new_provenance["identifiers"]
+    ):
+        raise ValueError("manifest extension changed fixed provenance identity")
+    old_document = old_provenance["document"]
+    new_document = new_provenance["document"]
+    assert isinstance(old_document, dict) and isinstance(new_document, dict)
+    if old_document["schema_version"] != new_document["schema_version"]:
+        raise ValueError("manifest extension changed provenance schema version")
+    old_sources = old_document["sources"]
+    new_sources = new_document["sources"]
+    assert isinstance(old_sources, list) and isinstance(new_sources, list)
+    if new_sources[: len(old_sources)] != old_sources:
+        raise ValueError("manifest extension changed prior provenance source")
+    if len({item["filename"] for item in new_sources}) != len(new_sources):
+        raise ValueError("manifest extension has duplicate provenance source identity")
+    old_artifacts = old_document["artifacts"]
+    new_artifacts = new_document["artifacts"]
+    assert isinstance(old_artifacts, dict) and isinstance(new_artifacts, dict)
+    if any(new_artifacts.get(name) != value for name, value in old_artifacts.items()):
+        raise ValueError("manifest extension changed prior provenance artifact")
 
 
 def render_dataset_card() -> bytes:
@@ -169,16 +182,25 @@ def validate_readiness_alignment(
     checked_manifest = validate_manifest_document(manifest)
     if readiness["available_examples"] != checked_manifest["counts"]["total"]:  # type: ignore[index]
         raise ValueError("readiness example count does not match manifest")
-    readiness_shards = {
-        str(item["path"]): (str(item["sha256"]), int(item["examples"]))
-        for item in readiness["verified_shards"]  # type: ignore[union-attr]
-    }
-    manifest_shards = {
-        str(item["path"]): (str(item["sha256"]), int(item["rows"]))
+    readiness_items = readiness["verified_shards"]
+    assert isinstance(readiness_items, list)
+    readiness_paths = [str(item["path"]) for item in readiness_items]
+    readiness_checksums = [str(item["sha256"]) for item in readiness_items]
+    if (
+        len(set(readiness_paths)) != len(readiness_paths)
+        or len(set(readiness_checksums)) != len(readiness_checksums)
+    ):
+        raise ValueError("readiness has duplicate shard identity")
+    manifest_items = [
+        {
+            "path": str(item["path"]),
+            "sha256": str(item["sha256"]),
+            "examples": int(item["rows"]),
+        }
         for item in checked_manifest["shards"]  # type: ignore[union-attr]
-    }
-    if readiness_shards != manifest_shards:
-        raise ValueError("readiness shard identities do not match manifest")
+    ]
+    if readiness_items != manifest_items:
+        raise ValueError("readiness shards are not a one-to-one manifest sequence")
     artifact = checked_manifest["provenance"]["document"]["artifacts"].get(  # type: ignore[index]
         "accepted_jsonl"
     )

@@ -42,6 +42,19 @@
       "additionalProperties": false,
       "required": ["row_counts", "match_rate", "exclusion_counts", "text_statistics", "vector_statistics"],
       "properties": {
+        "dataset_aggregate_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "dataset_rows_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "dataset_counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["total", "train", "validation", "test"],
+          "properties": {
+            "total": {"type": "integer", "minimum": 1},
+            "train": {"type": "integer", "minimum": 0},
+            "validation": {"type": "integer", "minimum": 0},
+            "test": {"type": "integer", "minimum": 0}
+          }
+        },
         "row_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
         "match_rate": {"type": "number", "minimum": 0, "maximum": 1},
         "exclusion_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},

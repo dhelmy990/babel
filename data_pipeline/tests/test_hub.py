@@ -25,7 +25,11 @@ from babel_data.hub import (  # noqa: E402
 )
 from babel_data.cli import main  # noqa: E402
 from babel_data.reconcile import split_for  # noqa: E402
-from babel_data.release import canonical_json, identity_rows_sha256  # noqa: E402
+from babel_data.release import (  # noqa: E402
+    canonical_json,
+    identity_rows_sha256,
+    validate_manifest_extension,
+)
 from babel_data.shard import load_readiness, write_shards  # noqa: E402
 from test_shard import provenance_document  # noqa: E402
 
@@ -174,6 +178,10 @@ def rolling_extension(result: object, destination: Path) -> tuple[Path, list[Pat
             for key in manifest["pilot_article_keys"]
         ]
     )
+    reports = manifest["provenance"]["document"]["reports"]
+    reports["dataset_aggregate_sha256"] = manifest["aggregate_sha256"]
+    reports["dataset_rows_sha256"] = manifest["rows_sha256"]
+    reports["dataset_counts"] = manifest["counts"]
     manifest_path.write_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n")
     readiness_path = destination / "readiness.json"
     readiness = json.loads(readiness_path.read_text())
@@ -280,6 +288,9 @@ def test_manifest_extension_rejects_reencoded_copy_with_forged_identity_digest(
     manifest["aggregate_sha256"] = hashlib.sha256(
         (json.dumps(manifest["shards"], sort_keys=True, separators=(",", ":")) + "\n").encode()
     ).hexdigest()
+    manifest["provenance"]["document"]["reports"][
+        "dataset_aggregate_sha256"
+    ] = manifest["aggregate_sha256"]
     extension_manifest.write_text(
         json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n"
     )
@@ -311,8 +322,14 @@ def test_publish_recomputes_manifest_identity_evidence_from_parquet(
         manifest["aggregate_sha256"] = hashlib.sha256(
             canonical_json(manifest["shards"])
         ).hexdigest()
+        manifest["provenance"]["document"]["reports"][
+            "dataset_aggregate_sha256"
+        ] = manifest["aggregate_sha256"]
     elif forgery == "root_digest":
         manifest["rows_sha256"] = "0" * 64
+        manifest["provenance"]["document"]["reports"][
+            "dataset_rows_sha256"
+        ] = manifest["rows_sha256"]
     else:
         manifest["pilot_article_keys"] = list(reversed(manifest["pilot_article_keys"]))
     result.manifest_path.write_text(
@@ -555,6 +572,9 @@ def test_publish_allows_only_a_monotonic_manifest_extension(tmp_path: Path) -> N
     regressed["aggregate_sha256"] = hashlib.sha256(
         (json.dumps(regressed["shards"], sort_keys=True, separators=(",", ":")) + "\n").encode()
     ).hexdigest()
+    regressed["provenance"]["document"]["reports"][
+        "dataset_aggregate_sha256"
+    ] = regressed["aggregate_sha256"]
     extension_manifest.write_text(
         json.dumps(regressed, sort_keys=True, separators=(",", ":")) + "\n"
     )
@@ -651,13 +671,47 @@ def test_manifest_extension_preserves_prior_provenance_evidence(tmp_path: Path) 
         json.dumps(extension, sort_keys=True, separators=(",", ":")) + "\n"
     )
 
-    with pytest.raises(ValueError, match="monotonic"):
+    with pytest.raises(ValueError, match="monotonic|provenance source"):
         publish_verified_shards(
             api, "dhelmy990/babel-wikipedia-experiment", extension_files, "token",
             root=extension_manifest.parent.parent,
             load_dataset_fn=lambda *args, **kwargs: datasets,
             retries=1, sleep=lambda _: None,
         )
+
+
+def test_manifest_extension_rejects_prior_artifact_mutation(tmp_path: Path) -> None:
+    result, _, _ = prepare(tmp_path)
+    extension_manifest, _ = rolling_extension(result, tmp_path / "rolling-artifact")
+    extension = json.loads(extension_manifest.read_text())
+    extension["provenance"]["document"]["artifacts"]["accepted_jsonl"][
+        "sha256"
+    ] = "e" * 64
+    with pytest.raises(ValueError, match="prior provenance artifact"):
+        validate_manifest_extension(
+            result.manifest_path.read_bytes(), canonical_json(extension)
+        )
+
+
+def test_manifest_extension_allows_current_reports_to_decrease_but_rejects_stale(
+    tmp_path: Path,
+) -> None:
+    result, _, _ = prepare(tmp_path)
+    extension_manifest, _ = rolling_extension(result, tmp_path / "rolling-reports")
+    old_bytes = result.manifest_path.read_bytes()
+    extension = json.loads(extension_manifest.read_text())
+    reports = extension["provenance"]["document"]["reports"]
+    reports["text_statistics"]["min_length"] = 0
+    reports["text_statistics"]["mean_length"] = 1.0
+    reports["text_statistics"]["histogram"] = [1, 0, 3]
+    reports["vector_statistics"]["min_norm"] = 0.5
+    reports["vector_statistics"]["mean_norm"] = 0.75
+    current_bytes = canonical_json(extension)
+    validate_manifest_extension(old_bytes, current_bytes)
+
+    reports["dataset_counts"] = json.loads(old_bytes)["counts"]
+    with pytest.raises(ValueError, match="report|stale|counts"):
+        validate_manifest_extension(old_bytes, canonical_json(extension))
 
 
 def test_publish_retries_transient_repo_info_preflight_and_commit_failures(
@@ -898,10 +952,15 @@ def complete_release(
         pilot_size=pilot_size,
         provenance=provenance,
     )
+    published_provenance = json.loads(result.manifest_path.read_text())["provenance"][
+        "document"
+    ]
     proof = {
         "schema_version": 1,
         "dataset_config": "distillation_2016",
-        "provenance_sha256": hashlib.sha256(canonical_json(provenance)).hexdigest(),
+        "provenance_sha256": hashlib.sha256(
+            canonical_json(published_provenance)
+        ).hexdigest(),
         "accepted_jsonl": {"sha256": "c" * 64, "size": 123, "rows": 3},
         "reconciliation_report": {
             "sha256": "d" * 64,
@@ -1087,6 +1146,34 @@ def test_cli_failure_is_structured_and_does_not_echo_token(
     error = capsys.readouterr().err
     assert json.loads(error)["status"] == "error"
     assert token not in error
+
+
+@pytest.mark.parametrize("token_source", ["argument", "environment"])
+def test_cli_redacts_registered_token_echoed_by_downstream_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    token_source: str,
+) -> None:
+    import babel_data.cli as cli
+
+    result, _, _ = prepare(tmp_path)
+    secret = f"downstream-{token_source}-secret"
+    if token_source == "environment":
+        monkeypatch.setenv("HF_TOKEN", secret)
+    monkeypatch.setattr(cli, "_api", object)
+    monkeypatch.setattr(
+        cli,
+        "publish_verified_shards",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError(secret)),
+    )
+    argv = ["publish-2016", "--input-root", str(result.output_root)]
+    if token_source == "argument":
+        argv.extend(["--token", secret])
+    assert main(argv) == 1
+    error = capsys.readouterr().err
+    assert secret not in error
+    assert "[REDACTED]" in error
 
 
 def test_cli_argument_errors_are_structured(
