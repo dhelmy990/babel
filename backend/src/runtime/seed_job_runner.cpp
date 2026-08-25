@@ -7,7 +7,20 @@ namespace babel {
 
 SeedJobRunner::SeedJobRunner(std::string manifest_version, SeedService& service,
                              SeedRunRepository& runs)
-    : manifest_version_(std::move(manifest_version)), service_(service), runs_(runs) {}
+    : manifest_version_(std::move(manifest_version)), service_(&service), runs_(runs) {}
+
+SeedJobRunner::SeedJobRunner(std::string manifest_version,
+                             std::vector<SeedAssignment> assignments,
+                             ArticleSourceFactory& source_factory,
+                             SourceSelection source_selection,
+                             PinnedExecution pinned_execution,
+                             SeedRunRepository& runs)
+    : manifest_version_(std::move(manifest_version)),
+      assignments_(std::move(assignments)),
+      source_factory_(&source_factory),
+      source_selection_(std::move(source_selection)),
+      pinned_execution_(std::move(pinned_execution)),
+      runs_(runs) {}
 
 SeedJobRunner::~SeedJobRunner() {
   std::optional<SeedRunId> interrupted_run_id;
@@ -38,7 +51,9 @@ Result<SeedRunId> SeedJobRunner::start() {
     });
   }
 
-  const auto run_id = runs_.createRun(manifest_version_, service_.assignments());
+  const auto assignments = service_ ? service_->assignments()
+                                    : std::span<const SeedAssignment>{assignments_};
+  const auto run_id = runs_.createRun(manifest_version_, assignments);
   if (!run_id) return tl::make_unexpected(run_id.error());
 
   active_ = true;
@@ -76,7 +91,29 @@ void SeedJobRunner::execute(SeedRunId run_id, std::stop_token stop_token) noexce
     }
   };
   try {
-    const auto result = service_.run(run_id, stop_token);
+    Result<void> result;
+    if (source_factory_ && source_selection_) {
+      auto source = source_factory_->pin(*source_selection_);
+      if (!source) {
+        persistTerminal(SeedRunState::failed);
+        releaseActiveGuard(run_id);
+        return;
+      }
+      const auto recorded = runs_.recordSourcePin(run_id, (*source)->provenance());
+      if (!recorded) {
+        persistTerminal(SeedRunState::failed);
+        releaseActiveGuard(run_id);
+        return;
+      }
+      if (!pinned_execution_) {
+        persistTerminal(SeedRunState::failed);
+        releaseActiveGuard(run_id);
+        return;
+      }
+      result = pinned_execution_(run_id, std::move(*source), stop_token);
+    } else {
+      result = service_->run(run_id, stop_token);
+    }
     if (stop_token.stop_requested()) {
       persistTerminal(SeedRunState::interrupted);
     } else if (!result) {

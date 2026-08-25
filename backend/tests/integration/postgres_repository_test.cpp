@@ -188,6 +188,50 @@ TEST_CASE_METHOD(PostgresFixture, "Wikipedia Babel insertion is atomic and maps 
 }
 
 TEST_CASE_METHOD(PostgresFixture,
+                 "Hugging Face Babel insertion persists complete pinned article provenance",
+                 "[postgres_repository]") {
+  installSchemaAndRoster();
+  const auto owner = babel::ProfileManifest::creators().at(1).id;
+  const auto article = makeBabel(owner, "Pinned article");
+  auto source = makeSource(article, 111);
+  source.provider = "huggingface_wikipedia";
+  source.source_repository = "dhelmy990/babel-wikipedia-experiment";
+  source.source_config = "catalog_2026_06";
+  source.source_commit_sha = std::string(40, 'a');
+  source.source_article_key = "enwiki:111";
+  source.source_snapshot_date = "2026-06-01";
+  source.source_content_sha256 = std::string(64, 'b');
+
+  REQUIRE(wikipedia_babels_.insertWikipediaBabel(article, source).has_value());
+  REQUIRE(wikipedia_babels_
+              .findByPage(owner, source.external_page_id, "huggingface_wikipedia")
+              .value()
+              .has_value());
+  REQUIRE_FALSE(wikipedia_babels_
+                    .findByPage(owner, source.external_page_id, "wikipedia")
+                    .value()
+                    .has_value());
+
+  pqxx::connection connection(schemaDatabaseUrl());
+  pqxx::read_transaction transaction(connection);
+  const auto row = transaction
+                       .exec(R"(
+      SELECT provider, source_repository, source_config, source_commit_sha,
+             source_article_key, source_snapshot_date, source_content_sha256
+      FROM babel_sources WHERE babel_id = $1
+    )",
+                             pqxx::params{article.id.value})
+                       .one_row();
+  CHECK(row["provider"].as<std::string>() == "huggingface_wikipedia");
+  CHECK(row["source_repository"].as<std::string>() == *source.source_repository);
+  CHECK(row["source_config"].as<std::string>() == *source.source_config);
+  CHECK(row["source_commit_sha"].as<std::string>() == *source.source_commit_sha);
+  CHECK(row["source_article_key"].as<std::string>() == *source.source_article_key);
+  CHECK(row["source_snapshot_date"].as<std::string>() == *source.source_snapshot_date);
+  CHECK(row["source_content_sha256"].as<std::string>() == *source.source_content_sha256);
+}
+
+TEST_CASE_METHOD(PostgresFixture,
                  "duplicate owner provider page rejects the Babel and preserves existing rows",
                  "[postgres_repository]") {
   installSchemaAndRoster();
@@ -441,6 +485,40 @@ TEST_CASE_METHOD(PostgresFixture, "seed runs atomically snapshot pending assignm
   REQUIRE(items.size() == 2);
   REQUIRE(items.front()["state"].as<std::string>() == "pending");
   REQUIRE(items.front()["attempt_count"].as<int>() == 0);
+}
+
+TEST_CASE_METHOD(PostgresFixture, "seed run records one complete Hugging Face source pin",
+                 "[postgres_repository]") {
+  installSchemaAndRoster();
+  const auto assignment = babel::ProfileManifest::seedAssignments().front();
+  const std::vector<babel::SeedAssignment> assignments{assignment};
+  const auto run = seed_runs_.createRun("manifest-v1", assignments);
+  REQUIRE(run.has_value());
+  const babel::PinnedSourceProvenance provenance{
+      .repository = "dhelmy990/babel-wikipedia-experiment",
+      .configuration = "catalog_2026_06",
+      .commit_sha = std::string(40, 'a'),
+      .snapshot_date = "2026-06-01",
+  };
+
+  REQUIRE(seed_runs_.recordSourcePin(*run, provenance).has_value());
+  const auto repeated = seed_runs_.recordSourcePin(*run, provenance);
+  REQUIRE_FALSE(repeated.has_value());
+  CHECK(repeated.error().code == babel::ErrorCode::conflict);
+
+  pqxx::connection connection(schemaDatabaseUrl());
+  pqxx::read_transaction transaction(connection);
+  const auto row = transaction
+                       .exec(R"(
+      SELECT source_repository, source_config, source_commit_sha, source_snapshot_date
+      FROM seed_runs WHERE id = $1
+    )",
+                             pqxx::params{run->value})
+                       .one_row();
+  CHECK(row["source_repository"].as<std::string>() == provenance.repository);
+  CHECK(row["source_config"].as<std::string>() == provenance.configuration);
+  CHECK(row["source_commit_sha"].as<std::string>() == provenance.commit_sha);
+  CHECK(row["source_snapshot_date"].as<std::string>() == provenance.snapshot_date);
 }
 
 TEST_CASE_METHOD(PostgresFixture, "duplicate assignment snapshot rolls back the whole seed run",
@@ -883,7 +961,7 @@ TEST_CASE_METHOD(PostgresFixture, "migrations are idempotent and track every ver
                  "[postgres_repository]") {
   REQUIRE(migration_runner_.run().has_value());
   REQUIRE(migration_runner_.run().has_value());
-  REQUIRE(countRows("schema_migrations") == 3);
+  REQUIRE(countRows("schema_migrations") == 4);
 }
 
 TEST_CASE_METHOD(PostgresFixture, "default migration path resolves outside the source tree",
@@ -894,7 +972,7 @@ TEST_CASE_METHOD(PostgresFixture, "default migration path resolves outside the s
   const auto result = defaults.run();
   INFO((result ? "migration succeeded" : result.error().message));
   REQUIRE(result.has_value());
-  REQUIRE(countRows("schema_migrations") == 3);
+  REQUIRE(countRows("schema_migrations") == 4);
 }
 
 TEST_CASE_METHOD(PostgresFixture, "migration discovery rejects duplicate numeric versions",

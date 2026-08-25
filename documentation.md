@@ -10,11 +10,13 @@ Babel currently has three deployed local processes:
 
 The backend also serves a small local operations dashboard at `/admin`. The
 dashboard is not part of Electron and has one operational responsibility:
-starting and monitoring generated-profile Wikipedia population.
+starting and monitoring generated-profile population from a pinned Wikipedia
+snapshot on Hugging Face.
 
-There is no authentication in this release. Loopback binding, strict local
-request checks, an instance-local admin nonce, and a single-backend database
-lease define the local security boundary.
+There is no end-user authentication in this release. Loopback binding, strict
+local request checks, an instance-local admin nonce, and a single-backend
+database lease define the local security boundary. The server-side Hugging Face
+token is an outbound private-dataset credential, not a dashboard credential.
 
 ## Architectural Boundaries
 
@@ -23,7 +25,8 @@ administrative commands:
 
 - creator/profile manifest installation
 - profile and graph queries
-- Wikipedia resolution, fetch, sanitization, and import
+- pinned Hugging Face catalog acquisition, Wikipedia identity lookup,
+  sanitization, and import
 - background seed orchestration and status
 - explicit legacy migration into Personal
 - database migrations and local HTTP composition
@@ -53,11 +56,12 @@ Justfile                              db, build, test, start, migration workflow
 backend/
   include/babel/domain/               typed IDs and domain models
   include/babel/application/          ports, DTOs, services, manifest
-  include/babel/adapters/             PostgreSQL, MediaWiki, HTML adapters
+  include/babel/adapters/             PostgreSQL, Hugging Face, MediaWiki, HTML adapters
   include/babel/http/                 profile/admin controllers and security
   include/babel/runtime/              command parsing and composition root
   src/application/                    use-case implementations
   src/adapters/postgres/              migrations and repositories
+  src/adapters/huggingface/           authenticated pin/cache/catalog adapter
   src/adapters/wikipedia/             MediaWiki HTTP adapter
   src/adapters/html/                  libxml2 allowlist sanitizer
   src/http/                           JSON/static dashboard controllers
@@ -66,7 +70,7 @@ backend/
   admin/                              dark dashboard HTML, CSS, and JavaScript
   tests/unit/                         service and domain tests
   tests/integration/                  PostgreSQL and HTTP contract tests
-  tests/fixtures/                     fixed Wikipedia and legacy inputs
+  tests/fixtures/                     fixed Hugging Face, Wikipedia, and legacy inputs
 
 main.js                               secure Electron main process and IPC
 preload.js                            two-method read-only renderer bridge
@@ -98,12 +102,15 @@ association and are excluded from DAG layout.
 one declared Wikipedia title, and one assignment UUID. There are 80 assignments,
 four per generated creator. Personal has none.
 
-**Seed run:** A durable snapshot of all assignments and their outcomes. A run can
-be queued, running, completed, completed with errors, failed, or interrupted.
+**Seed run:** A durable snapshot of all assignments and their outcomes, plus the
+repository/configuration/commit/snapshot pin used by snapshot-backed runs. A run
+can be queued, running, completed, completed with errors, failed, or interrupted.
 
-**Wikipedia source:** Provenance attached to a Babel: numeric page ID, canonical
-HTTPS URL, optional source revision, fetch time, declared title, and optional
-seed assignment.
+**Wikipedia source:** Provenance attached to a Babel: provider, numeric page ID,
+canonical HTTPS URL, optional source revision, fetch time, declared title, and
+optional seed assignment. Dashboard-created sources additionally record the
+Hugging Face repository, configuration, exact commit, article key, snapshot
+date, and prepared-text SHA-256.
 
 **Personal migration:** A digest-addressed, atomic conversion of one legacy JSON
 file into Babels and edges owned only by Personal.
@@ -164,20 +171,41 @@ practice is stricter than HTTP reachability: population is started only by
 pressing the visible dashboard button, never by scripts, CLI commands, Electron,
 or direct API requests.
 
-## Wikipedia Population
+## Snapshot-backed Wikipedia Population
 
 The manifest gives the seed service 80 stable assignments. The dashboard button
-creates a run that snapshots all 80 items, then the background runner processes
-at most four assignments concurrently.
+creates a run that snapshots all 80 items. Before any item starts, the runner
+authenticates with the server-side `HF_TOKEN`, resolves the configured revision
+once to a 40-character commit SHA, stores that pin on the run, and verifies the
+catalog plus its `.sha256` companion under
+`$BABEL_DATA_ROOT/cache/backend-seed/{commit_sha}/`. The default data root is
+`/home/dhelmy990/Data/babel-data`. The token and authenticated request headers
+never enter dashboard responses, logs, or PostgreSQL.
 
-For each missing assignment the application:
+Runtime source selection uses these environment variables:
 
-1. Resolves the declared title through the MediaWiki API.
-2. Fetches the rendered article by numeric page ID.
-3. Verifies that the fetched identity matches the resolved page.
-4. Sanitizes the rendered HTML through the Quill allowlist.
-5. Inserts the owned Babel and Wikipedia source atomically.
-6. Attaches the stable assignment and declared title.
+| Variable | Default |
+|---|---|
+| `HF_TOKEN` | required by `serve`; no default |
+| `BABEL_HF_REPOSITORY` | `dhelmy990/babel-wikipedia-experiment` |
+| `BABEL_HF_CONFIG` | `demo_catalog_2026_06` |
+| `BABEL_HF_REVISION` | `3fc8c1a2d84d6c8d069876ed27f91d6ead7fab2b` |
+| `BABEL_HF_ARTIFACT_PATH` | `backend-seed/2026-06/resolved-catalog-v1.jsonl` |
+| `BABEL_DATA_ROOT` | `/home/dhelmy990/Data/babel-data` |
+
+After pinning, the background runner processes at most four assignments
+concurrently. For each missing assignment the application:
+
+1. Resolves the declared title exactly against canonical and redirect titles in
+   the immutable local index; spaces/underscores use MediaWiki normalization,
+   and there is no fuzzy match.
+2. Fetches prepared article text locally by canonical numeric page ID.
+3. Deterministically normalizes newlines and whitespace, HTML-escapes the text,
+   and wraps non-empty paragraphs in `<p>` elements.
+4. Verifies that the fetched identity matches the resolved page.
+5. Sanitizes the paragraph HTML through the existing Quill allowlist.
+6. Inserts the owned Babel and complete snapshot source provenance atomically.
+7. Attaches the stable assignment and declared title.
 
 The canonical reusable application operation is
 `WikipediaImportService::importWikipediaBabel(creatorId, pageId, context)`. Its
@@ -186,15 +214,16 @@ a profile. The seed path resolves manifest titles first and then calls this
 numeric-ID operation with seed context. There is no public Electron or dashboard
 form for arbitrary page IDs yet.
 
-Unavailable MediaWiki requests are retried twice inside one assignment with a
-fixed backoff. Permanent failures are recorded immediately. Assignment failures
-do not discard successful imports; the run reaches `completed_with_errors` and
-the dashboard shows every durable error.
+The dashboard runtime contains no MediaWiki source, fallback, or feature flag. A
+pin, download, or checksum failure fails the run before item execution. The
+existing item retry, progress, error accounting, and successful-item durability
+remain unchanged. Assignment failures do not discard successful imports; the run
+reaches `completed_with_errors` and the dashboard shows every durable error.
 
 A later dashboard button press snapshots all 80 assignments again. Already
-attached assignments become skipped without a network request, while missing
-assignments are retried. PostgreSQL uniqueness constraints prevent duplicate
-owner/page and seed-assignment rows.
+attached assignments become skipped without a remote artifact request, while
+missing assignments are retried. PostgreSQL uniqueness constraints prevent
+duplicate owner/provider/page and seed-assignment rows.
 
 ## HTML Storage And Sanitization
 
@@ -267,9 +296,10 @@ retry action.
 
 - `creators`: stable selector identities, colors, kind, and order
 - `babels`: owned sanitized content and revision/hash metadata
-- `babel_sources`: one-to-one Wikipedia provenance and seed attachment
+- `babel_sources`: one-to-one provider/page provenance and seed attachment;
+  Hugging Face rows require repository/config/commit/article/snapshot/content hash
 - `edges`: same-owner directed graph relationships
-- `seed_runs`: durable run lifecycle
+- `seed_runs`: durable run lifecycle and all-or-none snapshot pin
 - `seed_run_items`: assignment snapshot, attempts, result, and error detail
 - `legacy_migrations`: exact source digest and imported Personal counts
 - `schema_migrations`: applied migration versions
@@ -283,8 +313,8 @@ performs no parameter synchronization.
 `just test` builds the test preset, runs Catch2 tests through CTest, and runs the
 Node test suite. Native integration tests exercise PostgreSQL transactions,
 constraints, locks, repositories, and HTTP-controller contracts. Unit tests use
-fixed MediaWiki and legacy fixtures; automated tests do not populate from the
-live network.
+fixed Hugging Face catalog, MediaWiki, and legacy fixtures; automated tests do
+not populate from the live network.
 
 Population and its operational retry check are performed through the rendered
 dashboard only. This rule does not move the automated C++ or Node test suite into
@@ -297,6 +327,7 @@ curl --fail --silent http://127.0.0.1:8787/health
 curl --fail --silent http://127.0.0.1:8787/api/v1/profiles
 ```
 
-For live MediaWiki 429 responses, keep the successful partial imports, wait for
-the remote rate limit to cool down, then press the dashboard retry button. The
-retry is idempotent and targets only assignments that are still missing.
+For a Hugging Face pin or checksum failure, confirm the exact accepted commit,
+catalog configuration/path, token access, and cached companion checksum before
+pressing the dashboard retry button. Retry is idempotent and targets only
+assignments that are still missing; it never switches to live MediaWiki.

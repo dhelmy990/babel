@@ -354,6 +354,15 @@ TEST_CASE("runtime configuration is fixed to loopback and rejects unsafe databas
   CHECK(defaults->port == 8787);
   CHECK(defaults->database_url ==
         "postgresql://babel:babel-local-dev@127.0.0.1:54329/babel");
+  CHECK(defaults->seed_source.repository == "dhelmy990/babel-wikipedia-experiment");
+  CHECK(defaults->seed_source.configuration == "demo_catalog_2026_06");
+  CHECK(defaults->seed_source.requested_revision ==
+        "3fc8c1a2d84d6c8d069876ed27f91d6ead7fab2b");
+  CHECK(defaults->seed_source.artifact_path ==
+        "backend-seed/2026-06/resolved-catalog-v1.jsonl");
+  CHECK(defaults->huggingface_cache_root ==
+        "/home/dhelmy990/Data/babel-data/cache/backend-seed");
+  CHECK_FALSE(defaults->huggingface_token.has_value());
 
   const auto nul = RuntimeConfig::fromEnvironment([](std::string_view name) {
     return name == "BABEL_DATABASE_URL"
@@ -361,6 +370,19 @@ TEST_CASE("runtime configuration is fixed to loopback and rejects unsafe databas
                : std::nullopt;
   });
   CHECK_FALSE(nul.has_value());
+
+  const auto configured = RuntimeConfig::fromEnvironment([](std::string_view name) {
+    if (name == "HF_TOKEN") return std::optional<std::string>{"server-secret"};
+    if (name == "BABEL_HF_REVISION") return std::optional<std::string>{std::string(40, 'a')};
+    if (name == "BABEL_HF_CONFIG") return std::optional<std::string>{"demo_catalog"};
+    if (name == "BABEL_DATA_ROOT") return std::optional<std::string>{"/srv/babel-data"};
+    return std::optional<std::string>{};
+  });
+  REQUIRE(configured.has_value());
+  CHECK(configured->huggingface_token == "server-secret");
+  CHECK(configured->seed_source.requested_revision == std::string(40, 'a'));
+  CHECK(configured->seed_source.configuration == "demo_catalog");
+  CHECK(configured->huggingface_cache_root == "/srv/babel-data/cache/backend-seed");
 }
 
 TEST_CASE("runtime command parser exposes migrate serve and typed Personal migration only") {

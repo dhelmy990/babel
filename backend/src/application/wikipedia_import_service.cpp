@@ -66,7 +66,8 @@ Result<ImportWikipediaBabelResult> WikipediaImportService::importCanonical(
   auto creator = creators_.get(creator_id);
   if (!creator) return tl::make_unexpected(creator.error());
 
-  auto existing = babels_.findByPage(creator_id, page_id);
+  const auto provider = source_.provider();
+  auto existing = babels_.findByPage(creator_id, page_id, provider);
   if (!existing) return tl::make_unexpected(existing.error());
   if (*existing) return existingResult(**existing, context);
 
@@ -76,6 +77,12 @@ Result<ImportWikipediaBabelResult> WikipediaImportService::importCanonical(
     return tl::make_unexpected(ApplicationError{
         .code = ErrorCode::internal,
         .message = "Wikipedia source returned a different page ID than requested",
+    });
+  }
+  if ((provider == "huggingface_wikipedia") != article->provenance.has_value()) {
+    return tl::make_unexpected(ApplicationError{
+        .code = ErrorCode::internal,
+        .message = "article source provenance does not match its provider",
     });
   }
 
@@ -97,13 +104,32 @@ Result<ImportWikipediaBabelResult> WikipediaImportService::importCanonical(
   const BabelSource babel_source{
       .babel_id = babel_id,
       .owner_id = creator_id,
-      .provider = "wikipedia",
+      .provider = std::string(provider),
       .external_page_id = page_id,
       .canonical_url = article->canonical_url,
       .source_revision_id = article->revision_id,
       .seed_assignment_id = context ? std::optional<SeedAssignmentId>{context->assignment_id}
                                     : std::nullopt,
       .declared_title = context ? context->declared_title : article->canonical_title,
+      .source_repository = article->provenance
+                               ? std::optional<std::string>{article->provenance->repository}
+                               : std::nullopt,
+      .source_config = article->provenance
+                           ? std::optional<std::string>{article->provenance->configuration}
+                           : std::nullopt,
+      .source_commit_sha = article->provenance
+                               ? std::optional<std::string>{article->provenance->commit_sha}
+                               : std::nullopt,
+      .source_article_key = article->provenance
+                                ? std::optional<std::string>{article->provenance->article_key}
+                                : std::nullopt,
+      .source_snapshot_date = article->provenance
+                                  ? std::optional<std::string>{article->provenance->snapshot_date}
+                                  : std::nullopt,
+      .source_content_sha256 = article->provenance
+                                   ? std::optional<std::string>{
+                                         article->provenance->content_sha256}
+                                   : std::nullopt,
   };
 
   auto inserted = babels_.insertWikipediaBabel(babel, babel_source);
@@ -112,7 +138,7 @@ Result<ImportWikipediaBabelResult> WikipediaImportService::importCanonical(
       return tl::make_unexpected(inserted.error());
     }
 
-    auto concurrent = babels_.findByPage(creator_id, page_id);
+    auto concurrent = babels_.findByPage(creator_id, page_id, provider);
     if (!concurrent) return tl::make_unexpected(concurrent.error());
     if (!*concurrent) return tl::make_unexpected(inserted.error());
     return existingResult(**concurrent, context);

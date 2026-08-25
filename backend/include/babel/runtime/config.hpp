@@ -8,6 +8,7 @@
 #include <string_view>
 
 #include "babel/application/errors.hpp"
+#include "babel/domain/models.hpp"
 
 namespace babel {
 
@@ -20,6 +21,15 @@ struct RuntimeConfig {
   std::optional<std::string> instance_token;
   std::filesystem::path migration_directory;
   std::filesystem::path admin_asset_directory;
+  std::optional<std::string> huggingface_token;
+  SourceSelection seed_source{
+      .repository = "dhelmy990/babel-wikipedia-experiment",
+      .configuration = "demo_catalog_2026_06",
+      .requested_revision = "3fc8c1a2d84d6c8d069876ed27f91d6ead7fab2b",
+      .artifact_path = "backend-seed/2026-06/resolved-catalog-v1.jsonl",
+  };
+  std::filesystem::path huggingface_cache_root{
+      "/home/dhelmy990/Data/babel-data/cache/backend-seed"};
 
   static Result<RuntimeConfig> fromEnvironment();
   static Result<RuntimeConfig> fromEnvironment(const Environment&);

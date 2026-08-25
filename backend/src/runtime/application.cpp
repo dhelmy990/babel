@@ -14,11 +14,11 @@
 #include <pqxx/pqxx>
 
 #include "babel/adapters/html/libxml_html_sanitizer.hpp"
+#include "babel/adapters/huggingface/huggingface_article_source.hpp"
 #include "babel/adapters/postgres/migration_runner.hpp"
 #include "babel/adapters/postgres/postgres_database.hpp"
 #include "babel/adapters/postgres/postgres_repositories.hpp"
 #include "babel/adapters/postgres/profile_roster_installer.hpp"
-#include "babel/adapters/wikipedia/mediawiki_article_source.hpp"
 #include "babel/application/profile_manifest.hpp"
 #include "babel/application/profile_query_service.hpp"
 #include "babel/application/seed_service.hpp"
@@ -212,7 +212,7 @@ Result<void> Application::verifySchemaReady() {
       });
     }
     if (transaction.exec(
-            "SELECT count(*) = 3 FROM schema_migrations WHERE version IN ('1', '2', '3')")
+            "SELECT count(*) = 4 FROM schema_migrations WHERE version IN ('1', '2', '3', '4')")
             .one_field()
             .as<bool>() == false) {
       return tl::make_unexpected(ApplicationError{
@@ -249,20 +249,33 @@ Result<void> Application::serve() {
 
   auto ready = verifySchemaReady();
   if (!ready) return tl::make_unexpected(ready.error());
+  if (!config_.huggingface_token) {
+    return invalidArgument("HF_TOKEN is required to serve the dashboard seed source");
+  }
 
   PostgresCreatorRepository creators(database);
   PostgresGraphRepository graphs(database);
   PostgresWikipediaBabelRepository wikipedia_babels(database);
   PostgresSeedRunRepository seed_runs(database);
   CurlHttpTransport transport;
-  MediaWikiArticleSource article_source(transport);
+  HuggingFaceArticleSourceFactory article_source_factory(
+      transport, config_.huggingface_cache_root, *config_.huggingface_token);
   LibxmlHtmlSanitizer sanitizer;
   ThreadSafeIdGenerator ids;
   ProfileQueryService profiles(creators, graphs);
-  WikipediaImportService importer(creators, wikipedia_babels, article_source, sanitizer, ids);
-  SeedService seed_service(ProfileManifest::seedAssignments(), seed_runs, article_source,
-                           importer, SeedRetryPolicy::withDefaultDelay());
-  SeedJobRunner seed_runner(std::string{kManifestVersion}, seed_service, seed_runs);
+  const auto assignments = ProfileManifest::seedAssignments();
+  SeedJobRunner seed_runner(
+      std::string{kManifestVersion}, assignments, article_source_factory,
+      config_.seed_source,
+      [&](SeedRunId run_id, std::shared_ptr<PinnedArticleSource> article_source,
+          std::stop_token stop_token) -> Result<void> {
+        WikipediaImportService importer(creators, wikipedia_babels, *article_source,
+                                        sanitizer, ids);
+        SeedService seed_service(assignments, seed_runs, *article_source, importer,
+                                 SeedRetryPolicy::withDefaultDelay());
+        return seed_service.run(run_id, stop_token);
+      },
+      seed_runs);
 
   std::string instance_token;
   if (config_.instance_token) {

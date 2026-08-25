@@ -43,6 +43,47 @@ Result<RuntimeConfig> RuntimeConfig::fromEnvironment(const Environment& environm
   if (config.instance_token && !validInstanceToken(*config.instance_token)) {
     return invalidArgument("BABEL_INSTANCE_TOKEN must contain exactly 64 lowercase hex digits");
   }
+  config.huggingface_token = environment("HF_TOKEN");
+  if (config.huggingface_token && invalidEnvironmentValue(*config.huggingface_token)) {
+    return invalidArgument("HF_TOKEN must be a non-empty single-line value");
+  }
+
+  const auto assignSourceValue = [&](std::string_view environment_name,
+                                     std::string& destination) -> Result<void> {
+    const auto value = environment(environment_name);
+    if (!value) return {};
+    if (invalidEnvironmentValue(*value)) {
+      return invalidArgument(std::string(environment_name) +
+                             " must be a non-empty single-line value");
+    }
+    destination = *value;
+    return {};
+  };
+  if (auto result = assignSourceValue("BABEL_HF_REPOSITORY", config.seed_source.repository);
+      !result) {
+    return tl::make_unexpected(result.error());
+  }
+  if (auto result = assignSourceValue("BABEL_HF_CONFIG", config.seed_source.configuration);
+      !result) {
+    return tl::make_unexpected(result.error());
+  }
+  if (auto result =
+          assignSourceValue("BABEL_HF_REVISION", config.seed_source.requested_revision);
+      !result) {
+    return tl::make_unexpected(result.error());
+  }
+  if (auto result =
+          assignSourceValue("BABEL_HF_ARTIFACT_PATH", config.seed_source.artifact_path);
+      !result) {
+    return tl::make_unexpected(result.error());
+  }
+  if (const auto data_root = environment("BABEL_DATA_ROOT")) {
+    if (invalidEnvironmentValue(*data_root)) {
+      return invalidArgument("BABEL_DATA_ROOT must be a non-empty single-line value");
+    }
+    config.huggingface_cache_root =
+        std::filesystem::path(*data_root) / "cache" / "backend-seed";
+  }
 
 #ifdef BABEL_MIGRATION_DIRECTORY
   config.migration_directory = BABEL_MIGRATION_DIRECTORY;

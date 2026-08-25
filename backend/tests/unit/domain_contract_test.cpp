@@ -63,6 +63,23 @@ TEST_CASE("seed item migration constrains attempts by state") {
   CHECK(migration.find("state IN ('resolving', 'importing', 'imported', 'failed') AND attempt_count > 0") != std::string::npos);
 }
 
+TEST_CASE("Hugging Face provenance migration preserves provider scoped source uniqueness") {
+  const auto migration_path = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
+                              "migrations/004_huggingface_source_provenance.sql";
+  std::ifstream migration_file(migration_path);
+  REQUIRE(migration_file.good());
+
+  const std::string migration{std::istreambuf_iterator<char>{migration_file}, {}};
+  CHECK(migration.find("DROP CONSTRAINT babel_sources_provider_check") != std::string::npos);
+  CHECK(migration.find("provider IN ('wikipedia', 'huggingface_wikipedia')") !=
+        std::string::npos);
+  CHECK(migration.find("source_commit_sha ~ '^[0-9a-f]{40}$'") != std::string::npos);
+  CHECK(migration.find("source_content_sha256 ~ '^[0-9a-f]{64}$'") != std::string::npos);
+  CHECK(migration.find("DROP CONSTRAINT babel_sources_owner_page_unique") ==
+        std::string::npos);
+  CHECK(migration.find("CONSTRAINT seed_runs_source_pin_check") != std::string::npos);
+}
+
 TEST_CASE("an empty personal profile graph is a successful result") {
   const auto personal_id = babel::CreatorId::parse(
       "00000000-0000-5000-8000-000000000000");

@@ -1,13 +1,15 @@
 # Babel
 
 Babel is a local-first knowledge graph application. A C++ modular monolith owns
-profiles, Babels, edges, Wikipedia ingestion, and administrative commands in
+profiles, Babels, edges, snapshot-backed Wikipedia ingestion, and administrative commands in
 PostgreSQL. Electron is the supported user application. A separate, narrow web
-dashboard starts and monitors Wikipedia population.
+dashboard starts and monitors population from a commit-pinned private Hugging
+Face dataset.
 
 The initial roster is fixed at 21 profiles: `Personal` followed by 20 generated
 creator profiles. Profiles exist after migration even when they have no Babels.
-There is no authentication in this local release.
+There is no end-user authentication in this local release. The backend alone
+uses a private-dataset read token for dashboard seeding.
 
 ## Prerequisites
 
@@ -35,6 +37,8 @@ Start PostgreSQL explicitly, then start the application:
 
 ```bash
 just db-up
+export HF_TOKEN='<private dataset read token>'
+export BABEL_HF_REVISION='3fc8c1a2d84d6c8d069876ed27f91d6ead7fab2b'
 just start
 ```
 
@@ -44,14 +48,18 @@ prints the dashboard URL, and launches Electron. Interrupting the command stops
 the backend and Electron. PostgreSQL remains running.
 
 `just start` deliberately does **not** run `db-up` and does **not** seed. This
-makes database lifecycle and network-backed population explicit.
+makes database lifecycle and authenticated snapshot population explicit. The
+backend consumes `HF_TOKEN`; the token is never returned to the browser, logged,
+or stored in PostgreSQL.
 
 ## Seed From The Dashboard
 
 Open [http://127.0.0.1:8787/admin](http://127.0.0.1:8787/admin) while `just start`
 is running, then press **Seed 80 Babels**. This rendered dashboard button is the
-only supported way to start operational Wikipedia population. Do not seed from a
-CLI, Electron, or a direct API call.
+only supported way to start operational Wikipedia population. The backend pins
+the configured Hugging Face revision once, verifies and caches the small seed
+catalog, and only then begins item work. It never falls back to live MediaWiki.
+Do not seed from a CLI, Electron, or a direct API call.
 
 The dashboard starts a background job and shows persisted progress, the current
 profile/article, and live errors. It remains usable if individual imports fail:
@@ -60,8 +68,8 @@ profile/article, and live errors. It remains usable if individual imports fail:
 - A later button press retries missing assignments and marks existing ones
   skipped for that run.
 - A second dashboard request while a run is active attaches to the active run.
-- Wikipedia HTTP 429 or transient network failures are shown as retryable errors;
-  wait for the remote service to cool down before pressing retry.
+- Unavailable Hugging Face acquisition or checksum failures leave the run failed
+  before any item begins; correct the source or connectivity and press retry.
 - Profiles with failed assignments remain selectable and display every durable
   success they have, which may still be an empty graph.
 
@@ -108,14 +116,15 @@ just test
 ```
 
 This configures and builds the test preset, runs all Catch2 tests through CTest,
-then runs the Node test suite. Automated tests use fakes for Wikipedia and do not
-perform operational population. Live population and its operational retry check
+then runs the Node test suite. Automated dashboard-source tests use a local JSONL
+fixture and fake Hub transport; they do not contact Hugging Face or MediaWiki.
+Live population and its operational retry check
 remain dashboard-only.
 
 ## Storage Contract
 
-PostgreSQL stores all profiles, Babels, edges, Wikipedia provenance, seed state,
-and Personal migration digests. Babel content is stored only as sanitized,
+PostgreSQL stores all profiles, Babels, edges, pinned Hugging Face/Wikipedia
+provenance, seed state, and Personal migration digests. Babel content is stored only as sanitized,
 Quill-compatible HTML. The application does not store a normalized/plain-text
 copy for embeddings.
 
@@ -135,8 +144,11 @@ status dashboard. None belongs in the current modular monolith.
   become healthy, then retry `just start`.
 - `another backend instance is active`: stop the existing `just start` or backend
   process before running migrations or Personal import.
-- dashboard shows HTTP 429: Wikipedia is rate limiting this machine. Preserve the
-  partial result, wait, then use the dashboard retry button. Do not bypass it.
+- backend reports `HF_TOKEN is required`: export a private-dataset read token in
+  the shell that launches `just start`; never put it in browser configuration.
+- dashboard source acquisition fails: verify `BABEL_HF_REVISION`, repository,
+  configuration, artifact checksum, and token access, then retry. There is no
+  live MediaWiki fallback.
 - Electron shows `Unable to connect`: confirm `http://127.0.0.1:8787/health`
   responds, then use the profile selector retry action.
 - Docker Snap cannot read a checkout under a hidden directory: use a visible

@@ -32,8 +32,9 @@ class PostgresWikipediaBabelRepository final : public WikipediaBabelRepository {
  public:
   explicit PostgresWikipediaBabelRepository(PostgresDatabase& database);
 
-  Result<std::optional<Babel>> findByPage(CreatorId owner_id,
-                                           WikipediaPageId page_id) override;
+  Result<std::optional<Babel>> findByPage(
+      CreatorId owner_id, WikipediaPageId page_id,
+      std::string_view provider = "wikipedia") override;
   Result<void> insertWikipediaBabel(const Babel& babel, const BabelSource& source) override;
   Result<void> attachSeedAssignment(BabelId babel_id, SeedAssignmentId assignment_id,
                                     std::string_view declared_title) override;
@@ -55,6 +56,8 @@ class PostgresSeedRunRepository final : public SeedRunRepository {
   Result<SeedStatusDto> status(SeedRunId run_id) override;
   Result<SeedStatusDto> latestStatus() override;
   Result<void> markNonterminalAsInterrupted() override;
+  Result<void> recordSourcePin(SeedRunId run_id,
+                               const PinnedSourceProvenance& provenance) override;
 
  private:
   PostgresDatabase& database_;
