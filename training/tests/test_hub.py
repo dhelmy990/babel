@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import struct
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +23,7 @@ from babel_training.hub import (  # noqa: E402
     export_distilled_artifact,
     publish_model_artifact,
 )
+import babel_training.hub as hub_module  # noqa: E402
 
 
 MODEL_REVISION = "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
@@ -36,10 +38,10 @@ def complete_adapter_tensors() -> dict[str, np.ndarray]:
         prefix = f"base_model.model.layers.{layer}.self_attn"
         for target, output_dimension in (("q_proj", 2048), ("v_proj", 1024)):
             tensors[f"{prefix}.{target}.lora_A.default.weight"] = np.zeros(
-                (16, 1024), dtype=np.float16
+                (16, 1024), dtype=np.float32
             )
             tensors[f"{prefix}.{target}.lora_B.default.weight"] = np.zeros(
-                (output_dimension, 16), dtype=np.float16
+                (output_dimension, 16), dtype=np.float32
             )
     return tensors
 
@@ -143,6 +145,55 @@ def test_export_is_atomic_deterministic_and_physical_safetensors(tmp_path: Path)
     for name, identity in document["files"].items():
         value = (first.path / name).read_bytes()
         assert identity == {"sha256": hashlib.sha256(value).hexdigest(), "size": len(value)}
+    mutable = first.document
+    mutable["artifact_id"] = "f" * 64
+    assert first.document["artifact_id"] == first.artifact_id
+
+
+def write_safetensors_probe(
+    path: Path, header: dict[str, object], *, payload_size: int,
+) -> None:
+    raw = json.dumps(header, separators=(",", ":")).encode()
+    with path.open("wb") as stream:
+        stream.write(struct.pack("<Q", len(raw)))
+        stream.write(raw)
+        stream.truncate(8 + len(raw) + payload_size)
+
+
+@pytest.mark.parametrize("mode", ["huge-header", "overlap", "trailing", "sparse"])
+def test_safetensors_preflight_rejects_hostile_layouts(
+    tmp_path: Path, mode: str,
+) -> None:
+    path = tmp_path / f"{mode}.safetensors"
+    expected = {"bias": (100,), "weight": (100, 1024)}
+    if mode == "huge-header":
+        path.write_bytes(struct.pack("<Q", 10 * 1024 * 1024))
+    else:
+        bias = [0, 400]
+        weight = [400, 410_000]
+        payload_size = 410_000
+        if mode == "overlap":
+            weight = [0, 409_600]
+        elif mode == "trailing":
+            payload_size += 1
+        elif mode == "sparse":
+            weight = [400, 10 * 1024 * 1024 * 1024]
+            payload_size = weight[1]
+        write_safetensors_probe(
+            path,
+            {
+                "bias": {"dtype": "F32", "shape": [100], "data_offsets": bias},
+                "weight": {
+                    "dtype": "F32", "shape": [100, 1024],
+                    "data_offsets": weight,
+                },
+            },
+            payload_size=payload_size,
+        )
+    with pytest.raises(ArtifactPublicationError, match="safetensors|header|layout|size"):
+        hub_module._preflight_safetensors(
+            path, expected_shapes=expected, expected_dtype="F32"
+        )
 
 
 def test_export_never_overwrites_and_rejects_symlink_destination(tmp_path: Path) -> None:
@@ -242,7 +293,8 @@ def test_export_rejects_empty_or_forged_training_and_validation_metadata(tmp_pat
 
 
 class Missing(Exception):
-    pass
+    def __init__(self, *_args: object) -> None:
+        self.response = SimpleNamespace(status_code=404)
 
 
 class ParentConflict(Exception):
@@ -397,6 +449,45 @@ def test_publish_rejects_unproved_privacy_and_redacts_token(tmp_path: Path) -> N
     assert token not in str(captured.value)
 
 
+@pytest.mark.parametrize(
+    ("status", "base"),
+    [(None, Exception), (403, Exception), (500, Exception), (403, FileNotFoundError)],
+)
+def test_publish_never_treats_deceptive_missing_errors_as_absence(
+    tmp_path: Path, status: int | None, base: type[Exception],
+) -> None:
+    artifact = export(tmp_path)
+
+    class DeceptiveEntryNotFound(base):
+        def __init__(self) -> None:
+            self.response = SimpleNamespace(status_code=status) if status else None
+
+    class DeceptiveApi(FakeApi):
+        def get_file_bytes(self, **kwargs: object) -> bytes:
+            raise DeceptiveEntryNotFound()
+
+    with pytest.raises(ArtifactPublicationError, match="preflight"):
+        publish_model_artifact(DeceptiveApi(), artifact, "secret", sleep=lambda _: None)
+
+
+def test_remote_verification_stops_at_expected_size(tmp_path: Path) -> None:
+    artifact = export(tmp_path)
+
+    class OversizeApi(FakeApi):
+        read_past_limit = False
+
+        def iter_file_bytes(self, *, path_in_repo: str, **kwargs: object):
+            value = self.get_file_bytes(path_in_repo=path_in_repo)
+            yield value + b"x"
+            self.read_past_limit = True
+            yield b"must-not-be-read"
+
+    api = OversizeApi()
+    with pytest.raises(ArtifactPublicationError, match="checksum|size|remote"):
+        publish_model_artifact(api, artifact, "secret", sleep=lambda _: None)
+    assert api.read_past_limit is False
+
+
 def test_publish_requires_immutable_export_identity_and_rejects_manifest_mutation(
     tmp_path: Path,
 ) -> None:
@@ -452,5 +543,7 @@ def test_publish_revalidates_safetensors_even_after_recomputed_manifest(
     )
     # Even a forged caller-side descriptor with the matching physical manifest must fail
     # because publication validates the safetensors key contract again.
-    with pytest.raises(ArtifactPublicationError, match="base model|LoRA|adapter"):
+    with pytest.raises(
+        ArtifactPublicationError, match="base model|LoRA|adapter|tensor names"
+    ):
         publish_model_artifact(FakeApi(), forged, "secret", sleep=lambda _: None)

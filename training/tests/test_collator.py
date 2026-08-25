@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "training" / "src"))
 
 from babel_training.collator import DistillationCollator  # noqa: E402
-from test_data import row  # noqa: E402
+from training.tests.test_data import row  # noqa: E402
 
 
 class FakeTensor:

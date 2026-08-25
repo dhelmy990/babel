@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import sys
+from collections.abc import Mapping
 from importlib.resources import files
 from pathlib import Path
 from types import SimpleNamespace
@@ -81,22 +82,26 @@ def row(number: int, *, split: str = "train") -> dict[str, object]:
     }
 
 
-def metadata(*, state: str = "pilot_ready", revision: str = COMMIT) -> dict[str, bytes]:
+def metadata(
+    *, state: str = "pilot_ready", revision: str = COMMIT, count: int = 8,
+    split: str = "train",
+) -> dict[str, bytes]:
     shard = {
-        "path": "distillation_2016/train/part-00000.parquet",
-        "split": "train",
-        "rows": 8,
+        "path": f"distillation_2016/{split}/part-00000.parquet",
+        "split": split,
+        "rows": count,
         "bytes": 10,
         "sha256": "b" * 64,
         "rows_sha256": "c" * 64,
         "schema": "distillation-example-v1",
         "version": 1,
         "min_article_key": "enwiki:2016-10-01:1",
-        "max_article_key": "enwiki:2016-10-01:8",
+        "max_article_key": f"enwiki:2016-10-01:{count}",
         "min_rank": "1" * 64,
         "max_rank": "2" * 64,
     }
-    counts = {"total": 8, "train": 8, "validation": 0, "test": 0}
+    counts = {"total": count, "train": 0, "validation": 0, "test": 0}
+    counts[split] = count
     aggregate = hashlib.sha256(canonical_json([shard])).hexdigest()
     provenance = {
         "schema_version": 1,
@@ -111,12 +116,12 @@ def metadata(*, state: str = "pilot_ready", revision: str = COMMIT) -> dict[str,
         }],
         "artifacts": {"accepted_jsonl": {"sha256": "e" * 64, "size": 1}},
         "reports": {
-            "row_counts": {"accepted": 8}, "match_rate": 1.0,
+            "row_counts": {"accepted": count}, "match_rate": 1.0,
             "exclusion_counts": {},
-            "text_statistics": {"count": 8, "min_length": 1, "max_length": 2,
+            "text_statistics": {"count": count, "min_length": 1, "max_length": 2,
                 "mean_length": 1.5, "stddev_length": 0.5, "p50_length": 1.5,
-                "p95_length": 2.0, "p99_length": 2.0, "histogram": [8]},
-            "vector_statistics": {"dimension": 100, "count": 8, "min_norm": 1.0,
+                "p95_length": 2.0, "p99_length": 2.0, "histogram": [count]},
+            "vector_statistics": {"dimension": 100, "count": count, "min_norm": 1.0,
                 "max_norm": 1.0, "mean_norm": 1.0, "stddev_norm": 0.0,
                 "p50_norm": 1.0, "p95_norm": 1.0, "non_finite_count": 0},
             "dataset_aggregate_sha256": aggregate,
@@ -137,8 +142,8 @@ def metadata(*, state: str = "pilot_ready", revision: str = COMMIT) -> dict[str,
     }
     readiness = {
         "state": state, "schema_version": 1, "teacher_dimension": 100,
-        "available_examples": 8,
-        "verified_shards": [{"path": shard["path"], "sha256": shard["sha256"], "examples": 8}],
+        "available_examples": count,
+        "verified_shards": [{"path": shard["path"], "sha256": shard["sha256"], "examples": count}],
         "source_checksums": {"accepted_jsonl": "e" * 64},
         "remote_verified": state != "building",
         "remote_commit_sha": revision if state != "building" else None,
@@ -249,7 +254,7 @@ def test_loader_fetches_pinned_metadata_before_one_streaming_dataset_call() -> N
 
 
 def test_loader_accepts_task5_non_self_referential_readiness_and_proves_privacy() -> None:
-    files = metadata()
+    files = metadata(count=1)
     readiness = json.loads(files["readiness.json"])
     readiness["remote_verified"] = False
     readiness["remote_commit_sha"] = None
@@ -270,7 +275,7 @@ def test_loader_accepts_task5_non_self_referential_readiness_and_proves_privacy(
 
 
 def test_provenance_uses_json_schema_uri_format_not_http_only_policy() -> None:
-    files = metadata()
+    files = metadata(count=1)
     manifest = json.loads(files["distillation_2016/manifest.json"])
     sources = manifest["provenance"]["document"]["sources"]
     sources[0]["url"] = "urn:babel:teacher:2016"
@@ -368,11 +373,13 @@ def test_every_streamed_row_is_validated_and_unknown_fields_fail_closed() -> Non
 
 
 def test_shuffle_is_deterministic_by_seed_and_epoch() -> None:
-    values = [row(index) for index in range(1, 20)]
+    values = list({
+        item["article_key"]: item for item in (row(index) for index in range(1, 20))
+    }.values())
 
     def make(seed: int, epoch: int = 0):
         return load_distillation_stream(
-            revision=COMMIT, token="secret", api=FakeApi(),
+            revision=COMMIT, token="secret", api=FakeApi(metadata(count=len(values))),
             load_dataset_fn=lambda *a, **k: copy.deepcopy(values),
             seed=seed, epoch=epoch, shuffle_buffer_size=4,
         )
@@ -389,7 +396,7 @@ def test_state_resume_preserves_shuffle_buffer_without_duplicates_or_skips() -> 
 
     def make():
         return load_distillation_stream(
-            revision=COMMIT, token="secret", api=FakeApi(),
+            revision=COMMIT, token="secret", api=FakeApi(metadata(count=len(values))),
             load_dataset_fn=lambda *a, **k: copy.deepcopy(values),
             seed=99, shuffle_buffer_size=5,
         )
@@ -424,7 +431,7 @@ def test_state_rejects_forged_cursor_rng_buffer_flags_and_redundant_shard() -> N
 
     def make():
         return load_distillation_stream(
-            revision=COMMIT, token="secret", api=FakeApi(),
+            revision=COMMIT, token="secret", api=FakeApi(metadata(count=len(values))),
             load_dataset_fn=lambda *a, **k: copy.deepcopy(values),
             seed=21, shuffle_buffer_size=4,
         )
@@ -468,7 +475,7 @@ def test_unstarted_state_has_rng_and_restores_exact_start() -> None:
 
     def make():
         return load_distillation_stream(
-            revision=COMMIT, token="secret", api=FakeApi(),
+            revision=COMMIT, token="secret", api=FakeApi(metadata(count=len(values))),
             load_dataset_fn=lambda *a, **k: copy.deepcopy(values),
             seed=42, shuffle_buffer_size=3,
         )
@@ -485,7 +492,7 @@ def test_unstarted_state_has_rng_and_restores_exact_start() -> None:
 def test_empty_stream_state_round_trip_and_epoch_boundary() -> None:
     def make(epoch: int = 0):
         return load_distillation_stream(
-            revision=COMMIT, token="secret", api=FakeApi(),
+            revision=COMMIT, token="secret", api=FakeApi(metadata(count=1, split="validation")),
             load_dataset_fn=lambda *a, **k: [], seed=4, epoch=epoch,
             shuffle_buffer_size=2,
         )
@@ -505,22 +512,164 @@ def test_empty_stream_state_round_trip_and_epoch_boundary() -> None:
 
 def test_state_rejects_immutable_identity_mismatch() -> None:
     stream = load_distillation_stream(
-        revision=COMMIT, token="secret", api=FakeApi(),
+        revision=COMMIT, token="secret", api=FakeApi(metadata(count=1)),
         load_dataset_fn=lambda *a, **k: [row(1)], seed=1, shuffle_buffer_size=2,
     )
     next(iter(stream)); state = stream.state_dict()
     other = load_distillation_stream(
-        revision=COMMIT, token="secret", api=FakeApi(),
+        revision=COMMIT, token="secret", api=FakeApi(metadata(count=1)),
         load_dataset_fn=lambda *a, **k: [row(1)], seed=2, shuffle_buffer_size=2,
     )
     with pytest.raises(ValueError, match="identity"):
         other.load_state_dict(state)
 
 
+def test_stream_projects_away_large_article_and_bounds_checkpoint_bytes() -> None:
+    value = row(1)
+    value["article_text"] = "x" * (4 * 1024 * 1024)
+    stream = load_distillation_stream(
+        revision=COMMIT, token="secret", api=FakeApi(metadata(count=1)),
+        load_dataset_fn=lambda *a, **k: [value], shuffle_buffer_size=10_000,
+    )
+    example = next(iter(stream))
+    state = stream.state_dict()
+
+    assert set(example) == {
+        "article_key", "page_id", "canonical_title", "lead_text",
+        "teacher_vector", "teacher_norm", "split",
+    }
+    assert "article_text" not in json.dumps(state)
+    assert len(canonical_json(state)) <= stream.checkpoint_byte_limit
+    assert stream.checkpoint_byte_limit <= 256 * 1024 * 1024
+
+
+def test_stream_rejects_oversized_training_text_before_buffering() -> None:
+    value = row(1)
+    value["lead_text"] = "x" * (16 * 1024 + 1)
+    stream = load_distillation_stream(
+        revision=COMMIT, token="secret", api=FakeApi(metadata(count=1)),
+        load_dataset_fn=lambda *a, **k: [value], shuffle_buffer_size=1,
+    )
+    with pytest.raises(DatasetContractError, match="size|large"):
+        next(iter(stream))
+    assert stream.state_dict()["cursor"]["shuffle_buffer"] == []
+
+
+def test_stream_rejects_wide_mapping_before_copying_its_entries() -> None:
+    class HostileWideRow(Mapping[str, object]):
+        def __len__(self) -> int:
+            return 1_000_000
+
+        def __iter__(self):
+            raise AssertionError("oversized mapping must not be traversed")
+
+        def __getitem__(self, key: str) -> object:
+            raise AssertionError("oversized mapping must not be read")
+
+    stream = load_distillation_stream(
+        revision=COMMIT, token="secret", api=FakeApi(metadata(count=1)),
+        load_dataset_fn=lambda *a, **k: [HostileWideRow()], shuffle_buffer_size=1,
+    )
+    with pytest.raises(DatasetContractError, match="fields|row"):
+        next(iter(stream))
+
+
+def test_state_rejects_wide_root_mapping_before_traversal() -> None:
+    class HostileWideState(Mapping[str, object]):
+        def __len__(self) -> int:
+            return 1_000_000
+
+        def __iter__(self):
+            raise AssertionError("oversized state must not be traversed")
+
+        def __getitem__(self, key: str) -> object:
+            raise AssertionError("oversized state must not be read")
+
+    stream = load_distillation_stream(
+        revision=COMMIT, token="secret", api=FakeApi(metadata(count=1)),
+        load_dataset_fn=lambda *a, **k: [row(1)], shuffle_buffer_size=1,
+    )
+    with pytest.raises(ValueError, match="shape|values"):
+        stream.load_state_dict(HostileWideState())
+
+
+@pytest.mark.parametrize(
+    ("declared", "physical", "message"),
+    [(8, 5, "early|count"), (5, 6, "additional|count")],
+)
+def test_stream_rejects_physical_split_count_mismatch(
+    declared: int, physical: int, message: str,
+) -> None:
+    unique = {item["article_key"]: item for item in (row(i) for i in range(1, 30))}
+    values = list(unique.values())[:physical]
+    stream = load_distillation_stream(
+        revision=COMMIT, token="secret", api=FakeApi(metadata(count=declared)),
+        load_dataset_fn=lambda *a, **k: copy.deepcopy(values),
+        shuffle_buffer_size=2,
+    )
+    with pytest.raises(DatasetContractError, match=message):
+        list(stream)
+
+
+def test_stream_rejects_duplicate_physical_article_identity() -> None:
+    unique = {item["article_key"]: item for item in (row(i) for i in range(1, 30))}
+    values = list(unique.values())[:4]
+    values.append(copy.deepcopy(values[0]))
+    stream = load_distillation_stream(
+        revision=COMMIT, token="secret", api=FakeApi(metadata(count=5)),
+        load_dataset_fn=lambda *a, **k: copy.deepcopy(values),
+        shuffle_buffer_size=2,
+    )
+    with pytest.raises(DatasetContractError, match="duplicate"):
+        list(stream)
+
+
+def test_resumption_reads_each_physical_row_once_at_every_cut_point() -> None:
+    unique = {item["article_key"]: item for item in (row(i) for i in range(1, 30))}
+    values = list(unique.values())[:8]
+
+    class CountingRows:
+        def __init__(self) -> None:
+            self.reads = 0
+
+        def __iter__(self):
+            for item in values:
+                self.reads += 1
+                yield copy.deepcopy(item)
+
+    def make(source: CountingRows):
+        return load_distillation_stream(
+            revision=COMMIT, token="secret", api=FakeApi(metadata(count=8)),
+            load_dataset_fn=lambda *a, **k: source,
+            seed=17, shuffle_buffer_size=3,
+        )
+
+    expected = [item["article_key"] for item in make(CountingRows())]
+    for cut in range(9):
+        original = make(CountingRows()); iterator = iter(original)
+        prefix = [next(iterator)["article_key"] for _ in range(cut)]
+        state = original.state_dict()
+        resumed_source = CountingRows(); resumed = make(resumed_source)
+        resumed.load_state_dict(state)
+        assert resumed_source.reads == 0
+        actual = prefix + [item["article_key"] for item in resumed]
+        assert actual == expected
+        assert resumed_source.reads == 8
+
+
+def test_resumable_stream_rejects_one_shot_iterators() -> None:
+    source = (row(index) for index in range(1, 9))
+    with pytest.raises(DatasetContractError, match="restartable"):
+        load_distillation_stream(
+            revision=COMMIT, token="secret", api=FakeApi(),
+            load_dataset_fn=lambda *a, **k: source,
+        )
+
+
 def test_validation_has_explicit_separate_api() -> None:
     value = row(1, split="validation")
     stream = load_validation_stream(
-        revision=COMMIT, token="secret", api=FakeApi(),
+        revision=COMMIT, token="secret", api=FakeApi(metadata(count=1, split="validation")),
         load_dataset_fn=lambda *a, **k: [value], shuffle_buffer_size=1,
     )
     assert next(iter(stream))["split"] == "validation"

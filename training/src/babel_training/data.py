@@ -7,6 +7,7 @@ import json
 import math
 import random
 import re
+import sqlite3
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from copy import deepcopy
 from functools import cache
@@ -42,6 +43,22 @@ _ALLOWED_ROW_FIELDS = frozenset(
         "reconciliation_status",
     }
 )
+_TRAINING_ROW_FIELDS = frozenset(
+    {
+        "article_key",
+        "page_id",
+        "canonical_title",
+        "lead_text",
+        "teacher_vector",
+        "teacher_norm",
+        "split",
+    }
+)
+# Qwen inputs are capped at 1024 tokens. A 16 KiB UTF-8 title+lead budget
+# allows a conservative 16 bytes/token while bounding the 10k shuffle buffer.
+_MAX_TRAINING_TEXT_BYTES = 16 * 1024
+_MAX_PROJECTED_ROW_BYTES = 24 * 1024
+_STATE_BASE_BYTES = 1024 * 1024
 _DATASET_CARD = b"""---
 configs:
 - config_name: distillation_2016
@@ -235,6 +252,69 @@ def validate_distillation_row(
     document["teacher_vector"] = checked_vector
     document["teacher_norm"] = float(norm)
     return document
+
+
+def _bounded_training_text(title: object, lead: object) -> None:
+    if not isinstance(title, str) or not title or not isinstance(lead, str) or not lead:
+        raise DatasetContractError("training title and lead text must be nonblank strings")
+    if len(title) + len(lead) > _MAX_TRAINING_TEXT_BYTES:
+        raise DatasetContractError("training text is too large for the bounded stream")
+    if len(title.encode("utf-8")) + len(lead.encode("utf-8")) > _MAX_TRAINING_TEXT_BYTES:
+        raise DatasetContractError("training UTF-8 text size exceeds the bounded stream")
+
+
+def validate_training_row(
+    value: object, *, expected_split: str | None = None
+) -> dict[str, object]:
+    """Validate or project one row to the only fields training may retain."""
+    if not isinstance(value, Mapping):
+        raise DatasetContractError("training row must be a mapping")
+    if len(value) not in {len(_ALLOWED_ROW_FIELDS), len(_TRAINING_ROW_FIELDS)}:
+        raise DatasetContractError("training row has an invalid number of fields")
+    document = dict(value)
+    if set(document) == _ALLOWED_ROW_FIELDS:
+        document = validate_distillation_row(document, expected_split=expected_split)
+        projected = {name: document[name] for name in _TRAINING_ROW_FIELDS}
+    elif set(document) == _TRAINING_ROW_FIELDS:
+        projected = document
+    else:
+        raise DatasetContractError("training row has missing, unknown, or retained hidden fields")
+    key = projected["article_key"]
+    page_id = projected["page_id"]
+    match = _ARTICLE_KEY.fullmatch(key) if isinstance(key, str) else None
+    split = projected["split"]
+    if (
+        match is None
+        or not _integer(page_id, minimum=1)
+        or int(match.group(1)) != page_id
+        or split not in {"train", "validation", "test"}
+        or split != _split_for(key)
+        or (expected_split is not None and split != expected_split)
+    ):
+        raise DatasetContractError("training row identity or split is invalid")
+    _bounded_training_text(projected["canonical_title"], projected["lead_text"])
+    vector = projected["teacher_vector"]
+    norm = projected["teacher_norm"]
+    if (
+        not isinstance(vector, (list, tuple))
+        or len(vector) != 100
+        or any(not _finite(item) for item in vector)
+        or not _finite(norm)
+        or float(norm) <= 0
+    ):
+        raise DatasetContractError("training teacher vector or norm is invalid")
+    checked_vector = [float(item) for item in vector]
+    calculated = math.sqrt(math.fsum(item * item for item in checked_vector))
+    if (
+        any(abs(item) > 3.4028234663852886e38 for item in checked_vector)
+        or not math.isclose(float(norm), calculated, rel_tol=1e-6, abs_tol=1e-7)
+    ):
+        raise DatasetContractError("training teacher vector semantics are invalid")
+    projected["teacher_vector"] = checked_vector
+    projected["teacher_norm"] = float(norm)
+    if len(_canonical_json(projected)) > _MAX_PROJECTED_ROW_BYTES:
+        raise DatasetContractError("projected training row exceeds its byte budget")
+    return projected
 
 
 def _parse_document(raw: bytes, label: str) -> dict[str, object]:
@@ -555,7 +635,7 @@ def _remote_bytes(
 
 def _validate_metadata(
     api: object, repo_id: str, revision: str, token: str
-) -> tuple[str, str]:
+) -> tuple[str, str, dict[str, int]]:
     manifest_bytes = _remote_bytes(api, repo_id, MANIFEST_PATH, revision, token)
     readiness_bytes = _remote_bytes(api, repo_id, READINESS_PATH, revision, token)
     readme_bytes = _remote_bytes(api, repo_id, README_PATH, revision, token)
@@ -565,7 +645,13 @@ def _validate_metadata(
         raise DatasetContractError(
             "pinned README does not advertise exactly the approved dataset configuration"
         )
-    return hashlib.sha256(manifest_bytes).hexdigest(), hashlib.sha256(readiness_bytes).hexdigest()
+    counts = manifest["counts"]
+    assert isinstance(counts, Mapping)
+    return (
+        hashlib.sha256(manifest_bytes).hexdigest(),
+        hashlib.sha256(readiness_bytes).hexdigest(),
+        {name: int(counts[name]) for name in ("train", "validation", "test")},
+    )
 
 
 def _prove_pinned_private_dataset(
@@ -597,6 +683,35 @@ def _tuple_state(value: object) -> object:
     return value
 
 
+def _preflight_state_value(value: object, *, max_nodes: int, max_characters: int) -> None:
+    """Reject hostile state containers before JSON encoding or deep copying."""
+    stack = [value]
+    nodes = 0
+    characters = 0
+    while stack:
+        item = stack.pop()
+        nodes += 1
+        if nodes > max_nodes:
+            raise ValueError("stream state contains too many values")
+        if isinstance(item, str):
+            if len(item) > _MAX_TRAINING_TEXT_BYTES:
+                raise ValueError("stream state contains an oversized string")
+            characters += len(item)
+            if characters > max_characters:
+                raise ValueError("stream state exceeds its character budget")
+        elif isinstance(item, Mapping):
+            if len(item) > max_nodes - nodes:
+                raise ValueError("stream state contains too many values")
+            stack.extend(item.keys())
+            stack.extend(item.values())
+        elif isinstance(item, (list, tuple)):
+            if len(item) > max_nodes - nodes:
+                raise ValueError("stream state contains too many values")
+            stack.extend(item)
+        elif item is not None and not isinstance(item, (bool, int, float)):
+            raise ValueError("stream state contains a non-JSON value")
+
+
 class StatefulDistillationStream(Iterable[dict[str, object]]):
     """A bounded-memory deterministic shuffle whose entire cursor is serializable."""
 
@@ -612,7 +727,12 @@ class StatefulDistillationStream(Iterable[dict[str, object]]):
         epoch: int,
         manifest_sha256: str,
         readiness_sha256: str,
+        expected_examples: int,
     ) -> None:
+        if iter(dataset) is dataset:
+            raise DatasetContractError(
+                "resumable streaming requires a restartable dataset iterable"
+            )
         self._dataset = dataset
         self.repo_id = repo_id
         self.revision = revision
@@ -623,6 +743,7 @@ class StatefulDistillationStream(Iterable[dict[str, object]]):
         self.epoch = epoch
         self.manifest_sha256 = manifest_sha256
         self.readiness_sha256 = readiness_sha256
+        self.expected_examples = expected_examples
         self._resume: dict[str, object] | None = None
         self._live: dict[str, object] = self._initial_cursor()
         self._iterating = False
@@ -653,7 +774,13 @@ class StatefulDistillationStream(Iterable[dict[str, object]]):
             "epoch": self.epoch,
             "manifest_sha256": self.manifest_sha256,
             "readiness_sha256": self.readiness_sha256,
+            "expected_examples": self.expected_examples,
         }
+
+    @property
+    def checkpoint_byte_limit(self) -> int:
+        buffered = min(self.shuffle_buffer_size, self.expected_examples)
+        return _STATE_BASE_BYTES + buffered * _MAX_PROJECTED_ROW_BYTES
 
     def set_epoch(self, epoch: int) -> None:
         if self._iterating or self._resume is not None:
@@ -665,7 +792,7 @@ class StatefulDistillationStream(Iterable[dict[str, object]]):
 
     def state_dict(self) -> dict[str, object]:
         state = self._resume if self._resume is not None else self._live
-        return {
+        document: dict[str, object] = {
             "state_version": 1,
             "identity": self._identity(),
             "cursor": deepcopy(state),
@@ -674,14 +801,24 @@ class StatefulDistillationStream(Iterable[dict[str, object]]):
                 "example_cursor": int(state["source_cursor"]),
             },
         }
+        document["state_sha256"] = hashlib.sha256(_canonical_json(document)).hexdigest()
+        if len(_canonical_json(document)) > self.checkpoint_byte_limit:
+            raise ValueError("stream checkpoint exceeds its deterministic byte budget")
+        return document
 
     def load_state_dict(self, state: Mapping[str, object]) -> None:
         if self._iterating:
             raise RuntimeError("cannot restore state while iterating")
-        if not isinstance(state, Mapping) or set(state) != {
-            "state_version", "identity", "cursor", "shard"
+        if not isinstance(state, Mapping) or len(state) != 5 or set(state) != {
+            "state_version", "identity", "cursor", "shard", "state_sha256"
         }:
             raise ValueError("stream state has an invalid shape")
+        _preflight_state_value(
+            state,
+            max_nodes=5_000
+            + min(self.shuffle_buffer_size, self.expected_examples) * 120,
+            max_characters=self.checkpoint_byte_limit,
+        )
         if state["state_version"] != 1 or state["identity"] != self._identity():
             raise ValueError("stream state immutable identity mismatch")
         cursor = state["cursor"]
@@ -699,6 +836,7 @@ class StatefulDistillationStream(Iterable[dict[str, object]]):
             or not _integer(processed)
             or not isinstance(buffer, list)
             or len(buffer) > self.shuffle_buffer_size
+            or len(buffer) > self.expected_examples
             or not isinstance(cursor["source_exhausted"], bool)
             or not isinstance(cursor["complete"], bool)
             or cursor["shuffle_rng_state"] is None
@@ -710,7 +848,7 @@ class StatefulDistillationStream(Iterable[dict[str, object]]):
         except (TypeError, ValueError) as error:
             raise ValueError("stream state shuffle RNG is invalid") from error
         checked_buffer = [
-            validate_distillation_row(item, expected_split=self.split) for item in buffer
+            validate_training_row(item, expected_split=self.split) for item in buffer
         ]
         restored = deepcopy(dict(cursor))
         restored["shuffle_buffer"] = checked_buffer
@@ -719,6 +857,8 @@ class StatefulDistillationStream(Iterable[dict[str, object]]):
             or set(shard) != {"index", "example_cursor"}
             or shard["index"] is not None
             or shard["example_cursor"] != source_cursor
+            or source_cursor > self.expected_examples
+            or processed > self.expected_examples
             or source_cursor != processed + len(checked_buffer)
             or len({str(item["article_key"]) for item in checked_buffer})
             != len(checked_buffer)
@@ -733,56 +873,21 @@ class StatefulDistillationStream(Iterable[dict[str, object]]):
                     not cursor["source_exhausted"]
                     or checked_buffer
                     or source_cursor != processed
+                    or processed != self.expected_examples
                 )
             )
         ):
             raise ValueError("stream state cursor/shard invariants are invalid")
-        expected = self._replay_cursor(
-            processed_examples=int(processed), complete=bool(cursor["complete"])
-        )
-        if restored != expected:
-            raise ValueError("stream state does not match deterministic stream history")
+        supplied_digest = state["state_sha256"]
+        unsigned = {name: state[name] for name in state if name != "state_sha256"}
+        if (
+            not _is_sha(supplied_digest, 64)
+            or len(_canonical_json(state)) > self.checkpoint_byte_limit
+            or hashlib.sha256(_canonical_json(unsigned)).hexdigest() != supplied_digest
+        ):
+            raise ValueError("stream state checksum or byte budget is invalid")
         self._resume = restored
         self._live = deepcopy(restored)
-
-    def _replay_cursor(
-        self, *, processed_examples: int, complete: bool
-    ) -> dict[str, object]:
-        """Reconstruct an observable checkpoint cursor without materializing rows."""
-        probe = StatefulDistillationStream(
-            self._dataset,
-            repo_id=self.repo_id,
-            revision=self.revision,
-            split=self.split,
-            seed=self.seed,
-            shuffle_buffer_size=self.shuffle_buffer_size,
-            epoch=self.epoch,
-            manifest_sha256=self.manifest_sha256,
-            readiness_sha256=self.readiness_sha256,
-        )
-        iterator = iter(probe)
-        try:
-            for _ in range(processed_examples):
-                try:
-                    next(iterator)
-                except StopIteration as error:
-                    raise ValueError(
-                        "stream state processed cursor exceeds deterministic dataset"
-                    ) from error
-            if complete:
-                try:
-                    next(iterator)
-                except StopIteration:
-                    pass
-                else:
-                    raise ValueError(
-                        "stream state is complete before deterministic dataset exhaustion"
-                    )
-            return deepcopy(probe._live)
-        finally:
-            close = getattr(iterator, "close", None)
-            if callable(close):
-                close()
 
     def __iter__(self) -> Iterator[dict[str, object]]:
         if self._iterating:
@@ -791,24 +896,55 @@ class StatefulDistillationStream(Iterable[dict[str, object]]):
 
     def _iterate(self) -> Iterator[dict[str, object]]:
         self._iterating = True
+        seen = sqlite3.connect("")
+        seen.execute("CREATE TABLE article_keys (article_key TEXT PRIMARY KEY)")
         try:
             source = iter(self._dataset)
             live = deepcopy(self._resume if self._resume is not None else self._live)
             rng = random.Random()
             rng.setstate(_tuple_state(live["shuffle_rng_state"]))  # type: ignore[arg-type]
+
+            def check_and_remember(raw: object) -> dict[str, object]:
+                checked = validate_training_row(raw, expected_split=self.split)
+                try:
+                    seen.execute(
+                        "INSERT INTO article_keys(article_key) VALUES (?)",
+                        (checked["article_key"],),
+                    )
+                except sqlite3.IntegrityError as error:
+                    raise DatasetContractError(
+                        "stream contains a duplicate physical article identity"
+                    ) from error
+                return checked
+
             for _ in range(int(live["source_cursor"])):
                 try:
-                    validate_distillation_row(next(source), expected_split=self.split)
+                    check_and_remember(next(source))
                 except StopIteration as error:
-                    raise ValueError("stream state source cursor exceeds dataset") from error
+                    raise DatasetContractError(
+                        "physical split ended before the restored cursor"
+                    ) from error
             self._resume = None
             self._live = live
             buffer = live["shuffle_buffer"]
             assert isinstance(buffer, list)
 
             def next_checked() -> dict[str, object]:
-                raw = next(source)
-                checked = validate_distillation_row(raw, expected_split=self.split)
+                if int(live["source_cursor"]) >= self.expected_examples:
+                    try:
+                        next(source)
+                    except StopIteration:
+                        raise
+                    raise DatasetContractError(
+                        "physical split contains additional rows beyond manifest count"
+                    )
+                try:
+                    raw = next(source)
+                except StopIteration as error:
+                    raise DatasetContractError(
+                        "physical split ended early before manifest count"
+                    ) from error
+                checked = check_and_remember(raw)
                 live["source_cursor"] = int(live["source_cursor"]) + 1
                 return checked
 
@@ -840,6 +976,7 @@ class StatefulDistillationStream(Iterable[dict[str, object]]):
                 yield deepcopy(outgoing)
             live["complete"] = True
         finally:
+            seen.close()
             self._iterating = False
 
 
@@ -877,7 +1014,9 @@ def _load_stream(
 
         api = HfApi()
     _prove_pinned_private_dataset(api, repo_id, revision, token)
-    manifest_sha, readiness_sha = _validate_metadata(api, repo_id, revision, token)
+    manifest_sha, readiness_sha, split_counts = _validate_metadata(
+        api, repo_id, revision, token
+    )
     if load_dataset_fn is None:
         from datasets import load_dataset as load_dataset_fn
     dataset = load_dataset_fn(
@@ -900,6 +1039,7 @@ def _load_stream(
         epoch=epoch,
         manifest_sha256=manifest_sha,
         readiness_sha256=readiness_sha,
+        expected_examples=split_counts[split],
     )
 
 

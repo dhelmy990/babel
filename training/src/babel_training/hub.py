@@ -11,9 +11,11 @@ import os
 import re
 import shutil
 import stat
+import struct
 import tempfile
 import time
 from collections.abc import Iterator, Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -50,6 +52,8 @@ _MANIFEST_NAME = "artifact_manifest.json"
 _QWEN_NUM_HIDDEN_LAYERS = 28
 _QWEN_HIDDEN_SIZE = 1024
 _QWEN_LORA_OUTPUTS = {"q_proj": 2048, "v_proj": 1024}
+_SAFETENSORS_MAX_HEADER_BYTES = 256 * 1024
+_SAFETENSORS_DTYPE_BYTES = {"F32": 4}
 
 
 class ArtifactExportError(ValueError):
@@ -171,21 +175,16 @@ def _checked_tensors(
 
 
 def _validate_projection_layout(tensors: Mapping[str, np.ndarray]) -> None:
-    weight_names = set(tensors) & {"weight", "projection.weight"}
-    if len(weight_names) != 1:
-        raise ArtifactExportError("projection requires exactly one weight tensor")
-    weight_name = next(iter(weight_names))
-    bias_name = "bias" if weight_name == "weight" else "projection.bias"
-    if set(tensors) != {weight_name, bias_name}:
+    if set(tensors) != {"weight", "bias"}:
         raise ArtifactExportError(
-            "projection requires exactly one weight and its matching bias"
+            "projection requires exactly the weight and bias tensors"
         )
-    weight = tensors[weight_name]
-    if weight.dtype.kind != "f" or weight.shape != (100, 1024):
-        raise ArtifactExportError("projection weight must have float shape (100, 1024)")
-    bias = tensors[bias_name]
+    weight = tensors["weight"]
+    if weight.dtype != np.dtype(np.float32) or weight.shape != (100, 1024):
+        raise ArtifactExportError("projection weight must have float32 shape (100, 1024)")
+    bias = tensors["bias"]
     if (
-        bias.dtype.kind != "f"
+        bias.dtype != np.dtype(np.float32)
         or bias.dtype != weight.dtype
         or bias.shape != (100,)
         or not bias.flags.c_contiguous
@@ -193,6 +192,22 @@ def _validate_projection_layout(tensors: Mapping[str, np.ndarray]) -> None:
         raise ArtifactExportError(
             "projection bias must match the weight dtype and have contiguous float shape (100,)"
         )
+
+
+def _expected_adapter_shapes(rank: int = 16) -> dict[str, tuple[int, int]]:
+    expected: dict[str, tuple[int, int]] = {}
+    for layer in range(_QWEN_NUM_HIDDEN_LAYERS):
+        prefix = f"base_model.model.layers.{layer}.self_attn"
+        for target, output_dimension in _QWEN_LORA_OUTPUTS.items():
+            expected[f"{prefix}.{target}.lora_A.default.weight"] = (
+                rank,
+                _QWEN_HIDDEN_SIZE,
+            )
+            expected[f"{prefix}.{target}.lora_B.default.weight"] = (
+                output_dimension,
+                rank,
+            )
+    return expected
 
 
 def _validate_adapter_layout(
@@ -217,24 +232,13 @@ def _validate_adapter_layout(
         or len(targets) != 2
     ):
         raise ArtifactExportError("adapter_config does not match the frozen LoRA contract")
-    expected: dict[str, tuple[int, int]] = {}
-    for layer in range(_QWEN_NUM_HIDDEN_LAYERS):
-        prefix = f"base_model.model.layers.{layer}.self_attn"
-        for target, output_dimension in _QWEN_LORA_OUTPUTS.items():
-            expected[f"{prefix}.{target}.lora_A.default.weight"] = (
-                rank,
-                _QWEN_HIDDEN_SIZE,
-            )
-            expected[f"{prefix}.{target}.lora_B.default.weight"] = (
-                output_dimension,
-                rank,
-            )
+    expected = _expected_adapter_shapes(rank)
     if set(tensors) != set(expected):
         raise ArtifactExportError(
             "adapter must contain the complete exact pinned Qwen q_proj/v_proj layout"
         )
     if any(
-        tensor.dtype.kind != "f"
+        tensor.dtype != np.dtype(np.float32)
         or tensor.ndim != 2
         or tensor.shape != expected[name]
         or not tensor.flags.c_contiguous
@@ -440,41 +444,57 @@ def _rename_noreplace(source: Path, destination: Path) -> None:
         raise OSError(value, os.strerror(value), destination)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class ArtifactManifest(Mapping[str, object]):
     path: Path
-    document: dict[str, object]
+    _document: dict[str, object]
     artifact_id: str
     manifest_sha256: str
 
+    def __init__(
+        self,
+        path: Path,
+        document: Mapping[str, object],
+        artifact_id: str,
+        manifest_sha256: str,
+    ) -> None:
+        object.__setattr__(self, "path", path)
+        object.__setattr__(self, "_document", deepcopy(dict(document)))
+        object.__setattr__(self, "artifact_id", artifact_id)
+        object.__setattr__(self, "manifest_sha256", manifest_sha256)
+
+    @property
+    def document(self) -> dict[str, object]:
+        return deepcopy(self._document)
+
     @property
     def model_revision(self) -> str:
-        return str(self.document["model"]["revision"])  # type: ignore[index]
+        return str(self._document["model"]["revision"])  # type: ignore[index]
 
     @property
     def tokenizer_revision(self) -> str:
-        return str(self.document["tokenizer"]["revision"])  # type: ignore[index]
+        return str(self._document["tokenizer"]["revision"])  # type: ignore[index]
 
     @property
     def dataset_commit_sha(self) -> str:
-        return str(self.document["dataset"]["commit_sha"])  # type: ignore[index]
+        return str(self._document["dataset"]["commit_sha"])  # type: ignore[index]
 
     @property
     def projection_sha256(self) -> str:
-        return str(self.document["files"]["projection.safetensors"]["sha256"])  # type: ignore[index]
+        return str(self._document["files"]["projection.safetensors"]["sha256"])  # type: ignore[index]
 
     @property
     def adapter_sha256(self) -> str:
-        return str(self.document["files"]["adapter_model.safetensors"]["sha256"])  # type: ignore[index]
+        return str(self._document["files"]["adapter_model.safetensors"]["sha256"])  # type: ignore[index]
 
     def __getitem__(self, key: str) -> object:
-        return self.document[key]
+        return deepcopy(self._document[key])
 
     def __iter__(self) -> Iterator[str]:
-        return iter(self.document)
+        return iter(self._document)
 
     def __len__(self) -> int:
-        return len(self.document)
+        return len(self._document)
 
 
 def export_distilled_artifact(
@@ -589,6 +609,85 @@ def export_distilled_artifact(
         raise
 
 
+def _preflight_safetensors(
+    path: Path,
+    *,
+    expected_shapes: Mapping[str, tuple[int, ...]],
+    expected_dtype: str,
+) -> None:
+    """Validate a bounded safetensors header and exact physical payload layout."""
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        file_size = os.fstat(descriptor).st_size
+        prefix = os.read(descriptor, 8)
+        if len(prefix) != 8:
+            raise ArtifactPublicationError("safetensors header prefix is truncated")
+        header_size = struct.unpack("<Q", prefix)[0]
+        if (
+            header_size < 2
+            or header_size > _SAFETENSORS_MAX_HEADER_BYTES
+            or header_size > file_size - 8
+        ):
+            raise ArtifactPublicationError("safetensors header size is invalid")
+        chunks: list[bytes] = []
+        remaining = header_size
+        while remaining:
+            block = os.read(descriptor, min(remaining, 64 * 1024))
+            if not block:
+                raise ArtifactPublicationError("safetensors header is truncated")
+            chunks.append(block)
+            remaining -= len(block)
+    finally:
+        os.close(descriptor)
+
+    def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        value: dict[str, object] = {}
+        for name, item in pairs:
+            if name in value:
+                raise ValueError("duplicate JSON key")
+            value[name] = item
+        return value
+
+    try:
+        header = json.loads(b"".join(chunks), object_pairs_hook=unique_object)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise ArtifactPublicationError("safetensors header JSON is invalid") from error
+    if not isinstance(header, Mapping) or set(header) != set(expected_shapes):
+        raise ArtifactPublicationError("safetensors header tensor names are invalid")
+    dtype_bytes = _SAFETENSORS_DTYPE_BYTES.get(expected_dtype)
+    if dtype_bytes is None:
+        raise ArtifactPublicationError("safetensors expected dtype is unsupported")
+    intervals: list[tuple[int, int]] = []
+    for name, shape in expected_shapes.items():
+        entry = header[name]
+        if not isinstance(entry, Mapping) or set(entry) != {
+            "dtype", "shape", "data_offsets"
+        }:
+            raise ArtifactPublicationError("safetensors tensor descriptor is invalid")
+        offsets = entry["data_offsets"]
+        if (
+            entry["dtype"] != expected_dtype
+            or entry["shape"] != list(shape)
+            or not isinstance(offsets, list)
+            or len(offsets) != 2
+            or any(not isinstance(item, int) or isinstance(item, bool) for item in offsets)
+        ):
+            raise ArtifactPublicationError("safetensors dtype, shape, or offsets are invalid")
+        start, end = offsets
+        elements = math.prod(shape)
+        if start < 0 or end < start or end - start != elements * dtype_bytes:
+            raise ArtifactPublicationError("safetensors tensor byte size is invalid")
+        intervals.append((start, end))
+    intervals.sort()
+    cursor = 0
+    for start, end in intervals:
+        if start != cursor:
+            raise ArtifactPublicationError("safetensors payload layout overlaps or has gaps")
+        cursor = end
+    if file_size != 8 + header_size + cursor:
+        raise ArtifactPublicationError("safetensors physical file size has trailing data")
+
+
 def _artifact_document(
     artifact_path: Path,
     *,
@@ -659,6 +758,18 @@ def _artifact_document(
     if not isinstance(files, Mapping) or set(files) != _PAYLOAD_NAMES:
         raise ArtifactPublicationError("artifact payload manifest is invalid")
     paths = {path.name: path for path in entries}
+    # Parse the bounded safetensors headers and prove the exact physical size
+    # before hashing or allowing safetensors to map tensor payloads.
+    _preflight_safetensors(
+        paths["projection.safetensors"],
+        expected_shapes={"weight": (100, 1024), "bias": (100,)},
+        expected_dtype="F32",
+    )
+    _preflight_safetensors(
+        paths["adapter_model.safetensors"],
+        expected_shapes=_expected_adapter_shapes(),
+        expected_dtype="F32",
+    )
     for name, recorded in files.items():
         path = paths[name]
         if (
@@ -705,6 +816,8 @@ def _artifact_document(
         _validate_adapter_layout(
             adapter, metadata["adapter_config.json"], training_config
         )
+    except ArtifactPublicationError:
+        raise
     except ArtifactExportError as error:
         raise ArtifactPublicationError(f"artifact semantic validation failed: {error}") from None
     except Exception as error:
@@ -715,9 +828,8 @@ def _artifact_document(
 
 
 def _is_missing(error: BaseException) -> bool:
-    name = type(error).__name__.casefold()
     response = getattr(error, "response", None)
-    return isinstance(error, FileNotFoundError) or "notfound" in name or "missing" in name or getattr(response, "status_code", None) == 404
+    return getattr(response, "status_code", None) == 404
 
 
 def _is_retryable(error: BaseException) -> bool:
@@ -830,21 +942,26 @@ def _verify_remote(
     _private_model_info(api, repo_id, revision, token)
     verified: dict[str, dict[str, object]] = {}
     for remote_path, local in sorted(uploads.items()):
+        expected_size = int(expected[remote_path]["size"])
+        expected_sha = str(expected[remote_path]["sha256"])
         digest = hashlib.sha256()
         size = 0
         try:
             for chunk in _remote_chunks(api, repo_id, remote_path, revision, token):
                 if not isinstance(chunk, bytes):
                     raise TypeError("remote stream yielded non-bytes")
-                digest.update(chunk); size += len(chunk)
+                if size + len(chunk) > expected_size:
+                    raise ArtifactPublicationError(
+                        f"remote artifact size exceeds manifest: {remote_path}"
+                    )
+                digest.update(chunk)
+                size += len(chunk)
         except ArtifactPublicationError:
             raise
         except BaseException as error:
             raise ArtifactPublicationError(
                 f"remote artifact file could not be verified ({type(error).__name__})"
             ) from None
-        expected_size = int(expected[remote_path]["size"])
-        expected_sha = str(expected[remote_path]["sha256"])
         if size != expected_size or digest.hexdigest() != expected_sha:
             raise ArtifactPublicationError(f"remote artifact checksum mismatch: {remote_path}")
         verified[remote_path] = {"sha256": expected_sha, "size": expected_size}

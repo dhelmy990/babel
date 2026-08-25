@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 
-from .data import validate_distillation_row
+from .data import validate_training_row
 
 
 class DistillationCollator:
@@ -56,7 +56,7 @@ class DistillationCollator:
     def __call__(self, examples: Sequence[Mapping[str, object]]) -> dict[str, Any]:
         if not isinstance(examples, Sequence) or isinstance(examples, (str, bytes)) or not examples:
             raise ValueError("collator batch must be nonempty")
-        checked = [validate_distillation_row(example) for example in examples]
+        checked = [validate_training_row(example) for example in examples]
         texts = [
             str(example["canonical_title"]) + "\n\n" + str(example["lead_text"])
             for example in checked

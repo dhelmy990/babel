@@ -31,7 +31,7 @@ from babel_data.release import (  # noqa: E402
     validate_manifest_extension,
 )
 from babel_data.shard import load_readiness, write_shards  # noqa: E402
-from test_shard import provenance_document  # noqa: E402
+from data_pipeline.tests.test_shard import provenance_document  # noqa: E402
 
 
 COMMIT = "a" * 40
