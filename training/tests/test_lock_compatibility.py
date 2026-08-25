@@ -24,10 +24,13 @@ def test_training_runtime_pins_archived_torchdata_0_11() -> None:
 def test_training_lock_pins_official_torch_cu128_without_cuda_13() -> None:
     pyproject = (REPOSITORY_ROOT / "training" / "pyproject.toml").read_text()
     lock = (REPOSITORY_ROOT / "training" / "requirements-colab.lock").read_text()
+    active_directives = {
+        line.strip() for line in lock.splitlines() if line.startswith("--")
+    }
 
     assert '"torch==2.11.0+cu128"' in pyproject
-    assert f"--index-url={PYPI_INDEX}" in lock
-    assert f"--extra-index-url {PYTORCH_CU128_INDEX}" in lock
+    assert f"--index-url {PYTORCH_CU128_INDEX}" in active_directives
+    assert f"--extra-index-url {PYPI_INDEX}" in active_directives
     assert "torch==2.11.0+cu128" in lock
     assert "cu13" not in lock.lower()
     assert not re.search(r"^cuda-toolkit.*==13(?:\.|$)", lock, re.MULTILINE)
