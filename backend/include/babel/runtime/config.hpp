@@ -25,8 +25,8 @@ struct RuntimeConfig {
   SourceSelection seed_source{
       .repository = "dhelmy990/babel-wikipedia-experiment",
       .configuration = "demo_catalog_2026_06",
-      .requested_revision = "3fc8c1a2d84d6c8d069876ed27f91d6ead7fab2b",
-      .artifact_path = "backend-seed/2026-06/resolved-catalog-v1.jsonl",
+      .requested_revision = "e1acc648fcace8820dd5ee70bae9216ea4334555",
+      .artifact_path = "backend-seed/2026-06/resolved-catalog-v3.jsonl",
   };
   std::filesystem::path huggingface_cache_root{
       "/home/dhelmy990/Data/babel-data/cache/backend-seed"};

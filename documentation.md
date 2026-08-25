@@ -189,8 +189,8 @@ Runtime source selection uses these environment variables:
 | `HF_TOKEN` | required by `serve`; no default |
 | `BABEL_HF_REPOSITORY` | `dhelmy990/babel-wikipedia-experiment` |
 | `BABEL_HF_CONFIG` | `demo_catalog_2026_06` |
-| `BABEL_HF_REVISION` | `3fc8c1a2d84d6c8d069876ed27f91d6ead7fab2b` |
-| `BABEL_HF_ARTIFACT_PATH` | `backend-seed/2026-06/resolved-catalog-v1.jsonl` |
+| `BABEL_HF_REVISION` | `e1acc648fcace8820dd5ee70bae9216ea4334555` |
+| `BABEL_HF_ARTIFACT_PATH` | `backend-seed/2026-06/resolved-catalog-v3.jsonl` |
 | `BABEL_DATA_ROOT` | `/home/dhelmy990/Data/babel-data` |
 
 After pinning, the background runner processes at most four assignments

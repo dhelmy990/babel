@@ -38,7 +38,7 @@ Start PostgreSQL explicitly, then start the application:
 ```bash
 just db-up
 export HF_TOKEN='<private dataset read token>'
-export BABEL_HF_REVISION='3fc8c1a2d84d6c8d069876ed27f91d6ead7fab2b'
+export BABEL_HF_REVISION='e1acc648fcace8820dd5ee70bae9216ea4334555'
 just start
 ```
 

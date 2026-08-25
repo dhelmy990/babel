@@ -357,9 +357,9 @@ TEST_CASE("runtime configuration is fixed to loopback and rejects unsafe databas
   CHECK(defaults->seed_source.repository == "dhelmy990/babel-wikipedia-experiment");
   CHECK(defaults->seed_source.configuration == "demo_catalog_2026_06");
   CHECK(defaults->seed_source.requested_revision ==
-        "3fc8c1a2d84d6c8d069876ed27f91d6ead7fab2b");
+        "e1acc648fcace8820dd5ee70bae9216ea4334555");
   CHECK(defaults->seed_source.artifact_path ==
-        "backend-seed/2026-06/resolved-catalog-v1.jsonl");
+        "backend-seed/2026-06/resolved-catalog-v3.jsonl");
   CHECK(defaults->huggingface_cache_root ==
         "/home/dhelmy990/Data/babel-data/cache/backend-seed");
   CHECK_FALSE(defaults->huggingface_token.has_value());
