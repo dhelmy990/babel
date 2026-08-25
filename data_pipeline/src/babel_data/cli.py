@@ -79,17 +79,29 @@ def _prepare(arguments: argparse.Namespace) -> dict[str, object]:
         else Path(arguments.data_root) / "prepared" / "2016-pilot"
     )
     source_checksum = _source_sha256(source)
+    provenance_path = Path(arguments.provenance)
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    if not isinstance(provenance, dict):
+        raise ValueError("provenance document must be a JSON object")
+    try:
+        artifact = provenance["artifacts"]["accepted_jsonl"]
+    except (KeyError, TypeError) as error:
+        raise ValueError(
+            "provenance must include the accepted_jsonl artifact"
+        ) from error
+    if not isinstance(artifact, dict) or artifact != {
+        "sha256": source_checksum,
+        "size": source.stat().st_size,
+    }:
+        raise ValueError(
+            "provenance accepted_jsonl artifact does not match the input"
+        )
     result = write_shards(
         _jsonl(source),
         output,
         pilot_size=arguments.pilot_size,
         target_shard_bytes=arguments.target_shard_bytes,
-        source_provenance={"accepted_jsonl_sha256": source_checksum},
-        dataset_provenance={
-            "configuration": "distillation_2016",
-            "snapshot_date": "2016-10-01",
-        },
-        model_provenance={"teacher_dimension": 100},
+        provenance=provenance,
     )
     build_readiness(
         result,
@@ -118,6 +130,9 @@ def _publish(arguments: argparse.Namespace) -> dict[str, object]:
     readiness_path = root / "readiness.json"
     readiness = load_readiness(readiness_path, manifest_path)
     readiness.mark_remote_verified(revision)
+    # Persist and fsync the exact remote evidence before it can authorize a
+    # readiness transition or local artifact deletion.
+    readiness.save(readiness_path)
     if readiness.state == "building":
         readiness.transition("pilot_ready")
     if arguments.state == "complete" and readiness.state == "pilot_ready":
@@ -164,6 +179,7 @@ def _parser() -> argparse.ArgumentParser:
 
     prepare = commands.add_parser("prepare-2016")
     prepare.add_argument("--input", required=True)
+    prepare.add_argument("--provenance", required=True)
     prepare.add_argument("--data-root", default=str(DEFAULT_DATA_ROOT))
     prepare.add_argument("--output-root")
     prepare.add_argument("--pilot-size", type=int, default=10_000)

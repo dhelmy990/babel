@@ -7,6 +7,8 @@ machines; fixture tests intentionally use much smaller values.
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import hashlib
 import heapq
 import json
@@ -15,6 +17,7 @@ import os
 import shutil
 import tempfile
 from collections.abc import Iterable, Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -124,6 +127,8 @@ class Readiness:
     _verified_paths: frozenset[str] = frozenset()
     _manifest_path: Path | None = None
     _artifact_root: Path | None = None
+    _evidence_path: Path | None = None
+    _evidence_durable: bool = False
 
     def to_document(self) -> dict[str, object]:
         document: dict[str, object] = {
@@ -149,15 +154,49 @@ class Readiness:
             and self._verified_paths == self._local_paths
             and self._manifest_path is not None
             and self._artifact_root is not None
+            and self._evidence_path is not None
+            and self._evidence_durable
         ):
             return False
         try:
-            if _sha256(self._manifest_path) != self._verified_manifest_sha256:
+            evidence = json.loads(self._evidence_path.read_text(encoding="utf-8"))
+            if evidence != {
+                "commit_sha": self.remote_commit_sha,
+                "manifest_sha256": self._verified_manifest_sha256,
+                "verified_paths": sorted(self._verified_paths),
+            }:
                 return False
-            for shard in self.verified_shards:
-                if _sha256(self._artifact_root / str(shard["path"])) != shard["sha256"]:
+            manifest_bytes = self._manifest_path.read_bytes()
+            if (
+                hashlib.sha256(manifest_bytes).hexdigest()
+                != self._verified_manifest_sha256
+            ):
+                return False
+            manifest = json.loads(manifest_bytes)
+            manifest_shards = manifest["shards"]
+            if not isinstance(manifest_shards, list):
+                return False
+            manifest_identities = {
+                str(item["path"]): (str(item["sha256"]), int(item["rows"]))
+                for item in manifest_shards
+            }
+            readiness_identities = {
+                str(item["path"]): (str(item["sha256"]), int(item["examples"]))
+                for item in self.verified_shards
+            }
+            if (
+                len(manifest_identities) != len(manifest_shards)
+                or manifest_identities != readiness_identities
+                or frozenset(manifest_identities) != self._local_paths
+            ):
+                return False
+            artifact_root = self._artifact_root.resolve()
+            for shard_path, (checksum, _) in manifest_identities.items():
+                local = (artifact_root / shard_path).resolve(strict=True)
+                local.relative_to(artifact_root)
+                if _sha256(local) != checksum:
                     return False
-        except (FileNotFoundError, OSError):
+        except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError):
             return False
         return True
 
@@ -190,6 +229,7 @@ class Readiness:
         self.remote_commit_sha = commit_sha
         self._verified_manifest_sha256 = verified_manifest
         self._verified_paths = paths
+        self._evidence_durable = False
 
     def transition(self, state: str) -> None:
         if state not in _STATE_ORDER:
@@ -215,6 +255,15 @@ class Readiness:
             validate_document("dataset-readiness-v1", prior)
             if _STATE_ORDER[str(prior["state"])] > _STATE_ORDER[self.state]:
                 raise ValueError("persisted readiness state cannot regress")
+            if prior["source_checksums"] != self.source_checksums:
+                raise ValueError("persisted source checksum identity is immutable")
+            if prior["remote_verified"] and not self.remote_verified:
+                raise ValueError("persisted remote verification cannot regress")
+            if (
+                prior["remote_commit_sha"] is not None
+                and prior["remote_commit_sha"] != self.remote_commit_sha
+            ):
+                raise ValueError("persisted remote commit identity is immutable")
             old = {item["path"]: item["sha256"] for item in prior["verified_shards"]}
             new = {item["path"]: item["sha256"] for item in self.verified_shards}
             for shard_path, checksum in old.items():
@@ -227,8 +276,9 @@ class Readiness:
                 or self._verified_paths != self._local_paths
             ):
                 raise ValueError("remote readiness requires durable exact verification evidence")
+            evidence_path = _verification_evidence_path(destination)
             _atomic_write_json(
-                _verification_evidence_path(destination),
+                evidence_path,
                 {
                     "commit_sha": self.remote_commit_sha,
                     "manifest_sha256": self._verified_manifest_sha256,
@@ -236,6 +286,8 @@ class Readiness:
                 },
             )
         _atomic_write_json(destination, self.to_document())
+        self._evidence_path = evidence_path if self.remote_verified else None
+        self._evidence_durable = self.remote_verified
 
 
 def build_readiness(
@@ -356,6 +408,10 @@ def load_readiness(
         _verified_paths=verified_paths,
         _manifest_path=local_manifest_path,
         _artifact_root=local_manifest_path.parent.parent,
+        _evidence_path=(
+            _verification_evidence_path(Path(path)) if remote_verified else None
+        ),
+        _evidence_durable=remote_verified,
     )
 
 
@@ -381,6 +437,11 @@ def _atomic_write_json(destination: Path, value: object) -> None:
             temporary.flush()
             os.fsync(temporary.fileno())
         os.replace(temporary_name, destination)
+        directory = os.open(destination.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     except BaseException:
         try:
             os.unlink(temporary_name)
@@ -397,7 +458,8 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _document(value: object) -> dict[str, object]:
+def validate_distillation_row(value: object) -> dict[str, object]:
+    """Return a normalized row after all schema and semantic checks."""
     if isinstance(value, Mapping):
         document = dict(value)
     else:
@@ -415,6 +477,11 @@ def _document(value: object) -> dict[str, object]:
     if isinstance(revision, bool):
         raise ValueError("source_revision_id must be an integer or null, not bool")
     key = str(document["article_key"])
+    expected_key = f"enwiki:{document['snapshot_date']}:{document['page_id']}"
+    if key != expected_key:
+        raise ValueError(
+            f"article_key/page identity mismatch: expected {expected_key!r}"
+        )
     if document["split"] != split_for(key):
         raise ValueError(f"split mismatch for article_key {key!r}")
     # Canonicalize tuples/NumPy arrays without asking Arrow to infer types.
@@ -428,6 +495,67 @@ def _document(value: object) -> dict[str, object]:
     document["teacher_vector"] = vector
     document["teacher_norm"] = norm
     return document
+
+
+def _rename_noreplace(source: Path, destination: Path) -> None:
+    """Atomically publish a directory without ever replacing another entry."""
+    library = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(library, "renameat2", None)
+    if renameat2 is None:
+        raise OSError(errno.ENOSYS, "renameat2(RENAME_NOREPLACE) is unavailable")
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        -100,
+        os.fsencode(source),
+        -100,
+        os.fsencode(destination),
+        1,
+    )
+    if result != 0:
+        error_number = ctypes.get_errno()
+        if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
+            raise FileExistsError(error_number, os.strerror(error_number), destination)
+        raise OSError(error_number, os.strerror(error_number), destination)
+    try:
+        directory = os.open(destination.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except BaseException as publication_error:
+        # The name became visible before its durability check failed. Move it
+        # back to the private staging name with the same no-clobber primitive,
+        # so the caller's cleanup can fail closed without deleting a racer.
+        rollback = renameat2(
+            -100,
+            os.fsencode(destination),
+            -100,
+            os.fsencode(source),
+            1,
+        )
+        if rollback != 0:
+            rollback_error = ctypes.get_errno()
+            raise OSError(
+                rollback_error,
+                "directory fsync failed and atomic publication rollback failed",
+                destination,
+            ) from publication_error
+        try:
+            directory = os.open(destination.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        except OSError:
+            pass
+        raise
 
 
 def _chunks(
@@ -471,9 +599,7 @@ def write_shards(
     pilot_size: int = DEFAULT_PILOT_SIZE,
     target_shard_bytes: int = DEFAULT_TARGET_SHARD_BYTES,
     *,
-    source_provenance: Mapping[str, object] | None = None,
-    dataset_provenance: Mapping[str, object] | None = None,
-    model_provenance: Mapping[str, object] | None = None,
+    provenance: Mapping[str, object] | None = None,
 ) -> ShardResult:
     """Validate rows and atomically publish deterministic pilot Parquet shards."""
     if (
@@ -488,12 +614,16 @@ def write_shards(
         or target_shard_bytes <= 0
     ):
         raise ValueError("target_shard_bytes must be a positive integer")
+    if provenance is None:
+        raise ValueError("provenance-v1 evidence is required")
+    validate_document("provenance-v1", provenance)
+    checked_provenance = deepcopy(dict(provenance))
 
     pilot_heap: list[_PilotCandidate] = []
     article_keys: set[str] = set()
     page_ids: set[int] = set()
     for value in rows:
-        document = _document(value)
+        document = validate_distillation_row(value)
         article_key = str(document["article_key"])
         page_id = int(document["page_id"])
         if article_key in article_keys:
@@ -577,16 +707,21 @@ def write_shards(
                 b"".join(_canonical_json(item[2]) for item in selected)
             ).hexdigest(),
             "provenance": {
-                "source": dict(source_provenance or {}),
-                "dataset": dict(dataset_provenance or {}),
-                "model": dict(model_provenance or {}),
+                "schema": "provenance-v1",
+                "identifiers": {
+                    "dataset_config": DATASET_CONFIG,
+                    "example_schema": "distillation-example-v1",
+                    "snapshot_date": "2016-10-01",
+                    "teacher_dimension": 100,
+                },
+                "document": checked_provenance,
             },
         }
         manifest_path = staging / DATASET_CONFIG / "manifest.json"
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_bytes = _canonical_json(manifest)
         manifest_path.write_bytes(manifest_bytes)
-        os.rename(staging, destination)
+        _rename_noreplace(staging, destination)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
