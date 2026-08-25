@@ -8,10 +8,15 @@ version = "0.1.0"
 description = "Babel distillation data acquisition and validation"
 requires-python = ">=3.10,<3.13"
 dependencies = [
+  "datasets==3.3.2",
+  "huggingface-hub==0.30.2",
   "jsonschema[format-nongpl]==4.23.0",
   "numpy==2.2.6",
   "pyarrow==17.0.0",
 ]
+
+[project.scripts]
+babel-data = "babel_data.cli:main"
 
 [project.optional-dependencies]
 dev = [
