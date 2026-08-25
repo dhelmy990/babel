@@ -43,6 +43,14 @@ _PAYLOAD_NAMES = frozenset(
 )
 _MANIFEST_NAME = "artifact_manifest.json"
 
+# Immutable architecture facts for Qwen/Qwen3-Embedding-0.6B at MODEL_REVISION.
+# The pinned config has 28 layers, hidden_size=1024, 16 query heads, 8 KV
+# heads, and head_dim=128; therefore q_proj is 1024->2048 and v_proj is
+# 1024->1024. The adapter artifact must cover both modules in every layer.
+_QWEN_NUM_HIDDEN_LAYERS = 28
+_QWEN_HIDDEN_SIZE = 1024
+_QWEN_LORA_OUTPUTS = {"q_proj": 2048, "v_proj": 1024}
+
 
 class ArtifactExportError(ValueError):
     """Local artifact inputs violate the immutable export contract."""
@@ -168,15 +176,23 @@ def _validate_projection_layout(tensors: Mapping[str, np.ndarray]) -> None:
         raise ArtifactExportError("projection requires exactly one weight tensor")
     weight_name = next(iter(weight_names))
     bias_name = "bias" if weight_name == "weight" else "projection.bias"
-    if set(tensors) - {weight_name, bias_name}:
-        raise ArtifactExportError("projection contains duplicate aliases or unknown tensors")
+    if set(tensors) != {weight_name, bias_name}:
+        raise ArtifactExportError(
+            "projection requires exactly one weight and its matching bias"
+        )
     weight = tensors[weight_name]
     if weight.dtype.kind != "f" or weight.shape != (100, 1024):
         raise ArtifactExportError("projection weight must have float shape (100, 1024)")
-    if bias_name in tensors:
-        bias = tensors[bias_name]
-        if bias.dtype.kind != "f" or bias.shape != (100,):
-            raise ArtifactExportError("projection bias must have float shape (100,)")
+    bias = tensors[bias_name]
+    if (
+        bias.dtype.kind != "f"
+        or bias.dtype != weight.dtype
+        or bias.shape != (100,)
+        or not bias.flags.c_contiguous
+    ):
+        raise ArtifactExportError(
+            "projection bias must match the weight dtype and have contiguous float shape (100,)"
+        )
 
 
 def _validate_adapter_layout(
@@ -201,32 +217,32 @@ def _validate_adapter_layout(
         or len(targets) != 2
     ):
         raise ArtifactExportError("adapter_config does not match the frozen LoRA contract")
-    target_set = set(targets)
-    pairs: dict[str, dict[str, np.ndarray]] = {}
-    represented: set[str] = set()
-    pattern = re.compile(
-        r"^(?P<prefix>.+)\.lora_(?P<kind>A|B)(?:\.[^.]+)?\.weight$"
-    )
-    for name, tensor in tensors.items():
-        match = pattern.fullmatch(name)
-        if match is None:
-            raise ArtifactExportError("adapter tensor name is not a closed LoRA A/B weight")
-        prefix = match.group("prefix")
-        target = prefix.rsplit(".", 1)[-1]
-        kind = match.group("kind")
-        if target not in target_set or kind in pairs.setdefault(prefix, {}):
-            raise ArtifactExportError("adapter tensors do not match configured targets")
-        if tensor.dtype.kind != "f" or tensor.ndim != 2:
-            raise ArtifactExportError("adapter tensors must be float matrices")
-        if (
-            (kind == "A" and tensor.shape != (rank, 1024))
-            or (kind == "B" and (tensor.shape[1] != rank or tensor.shape[0] < 1))
-        ):
-            raise ArtifactExportError("adapter tensor shape does not match configured rank")
-        pairs[prefix][kind] = tensor
-        represented.add(target)
-    if any(set(pair) != {"A", "B"} for pair in pairs.values()) or represented != target_set:
-        raise ArtifactExportError("adapter requires paired A/B tensors for every target")
+    expected: dict[str, tuple[int, int]] = {}
+    for layer in range(_QWEN_NUM_HIDDEN_LAYERS):
+        prefix = f"base_model.model.layers.{layer}.self_attn"
+        for target, output_dimension in _QWEN_LORA_OUTPUTS.items():
+            expected[f"{prefix}.{target}.lora_A.default.weight"] = (
+                rank,
+                _QWEN_HIDDEN_SIZE,
+            )
+            expected[f"{prefix}.{target}.lora_B.default.weight"] = (
+                output_dimension,
+                rank,
+            )
+    if set(tensors) != set(expected):
+        raise ArtifactExportError(
+            "adapter must contain the complete exact pinned Qwen q_proj/v_proj layout"
+        )
+    if any(
+        tensor.dtype.kind != "f"
+        or tensor.ndim != 2
+        or tensor.shape != expected[name]
+        or not tensor.flags.c_contiguous
+        for name, tensor in tensors.items()
+    ):
+        raise ArtifactExportError(
+            "adapter tensor dtype or shape does not match the pinned Qwen LoRA layout"
+        )
     if any(
         training_config.get(name) != expected
         for name, expected in {

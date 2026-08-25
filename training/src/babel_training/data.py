@@ -693,6 +693,7 @@ class StatefulDistillationStream(Iterable[dict[str, object]]):
         source_cursor = cursor["source_cursor"]
         processed = cursor["processed_examples"]
         buffer = cursor["shuffle_buffer"]
+        shard = state["shard"]
         if (
             not _integer(source_cursor)
             or not _integer(processed)
@@ -713,8 +714,75 @@ class StatefulDistillationStream(Iterable[dict[str, object]]):
         ]
         restored = deepcopy(dict(cursor))
         restored["shuffle_buffer"] = checked_buffer
+        if (
+            not isinstance(shard, Mapping)
+            or set(shard) != {"index", "example_cursor"}
+            or shard["index"] is not None
+            or shard["example_cursor"] != source_cursor
+            or source_cursor != processed + len(checked_buffer)
+            or len({str(item["article_key"]) for item in checked_buffer})
+            != len(checked_buffer)
+            or (
+                not cursor["source_exhausted"]
+                and source_cursor > 0
+                and len(checked_buffer) != self.shuffle_buffer_size
+            )
+            or (
+                cursor["complete"]
+                and (
+                    not cursor["source_exhausted"]
+                    or checked_buffer
+                    or source_cursor != processed
+                )
+            )
+        ):
+            raise ValueError("stream state cursor/shard invariants are invalid")
+        expected = self._replay_cursor(
+            processed_examples=int(processed), complete=bool(cursor["complete"])
+        )
+        if restored != expected:
+            raise ValueError("stream state does not match deterministic stream history")
         self._resume = restored
         self._live = deepcopy(restored)
+
+    def _replay_cursor(
+        self, *, processed_examples: int, complete: bool
+    ) -> dict[str, object]:
+        """Reconstruct an observable checkpoint cursor without materializing rows."""
+        probe = StatefulDistillationStream(
+            self._dataset,
+            repo_id=self.repo_id,
+            revision=self.revision,
+            split=self.split,
+            seed=self.seed,
+            shuffle_buffer_size=self.shuffle_buffer_size,
+            epoch=self.epoch,
+            manifest_sha256=self.manifest_sha256,
+            readiness_sha256=self.readiness_sha256,
+        )
+        iterator = iter(probe)
+        try:
+            for _ in range(processed_examples):
+                try:
+                    next(iterator)
+                except StopIteration as error:
+                    raise ValueError(
+                        "stream state processed cursor exceeds deterministic dataset"
+                    ) from error
+            if complete:
+                try:
+                    next(iterator)
+                except StopIteration:
+                    pass
+                else:
+                    raise ValueError(
+                        "stream state is complete before deterministic dataset exhaustion"
+                    )
+            return deepcopy(probe._live)
+        finally:
+            close = getattr(iterator, "close", None)
+            if callable(close):
+                close()
 
     def __iter__(self) -> Iterator[dict[str, object]]:
         if self._iterating:

@@ -405,6 +405,64 @@ def test_state_resume_preserves_shuffle_buffer_without_duplicates_or_skips() -> 
     assert len(actual) == len(set(actual))
 
 
+def test_state_rejects_buffer_that_would_duplicate_unconsumed_source_row() -> None:
+    values = [row(index) for index in range(1, 12)]
+    stream = load_distillation_stream(
+        revision=COMMIT, token="secret", api=FakeApi(),
+        load_dataset_fn=lambda *a, **k: copy.deepcopy(values),
+        seed=9, shuffle_buffer_size=3,
+    )
+    forged = stream.state_dict()
+    forged["cursor"]["shuffle_buffer"] = [copy.deepcopy(values[0])]
+
+    with pytest.raises(ValueError, match="state"):
+        stream.load_state_dict(forged)
+
+
+def test_state_rejects_forged_cursor_rng_buffer_flags_and_redundant_shard() -> None:
+    values = [row(index) for index in range(1, 20)]
+
+    def make():
+        return load_distillation_stream(
+            revision=COMMIT, token="secret", api=FakeApi(),
+            load_dataset_fn=lambda *a, **k: copy.deepcopy(values),
+            seed=21, shuffle_buffer_size=4,
+        )
+
+    source = make(); iterator = iter(source)
+    next(iterator); next(iterator)
+    valid = source.state_dict()
+    mutations = []
+
+    shard = copy.deepcopy(valid)
+    shard["shard"]["example_cursor"] += 1
+    mutations.append(shard)
+
+    arithmetic = copy.deepcopy(valid)
+    arithmetic["cursor"]["processed_examples"] += 1
+    mutations.append(arithmetic)
+
+    wrong_buffer = copy.deepcopy(valid)
+    wrong_buffer["cursor"]["shuffle_buffer"][0] = copy.deepcopy(values[-1])
+    mutations.append(wrong_buffer)
+
+    wrong_rng = copy.deepcopy(valid)
+    wrong_rng["cursor"]["shuffle_rng_state"] = make().state_dict()["cursor"]["shuffle_rng_state"]
+    mutations.append(wrong_rng)
+
+    wrong_exhaustion = copy.deepcopy(valid)
+    wrong_exhaustion["cursor"]["source_exhausted"] = True
+    mutations.append(wrong_exhaustion)
+
+    wrong_completion = copy.deepcopy(valid)
+    wrong_completion["cursor"]["complete"] = True
+    mutations.append(wrong_completion)
+
+    for forged in mutations:
+        with pytest.raises(ValueError, match="state"):
+            make().load_state_dict(forged)
+
+
 def test_unstarted_state_has_rng_and_restores_exact_start() -> None:
     values = list({item["article_key"]: item for item in (row(i) for i in range(1, 12))}.values())
 

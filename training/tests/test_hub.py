@@ -30,6 +30,20 @@ PARENT = "b" * 40
 PUBLISHED = "c" * 40
 
 
+def complete_adapter_tensors() -> dict[str, np.ndarray]:
+    tensors: dict[str, np.ndarray] = {}
+    for layer in range(28):
+        prefix = f"base_model.model.layers.{layer}.self_attn"
+        for target, output_dimension in (("q_proj", 2048), ("v_proj", 1024)):
+            tensors[f"{prefix}.{target}.lora_A.default.weight"] = np.zeros(
+                (16, 1024), dtype=np.float16
+            )
+            tensors[f"{prefix}.{target}.lora_B.default.weight"] = np.zeros(
+                (output_dimension, 16), dtype=np.float16
+            )
+    return tensors
+
+
 def export(tmp_path: Path, **overrides: object):
     training_config = {
         "config_version": 1,
@@ -90,12 +104,7 @@ def export(tmp_path: Path, **overrides: object):
             "weight": np.arange(102400, dtype=np.float32).reshape(100, 1024),
             "bias": np.zeros(100, dtype=np.float32),
         },
-        "adapter_tensors": {
-            "base_model.model.layers.0.self_attn.q_proj.lora_A.default.weight": np.ones((16, 1024), dtype=np.float32),
-            "base_model.model.layers.0.self_attn.q_proj.lora_B.default.weight": np.ones((1024, 16), dtype=np.float32),
-            "base_model.model.layers.0.self_attn.v_proj.lora_A.default.weight": np.ones((16, 1024), dtype=np.float32),
-            "base_model.model.layers.0.self_attn.v_proj.lora_B.default.weight": np.ones((1024, 16), dtype=np.float32),
-        },
+        "adapter_tensors": complete_adapter_tensors(),
         "adapter_config": {
             "r": 16, "lora_alpha": 32, "lora_dropout": 0.05,
             "bias": "none", "target_modules": ["q_proj", "v_proj"],
@@ -164,8 +173,25 @@ def test_export_failure_leaves_no_partial_and_rejects_base_weights(tmp_path: Pat
 
 
 def test_export_rejects_invalid_projection_and_adapter_layouts(tmp_path: Path) -> None:
+    missing_layer = complete_adapter_tensors()
+    missing_layer.pop(
+        "base_model.model.layers.27.self_attn.v_proj.lora_B.default.weight"
+    )
+    tiny_q = complete_adapter_tensors()
+    tiny_q[
+        "base_model.model.layers.0.self_attn.q_proj.lora_B.default.weight"
+    ] = np.zeros((1, 16), dtype=np.float16)
+    extra_layer = complete_adapter_tensors()
+    extra_layer[
+        "base_model.model.layers.28.self_attn.q_proj.lora_A.default.weight"
+    ] = np.zeros((16, 1024), dtype=np.float16)
     invalid = [
         {"projection_tensors": {"bias": np.zeros(100, dtype=np.float32)}},
+        {"projection_tensors": {"weight": np.zeros((100, 1024), dtype=np.float32)}},
+        {"projection_tensors": {
+            "weight": np.zeros((100, 1024), dtype=np.float32),
+            "bias": np.zeros(100, dtype=np.float16),
+        }},
         {"projection_tensors": {"weight": np.zeros((99, 1024), dtype=np.float32)}},
         {"projection_tensors": {
             "weight": np.zeros((100, 1024), dtype=np.float32),
@@ -183,6 +209,9 @@ def test_export_rejects_invalid_projection_and_adapter_layouts(tmp_path: Path) -
             "r": 8, "lora_alpha": 32, "lora_dropout": 0.05,
             "bias": "none", "target_modules": ["q_proj", "v_proj"],
         }},
+        {"adapter_tensors": missing_layer},
+        {"adapter_tensors": tiny_q},
+        {"adapter_tensors": extra_layer},
     ]
     for index, overrides in enumerate(invalid):
         with pytest.raises(ArtifactExportError):
