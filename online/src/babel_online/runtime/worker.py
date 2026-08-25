@@ -215,15 +215,22 @@ class FridayDemoRuntime:
         used: dict[UUID, set[str]] = {}
         plan: list[tuple[str, UUID, dict[str, Any], UUID]] = []
         creators = [uuid5(self.config.runId, f"creator:{index}") for index in range(self.config.creatorCount)]
+        self._creator_slots = {creator: index for index, creator in enumerate(creators)}
         sequence = 0
         for period in self.config.environmentSequence:
             rows = catalogs[period]
             budget = self.config.perMonthEventBudget[period]
             for month_index in range(budget):
                 creator = creators[month_index % len(creators)]
+                start = int(
+                    self._simulation_draw(
+                        "source", period, month_index, self._creator_slots[creator], "", 0
+                    )
+                    * len(rows)
+                )
                 chosen = None
                 for shift in range(len(rows)):
-                    row = rows[(month_index * 37 + shift + (17 if period == "2026-07" else 0)) % len(rows)]
+                    row = rows[(start + shift) % len(rows)]
                     if row["article_key"] not in used.setdefault(creator, set()):
                         chosen = row
                         break
@@ -234,6 +241,25 @@ class FridayDemoRuntime:
                 plan.append((period, creator, chosen, babel_id))
                 sequence += 1
         return plan
+
+    def _simulation_draw(
+        self,
+        kind: str,
+        period: str,
+        event_number: int,
+        creator_slot: int,
+        candidate_source: str,
+        candidate_rank: int,
+    ) -> float:
+        return deterministic_draw(
+            self.config.runSeed,
+            kind,
+            period,
+            event_number,
+            creator_slot,
+            candidate_source,
+            candidate_rank,
+        )
 
     def _materialized_records(self, version: int) -> list[VectorRecord]:
         return [
@@ -258,13 +284,28 @@ class FridayDemoRuntime:
             backend_snapshot_sha256=sha,
         )
 
-    def _persist_and_activate(self, version: int, *, synchronize: bool) -> None:
-        if synchronize:
-            self._serving_vectors = {
-                babel.babelId: self.model.materialized_vector(babel.babelId)
+    def _capture_training_sync(self) -> tuple[int, dict[UUID, np.ndarray], dict[str, Any]]:
+        captured = self.trainer.capture_sync_state()
+        return (
+            captured.version,
+            {
+                babel.babelId: captured.materialized_vectors[babel.babelId]
                 for babel in self._created
-            }
+            },
+            captured.model_state,
+        )
+
+    def _persist_and_activate(
+        self, version: int | None = None, *, synchronize: bool
+    ) -> None:
+        captured_model_state: dict[str, Any] | None = None
+        if synchronize:
+            version, self._serving_vectors, captured_model_state = (
+                self._capture_training_sync()
+            )
             self._serving_version = version
+        if version is None:
+            raise ValueError("materialization version is required")
         records = self._materialized_records(version)
         self.database.insert_vectors(records)
         sha = _snapshot_sha(records)
@@ -279,7 +320,7 @@ class FridayDemoRuntime:
         )
         if synchronize:
             artifact = self.synchronizer.publish(
-                model=self.model,
+                model_state=captured_model_state,
                 selected_model_id=self.starting_model.modelId,
                 materialized_state=state,
                 candidate_index=self.index,
@@ -388,7 +429,20 @@ class FridayDemoRuntime:
                 candidate_actions = []
                 for candidate in response.candidates:
                     related = 0.95 if (babel.sourceArticleKey, candidate.sourceArticleKey) in hidden[period] else 0.55
-                    preference = 0.7 if deterministic_draw(creator_id, candidate.babelId, period) < 0.5 else 0.4
+                    creator_slot = self._creator_slots[creator_id]
+                    preference = (
+                        0.7
+                        if self._simulation_draw(
+                            "preference",
+                            period,
+                            event_number,
+                            creator_slot,
+                            candidate.sourceArticleKey,
+                            candidate.rank,
+                        )
+                        < 0.5
+                        else 0.4
+                    )
                     probabilities = action_probabilities(
                         relevance=combined_relevance(
                             relatedness_rank=related, preference_rank=preference
@@ -404,11 +458,13 @@ class FridayDemoRuntime:
                             modelScore=candidate.modelScore,
                             action=decide_candidate(
                                 probabilities,
-                                draw=deterministic_draw(
-                                    self.config.runId,
-                                    creator_id,
+                                draw=self._simulation_draw(
+                                    "action",
+                                    period,
                                     event_number,
-                                    candidate.babelId,
+                                    creator_slot,
+                                    candidate.sourceArticleKey,
+                                    candidate.rank,
                                 ),
                             ),
                         )
@@ -434,10 +490,13 @@ class FridayDemoRuntime:
                 self._content_hashes[babel_id] = article["content_hash"]
                 self._histories[creator_id].append(babel_id)
                 self._serving_vectors[babel_id] = self._frozen_vectors[babel_id]
-                current_version = self.trainer.training_version
                 self._materialize_new_babel()
                 self._record_recommendation(babel, response, feedback, client_ns)
-                lag = max(0, event_number + 1 - self.trainer.processed_events)
+                trainer_metrics = self.trainer.metrics
+                lag = max(
+                    0, event_number + 1 - int(trainer_metrics["processedEvents"])
+                )
+                current_version = int(trainer_metrics["optimizerSteps"])
                 self.database.update_metrics(
                     self.config.runId,
                     created_babel_count=len(self._created),
@@ -445,22 +504,25 @@ class FridayDemoRuntime:
                     event_rate=(event_number + 1) / max(time.monotonic() - started, 1e-6),
                     kafka_offset=record.offset + 1,
                     kafka_lag=lag,
-                    trainer_steps=self.trainer.global_step,
-                    rolling_rank_loss=self.trainer.metrics["rollingRankLoss"],
+                    trainer_steps=current_version,
+                    rolling_rank_loss=trainer_metrics["rollingRankLoss"],
                 )
-                if self.trainer.global_step > self._last_logged_training_step:
-                    self._last_logged_training_step = self.trainer.global_step
+                if current_version > self._last_logged_training_step:
+                    self._last_logged_training_step = current_version
+                    step_metrics = {}
+                    if self.trainer.last_step_time_ms is not None:
+                        step_metrics["stepTimeMs"] = self.trainer.last_step_time_ms
                     self.database.append_activity(
                         _activity(
                             self.config.runId,
                             component="training",
                             event="online_training_progress",
-                            message=f"Online trainer reached step {self.trainer.global_step}.",
-                            metrics={"stepTimeMs": 0.0},
+                            message=f"Online trainer reached step {current_version}.",
+                            metrics=step_metrics,
                             details={
                                 "kind": "training",
-                                "trainerStep": self.trainer.global_step,
-                                "rollingRankLoss": self.trainer.metrics["rollingRankLoss"],
+                                "trainerStep": current_version,
+                                "rollingRankLoss": trainer_metrics["rollingRankLoss"],
                             },
                         )
                     )
@@ -481,7 +543,7 @@ class FridayDemoRuntime:
                 if (
                     current_version >= self._last_sync_version + self.config.syncEverySteps
                 ):
-                    self._persist_and_activate(current_version, synchronize=True)
+                    self._persist_and_activate(synchronize=True)
         finally:
             client.close()
 
@@ -505,7 +567,7 @@ class FridayDemoRuntime:
         export_offset_ranges(self.scoped_consumer, ranges, Path(self.config.artifactRoot) / str(self.config.runId) / "feedback")
         version = self.trainer.training_version
         if version > self._last_sync_version:
-            self._persist_and_activate(version, synchronize=True)
+            self._persist_and_activate(synchronize=True)
         child_id = uuid5(self.config.runId, "immutable-child-model")
         child = export_immutable_child(
             Path(self.config.artifactRoot) / str(self.config.runId) / "models",
@@ -544,7 +606,6 @@ class FridayDemoRuntime:
         return child
 
     def run(self) -> ModelManifestV1:
-        self.database.claim_run(self.config.runId)
         self.database.append_activity(
             lifecycle_activity(
                 self.config.runId,
@@ -639,9 +700,11 @@ class WorkerManager:
         self,
         *,
         database: RuntimeDatabase,
+        dataset_bundle: DatasetBundle,
         runtime_factory: Callable[[Any, threading.Event], FridayDemoRuntime],
     ) -> None:
         self.database = database
+        self.dataset_bundle = dataset_bundle
         self.runtime_factory = runtime_factory
         self._lock = threading.Lock()
         self._run_id: UUID | None = None
@@ -653,9 +716,19 @@ class WorkerManager:
         persisted = self.database.load_run(run_id)
         if persisted.status != "starting":
             raise RuntimeError("persisted run is not in starting state")
-        if persisted.config.datasetConfig != "demo_crosswalk":
+        expected_identity = (
+            persisted.config.datasetRepo,
+            persisted.config.datasetConfig,
+            persisted.config.datasetRevision,
+        )
+        loaded_identity = (
+            self.dataset_bundle.dataset_repository,
+            self.dataset_bundle.dataset_config,
+            self.dataset_bundle.dataset_revision,
+        )
+        if expected_identity != loaded_identity:
             raise RuntimeError(
-                "online experiment requires the pinned demo_crosswalk dataset bundle"
+                "online experiment launch and loaded dataset bundle identity differ"
             )
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
@@ -665,6 +738,9 @@ class WorkerManager:
             stop_event = threading.Event()
             self._run_id = run_id
             self._stop_event = stop_event
+            # Claim synchronously so the dashboard cannot receive Start success
+            # before the persisted run is ready to accept graceful stop.
+            self.database.claim_run(run_id)
 
             def execute() -> None:
                 try:

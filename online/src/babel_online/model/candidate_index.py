@@ -49,7 +49,9 @@ class CandidateIndex(Protocol):
         k: int,
     ) -> list[RetrievedCandidate]: ...
 
-    def activate(self, state: MaterializedServingState) -> None: ...
+    def activate(
+        self, state: MaterializedServingState, records: Sequence[VectorRecord]
+    ) -> None: ...
 
 
 def normalized_query(query: NDArray[np.float32]) -> NDArray[np.float32]:
@@ -69,10 +71,14 @@ class InMemoryCreatedBabelIndex:
 
     def __init__(self, records: Sequence[VectorRecord]) -> None:
         self._records = tuple(records)
-        self._active: MaterializedServingState | None = None
+        self._records_by_state: dict[MaterializedServingState, tuple[VectorRecord, ...]] = {}
 
-    def activate(self, state: MaterializedServingState) -> None:
-        self._active = state
+    def activate(
+        self,
+        state: MaterializedServingState,
+        records: Sequence[VectorRecord] | None = None,
+    ) -> None:
+        self._records_by_state[state] = tuple(records) if records is not None else self._records
 
     def search(
         self,
@@ -83,13 +89,13 @@ class InMemoryCreatedBabelIndex:
         exclude_creator_id: UUID,
         k: int,
     ) -> list[RetrievedCandidate]:
-        if self._active != state or state.run_id != run_id:
+        if state not in self._records_by_state or state.run_id != run_id:
             raise StaleServingState("candidate index state does not match request snapshot")
         if k <= 0:
             raise ValueError("candidate count must be positive")
         unit = normalized_query(query)
         candidates: list[RetrievedCandidate] = []
-        for record in self._records:
+        for record in self._records_by_state[state]:
             babel = record.babel
             if (
                 babel.runId != run_id

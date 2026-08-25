@@ -70,7 +70,7 @@ class ServingState:
                 or record.materializedModelVersion > materialized_state.model_version
             ):
                 raise ValueError("vector record is incompatible with serving state")
-        candidate_index.activate(materialized_state)
+        candidate_index.activate(materialized_state, vector_records)
         vectors = {
             record.babel.babelId: np.asarray(record.vector, dtype="<f4")
             for record in vector_records

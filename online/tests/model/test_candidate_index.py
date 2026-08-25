@@ -90,7 +90,8 @@ def test_fixture_index_returns_only_other_creators_created_babels() -> None:
 def test_pgvector_query_joins_created_babels_not_catalog_candidates() -> None:
     lowered = " ".join(PGVECTOR_CREATED_BABEL_QUERY.casefold().split())
     assert "join experiment_babels" in lowered
-    assert "join run_embedding_states" in lowered
+    assert "join run_embedding_states" not in lowered
+    assert "any(%(babel_ids)s::uuid[])" in lowered
     assert "catalog_embeddings" not in lowered
     assert "eb.creator_id <>" in lowered
 
@@ -110,7 +111,8 @@ def test_pgvector_adapter_applies_cosine_hnsw_settings() -> None:
         ]
 
     index = PgvectorCandidateIndex(query_rows)
-    index.activate(state())
+    eligible = [record(202, CREATOR_B, "enwiki:2032", 0)]
+    index.activate(state(), eligible)
     result = index.search(
         np.asarray(vector(0), dtype=np.float32),
         run_id=RUN,
@@ -121,4 +123,42 @@ def test_pgvector_adapter_applies_cosine_hnsw_settings() -> None:
 
     assert tuple(captured["settings"]) == PGVECTOR_TRANSACTION_SETTINGS
     assert captured["sql"] == PGVECTOR_CREATED_BABEL_QUERY
+    assert captured["parameters"]["babel_ids"] == [eligible[0].babel.babelId]
     assert result[0].creator_id == CREATOR_B
+
+
+def test_pgvector_old_and_new_snapshots_keep_separate_candidate_membership() -> None:
+    captured = []
+
+    def query_rows(_settings, _sql, parameters):
+        captured.append(tuple(parameters["babel_ids"]))
+        return []
+
+    old_state = state()
+    new_state = MaterializedServingState(
+        run_id=RUN,
+        model_id=MODEL,
+        model_version=1,
+        embedding_space_id=SPACE,
+        pgvector_snapshot_sha256="c" * 64,
+        backend_snapshot_sha256="c" * 64,
+    )
+    old_record = record(201, CREATOR_A, "enwiki:593", 0)
+    new_record = record(202, CREATOR_B, "enwiki:2032", 0)
+    index = PgvectorCandidateIndex(query_rows)
+    index.activate(old_state, [old_record])
+    index.activate(new_state, [old_record, new_record])
+
+    for snapshot in (old_state, new_state):
+        index.search(
+            np.asarray(vector(0), dtype=np.float32),
+            run_id=RUN,
+            state=snapshot,
+            exclude_creator_id=CREATOR_C,
+            k=3,
+        )
+
+    assert captured == [
+        (old_record.babel.babelId,),
+        (old_record.babel.babelId, new_record.babel.babelId),
+    ]

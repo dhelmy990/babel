@@ -71,7 +71,8 @@ class AtomicSynchronizer:
     def publish(
         self,
         *,
-        model: Any,
+        model: Any | None = None,
+        model_state: dict[str, Any] | None = None,
         selected_model_id: UUID,
         materialized_state: Any,
         candidate_index: Any,
@@ -80,7 +81,11 @@ class AtomicSynchronizer:
         version = int(materialized_state.model_version)
         if version < 0 or materialized_state.model_id != selected_model_id:
             raise ValueError("sync model identity/version is invalid")
-        state_bytes = _canonical_json(model.state_dict())
+        if (model is None) == (model_state is None):
+            raise ValueError("sync requires exactly one captured model state")
+        state_bytes = _canonical_json(
+            model_state if model_state is not None else model.state_dict()
+        )
         state_sha = hashlib.sha256(state_bytes).hexdigest()
         name = f"sync-v{version:08d}"
         final = self.root / name

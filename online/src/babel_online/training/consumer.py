@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import copy
 import time
+from dataclasses import dataclass
 from pathlib import Path
+from threading import RLock
 from typing import Any, Callable
 
 from babel_online.feedback.bus import FeedbackConsumer, TopicPartition
@@ -16,6 +19,13 @@ from .checkpoint import (
     save_online_checkpoint,
 )
 from .pairs import pairs_from_event
+
+
+@dataclass(frozen=True, slots=True)
+class SyncTrainingState:
+    version: int
+    materialized_vectors: dict[Any, Any]
+    model_state: dict[str, Any]
 
 
 class OnlineTrainer:
@@ -36,18 +46,33 @@ class OnlineTrainer:
         self.processed_events = 0
         self.losses: list[float] = []
         self.next_offsets = consumer.position()
+        self.last_step_time_ms: float | None = None
+        self._lock = RLock()
 
     @property
     def metrics(self) -> dict[str, float | int]:
-        return {
-            "processedEvents": self.processed_events,
-            "optimizerSteps": self.global_step,
-            "rollingRankLoss": (
-                float(sum(self.losses[-20:]) / len(self.losses[-20:]))
-                if self.losses
-                else 0.0
-            ),
-        }
+        with self._lock:
+            return {
+                "processedEvents": self.processed_events,
+                "optimizerSteps": self.global_step,
+                "rollingRankLoss": (
+                    float(sum(self.losses[-20:]) / len(self.losses[-20:]))
+                    if self.losses
+                    else 0.0
+                ),
+            }
+
+    def capture_sync_state(self) -> SyncTrainingState:
+        """Capture one version and its exact vectors/model bytes atomically."""
+        with self._lock:
+            return SyncTrainingState(
+                version=self.training_version,
+                materialized_vectors={
+                    item_id: vector.copy()
+                    for item_id, vector in self.model.materialized_vectors().items()
+                },
+                model_state=copy.deepcopy(self.model.state_dict()),
+            )
 
     def process_available(
         self,
@@ -71,13 +96,18 @@ class OnlineTrainer:
                 self.consumer.seek({partition: record.offset})
                 break
             pairs = pairs_from_event(record.event)
-            if pairs:
-                loss = float(self.model.train_pairs(pairs))
-                self.losses.append(loss)
-                self.global_step += 1
-                self.training_version += 1
-            self.next_offsets[partition] = record.offset + 1
-            self.processed_events += 1
+            with self._lock:
+                if pairs:
+                    step_started = time.perf_counter_ns()
+                    loss = float(self.model.train_pairs(pairs))
+                    self.last_step_time_ms = (
+                        time.perf_counter_ns() - step_started
+                    ) / 1_000_000
+                    self.losses.append(loss)
+                    self.global_step += 1
+                    self.training_version += 1
+                self.next_offsets[partition] = record.offset + 1
+                self.processed_events += 1
             processed += 1
         return processed
 
@@ -119,25 +149,26 @@ class OnlineTrainer:
                 raise TimeoutError("online trainer did not drain to captured offsets")
 
     def checkpoint_and_commit(self) -> Path:
-        latest = load_latest_checkpoint(self.checkpoint_root)
-        if (
-            latest is not None
-            and latest.step == self.processed_events
-            and latest.version == self.training_version
-            and latest.next_offsets == self.next_offsets
-        ):
+        with self._lock:
+            latest = load_latest_checkpoint(self.checkpoint_root)
+            if (
+                latest is not None
+                and latest.step == self.processed_events
+                and latest.version == self.training_version
+                and latest.next_offsets == self.next_offsets
+            ):
+                self.consumer.commit(self.next_offsets)
+                return latest.path
+            checkpoint = save_online_checkpoint(
+                self.checkpoint_root,
+                step=self.processed_events,
+                version=self.training_version,
+                next_offsets=self.next_offsets,
+                metrics=self.metrics,
+                model_state=self.model.state_dict(),
+                identity=self.identity,
+            )
             self.consumer.commit(self.next_offsets)
-            return latest.path
-        checkpoint = save_online_checkpoint(
-            self.checkpoint_root,
-            step=self.processed_events,
-            version=self.training_version,
-            next_offsets=self.next_offsets,
-            metrics=self.metrics,
-            model_state=self.model.state_dict(),
-            identity=self.identity,
-        )
-        self.consumer.commit(self.next_offsets)
         return checkpoint
 
     def restore_latest(self) -> CheckpointState | None:
@@ -146,15 +177,16 @@ class OnlineTrainer:
             return None
         if self.identity is not None and checkpoint.identity != self.identity:
             raise ValueError("online checkpoint identity does not match this run")
-        self.model.load_state_dict(checkpoint.model_state)
-        self.global_step = int(checkpoint.metrics["optimizerSteps"])
-        self.training_version = checkpoint.version
-        self.processed_events = int(checkpoint.metrics["processedEvents"])
-        self.losses = []
-        self.next_offsets = dict(checkpoint.next_offsets)
-        restore_rng(checkpoint.rng_state)
-        self.consumer.seek(self.next_offsets)
+        with self._lock:
+            self.model.load_state_dict(checkpoint.model_state)
+            self.global_step = int(checkpoint.metrics["optimizerSteps"])
+            self.training_version = checkpoint.version
+            self.processed_events = int(checkpoint.metrics["processedEvents"])
+            self.losses = []
+            self.next_offsets = dict(checkpoint.next_offsets)
+            restore_rng(checkpoint.rng_state)
+            self.consumer.seek(self.next_offsets)
         return checkpoint
 
 
-__all__ = ["OnlineTrainer"]
+__all__ = ["OnlineTrainer", "SyncTrainingState"]

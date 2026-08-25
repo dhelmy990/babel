@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from threading import RLock
 from uuid import UUID
 
 import numpy as np
@@ -33,11 +34,8 @@ FROM (
 ) AS eb
 JOIN experiment_babels AS xb
   ON xb.run_id = eb.run_id AND xb.babel_id = eb.babel_id
-JOIN run_embedding_states AS rs ON rs.run_id = eb.run_id
 WHERE eb.run_id = %(run_id)s
-  AND rs.active_model_id = %(model_id)s
-  AND rs.active_model_version = %(model_version)s
-  AND rs.pgvector_snapshot_sha256 = %(snapshot_sha256)s
+  AND eb.babel_id = ANY(%(babel_ids)s::uuid[])
   AND eb.serving_model_id = %(model_id)s
   AND eb.materialized_model_version <= %(model_version)s
   AND eb.creator_id <> %(exclude_creator_id)s
@@ -62,10 +60,13 @@ class PgvectorCandidateIndex:
 
     def __init__(self, query_rows: QueryRows) -> None:
         self._query_rows = query_rows
-        self._active: MaterializedServingState | None = None
+        self._babel_ids_by_state: dict[MaterializedServingState, tuple[UUID, ...]] = {}
+        self._lock = RLock()
 
-    def activate(self, state: MaterializedServingState) -> None:
-        self._active = state
+    def activate(self, state: MaterializedServingState, records: Sequence[object]) -> None:
+        babel_ids = tuple(record.babel.babelId for record in records)
+        with self._lock:
+            self._babel_ids_by_state[state] = babel_ids
 
     def search(
         self,
@@ -76,7 +77,9 @@ class PgvectorCandidateIndex:
         exclude_creator_id: UUID,
         k: int,
     ) -> list[RetrievedCandidate]:
-        if self._active != state or state.run_id != run_id:
+        with self._lock:
+            babel_ids = self._babel_ids_by_state.get(state)
+        if babel_ids is None or state.run_id != run_id:
             raise StaleServingState("pgvector state does not match request snapshot")
         unit = normalized_query(query)
         parameters: dict[str, object] = {
@@ -85,6 +88,7 @@ class PgvectorCandidateIndex:
             "model_id": state.model_id,
             "model_version": state.model_version,
             "snapshot_sha256": state.pgvector_snapshot_sha256,
+            "babel_ids": list(babel_ids),
             "exclude_creator_id": exclude_creator_id,
             "limit": k,
         }

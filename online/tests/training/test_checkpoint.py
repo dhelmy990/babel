@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import threading
 from uuid import UUID
 
 import numpy as np
@@ -83,3 +84,51 @@ def test_checkpoint_binds_run_model_and_embedding_identity(tmp_path) -> None:
     )
     with pytest.raises(ValueError, match="identity"):
         incompatible.restore_latest()
+
+
+def test_sync_capture_cannot_observe_model_update_before_matching_version(tmp_path) -> None:
+    event = event_with_three_actions()
+    bus = InMemoryFeedbackBus()
+    bus.publish(key=str(event.creatorId), event=event)
+    update_started = threading.Event()
+    release_update = threading.Event()
+
+    class BlockingModel:
+        def __init__(self) -> None:
+            self.value = 0.0
+
+        def train_pairs(self, _pairs) -> float:
+            self.value = 1.0
+            update_started.set()
+            assert release_update.wait(2.0)
+            return 0.5
+
+        def materialized_vectors(self):
+            vector = np.zeros(100, dtype=np.float32)
+            vector[0] = self.value
+            return {INCLUDED: vector}
+
+        def state_dict(self):
+            return {"observedVersion": self.value}
+
+    trainer = OnlineTrainer(
+        model=BlockingModel(),
+        consumer=bus.consumer(group_id="locked-capture", auto_commit=False),
+        checkpoint_root=tmp_path,
+    )
+    training = threading.Thread(target=trainer.process_available)
+    training.start()
+    assert update_started.wait(1.0)
+    captured = []
+    capture = threading.Thread(target=lambda: captured.append(trainer.capture_sync_state()))
+    capture.start()
+    capture.join(0.05)
+    assert capture.is_alive()
+
+    release_update.set()
+    training.join(1.0)
+    capture.join(1.0)
+
+    assert captured[0].version == 1
+    assert captured[0].model_state == {"observedVersion": 1.0}
+    assert captured[0].materialized_vectors[INCLUDED][0] == 1.0

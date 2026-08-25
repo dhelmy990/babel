@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 
 from babel_online.runtime.dataset_bundle import (
+    DEMO_DATASET_CONFIG,
+    DEMO_DATASET_REPOSITORY,
     DEMO_DATASET_REVISION,
     DatasetBundleIntegrityError,
     acquire_pinned_bundle,
@@ -43,12 +45,16 @@ def test_full_bundle_requires_both_observable_hidden_months_and_crosswalk(tmp_pa
 
     bundle = load_demo_dataset_bundle(
         tmp_path,
+        dataset_repository=DEMO_DATASET_REPOSITORY,
+        dataset_config=DEMO_DATASET_CONFIG,
         dataset_revision=DEMO_DATASET_REVISION,
         read_parquet=lambda path: [{"path": str(path)}],
     )
 
     assert set(bundle.configs) == set(configs)
     assert bundle.release_scope == "friday_demo_fixture"
+    assert bundle.dataset_repository == DEMO_DATASET_REPOSITORY
+    assert bundle.dataset_config == DEMO_DATASET_CONFIG
 
 
 def test_bundle_rejects_missing_hidden_month_or_wrong_pin(tmp_path) -> None:
@@ -59,6 +65,8 @@ def test_bundle_rejects_missing_hidden_month_or_wrong_pin(tmp_path) -> None:
     with pytest.raises(DatasetBundleIntegrityError):
         load_demo_dataset_bundle(
             tmp_path,
+            dataset_repository=DEMO_DATASET_REPOSITORY,
+            dataset_config=DEMO_DATASET_CONFIG,
             dataset_revision="0" * 40,
             read_parquet=lambda _path: [],
         )
@@ -123,6 +131,8 @@ def test_loader_accepts_checksum_pinned_hub_cache_symlinks(tmp_path) -> None:
 
     loaded = load_demo_dataset_bundle(
         snapshot,
+        dataset_repository=DEMO_DATASET_REPOSITORY,
+        dataset_config=DEMO_DATASET_CONFIG,
         dataset_revision=DEMO_DATASET_REVISION,
         read_parquet=lambda _path: [{}],
     )

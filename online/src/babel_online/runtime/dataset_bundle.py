@@ -12,6 +12,8 @@ from typing import Any
 from ..observable import reject_hidden_fields
 
 
+DEMO_DATASET_REPOSITORY = "dhelmy990/babel-wikipedia-experiment"
+DEMO_DATASET_CONFIG = "demo_crosswalk"
 DEMO_DATASET_REVISION = "e1acc648fcace8820dd5ee70bae9216ea4334555"
 REQUIRED_CONFIGS = frozenset(
     {
@@ -37,7 +39,11 @@ def acquire_pinned_bundle(
     snapshot_download: Callable[..., str] | None = None,
 ) -> Path:
     """Download/cache the five-config private snapshot in one pinned Hub call."""
-    if revision != DEMO_DATASET_REVISION or not token:
+    if (
+        repo_id != DEMO_DATASET_REPOSITORY
+        or revision != DEMO_DATASET_REVISION
+        or not token
+    ):
         raise DatasetBundleIntegrityError("private dataset requires its exact revision and token")
     if snapshot_download is None:
         try:
@@ -59,6 +65,8 @@ def acquire_pinned_bundle(
 @dataclass(frozen=True, slots=True)
 class DatasetBundle:
     root: Path
+    dataset_repository: str
+    dataset_config: str
     dataset_revision: str
     release_scope: str
     snapshot_claim: str
@@ -77,12 +85,18 @@ def _default_read_parquet(path: Path) -> list[dict[str, Any]]:
 def load_demo_dataset_bundle(
     root: str | Path,
     *,
+    dataset_repository: str,
+    dataset_config: str,
     dataset_revision: str,
     read_parquet: Callable[[Path], list[dict[str, Any]]] = _default_read_parquet,
 ) -> DatasetBundle:
     root_path = Path(root).resolve()
-    if dataset_revision != DEMO_DATASET_REVISION:
-        raise DatasetBundleIntegrityError("dataset revision is not the pinned Friday bundle")
+    if (
+        dataset_repository != DEMO_DATASET_REPOSITORY
+        or dataset_config != DEMO_DATASET_CONFIG
+        or dataset_revision != DEMO_DATASET_REVISION
+    ):
+        raise DatasetBundleIntegrityError("dataset identity is not the pinned Friday bundle")
     manifest_path = root_path / "demo_crosswalk" / "release.json"
     try:
         manifest_bytes = manifest_path.read_bytes()
@@ -120,6 +134,8 @@ def load_demo_dataset_bundle(
         loaded[name] = rows
     return DatasetBundle(
         root=root_path,
+        dataset_repository=dataset_repository,
+        dataset_config=dataset_config,
         dataset_revision=dataset_revision,
         release_scope=manifest["release_scope"],
         snapshot_claim=manifest["snapshot_claim"],
@@ -130,6 +146,8 @@ def load_demo_dataset_bundle(
 
 __all__ = [
     "DEMO_DATASET_REVISION",
+    "DEMO_DATASET_REPOSITORY",
+    "DEMO_DATASET_CONFIG",
     "DatasetBundle",
     "DatasetBundleIntegrityError",
     "REQUIRED_CONFIGS",

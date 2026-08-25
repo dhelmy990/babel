@@ -36,7 +36,12 @@ def _serve() -> None:
             "/home/dhelmy990/Data/babel-data/cache/online-dataset",
         ),
     )
-    bundle = load_demo_dataset_bundle(dataset_root, dataset_revision=revision)
+    bundle = load_demo_dataset_bundle(
+        dataset_root,
+        dataset_repository=_required("BABEL_ONLINE_DATASET_REPOSITORY"),
+        dataset_config="demo_crosswalk",
+        dataset_revision=revision,
+    )
     kafka = os.environ.get("BABEL_KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:29092")
     recommendation_port = int(os.environ.get("BABEL_RECOMMENDATION_PORT", "8791"))
 
@@ -51,7 +56,11 @@ def _serve() -> None:
             stop_event=stop_event,
         )
 
-    manager = WorkerManager(database=database, runtime_factory=runtime_factory)
+    manager = WorkerManager(
+        database=database,
+        dataset_bundle=bundle,
+        runtime_factory=runtime_factory,
+    )
     app = create_control_app(manager, token=_required("BABEL_ONLINE_WORKER_TOKEN"))
     uvicorn.run(
         app,
