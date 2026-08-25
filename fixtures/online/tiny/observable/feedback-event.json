@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "eventId": "00000000-0000-5000-8000-000000000501",
+  "requestId": "00000000-0000-5000-8000-000000000401",
+  "runId": "00000000-0000-5000-8000-000000000001",
+  "creatorId": "00000000-0000-5000-8000-000000000101",
+  "newBabelId": "00000000-0000-5000-8000-000000000301",
+  "newSourceArticleKey": "enwiki:5739",
+  "modelId": "00000000-0000-5000-8000-000000000002",
+  "modelVersion": 0,
+  "embeddingSpaceId": "00000000-0000-5000-8000-000000000003",
+  "retrievalBackend": "pgvector",
+  "candidateActions": [
+    {
+      "babelId": "00000000-0000-5000-8000-000000000202",
+      "sourceArticleKey": "enwiki:2032",
+      "rank": 1,
+      "modelScore": 0.75,
+      "action": "include"
+    },
+    {
+      "babelId": "00000000-0000-5000-8000-000000000204",
+      "sourceArticleKey": "enwiki:5218",
+      "rank": 2,
+      "modelScore": 0.5,
+      "action": "ignore"
+    }
+  ],
+  "occurredAtNs": 1000
+}

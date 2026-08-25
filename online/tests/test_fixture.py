@@ -59,6 +59,8 @@ def test_tiny_world_contract_documents_round_trip() -> None:
         "model-manifest-v1": "original-model.json",
         "hnsw-snapshot-v1": "hnsw-snapshot.json",
         "recommendation-request-v1": "observable/request.json",
+        "feedback-event-v1": "observable/feedback-event.json",
+        "activity-log-v1": "observable/activity-log.json",
     }
     for contract, relative in documents.items():
         document = json.loads((FIXTURE / relative).read_text())
