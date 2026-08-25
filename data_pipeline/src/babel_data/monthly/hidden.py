@@ -125,8 +125,12 @@ def build_archetypes(
 
 def build_seed_catalog(
     archetypes: Sequence[Mapping[str, object]],
+    articles: Sequence[Mapping[str, object]],
 ) -> list[dict[str, object]]:
-    """Flatten hidden archetypes into the backend's deterministic seed catalog."""
+    """Join assignments to complete prepared articles for backend ingestion."""
+    articles_by_page = {int(article["page_id"]): article for article in articles}
+    if len(articles_by_page) != len(articles):
+        raise ValueError("backend seed articles must have unique page IDs")
     result: list[dict[str, object]] = []
     for archetype in archetypes:
         seeds = archetype.get("seeds")
@@ -135,17 +139,24 @@ def build_seed_catalog(
         for seed in seeds:
             if not isinstance(seed, Mapping):
                 raise ValueError("archetype seed must be an object")
+            page_id = int(seed["page_id"])
+            try:
+                article = articles_by_page[page_id]
+            except KeyError as error:
+                raise ValueError(
+                    f"backend seed assignment has no prepared article: {page_id}"
+                ) from error
             result.append(
                 {
+                    **article,
+                    "snapshot": article["period"],
                     "assignment_id": seed["assignment_id"],
                     "creator_id": archetype["creator_id"],
                     "creator_slug": archetype["archetype_slug"],
                     "display_name": archetype["display_name"],
                     "declared_title": seed["declared_title"],
-                    "article_key": seed["article_key"],
-                    "page_id": seed["page_id"],
-                    "canonical_title": seed["canonical_title"],
                     "weight": seed["weight"],
                 }
             )
+    result.sort(key=lambda row: (int(row["page_id"]), str(row["assignment_id"])))
     return result

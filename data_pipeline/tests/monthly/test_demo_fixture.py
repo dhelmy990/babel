@@ -18,12 +18,12 @@ EXPECTED_RELEASE_FILES = {
     "june/edges.jsonl",
     "june/clickstream.jsonl",
     "june/hidden-archetypes.jsonl",
-    "june/backend-seed-catalog.jsonl",
+    "june/resolved-catalog-v1.jsonl",
     "july/articles.jsonl",
     "july/edges.jsonl",
     "july/clickstream.jsonl",
     "july/hidden-archetypes.jsonl",
-    "july/backend-seed-catalog.jsonl",
+    "july/resolved-catalog-v1.jsonl",
 }
 
 
@@ -110,9 +110,22 @@ def test_backend_seed_catalogs_have_dashboard_compatible_checksum_companions() -
 
     for period, directory in (("2026-06", "june"), ("2026-07", "july")):
         descriptor = provenance["periods"][period]["artifacts"]["backend_seed_catalog"]
-        companion = root / directory / "backend-seed-catalog.jsonl.sha256"
+        companion = root / directory / "resolved-catalog-v1.jsonl.sha256"
         assert companion.read_text(encoding="ascii") == (
-            f"{descriptor['sha256']}  catalog.jsonl\n"
+            f"{descriptor['sha256']}  resolved-catalog-v1.jsonl\n"
+        )
+        catalog = read_jsonl(root / descriptor["path"])
+        assert len(catalog) == 80
+        assert [row["page_id"] for row in catalog] == sorted(
+            row["page_id"] for row in catalog
+        )
+        assert all(
+            {
+                "assignment_id", "creator_id", "creator_slug", "declared_title",
+                "weight", "snapshot", "article_key", "page_id", "canonical_title",
+                "article_text", "redirect_titles", "content_hash", "source_revision_id",
+            } <= set(row)
+            for row in catalog
         )
 
 

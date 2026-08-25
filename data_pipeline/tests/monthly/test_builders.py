@@ -107,7 +107,7 @@ def test_hidden_archetypes_and_seed_catalog_match_backend_roster() -> None:
     articles = build_period_articles(source_rows(), "2026-06")
 
     archetypes = build_archetypes(articles)
-    catalog = build_seed_catalog(archetypes)
+    catalog = build_seed_catalog(archetypes, articles)
 
     assert len(archetypes) == 20
     assert len(catalog) == 80
@@ -118,10 +118,30 @@ def test_hidden_archetypes_and_seed_catalog_match_backend_roster() -> None:
         for archetype in archetypes
     )
     assert len({row["assignment_id"] for row in catalog}) == 80
+    assert [row["page_id"] for row in catalog] == sorted(
+        row["page_id"] for row in catalog
+    )
+    required_article_fields = {
+        "snapshot",
+        "article_key",
+        "page_id",
+        "canonical_title",
+        "article_text",
+        "redirect_titles",
+        "content_hash",
+        "source_revision_id",
+    }
+    assert all(required_article_fields <= set(row) for row in catalog)
+    articles_by_page = {row["page_id"]: row for row in articles}
+    assert all(
+        row["article_text"] == articles_by_page[row["page_id"]]["article_text"]
+        and row["snapshot"] == "2026-06"
+        for row in catalog
+    )
     assert catalog[0]["declared_title"] == "Distributed computing"
     assert catalog[-1]["declared_title"] == "Regulation"
     payload = canonical_jsonl(catalog)
     assert hashlib.sha256(payload).hexdigest() == hashlib.sha256(
-        canonical_jsonl(build_seed_catalog(build_archetypes(articles)))
+        canonical_jsonl(build_seed_catalog(build_archetypes(articles), articles))
     ).hexdigest()
     assert json.loads(payload.splitlines()[0])["weight"] == 0.4

@@ -16,3 +16,5 @@ The
 observable catalogs contain no graph, Clickstream, archetype, seed-weight, PPR,
 hidden-relevance, or random-draw fields. `provenance.json` is the sole release
 input manifest; the crosswalk and ambiguity files are local expectations only.
+Each `resolved-catalog-v1.jsonl` row joins its creator assignment to the full
+prepared observable article payload required by the pinned dashboard adapter.

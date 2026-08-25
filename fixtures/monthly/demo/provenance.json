@@ -18,9 +18,9 @@
           "sha256": "bf429e764503198dd760fa16b44d966322927046330bd88de1481ad62cc6cd8d"
         },
         "backend_seed_catalog": {
-          "path": "june/backend-seed-catalog.jsonl",
+          "path": "june/resolved-catalog-v1.jsonl",
           "rows": 80,
-          "sha256": "de34ed341cba99fc9464c4939a89ba72f4c564aafa48b171ccfdc1e8e53c6dc7"
+          "sha256": "6d7c6c505cfc9ceefb67f6cd6c992cde75504390de5a0c256bb19d811e8c0a5a"
         },
         "clickstream": {
           "path": "june/clickstream.jsonl",
@@ -47,9 +47,9 @@
           "sha256": "925475641cb300cf9439b62f0683175894666c4e030324edf66ac237c8e422d4"
         },
         "backend_seed_catalog": {
-          "path": "july/backend-seed-catalog.jsonl",
+          "path": "july/resolved-catalog-v1.jsonl",
           "rows": 80,
-          "sha256": "288451fcd1a8a466852218b947d084ecc4f3aaff69f8649e41a3344246dfc973"
+          "sha256": "061e3e2eebf67d36eabe447eb561eaca52a0171e322dabac256dba773bfc8c93"
         },
         "clickstream": {
           "path": "july/clickstream.jsonl",

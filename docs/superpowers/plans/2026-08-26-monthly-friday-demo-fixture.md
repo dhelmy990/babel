@@ -65,7 +65,7 @@ Expected: PASS.
 
 **Interfaces:**
 - Consumes: normalized representative article dictionaries and the authoritative 20-profile roster.
-- Produces: `content_sha256(text: str) -> str`, `build_period_articles(source_rows, period) -> list[dict]`, `build_graph(articles) -> list[dict]`, `build_clickstream(edges) -> list[dict]`, `build_archetypes(articles) -> list[dict]`, `build_seed_catalog(archetypes) -> list[dict]`, and `build_crosswalk(june, july) -> tuple[list[dict], list[dict]]`.
+- Produces: `content_sha256(text: str) -> str`, `build_period_articles(source_rows, period) -> list[dict]`, `build_graph(articles) -> list[dict]`, `build_clickstream(edges) -> list[dict]`, `build_archetypes(articles) -> list[dict]`, `build_seed_catalog(archetypes, articles) -> list[dict]`, and `build_crosswalk(june, july) -> tuple[list[dict], list[dict]]`.
 
 - [ ] **Step 1: Write failing builder invariant tests**
 

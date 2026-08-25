@@ -100,7 +100,7 @@ def build_demo_fixture(source_path: Path, output_root: Path) -> dict[str, object
             "edges": graph,
             "clickstream": build_clickstream(graph),
             "hidden_archetypes": archetypes,
-            "backend_seed_catalog": build_seed_catalog(archetypes),
+            "backend_seed_catalog": build_seed_catalog(archetypes, articles),
         }
 
     filenames = {
@@ -108,7 +108,7 @@ def build_demo_fixture(source_path: Path, output_root: Path) -> dict[str, object
         "edges": "edges.jsonl",
         "clickstream": "clickstream.jsonl",
         "hidden_archetypes": "hidden-archetypes.jsonl",
-        "backend_seed_catalog": "backend-seed-catalog.jsonl",
+        "backend_seed_catalog": "resolved-catalog-v1.jsonl",
     }
     descriptors: dict[str, dict[str, object]] = {}
     for period, rows_by_artifact in artifact_rows.items():
@@ -143,6 +143,8 @@ The
 observable catalogs contain no graph, Clickstream, archetype, seed-weight, PPR,
 hidden-relevance, or random-draw fields. `provenance.json` is the sole release
 input manifest; the crosswalk and ambiguity files are local expectations only.
+Each `resolved-catalog-v1.jsonl` row joins its creator assignment to the full
+prepared observable article payload required by the pinned dashboard adapter.
 """
     _atomic_write(output_root / "README.md", readme.encode("utf-8"))
     manifest: dict[str, object] = {
@@ -161,7 +163,9 @@ input manifest; the crosswalk and ambiguity files are local expectations only.
         catalog = descriptors[period]["artifacts"]["backend_seed_catalog"]
         assert isinstance(catalog, Mapping)
         catalog_path = output_root / str(catalog["path"])
-        checksum_payload = f"{catalog['sha256']}  catalog.jsonl\n".encode("ascii")
+        checksum_payload = (
+            f"{catalog['sha256']}  {catalog_path.name}\n".encode("ascii")
+        )
         _atomic_write(
             catalog_path.with_name(f"{catalog_path.name}.sha256"), checksum_payload
         )
@@ -267,7 +271,9 @@ def verify_demo_fixture(root: Path) -> dict[str, object]:
             )
             catalog_path = _safe_artifact(root, catalog_descriptor["path"])
             checksum_path = catalog_path.with_name(f"{catalog_path.name}.sha256")
-            expected_checksum = f"{catalog_descriptor['sha256']}  catalog.jsonl\n"
+            expected_checksum = (
+                f"{catalog_descriptor['sha256']}  {catalog_path.name}\n"
+            )
             if checksum_path.read_text(encoding="ascii") != expected_checksum:
                 raise ValueError(f"backend seed checksum companion mismatch for {period}")
 

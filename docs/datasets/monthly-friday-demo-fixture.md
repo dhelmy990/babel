@@ -28,7 +28,10 @@ ambiguity group. It does not assert that those changes happened on Wikipedia.
 | June scenario | 80 | 160 | 160 | 20 | 80 |
 | July scenario | 80 | 160 | 160 | 20 | 80 |
 
-Every archetype has four ordered seed weights `(0.4, 0.3, 0.2, 0.1)`. Graph
+Every archetype has four ordered seed weights `(0.4, 0.3, 0.2, 0.1)`. Each of
+the 80 page-ID-sorted resolved catalog rows retains creator and assignment
+metadata while joining the full prepared article snapshot, text, redirects,
+content hash, and revision provenance required by the dashboard adapter. Graph
 edges are directed, duplicate-free, and contain no self-loop. Every behavior
 row is `type == "link"`, retains a positive raw `n`, and records
 `log1p(n) / max(log1p(n))` for the period. The observable article schema is
@@ -39,13 +42,14 @@ hidden-relevance, or simulator-randomness fields.
 
 The authoritative checksums are embedded beside paths and row counts in
 `provenance.json`. The June backend seed catalog checksum is
-`de34ed341cba99fc9464c4939a89ba72f4c564aafa48b171ccfdc1e8e53c6dc7`;
+`6d7c6c505cfc9ceefb67f6cd6c992cde75504390de5a0c256bb19d811e8c0a5a`;
 the July checksum is
-`288451fcd1a8a466852218b947d084ecc4f3aaff69f8649e41a3344246dfc973`.
-The corresponding `backend-seed-catalog.jsonl.sha256` companions contain the
-standard `<sha256>  catalog.jsonl` line expected when these exact bytes are
-uploaded as `backend-seed/2026-06/catalog.jsonl(.sha256)` and
-`backend-seed/2026-07/catalog.jsonl(.sha256)`.
+`061e3e2eebf67d36eabe447eb561eaca52a0171e322dabac256dba773bfc8c93`.
+The corresponding `resolved-catalog-v1.jsonl.sha256` companions contain the
+standard `<sha256>  resolved-catalog-v1.jsonl` line expected when these exact
+bytes are uploaded as
+`backend-seed/2026-06/resolved-catalog-v1.jsonl(.sha256)` and
+`backend-seed/2026-07/resolved-catalog-v1.jsonl(.sha256)`.
 
 ## Rebuild and verification
 
