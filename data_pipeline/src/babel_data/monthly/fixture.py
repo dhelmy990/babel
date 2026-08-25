@@ -13,7 +13,8 @@ from babel_data.contracts import validate_document
 
 from .catalog import HIDDEN_ARTICLE_FIELDS, canonical_jsonl, build_period_articles
 from .crosswalk import build_crosswalk_expectations
-from .hidden import build_archetypes, build_clickstream, build_graph, build_seed_catalog
+from .hidden import build_archetypes, build_clickstream, build_graph
+from .profiles import build_profile_catalog, extract_profile_manifest_assignments
 
 
 REPO_ID = "dhelmy990/babel-wikipedia-experiment"
@@ -76,9 +77,18 @@ def _descriptor(root: Path, relative_path: str, rows: int) -> dict[str, object]:
     }
 
 
-def build_demo_fixture(source_path: Path, output_root: Path) -> dict[str, object]:
+def build_demo_fixture(
+    source_path: Path,
+    output_root: Path,
+    *,
+    profile_source_path: Path,
+    profile_manifest_path: Path,
+) -> dict[str, object]:
     """Build exact deterministic artifacts from the pinned representative rows."""
     source_rows = _read_jsonl(source_path)
+    profile_source_rows = _read_jsonl(profile_source_path)
+    profile_source_sha256 = hashlib.sha256(profile_source_path.read_bytes()).hexdigest()
+    profile_assignments = extract_profile_manifest_assignments(profile_manifest_path)
     source_sha256 = hashlib.sha256(source_path.read_bytes()).hexdigest()
     articles_2016 = build_period_articles(source_rows, "2016")
     june_articles = build_period_articles(source_rows, "2026-06")
@@ -100,7 +110,9 @@ def build_demo_fixture(source_path: Path, output_root: Path) -> dict[str, object
             "edges": graph,
             "clickstream": build_clickstream(graph),
             "hidden_archetypes": archetypes,
-            "backend_seed_catalog": build_seed_catalog(archetypes, articles),
+            "backend_seed_catalog": build_profile_catalog(
+                profile_source_rows, profile_assignments, period=period
+            ),
         }
 
     filenames = {
@@ -108,7 +120,7 @@ def build_demo_fixture(source_path: Path, output_root: Path) -> dict[str, object
         "edges": "edges.jsonl",
         "clickstream": "clickstream.jsonl",
         "hidden_archetypes": "hidden-archetypes.jsonl",
-        "backend_seed_catalog": "resolved-catalog-v2.jsonl",
+        "backend_seed_catalog": "resolved-catalog-v3.jsonl",
     }
     descriptors: dict[str, dict[str, object]] = {}
     for period, rows_by_artifact in artifact_rows.items():
@@ -135,6 +147,7 @@ revision IDs were derived byte-faithfully from the pinned October 2016 pilot
 `{REPO_ID}` / `{CONFIG}` at `{REVISION}`.
 
 Representative input SHA-256: `{source_sha256}`.
+Profile catalog input SHA-256: `{profile_source_sha256}`.
 
 The last four identities carry explicit simulated titles, page IDs, and QID
 transition metadata solely to exercise moved, deleted, created, and ambiguous
@@ -143,8 +156,16 @@ The
 observable catalogs contain no graph, Clickstream, archetype, seed-weight, PPR,
 hidden-relevance, or random-draw fields. `provenance.json` is the sole release
 input manifest; the crosswalk and ambiguity files are local expectations only.
-Each `resolved-catalog-v2.jsonl` row joins its creator assignment to the full
-prepared observable article payload required by the pinned dashboard adapter.
+Each `resolved-catalog-v3.jsonl` contains 78 unique real October 2016 articles
+that resolve all 80 backend-owned `ProfileManifest` creator assignments. The
+two repeated requested titles reuse the same source article across creators;
+the assignment ledger remains authoritative in the backend and is not copied
+into this source catalog. These source articles were extracted with the
+production parser from strict byte ranges of the official `enwiki-20161001`
+multistream dump; no live Wikipedia API was used. `Corporate finance` is the
+only row for which the production lead heuristic returned empty, so its
+nonempty lead is deterministically the first nonempty prepared article
+paragraph (`lead_derivation=first_nonempty_paragraph_fallback`).
 """
     _atomic_write(output_root / "README.md", readme.encode("utf-8"))
     manifest: dict[str, object] = {
@@ -198,14 +219,11 @@ def _normalize_backend_title(value: str) -> str:
 
 
 def _verify_resolved_seed_catalog(rows: list[dict[str, object]], period: str) -> None:
-    if len(rows) != 80:
-        raise ValueError("backend seed catalog must contain exactly 80 assignments")
+    if len(rows) != 78:
+        raise ValueError("backend seed catalog must contain exactly 78 source articles")
     page_ids = [row.get("page_id") for row in rows]
-    if page_ids != sorted(page_ids) or len(set(page_ids)) != 80:
+    if page_ids != sorted(page_ids) or len(set(page_ids)) != 78:
         raise ValueError("backend seed catalog page IDs must be sorted and unique")
-    pairs = {(row.get("creator_id"), row.get("article_key")) for row in rows}
-    if len(pairs) != 80:
-        raise ValueError("backend seed creator/source pairs must be unique")
     title_index: dict[str, set[object]] = {}
     for row in rows:
         article_text = row.get("article_text")
@@ -219,6 +237,7 @@ def _verify_resolved_seed_catalog(rows: list[dict[str, object]], period: str) ->
             or not isinstance(canonical_title, str)
             or not isinstance(redirects, list)
             or row.get("snapshot") != period
+            or row.get("article_key") != f"enwiki:{row.get('page_id')}"
         ):
             raise ValueError("backend seed resolved article fields are invalid")
         for title in (canonical_title, *redirects):
@@ -227,13 +246,10 @@ def _verify_resolved_seed_catalog(rows: list[dict[str, object]], period: str) ->
             title_index.setdefault(_normalize_backend_title(title), set()).add(
                 row["page_id"]
             )
-    for row in rows:
-        declared_title = row.get("declared_title")
-        allowed = {row["canonical_title"], *row["redirect_titles"]}
-        if not isinstance(declared_title, str) or declared_title not in allowed:
-            raise ValueError("backend seed declared title is not resolved by its article")
-        if title_index[_normalize_backend_title(declared_title)] != {row["page_id"]}:
-            raise ValueError("backend seed declared title does not resolve uniquely")
+    if len(title_index) < 78 or any(
+        len(page_ids_for_title) != 1 for page_ids_for_title in title_index.values()
+    ):
+        raise ValueError("backend seed title lookup is incomplete or ambiguous")
 
 
 def verify_demo_fixture(root: Path) -> dict[str, object]:
@@ -343,6 +359,8 @@ def _parser() -> argparse.ArgumentParser:
     group.add_argument("--source", type=Path)
     group.add_argument("--verify", type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--profile-source", type=Path)
+    parser.add_argument("--profile-manifest", type=Path)
     return parser
 
 
@@ -353,7 +371,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         if arguments.output is None:
             raise SystemExit("--source requires --output")
-        build_demo_fixture(arguments.source, arguments.output)
+        if arguments.profile_source is None or arguments.profile_manifest is None:
+            raise SystemExit("--source requires --profile-source and --profile-manifest")
+        build_demo_fixture(
+            arguments.source,
+            arguments.output,
+            profile_source_path=arguments.profile_source,
+            profile_manifest_path=arguments.profile_manifest,
+        )
         result = verify_demo_fixture(arguments.output)
     print(json.dumps(result, sort_keys=True))
     return 0
