@@ -145,7 +145,7 @@ class _ScanBudget:
 
     def __init__(self, text_length: int) -> None:
         self.operations = 0
-        self.limit = max(1, text_length + 1)
+        self.limit = max(1, 4 * text_length + 1)
 
     def step(self) -> None:
         self.operations += 1
@@ -928,9 +928,26 @@ def _find_ref_close(
         if boundary == len(lower_text) or lower_text[boundary].isspace() or lower_text[
             boundary
         ] == ">":
-            end = lower_text.find(">", boundary)
-            return None if end < 0 else (closing, end + 1)
+            end = _find_tag_end(lower_text, boundary, budget)
+            return None if end is None else (closing, end + 1)
         cursor = boundary
+    return None
+
+
+def _find_tag_end(text: str, start: int, budget: _ScanBudget) -> int | None:
+    quote: str | None = None
+    cursor = start
+    while cursor < len(text):
+        budget.step()
+        character = text[cursor]
+        if quote is not None:
+            if character == quote:
+                quote = None
+        elif character in {'"', "'"}:
+            quote = character
+        elif character == ">":
+            return cursor
+        cursor += 1
     return None
 
 
@@ -982,9 +999,9 @@ def _scan_inline_markup(text: str) -> str:
                 output.append("<")
                 cursor += 1
                 continue
-            tag_end = text.find(">", name_start + 1)
+            tag_end = _find_tag_end(text, name_start + 1, budget)
             output.append(" ")
-            if tag_end < 0:
+            if tag_end is None:
                 break
             tag_body = lower_text[name_start:tag_end].lstrip()
             is_ref = tag_body.startswith("ref") and (
@@ -1034,9 +1051,9 @@ def _normalize_plain_text(text: str) -> str:
 
 
 def _remove_structural_markup(text: str) -> str:
+    text = _scan_inline_markup(text)
     text = _remove_balanced(text, "{{", "}}")
-    text = _remove_balanced(text, "{|", "|}")
-    return _scan_inline_markup(text)
+    return _remove_balanced(text, "{|", "|}")
 
 
 def wikitext_to_plain_text(wikitext: str) -> str:

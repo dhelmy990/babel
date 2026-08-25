@@ -148,6 +148,36 @@ def test_inline_scanner_offsets_survive_unicode_case_expansion() -> None:
     assert wikitext_to_plain_text("İ text <REF>x</REF> tail") == "İ text tail"
 
 
+def test_comments_are_removed_before_template_parsing() -> None:
+    assert wikitext_to_plain_text("Lead <!-- {{ disabled --> tail") == "Lead tail"
+
+
+def test_refs_are_removed_before_template_parsing() -> None:
+    assert wikitext_to_plain_text("Lead <ref>{{ disabled</ref> tail") == "Lead tail"
+    assert (
+        wikitext_to_plain_text("Lead <ReF name='note'>{{ disabled</rEf> tail")
+        == "Lead tail"
+    )
+    assert wikitext_to_plain_text("Lead <REF name='{{ disabled' /> tail") == "Lead tail"
+    assert wikitext_to_plain_text('Lead <ReF name="a>b" /> tail') == "Lead tail"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "Lead <!-- " + "{{" * 100 + " disabled --> tail",
+        "Lead <ref>" + "{{" * 100 + " disabled</ref> tail",
+    ],
+)
+def test_inert_regions_do_not_consume_template_nesting_budget(source: str) -> None:
+    assert wikitext_to_plain_text(source) == "Lead tail"
+
+
+@pytest.mark.parametrize("source", ["Lead <!-- hidden", "Lead <REF>hidden"])
+def test_unclosed_inert_region_extends_deterministically_to_eof(source: str) -> None:
+    assert wikitext_to_plain_text(source) == "Lead"
+
+
 @pytest.mark.parametrize(
     "raw",
     [
