@@ -23,10 +23,19 @@ pgvector = [
   "pgvector>=0.3,<0.4",
   "psycopg[binary]>=3.2,<3.3",
 ]
+kafka = [
+  "confluent-kafka>=2.6,<3",
+]
+parquet = [
+  "pyarrow>=17,<26",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["pgvector: requires a real PostgreSQL/pgvector service"]
+markers = [
+  "kafka: requires a real Kafka service",
+  "pgvector: requires a real PostgreSQL/pgvector service",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

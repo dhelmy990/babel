@@ -6,7 +6,7 @@
 
 **Architecture:** Pure in-memory ports own deterministic behavior; Kafka, synchronous HTTP, filesystem synchronization, and Parquet are thin adapters. The trainer checkpoints model state and next offsets atomically before committing transport offsets, while the simulator remains the only hidden-data consumer.
 
-**Tech Stack:** Python 3.10+, PyTorch, NumPy, PyArrow, httpx, confluent-kafka, Apache Kafka KRaft, pytest.
+**Tech Stack:** Python 3.10+, NumPy, PyArrow, httpx, confluent-kafka, Apache Kafka KRaft, pytest.
 
 ## Global Constraints
 
@@ -141,7 +141,7 @@ Run: `PYTHONPATH=online/src pytest online/tests/simulation -q`
 - Create: `online/tests/training/test_recovery.py`
 
 **Interfaces:**
-- Consumes: Lane A `FeedbackEventV1`, Task 1 consumer records, and an injected working PyTorch model/optimizer.
+- Consumes: Lane A `FeedbackEventV1`, Task 1 consumer records, and frozen fixture vectors injected into a NumPy working model.
 - Produces: `TrainingPair`, `pairs_from_event`, `weighted_pairwise_loss`, `CheckpointState`, `save_online_checkpoint`, `load_latest_checkpoint`, and `OnlineTrainer`.
 
 - [ ] **Step 1: Write and run the failing pair-label test**
