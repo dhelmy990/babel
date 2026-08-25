@@ -372,6 +372,46 @@ def test_every_streamed_row_is_validated_and_unknown_fields_fail_closed() -> Non
         next(iter(closed))
 
 
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "article_text",
+        "wikidata_id",
+        "source_revision_id",
+        "snapshot_date",
+        "reconciliation_status",
+    ],
+)
+def test_physical_stream_requires_every_canonical_v1_field(missing: str) -> None:
+    physical = row(1)
+    del physical[missing]
+    stream = load_distillation_stream(
+        revision=COMMIT, token="secret", api=FakeApi(metadata(count=1)),
+        load_dataset_fn=lambda *a, **k: [physical], shuffle_buffer_size=1,
+    )
+
+    with pytest.raises(DatasetContractError, match="field|schema|row"):
+        next(iter(stream))
+
+
+def test_physical_stream_rejects_internal_seven_field_projection() -> None:
+    physical = row(1)
+    projected = {
+        name: physical[name]
+        for name in (
+            "article_key", "page_id", "canonical_title", "lead_text",
+            "teacher_vector", "teacher_norm", "split",
+        )
+    }
+    stream = load_distillation_stream(
+        revision=COMMIT, token="secret", api=FakeApi(metadata(count=1)),
+        load_dataset_fn=lambda *a, **k: [projected], shuffle_buffer_size=1,
+    )
+
+    with pytest.raises(DatasetContractError, match="field|schema|row"):
+        next(iter(stream))
+
+
 def test_shuffle_is_deterministic_by_seed_and_epoch() -> None:
     values = list({
         item["article_key"]: item for item in (row(index) for index in range(1, 20))

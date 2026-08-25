@@ -43,17 +43,16 @@ _ALLOWED_ROW_FIELDS = frozenset(
         "reconciliation_status",
     }
 )
-_TRAINING_ROW_FIELDS = frozenset(
-    {
-        "article_key",
-        "page_id",
-        "canonical_title",
-        "lead_text",
-        "teacher_vector",
-        "teacher_norm",
-        "split",
-    }
+_TRAINING_ROW_FIELD_ORDER = (
+    "article_key",
+    "page_id",
+    "canonical_title",
+    "lead_text",
+    "teacher_vector",
+    "teacher_norm",
+    "split",
 )
+_TRAINING_ROW_FIELDS = frozenset(_TRAINING_ROW_FIELD_ORDER)
 # Qwen inputs are capped at 1024 tokens. A 16 KiB UTF-8 title+lead budget
 # allows a conservative 16 bytes/token while bounding the 10k shuffle buffer.
 _MAX_TRAINING_TEXT_BYTES = 16 * 1024
@@ -206,6 +205,8 @@ def validate_distillation_row(
     """Apply the complete closed v1 schema and Task 5 semantic checks."""
     if not isinstance(value, Mapping):
         raise DatasetContractError("stream row must be a mapping")
+    if len(value) != len(_ALLOWED_ROW_FIELDS):
+        raise DatasetContractError("stream row has an invalid number of fields")
     document = dict(value)
     _validate_schema("distillation-example-v1", document)
     if set(document) != _ALLOWED_ROW_FIELDS:
@@ -274,7 +275,7 @@ def validate_training_row(
     document = dict(value)
     if set(document) == _ALLOWED_ROW_FIELDS:
         document = validate_distillation_row(document, expected_split=expected_split)
-        projected = {name: document[name] for name in _TRAINING_ROW_FIELDS}
+        projected = {name: document[name] for name in _TRAINING_ROW_FIELD_ORDER}
     elif set(document) == _TRAINING_ROW_FIELDS:
         projected = document
     else:
@@ -952,7 +953,11 @@ class StatefulDistillationStream(Iterable[dict[str, object]]):
             rng.setstate(_tuple_state(live["shuffle_rng_state"]))  # type: ignore[arg-type]
 
             def check_and_remember(raw: object) -> dict[str, object]:
-                checked = validate_training_row(raw, expected_split=self.split)
+                physical = validate_distillation_row(raw, expected_split=self.split)
+                checked = validate_training_row(
+                    {name: physical[name] for name in _TRAINING_ROW_FIELD_ORDER},
+                    expected_split=self.split,
+                )
                 try:
                     seen.execute(
                         "INSERT INTO article_keys(article_key) VALUES (?)",

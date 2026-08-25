@@ -856,40 +856,6 @@ def _private_model_info(api: object, repo_id: str, revision: str, token: str) ->
     return info
 
 
-def _remote_or_missing(
-    api: object, repo_id: str, remote_path: str, revision: str, token: str
-) -> bytes | None:
-    try:
-        getter = getattr(api, "get_file_bytes", None)
-        if callable(getter):
-            value = getter(
-                repo_id=repo_id,
-                path_in_repo=remote_path,
-                repo_type="model",
-                revision=revision,
-                token=token,
-            )
-            if not isinstance(value, bytes):
-                raise TypeError("remote adapter returned non-bytes")
-            return value
-        from huggingface_hub import hf_hub_download
-
-        path = hf_hub_download(
-            repo_id=repo_id,
-            filename=remote_path,
-            repo_type="model",
-            revision=revision,
-            token=token,
-        )
-        return Path(path).read_bytes()
-    except BaseException as error:
-        if _is_missing(error):
-            return None
-        raise ArtifactPublicationError(
-            f"remote artifact preflight failed ({type(error).__name__})"
-        ) from None
-
-
 def _add_operation(api: object, remote_path: str, local_path: Path) -> object:
     factory = getattr(api, "make_add_operation", None)
     if callable(factory):
@@ -925,10 +891,68 @@ def _remote_chunks(
             token=token,
         )
         return
-    value = _remote_or_missing(api, repo_id, remote_path, revision, token)
-    if value is None:
-        raise ArtifactPublicationError(f"remote artifact file is missing: {remote_path}")
-    yield value
+    from huggingface_hub import hf_hub_url
+    from huggingface_hub.utils import build_hf_headers, get_session
+
+    url = hf_hub_url(
+        repo_id=repo_id,
+        filename=remote_path,
+        repo_type="model",
+        revision=revision,
+    )
+    response = get_session().get(
+        url,
+        headers=build_hf_headers(token=token),
+        allow_redirects=True,
+        stream=True,
+        timeout=(10, 60),
+    )
+    try:
+        response.raise_for_status()
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            if chunk:
+                yield chunk
+    finally:
+        response.close()
+
+
+def _existing_remote_identity_or_missing(
+    api: object,
+    repo_id: str,
+    remote_path: str,
+    revision: str,
+    token: str,
+    expected: Mapping[str, object],
+) -> dict[str, object] | None:
+    """Stream one pre-existing path, retaining only its fixed-size identity."""
+    expected_size = int(expected["size"])
+    expected_sha = str(expected["sha256"])
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        for chunk in _remote_chunks(api, repo_id, remote_path, revision, token):
+            if not isinstance(chunk, bytes):
+                raise TypeError("remote stream yielded non-bytes")
+            remaining = expected_size - size
+            if len(chunk) > remaining:
+                raise ArtifactPublicationError(
+                    f"remote artifact conflict: size exceeds manifest for {remote_path}"
+                )
+            digest.update(chunk)
+            size += len(chunk)
+    except ArtifactPublicationError:
+        raise
+    except BaseException as error:
+        if _is_missing(error):
+            return None
+        raise ArtifactPublicationError(
+            f"remote artifact preflight failed ({type(error).__name__})"
+        ) from None
+    if size != expected_size or digest.hexdigest() != expected_sha:
+        raise ArtifactPublicationError(
+            f"remote artifact conflict: immutable bytes differ for {remote_path}"
+        )
+    return {"sha256": expected_sha, "size": expected_size}
 
 
 def _verify_remote(
@@ -1046,13 +1070,6 @@ def _expected_identities(
     return expected
 
 
-def _bytes_match_identity(value: bytes, identity: Mapping[str, object]) -> bool:
-    return (
-        len(value) == int(identity["size"])
-        and hashlib.sha256(value).hexdigest() == identity["sha256"]
-    )
-
-
 @dataclass(frozen=True, slots=True)
 class PublicationEvidence:
     repo_id: str
@@ -1125,19 +1142,21 @@ def _publish_snapshot(
     for attempt in range(retries):
         info = _private_model_info(api, repo_id, "main", token)
         parent_sha = str(getattr(info, "sha"))
-        existing = {
-            remote_path: _remote_or_missing(api, repo_id, remote_path, parent_sha, token)
-            for remote_path in sorted(uploads)
-        }
-        present = {name for name, value in existing.items() if value is not None}
+        present = 0
+        for remote_path in sorted(uploads):
+            identity = _existing_remote_identity_or_missing(
+                api,
+                repo_id,
+                remote_path,
+                parent_sha,
+                token,
+                expected[remote_path],
+            )
+            if identity is not None:
+                present += 1
         if present:
-            if present != set(uploads):
+            if present != len(uploads):
                 raise ArtifactPublicationError("remote artifact conflict: partial immutable path exists")
-            if any(
-                not _bytes_match_identity(existing[name], expected[name])  # type: ignore[arg-type]
-                for name in uploads
-            ):
-                raise ArtifactPublicationError("remote artifact conflict: immutable bytes differ")
             commit_sha = parent_sha
             break
         try:

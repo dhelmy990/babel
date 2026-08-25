@@ -367,6 +367,31 @@ def test_publish_is_idempotent_for_same_bytes_and_rejects_conflict(tmp_path: Pat
         publish_model_artifact(conflict, artifact, "secret", sleep=lambda _: None)
 
 
+def test_existing_remote_preflight_stops_at_manifest_size_plus_one(tmp_path: Path) -> None:
+    artifact = export(tmp_path)
+    name = "adapter_config.json"
+    remote_path = f"artifacts/{artifact.artifact_id}/{name}"
+    expected = (artifact.path / name).read_bytes()
+
+    class OversizedExistingApi(FakeApi):
+        bytes_read = 0
+
+        def iter_file_bytes(self, *, path_in_repo: str, **kwargs: object):
+            if path_in_repo != remote_path:
+                raise AssertionError("preflight must stop at the first conflict")
+            for byte in self.remote[path_in_repo]:
+                self.bytes_read += 1
+                yield bytes((byte,))
+
+    api = OversizedExistingApi()
+    api.remote[remote_path] = expected + b"x" + b"must-not-be-read"
+    with pytest.raises(ArtifactPublicationError, match="conflict|size"):
+        publish_model_artifact(api, artifact, "secret", sleep=lambda _: None)
+
+    assert api.bytes_read == len(expected) + 1
+    assert api.commit_calls == []
+
+
 def test_publish_retries_parent_race(tmp_path: Path) -> None:
     artifact = export(tmp_path)
 
