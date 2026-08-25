@@ -162,6 +162,29 @@ def test_refs_are_removed_before_template_parsing() -> None:
     assert wikitext_to_plain_text('Lead <ReF name="a>b" /> tail') == "Lead tail"
 
 
+def test_ref_close_tokens_inside_comments_are_inert() -> None:
+    source = "Lead <ref><!-- </ref> -->citation</ref> tail"
+    assert wikitext_to_plain_text(source) == "Lead tail"
+
+
+def test_ref_close_tokens_inside_quoted_attributes_are_inert() -> None:
+    source = 'Lead <ref><span title="</ref>">citation</span></ref> tail'
+    assert wikitext_to_plain_text(source) == "Lead tail"
+
+
+@pytest.mark.parametrize(
+    "inert_markup",
+    ["<![CDATA[</ref>]]>", '<?citation value="</ref>"?>'],
+)
+def test_ref_close_tokens_inside_other_inert_markup_are_ignored(
+    inert_markup: str,
+) -> None:
+    assert (
+        wikitext_to_plain_text(f"Lead <ref>{inert_markup}citation</ref> tail")
+        == "Lead tail"
+    )
+
+
 @pytest.mark.parametrize(
     "source",
     [
@@ -173,7 +196,14 @@ def test_inert_regions_do_not_consume_template_nesting_budget(source: str) -> No
     assert wikitext_to_plain_text(source) == "Lead tail"
 
 
-@pytest.mark.parametrize("source", ["Lead <!-- hidden", "Lead <REF>hidden"])
+@pytest.mark.parametrize(
+    "source",
+    [
+        "Lead <!-- hidden",
+        "Lead <REF>hidden",
+        "Lead <ref><!-- </ref> -->hidden",
+    ],
+)
 def test_unclosed_inert_region_extends_deterministically_to_eof(source: str) -> None:
     assert wikitext_to_plain_text(source) == "Lead"
 
@@ -740,7 +770,14 @@ def test_wikitext_limits_reject_pathological_size_and_nesting() -> None:
 
 @pytest.mark.parametrize(
     "fragment",
-    ["<ref", "<a", "[http://example.invalid ", "<!--", "<a>x</a>"],
+    [
+        "<ref",
+        "<a",
+        "[http://example.invalid ",
+        "<!--",
+        "<a>x</a>",
+        '<ref><span title="</ref>">x</span></ref>',
+    ],
 )
 def test_inline_markup_scanner_has_a_linear_operation_budget(
     monkeypatch: pytest.MonkeyPatch, fragment: str

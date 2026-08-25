@@ -916,21 +916,40 @@ def _internal_link_label(content: str) -> str:
 
 
 def _find_ref_close(
-    lower_text: str, start: int, budget: _ScanBudget
+    text: str, lower_text: str, start: int, budget: _ScanBudget
 ) -> tuple[int, int] | None:
     cursor = start
-    while cursor < len(lower_text):
+    while cursor < len(text):
         budget.step()
-        closing = lower_text.find("</ref", cursor)
-        if closing < 0:
+        markup_start = text.find("<", cursor)
+        if markup_start < 0:
             return None
-        boundary = closing + len("</ref")
-        if boundary == len(lower_text) or lower_text[boundary].isspace() or lower_text[
-            boundary
-        ] == ">":
-            end = _find_tag_end(lower_text, boundary, budget)
-            return None if end is None else (closing, end + 1)
-        cursor = boundary
+        if text.startswith("<!--", markup_start):
+            comment_end = text.find("-->", markup_start + 4)
+            if comment_end < 0:
+                return None
+            cursor = comment_end + 3
+            continue
+        if text.startswith("<![CDATA[", markup_start):
+            cdata_end = text.find("]]>", markup_start + 9)
+            if cdata_end < 0:
+                return None
+            cursor = cdata_end + 3
+            continue
+        if text.startswith("<?", markup_start):
+            instruction_end = text.find("?>", markup_start + 2)
+            if instruction_end < 0:
+                return None
+            cursor = instruction_end + 2
+            continue
+
+        tag_end = _find_tag_end(text, markup_start + 1, budget)
+        if tag_end is None:
+            return None
+        tag_body = lower_text[markup_start + 1 : tag_end].strip()
+        if tag_body.startswith("/") and tag_body[1:].strip() == "ref":
+            return markup_start, tag_end + 1
+        cursor = tag_end + 1
     return None
 
 
@@ -1014,7 +1033,7 @@ def _scan_inline_markup(text: str) -> str:
                 and not closing_tag
                 and not tag_body.rstrip().endswith("/")
             ):
-                closing = _find_ref_close(lower_text, tag_end + 1, budget)
+                closing = _find_ref_close(text, lower_text, tag_end + 1, budget)
                 if closing is None:
                     break
                 _closing_start, cursor = closing
