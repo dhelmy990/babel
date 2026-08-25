@@ -1,0 +1,86 @@
+{
+  "$id": "https://babel.local/schemas/online/hnsw-snapshot-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "efConstruction": {
+      "default": 200,
+      "exclusiveMinimum": 0,
+      "title": "Efconstruction",
+      "type": "integer"
+    },
+    "efSearch": {
+      "default": 100,
+      "exclusiveMinimum": 0,
+      "title": "Efsearch",
+      "type": "integer"
+    },
+    "embeddingSpaceId": {
+      "format": "uuid",
+      "title": "Embeddingspaceid",
+      "type": "string"
+    },
+    "m": {
+      "default": 16,
+      "exclusiveMinimum": 0,
+      "title": "M",
+      "type": "integer"
+    },
+    "orderedBabelIds": {
+      "items": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "title": "Orderedbabelids",
+      "type": "array"
+    },
+    "pgvectorSnapshotSha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Pgvectorsnapshotsha256",
+      "type": "string"
+    },
+    "rowCount": {
+      "minimum": 0,
+      "title": "Rowcount",
+      "type": "integer"
+    },
+    "runId": {
+      "format": "uuid",
+      "title": "Runid",
+      "type": "string"
+    },
+    "schemaVersion": {
+      "const": 1,
+      "title": "Schemaversion",
+      "type": "integer"
+    },
+    "servingModelId": {
+      "format": "uuid",
+      "title": "Servingmodelid",
+      "type": "string"
+    },
+    "servingModelVersion": {
+      "minimum": 0,
+      "title": "Servingmodelversion",
+      "type": "integer"
+    },
+    "vectorSha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Vectorsha256",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "runId",
+    "servingModelId",
+    "servingModelVersion",
+    "embeddingSpaceId",
+    "pgvectorSnapshotSha256",
+    "orderedBabelIds",
+    "rowCount",
+    "vectorSha256"
+  ],
+  "title": "HnswSnapshotV1",
+  "type": "object"
+}

@@ -1,0 +1,84 @@
+{
+  "$id": "https://babel.local/schemas/online/activity-log-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "component": {
+      "enum": [
+        "supervisor",
+        "serving",
+        "training",
+        "feedback"
+      ],
+      "title": "Component",
+      "type": "string"
+    },
+    "event": {
+      "minLength": 1,
+      "title": "Event",
+      "type": "string"
+    },
+    "level": {
+      "enum": [
+        "debug",
+        "info",
+        "warning",
+        "error"
+      ],
+      "title": "Level",
+      "type": "string"
+    },
+    "message": {
+      "minLength": 1,
+      "title": "Message",
+      "type": "string"
+    },
+    "metrics": {
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "number"
+          }
+        ]
+      },
+      "title": "Metrics",
+      "type": "object"
+    },
+    "occurredAtNs": {
+      "minimum": 0,
+      "title": "Occurredatns",
+      "type": "integer"
+    },
+    "runId": {
+      "format": "uuid",
+      "title": "Runid",
+      "type": "string"
+    },
+    "schemaVersion": {
+      "const": 1,
+      "title": "Schemaversion",
+      "type": "integer"
+    },
+    "sequence": {
+      "exclusiveMinimum": 0,
+      "title": "Sequence",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "runId",
+    "sequence",
+    "occurredAtNs",
+    "level",
+    "component",
+    "event",
+    "message",
+    "metrics"
+  ],
+  "title": "ActivityLogV1",
+  "type": "object"
+}

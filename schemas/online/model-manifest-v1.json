@@ -1,0 +1,174 @@
+{
+  "$defs": {
+    "EmbeddingSpaceV1": {
+      "additionalProperties": false,
+      "properties": {
+        "compatibilityVersion": {
+          "minLength": 1,
+          "title": "Compatibilityversion",
+          "type": "string"
+        },
+        "datasetRevision": {
+          "pattern": "^[a-f0-9]{40,64}$",
+          "title": "Datasetrevision",
+          "type": "string"
+        },
+        "dimension": {
+          "const": 100,
+          "title": "Dimension",
+          "type": "integer"
+        },
+        "distance": {
+          "const": "cosine",
+          "title": "Distance",
+          "type": "string"
+        },
+        "distilledEncoderArtifact": {
+          "minLength": 1,
+          "title": "Distilledencoderartifact",
+          "type": "string"
+        },
+        "embeddingSpaceId": {
+          "format": "uuid",
+          "title": "Embeddingspaceid",
+          "type": "string"
+        },
+        "schemaVersion": {
+          "const": 1,
+          "title": "Schemaversion",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "embeddingSpaceId",
+        "dimension",
+        "distance",
+        "distilledEncoderArtifact",
+        "datasetRevision",
+        "compatibilityVersion"
+      ],
+      "title": "EmbeddingSpaceV1",
+      "type": "object"
+    }
+  },
+  "$id": "https://babel.local/schemas/online/model-manifest-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "checkpointPath": {
+      "minLength": 1,
+      "title": "Checkpointpath",
+      "type": "string"
+    },
+    "checkpointSha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Checkpointsha256",
+      "type": "string"
+    },
+    "datasetRepo": {
+      "minLength": 1,
+      "title": "Datasetrepo",
+      "type": "string"
+    },
+    "datasetRevision": {
+      "pattern": "^[a-f0-9]{40,64}$",
+      "title": "Datasetrevision",
+      "type": "string"
+    },
+    "embeddingSpace": {
+      "$ref": "#/$defs/EmbeddingSpaceV1"
+    },
+    "encoderRepo": {
+      "minLength": 1,
+      "title": "Encoderrepo",
+      "type": "string"
+    },
+    "encoderRevision": {
+      "pattern": "^[a-f0-9]{40,64}$",
+      "title": "Encoderrevision",
+      "type": "string"
+    },
+    "environmentSequence": {
+      "items": {
+        "enum": [
+          "2026-06",
+          "2026-07"
+        ],
+        "type": "string"
+      },
+      "maxItems": 2,
+      "minItems": 1,
+      "title": "Environmentsequence",
+      "type": "array"
+    },
+    "immutable": {
+      "const": true,
+      "title": "Immutable",
+      "type": "boolean"
+    },
+    "label": {
+      "minLength": 1,
+      "title": "Label",
+      "type": "string"
+    },
+    "modelId": {
+      "format": "uuid",
+      "title": "Modelid",
+      "type": "string"
+    },
+    "parentModelId": {
+      "anyOf": [
+        {
+          "format": "uuid",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Parentmodelid"
+    },
+    "producingRunId": {
+      "anyOf": [
+        {
+          "format": "uuid",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Producingrunid"
+    },
+    "schemaVersion": {
+      "const": 1,
+      "title": "Schemaversion",
+      "type": "integer"
+    },
+    "trainingExamples": {
+      "minimum": 0,
+      "title": "Trainingexamples",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "modelId",
+    "label",
+    "parentModelId",
+    "producingRunId",
+    "encoderRepo",
+    "encoderRevision",
+    "datasetRepo",
+    "datasetRevision",
+    "environmentSequence",
+    "trainingExamples",
+    "checkpointPath",
+    "checkpointSha256",
+    "embeddingSpace",
+    "immutable"
+  ],
+  "title": "ModelManifestV1",
+  "type": "object"
+}

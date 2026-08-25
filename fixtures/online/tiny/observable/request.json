@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "requestId": "00000000-0000-5000-8000-000000000401",
+  "runId": "00000000-0000-5000-8000-000000000001",
+  "creatorId": "00000000-0000-5000-8000-000000000101",
+  "newBabelId": "00000000-0000-5000-8000-000000000301",
+  "newSourceArticleKey": "enwiki:5739",
+  "title": "Compiler notes",
+  "text": "An observable note about compiler design.",
+  "historyBabelIds": ["00000000-0000-5000-8000-000000000201"],
+  "candidateCount": 3
+}

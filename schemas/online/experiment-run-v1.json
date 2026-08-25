@@ -1,0 +1,140 @@
+{
+  "$id": "https://babel.local/schemas/online/experiment-run-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "artifactRoot": {
+      "default": "artifacts/online",
+      "minLength": 1,
+      "title": "Artifactroot",
+      "type": "string"
+    },
+    "checkpointEveryEvents": {
+      "default": 100,
+      "exclusiveMinimum": 0,
+      "title": "Checkpointeveryevents",
+      "type": "integer"
+    },
+    "creatorCount": {
+      "default": 50,
+      "maximum": 10000,
+      "minimum": 1,
+      "title": "Creatorcount",
+      "type": "integer"
+    },
+    "datasetRepo": {
+      "minLength": 1,
+      "title": "Datasetrepo",
+      "type": "string"
+    },
+    "datasetRevision": {
+      "pattern": "^[a-f0-9]{40,64}$",
+      "title": "Datasetrevision",
+      "type": "string"
+    },
+    "embeddingDimension": {
+      "const": 100,
+      "default": 100,
+      "title": "Embeddingdimension",
+      "type": "integer"
+    },
+    "environmentSequence": {
+      "items": {
+        "enum": [
+          "2026-06",
+          "2026-07"
+        ],
+        "type": "string"
+      },
+      "maxItems": 2,
+      "minItems": 1,
+      "title": "Environmentsequence",
+      "type": "array"
+    },
+    "kafkaGroup": {
+      "default": "babel-online-trainer-v1",
+      "minLength": 1,
+      "title": "Kafkagroup",
+      "type": "string"
+    },
+    "kafkaTopic": {
+      "default": "babel.feedback.v1",
+      "minLength": 1,
+      "title": "Kafkatopic",
+      "type": "string"
+    },
+    "perMonthEventBudget": {
+      "additionalProperties": {
+        "type": "integer"
+      },
+      "propertyNames": {
+        "enum": [
+          "2026-06",
+          "2026-07"
+        ]
+      },
+      "title": "Permontheventbudget",
+      "type": "object"
+    },
+    "recommendationK": {
+      "default": 10,
+      "exclusiveMinimum": 0,
+      "maximum": 100,
+      "title": "Recommendationk",
+      "type": "integer"
+    },
+    "retrievalBackend": {
+      "default": "pgvector",
+      "enum": [
+        "pgvector",
+        "hnswlib"
+      ],
+      "title": "Retrievalbackend",
+      "type": "string"
+    },
+    "runId": {
+      "format": "uuid",
+      "title": "Runid",
+      "type": "string"
+    },
+    "schemaVersion": {
+      "const": 1,
+      "title": "Schemaversion",
+      "type": "integer"
+    },
+    "startingModelId": {
+      "format": "uuid",
+      "title": "Startingmodelid",
+      "type": "string"
+    },
+    "stateRoot": {
+      "default": "state/online",
+      "minLength": 1,
+      "title": "Stateroot",
+      "type": "string"
+    },
+    "syncEverySteps": {
+      "default": 10,
+      "exclusiveMinimum": 0,
+      "title": "Synceverysteps",
+      "type": "integer"
+    },
+    "topL": {
+      "default": 100,
+      "exclusiveMinimum": 0,
+      "title": "Topl",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "runId",
+    "datasetRepo",
+    "datasetRevision",
+    "startingModelId",
+    "environmentSequence",
+    "perMonthEventBudget"
+  ],
+  "title": "RunConfigV1",
+  "type": "object"
+}

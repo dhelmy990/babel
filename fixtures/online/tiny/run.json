@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "runId": "00000000-0000-5000-8000-000000000001",
+  "datasetRepo": "dhelmy990/babel-wikipedia-experiment",
+  "datasetRevision": "e1acc648fcace8820dd5ee70bae9216ea4334555",
+  "startingModelId": "00000000-0000-5000-8000-000000000002",
+  "retrievalBackend": "pgvector",
+  "creatorCount": 6,
+  "embeddingDimension": 100,
+  "environmentSequence": ["2026-06", "2026-07"],
+  "perMonthEventBudget": {"2026-06": 6, "2026-07": 6},
+  "recommendationK": 3,
+  "topL": 6,
+  "kafkaTopic": "babel.feedback.v1",
+  "kafkaGroup": "babel-online-trainer-v1",
+  "checkpointEveryEvents": 6,
+  "syncEverySteps": 2,
+  "artifactRoot": "artifacts/online",
+  "stateRoot": "state/online"
+}

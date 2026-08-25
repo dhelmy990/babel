@@ -1,0 +1,75 @@
+{
+  "$id": "https://babel.local/schemas/online/recommendation-request-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "candidateCount": {
+      "exclusiveMinimum": 0,
+      "maximum": 100,
+      "title": "Candidatecount",
+      "type": "integer"
+    },
+    "creatorId": {
+      "format": "uuid",
+      "title": "Creatorid",
+      "type": "string"
+    },
+    "historyBabelIds": {
+      "items": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "title": "Historybabelids",
+      "type": "array"
+    },
+    "newBabelId": {
+      "format": "uuid",
+      "title": "Newbabelid",
+      "type": "string"
+    },
+    "newSourceArticleKey": {
+      "pattern": "^enwiki:[1-9][0-9]*$",
+      "title": "Newsourcearticlekey",
+      "type": "string"
+    },
+    "requestId": {
+      "format": "uuid",
+      "title": "Requestid",
+      "type": "string"
+    },
+    "runId": {
+      "format": "uuid",
+      "title": "Runid",
+      "type": "string"
+    },
+    "schemaVersion": {
+      "const": 1,
+      "title": "Schemaversion",
+      "type": "integer"
+    },
+    "text": {
+      "minLength": 1,
+      "title": "Text",
+      "type": "string"
+    },
+    "title": {
+      "minLength": 1,
+      "title": "Title",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "requestId",
+    "runId",
+    "creatorId",
+    "newBabelId",
+    "newSourceArticleKey",
+    "title",
+    "text",
+    "historyBabelIds",
+    "candidateCount"
+  ],
+  "title": "RecommendationRequestV1",
+  "type": "object"
+}

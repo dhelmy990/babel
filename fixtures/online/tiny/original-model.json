@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "modelId": "00000000-0000-5000-8000-000000000002",
+  "label": "Friday demo immutable original",
+  "parentModelId": null,
+  "producingRunId": null,
+  "encoderRepo": "dhelmy990/babel-distilled-qwen",
+  "encoderRevision": "cccccccccccccccccccccccccccccccccccccccc",
+  "datasetRepo": "dhelmy990/babel-wikipedia-experiment",
+  "datasetRevision": "e1acc648fcace8820dd5ee70bae9216ea4334555",
+  "environmentSequence": ["2026-06", "2026-07"],
+  "trainingExamples": 0,
+  "checkpointPath": "models/original/model.safetensors",
+  "checkpointSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "embeddingSpace": {
+    "schemaVersion": 1,
+    "embeddingSpaceId": "00000000-0000-5000-8000-000000000003",
+    "dimension": 100,
+    "distance": "cosine",
+    "distilledEncoderArtifact": "hf://dhelmy990/babel-distilled-qwen@original-demo",
+    "datasetRevision": "e1acc648fcace8820dd5ee70bae9216ea4334555",
+    "compatibilityVersion": "babel-online-v1"
+  },
+  "immutable": true
+}
