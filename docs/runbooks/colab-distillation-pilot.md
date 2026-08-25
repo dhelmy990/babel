@@ -22,6 +22,10 @@ and readiness SHA-256
 `763b40f911c34a0479efdcbe2851f6c5151656d25f2e23d167c4d4560ef9acc2`.
 Do not substitute a branch name or floating revision.
 
+The pinned source commit is published on the public GitHub branch
+`codex/colab-pilot`. Its unauthenticated clean checkout was verified from the
+same URL used by the notebook, so Colab does not need a GitHub secret.
+
 ## Launch: exact clicks
 
 1. Open <https://colab.research.google.com/>.

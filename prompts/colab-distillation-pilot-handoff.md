@@ -23,6 +23,11 @@ MODEL_REVISION_SHA=97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3
 TOKENIZER_REVISION_SHA=97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3
 ```
 
+The source commit is publicly reachable from
+`https://github.com/dhelmy990/babel.git` through branch
+`codex/colab-pilot`. An unauthenticated clean clone and exact commit checkout
+were verified before this handoff; no GitHub credential is required in Colab.
+
 Use **Runtime > Change runtime type > T4 GPU**. Add a read-only private-Hub
 credential under the exact Colab Secret name `HF_TOKEN`, enable notebook
 access, and never paste or print its value. Keep the demo defaults: max length
