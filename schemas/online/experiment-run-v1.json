@@ -22,6 +22,11 @@
       "title": "Creatorcount",
       "type": "integer"
     },
+    "datasetConfig": {
+      "minLength": 1,
+      "title": "Datasetconfig",
+      "type": "string"
+    },
     "datasetRepo": {
       "minLength": 1,
       "title": "Datasetrepo",
@@ -97,6 +102,12 @@
       "title": "Runid",
       "type": "string"
     },
+    "runSeed": {
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "title": "Runseed",
+      "type": "integer"
+    },
     "schemaVersion": {
       "const": 1,
       "title": "Schemaversion",
@@ -130,10 +141,12 @@
     "schemaVersion",
     "runId",
     "datasetRepo",
+    "datasetConfig",
     "datasetRevision",
     "startingModelId",
     "environmentSequence",
-    "perMonthEventBudget"
+    "perMonthEventBudget",
+    "runSeed"
   ],
   "title": "RunConfigV1",
   "type": "object"

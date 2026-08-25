@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -32,6 +32,7 @@ class RunConfigV1(FrozenContract):
     schemaVersion: Literal[1]
     runId: UUID
     datasetRepo: str = Field(min_length=1)
+    datasetConfig: str = Field(min_length=1)
     datasetRevision: str = Field(pattern=SHA256_PATTERN)
     startingModelId: UUID
     retrievalBackend: RetrievalBackend = "pgvector"
@@ -39,6 +40,7 @@ class RunConfigV1(FrozenContract):
     embeddingDimension: Literal[100] = 100
     environmentSequence: list[EnvironmentPeriod] = Field(min_length=1, max_length=2)
     perMonthEventBudget: dict[EnvironmentPeriod, int]
+    runSeed: int = Field(ge=0, le=9_223_372_036_854_775_807)
     recommendationK: int = Field(default=10, gt=0, le=100)
     topL: int = Field(default=100, gt=0)
     kafkaTopic: str = Field(default="babel.feedback.v1", min_length=1)
@@ -161,6 +163,55 @@ class FeedbackEventV1(FrozenContract):
     occurredAtNs: int = Field(ge=0)
 
 
+class LifecycleActivityV1(FrozenContract):
+    kind: Literal["lifecycle"]
+
+
+class RecommendationActivityV1(FrozenContract):
+    kind: Literal["recommendation"]
+    creatorId: UUID
+    newBabelId: UUID
+    newBabelTitle: str = Field(min_length=1)
+    candidateBabelIds: list[UUID]
+    includeBabelIds: list[UUID]
+    excludeBabelIds: list[UUID]
+    ignoreBabelIds: list[UUID]
+    acceptedEdgeCount: int = Field(ge=0)
+    modelId: UUID
+    modelVersion: int = Field(ge=0)
+
+
+class FeedbackActivityV1(FrozenContract):
+    kind: Literal["feedback"]
+    kafkaOffset: int = Field(ge=0)
+    kafkaLag: int = Field(ge=0)
+
+
+class TrainingActivityV1(FrozenContract):
+    kind: Literal["training"]
+    trainerStep: int = Field(ge=0)
+    rollingRankLoss: float = Field(ge=0)
+
+
+class SynchronizationActivityV1(FrozenContract):
+    kind: Literal["synchronization"]
+    checkpointPath: str = Field(min_length=1)
+    checkpointSha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    synchronizationVersion: int = Field(ge=0)
+    modelId: UUID
+    modelVersion: int = Field(ge=0)
+
+
+ActivityDetailsV1 = Annotated[
+    LifecycleActivityV1
+    | RecommendationActivityV1
+    | FeedbackActivityV1
+    | TrainingActivityV1
+    | SynchronizationActivityV1,
+    Field(discriminator="kind"),
+]
+
+
 class ActivityLogV1(FrozenContract):
     schemaVersion: Literal[1]
     runId: UUID
@@ -171,6 +222,7 @@ class ActivityLogV1(FrozenContract):
     event: str = Field(min_length=1)
     message: str = Field(min_length=1)
     metrics: dict[str, int | float]
+    details: ActivityDetailsV1
 
     @field_validator("metrics")
     @classmethod
@@ -264,15 +316,21 @@ def contract_schema_documents() -> dict[str, dict[str, object]]:
 
 __all__ = [
     "ActivityLogV1",
+    "ActivityDetailsV1",
     "CandidateActionV1",
     "contract_schema_documents",
     "EmbeddingSpaceV1",
     "FeedbackEventV1",
+    "FeedbackActivityV1",
     "HnswSnapshotV1",
     "ModelManifestV1",
+    "LifecycleActivityV1",
+    "RecommendationActivityV1",
     "RecommendationCandidateV1",
     "RecommendationRequestV1",
     "RecommendationResponseV1",
     "RunConfigV1",
+    "SynchronizationActivityV1",
+    "TrainingActivityV1",
     "validate_contract",
 ]

@@ -35,12 +35,14 @@ def default_run_config(
         schemaVersion=1,
         runId=run_id,
         datasetRepo="dhelmy990/babel-wikipedia-experiment",
+        datasetConfig="demo_catalog_2026_06",
         datasetRevision=dataset_revision,
         startingModelId=starting_model_id,
         retrievalBackend="pgvector",
         creatorCount=creator_count,
         environmentSequence=["2026-06", "2026-07"],
         perMonthEventBudget={"2026-06": 100, "2026-07": 100},
+        runSeed=0,
     )
 
 

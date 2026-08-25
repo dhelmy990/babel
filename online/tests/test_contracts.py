@@ -15,6 +15,7 @@ from babel_online.contracts import (
     FeedbackEventV1,
     HnswSnapshotV1,
     ModelManifestV1,
+    RecommendationActivityV1,
     RecommendationCandidateV1,
     RecommendationRequestV1,
     RecommendationResponseV1,
@@ -49,10 +50,12 @@ def test_run_defaults_and_request_contract_are_closed_and_frozen() -> None:
         schemaVersion=1,
         runId=RUN_ID,
         datasetRepo="dhelmy990/babel-wikipedia-experiment",
+        datasetConfig="demo_catalog_2026_06",
         datasetRevision="e1acc648fcace8820dd5ee70bae9216ea4334555",
         startingModelId=MODEL_ID,
         environmentSequence=["2026-06", "2026-07"],
         perMonthEventBudget={"2026-06": 6, "2026-07": 6},
+        runSeed=7,
     )
 
     assert run.retrievalBackend == "pgvector"
@@ -196,8 +199,26 @@ def test_model_snapshot_activity_and_named_validation_are_frozen() -> None:
         event="recommendation_completed",
         message="Recommendation completed.",
         metrics={"serverTotalNs": 21},
+        details=RecommendationActivityV1(
+            kind="recommendation",
+            creatorId="00000000-0000-5000-8000-000000000020",
+            newBabelId="00000000-0000-5000-8000-000000000030",
+            newBabelTitle="Compiler notes",
+            candidateBabelIds=["00000000-0000-5000-8000-000000000040"],
+            includeBabelIds=["00000000-0000-5000-8000-000000000040"],
+            excludeBabelIds=[],
+            ignoreBabelIds=[],
+            acceptedEdgeCount=1,
+            modelId=MODEL_ID,
+            modelVersion=0,
+        ),
     )
-    assert "hiddenProfile" not in log.model_dump()
+    payload = log.model_dump(mode="json")
+    assert payload["details"]["acceptedEdgeCount"] == 1
+    with pytest.raises(ValidationError):
+        ActivityLogV1.model_validate(
+            {**payload, "details": {**payload["details"], "hiddenPpr": {}}}
+        )
 
 
 def test_checked_in_json_schemas_match_typed_contracts() -> None:

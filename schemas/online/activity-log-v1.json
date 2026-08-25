@@ -1,4 +1,207 @@
 {
+  "$defs": {
+    "FeedbackActivityV1": {
+      "additionalProperties": false,
+      "properties": {
+        "kafkaLag": {
+          "minimum": 0,
+          "title": "Kafkalag",
+          "type": "integer"
+        },
+        "kafkaOffset": {
+          "minimum": 0,
+          "title": "Kafkaoffset",
+          "type": "integer"
+        },
+        "kind": {
+          "const": "feedback",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "kafkaOffset",
+        "kafkaLag"
+      ],
+      "title": "FeedbackActivityV1",
+      "type": "object"
+    },
+    "LifecycleActivityV1": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "lifecycle",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "LifecycleActivityV1",
+      "type": "object"
+    },
+    "RecommendationActivityV1": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptedEdgeCount": {
+          "minimum": 0,
+          "title": "Acceptededgecount",
+          "type": "integer"
+        },
+        "candidateBabelIds": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "title": "Candidatebabelids",
+          "type": "array"
+        },
+        "creatorId": {
+          "format": "uuid",
+          "title": "Creatorid",
+          "type": "string"
+        },
+        "excludeBabelIds": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "title": "Excludebabelids",
+          "type": "array"
+        },
+        "ignoreBabelIds": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "title": "Ignorebabelids",
+          "type": "array"
+        },
+        "includeBabelIds": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "title": "Includebabelids",
+          "type": "array"
+        },
+        "kind": {
+          "const": "recommendation",
+          "title": "Kind",
+          "type": "string"
+        },
+        "modelId": {
+          "format": "uuid",
+          "title": "Modelid",
+          "type": "string"
+        },
+        "modelVersion": {
+          "minimum": 0,
+          "title": "Modelversion",
+          "type": "integer"
+        },
+        "newBabelId": {
+          "format": "uuid",
+          "title": "Newbabelid",
+          "type": "string"
+        },
+        "newBabelTitle": {
+          "minLength": 1,
+          "title": "Newbabeltitle",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "creatorId",
+        "newBabelId",
+        "newBabelTitle",
+        "candidateBabelIds",
+        "includeBabelIds",
+        "excludeBabelIds",
+        "ignoreBabelIds",
+        "acceptedEdgeCount",
+        "modelId",
+        "modelVersion"
+      ],
+      "title": "RecommendationActivityV1",
+      "type": "object"
+    },
+    "SynchronizationActivityV1": {
+      "additionalProperties": false,
+      "properties": {
+        "checkpointPath": {
+          "minLength": 1,
+          "title": "Checkpointpath",
+          "type": "string"
+        },
+        "checkpointSha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Checkpointsha256",
+          "type": "string"
+        },
+        "kind": {
+          "const": "synchronization",
+          "title": "Kind",
+          "type": "string"
+        },
+        "modelId": {
+          "format": "uuid",
+          "title": "Modelid",
+          "type": "string"
+        },
+        "modelVersion": {
+          "minimum": 0,
+          "title": "Modelversion",
+          "type": "integer"
+        },
+        "synchronizationVersion": {
+          "minimum": 0,
+          "title": "Synchronizationversion",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "checkpointPath",
+        "checkpointSha256",
+        "synchronizationVersion",
+        "modelId",
+        "modelVersion"
+      ],
+      "title": "SynchronizationActivityV1",
+      "type": "object"
+    },
+    "TrainingActivityV1": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "training",
+          "title": "Kind",
+          "type": "string"
+        },
+        "rollingRankLoss": {
+          "minimum": 0.0,
+          "title": "Rollingrankloss",
+          "type": "number"
+        },
+        "trainerStep": {
+          "minimum": 0,
+          "title": "Trainerstep",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "trainerStep",
+        "rollingRankLoss"
+      ],
+      "title": "TrainingActivityV1",
+      "type": "object"
+    }
+  },
   "$id": "https://babel.local/schemas/online/activity-log-v1.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
@@ -12,6 +215,36 @@
       ],
       "title": "Component",
       "type": "string"
+    },
+    "details": {
+      "discriminator": {
+        "mapping": {
+          "feedback": "#/$defs/FeedbackActivityV1",
+          "lifecycle": "#/$defs/LifecycleActivityV1",
+          "recommendation": "#/$defs/RecommendationActivityV1",
+          "synchronization": "#/$defs/SynchronizationActivityV1",
+          "training": "#/$defs/TrainingActivityV1"
+        },
+        "propertyName": "kind"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/LifecycleActivityV1"
+        },
+        {
+          "$ref": "#/$defs/RecommendationActivityV1"
+        },
+        {
+          "$ref": "#/$defs/FeedbackActivityV1"
+        },
+        {
+          "$ref": "#/$defs/TrainingActivityV1"
+        },
+        {
+          "$ref": "#/$defs/SynchronizationActivityV1"
+        }
+      ],
+      "title": "Details"
     },
     "event": {
       "minLength": 1,
@@ -77,7 +310,8 @@
     "component",
     "event",
     "message",
-    "metrics"
+    "metrics",
+    "details"
   ],
   "title": "ActivityLogV1",
   "type": "object"
