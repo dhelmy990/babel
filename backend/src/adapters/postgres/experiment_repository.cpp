@@ -446,8 +446,8 @@ Result<std::vector<ExperimentActivityDto>> PostgresExperimentRepository::activit
     result.reserve(rows.size());
     for (const auto& row : rows) {
       std::map<std::string, double> metrics;
-      for (const auto& [name, value] :
-           Json::parse(row["metrics"].as<std::string>()).items()) {
+      const auto parsed_metrics = Json::parse(row["metrics"].as<std::string>());
+      for (const auto& [name, value] : parsed_metrics.items()) {
         metrics.emplace(name, value.get<double>());
       }
       result.push_back(ExperimentActivityDto{

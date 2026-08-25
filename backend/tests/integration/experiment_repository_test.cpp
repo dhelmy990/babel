@@ -199,6 +199,49 @@ TEST_CASE_METHOD(ExperimentPostgresFixture,
 }
 
 TEST_CASE_METHOD(ExperimentPostgresFixture,
+                 "persisted online activity can be read for the dashboard") {
+  const auto run = repository_.createRun(launch()).value();
+  pqxx::connection connection(schemaUrl());
+  pqxx::work transaction(connection);
+  transaction.exec(R"(
+    INSERT INTO experiment_activity_logs(
+      run_id, sequence, occurred_at_ns, level, component, event, message, metrics, details
+    ) VALUES
+      ($1, 1, 1787686757789485714, 'info', 'serving',
+       'recommendation_completed', 'Creator created a Babel.',
+       '{"annNs":9859276,"clientTotalNs":42690337,"serverTotalNs":10604546}'::jsonb,
+       '{"kind":"recommendation","creatorId":"33333333-3333-5333-8333-333333333333",'
+       '"newBabelId":"44444444-4444-5444-8444-444444444444",'
+       '"newBabelTitle":"Virtual memory",'
+       '"candidateBabelIds":["55555555-5555-5555-8555-555555555555"],'
+       '"includeBabelIds":["55555555-5555-5555-8555-555555555555"],'
+       '"excludeBabelIds":[],"ignoreBabelIds":[],"acceptedEdgeCount":1,'
+       '"modelId":"11111111-1111-5111-8111-111111111111","modelVersion":10}'::jsonb),
+      ($1, 2, 1787686757808909079, 'info', 'training',
+       'online_training_progress', 'Online trainer reached step 10.',
+       '{"stepTimeMs":1.174327}'::jsonb,
+       '{"kind":"training","trainerStep":10,"rollingRankLoss":0.6905}'::jsonb)
+  )",
+                   pqxx::params{run.run_id.value});
+  transaction.commit();
+
+  const auto activity = repository_.activity(run.run_id, 0, 10);
+
+  REQUIRE(activity.has_value());
+  REQUIRE(activity->size() == 2);
+  CHECK(activity->at(0).metrics.at("clientTotalNs") == 42690337.0);
+  const auto& recommendation =
+      std::get<babel::ExperimentRecommendationActivityDto>(activity->at(0).details);
+  CHECK(recommendation.model_version == 10);
+  CHECK(recommendation.accepted_edge_count == 1);
+  CHECK(activity->at(1).metrics.at("stepTimeMs") == 1.174327);
+  const auto& training =
+      std::get<babel::ExperimentTrainingActivityDto>(activity->at(1).details);
+  CHECK(training.trainer_step == 10);
+  CHECK(training.rolling_rank_loss == 0.6905);
+}
+
+TEST_CASE_METHOD(ExperimentPostgresFixture,
                  "startup recovery interrupts an experiment left active") {
   const auto run = repository_.createRun(launch()).value();
   REQUIRE(repository_.markInterruptedRuns().has_value());
