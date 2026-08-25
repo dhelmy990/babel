@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=75,<76", "wheel>=0.45,<0.46"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "babel-friday-benchmark"
+version = "0.1.0"
+description = "Paired Friday-demo synchronous POST benchmark"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+  "httpx>=0.28,<0.29",
+  "pydantic>=2.10,<2.11",
+]
+
+[project.scripts]
+babel-friday-benchmark = "babel_benchmark.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3,<8.4"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,62 @@
+{
+  "$id": "https://babel.local/schemas/performance/performance-summary-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PerformanceSummaryV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "benchmarkRunId", "baselineCondition", "conditions"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "benchmarkRunId": {"type": "string", "format": "uuid"},
+    "baselineCondition": {"const": "pgvector_serving_only"},
+    "conditions": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/conditionSummary"}}
+  },
+  "$defs": {
+    "condition": {"enum": ["pgvector_serving_only", "pgvector_training_no_sync", "pgvector_training_and_sync"]},
+    "percentiles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "p50", "p95", "p99", "max"],
+      "properties": {
+        "count": {"type": "integer", "minimum": 1},
+        "p50": {"type": "integer", "minimum": 0},
+        "p95": {"type": "integer", "minimum": 0},
+        "p99": {"type": "integer", "minimum": 0},
+        "max": {"type": "integer", "minimum": 0}
+      }
+    },
+    "nullablePercentiles": {"anyOf": [{"$ref": "#/$defs/percentiles"}, {"type": "null"}]},
+    "conditionSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "condition",
+        "requests",
+        "successes",
+        "errors",
+        "timeouts",
+        "rps",
+        "endToEndNs",
+        "serverStagesNs",
+        "trainerStepNs",
+        "kafkaLag",
+        "syncSpikeNs",
+        "slowdownRatioP95"
+      ],
+      "properties": {
+        "condition": {"$ref": "#/$defs/condition"},
+        "requests": {"type": "integer", "minimum": 0},
+        "successes": {"type": "integer", "minimum": 0},
+        "errors": {"type": "integer", "minimum": 0},
+        "timeouts": {"type": "integer", "minimum": 0},
+        "rps": {"type": "number", "minimum": 0},
+        "endToEndNs": {"$ref": "#/$defs/nullablePercentiles"},
+        "serverStagesNs": {"type": "object", "additionalProperties": {"$ref": "#/$defs/percentiles"}},
+        "trainerStepNs": {"$ref": "#/$defs/nullablePercentiles"},
+        "kafkaLag": {"$ref": "#/$defs/nullablePercentiles"},
+        "syncSpikeNs": {"anyOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]},
+        "slowdownRatioP95": {"anyOf": [{"type": "number", "minimum": 0}, {"type": "null"}]}
+      }
+    }
+  }
+}

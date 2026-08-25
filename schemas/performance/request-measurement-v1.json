@@ -1,0 +1,81 @@
+{
+  "$id": "https://babel.local/schemas/performance/request-measurement-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RequestMeasurementV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "benchmarkRunId",
+    "condition",
+    "requestId",
+    "scheduleIndex",
+    "scheduleOffsetNs",
+    "isWarmup",
+    "startedAtMonotonicNs",
+    "completedAtMonotonicNs",
+    "queueDelayNs",
+    "clientTotalNs",
+    "clientOverheadNs",
+    "outcome",
+    "httpStatus",
+    "errorType",
+    "serverTimingsNs",
+    "modelId",
+    "modelVersion",
+    "retrievalBackend",
+    "pgvectorSnapshotSha256",
+    "backendSnapshotSha256",
+    "queryVectorSha256",
+    "candidateCount"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "benchmarkRunId": {"type": "string", "format": "uuid"},
+    "condition": {"$ref": "#/$defs/condition"},
+    "requestId": {"type": "string", "format": "uuid"},
+    "scheduleIndex": {"type": "integer", "minimum": 0},
+    "scheduleOffsetNs": {"type": "integer", "minimum": 0},
+    "isWarmup": {"type": "boolean"},
+    "startedAtMonotonicNs": {"type": "integer", "minimum": 0},
+    "completedAtMonotonicNs": {"type": "integer", "minimum": 0},
+    "queueDelayNs": {"type": "integer", "minimum": 0},
+    "clientTotalNs": {"type": "integer", "minimum": 0},
+    "clientOverheadNs": {"$ref": "#/$defs/nullableNonnegativeInteger"},
+    "outcome": {"enum": ["success", "error", "timeout"]},
+    "httpStatus": {"anyOf": [{"type": "integer", "minimum": 100, "maximum": 599}, {"type": "null"}]},
+    "errorType": {"anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
+    "serverTimingsNs": {
+      "anyOf": [
+        {"$ref": "#/$defs/serverTimings"},
+        {"type": "null"}
+      ]
+    },
+    "modelId": {"anyOf": [{"type": "string", "format": "uuid"}, {"type": "null"}]},
+    "modelVersion": {"$ref": "#/$defs/nullableNonnegativeInteger"},
+    "retrievalBackend": {"anyOf": [{"const": "pgvector"}, {"type": "null"}]},
+    "pgvectorSnapshotSha256": {"$ref": "#/$defs/nullableSha256"},
+    "backendSnapshotSha256": {"$ref": "#/$defs/nullableSha256"},
+    "queryVectorSha256": {"$ref": "#/$defs/nullableSha256"},
+    "candidateCount": {"$ref": "#/$defs/nullableNonnegativeInteger"}
+  },
+  "$defs": {
+    "condition": {"enum": ["pgvector_serving_only", "pgvector_training_no_sync", "pgvector_training_and_sync"]},
+    "nullableNonnegativeInteger": {"anyOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]},
+    "nullableSha256": {"anyOf": [{"type": "string", "pattern": "^[a-f0-9]{64}$"}, {"type": "null"}]},
+    "serverTimings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["queue", "encode", "context", "ann", "filtering", "serialization", "serverTotal"],
+      "properties": {
+        "queue": {"type": "integer", "minimum": 0},
+        "encode": {"type": "integer", "minimum": 0},
+        "context": {"type": "integer", "minimum": 0},
+        "ann": {"type": "integer", "minimum": 0},
+        "filtering": {"type": "integer", "minimum": 0},
+        "serialization": {"type": "integer", "minimum": 0},
+        "serverTotal": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}
