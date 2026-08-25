@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://babel.local/schemas/clickstream-edge-v1.json",
+  "title": "Monthly hidden Clickstream edge v1",
+  "type": "object",
+  "additionalProperties": false,
+  "x-distinct-properties": ["source_article_key", "target_article_key"],
+  "required": ["period", "source_article_key", "target_article_key", "type", "n", "normalized_weight"],
+  "properties": {
+    "period": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}$"},
+    "source_article_key": {"type": "string", "pattern": "^enwiki:[1-9][0-9]*$"},
+    "target_article_key": {"type": "string", "pattern": "^enwiki:[1-9][0-9]*$"},
+    "type": {"const": "link"},
+    "n": {"type": "integer", "minimum": 1},
+    "normalized_weight": {"type": "number", "minimum": 0, "maximum": 1}
+  }
+}

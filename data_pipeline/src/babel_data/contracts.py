@@ -4,21 +4,26 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from copy import deepcopy
 from functools import cache
 from importlib.resources import files
 from typing import Any
 
 from jsonschema import Draft202012Validator, FormatChecker, validators
+from jsonschema.exceptions import ValidationError
 
 
 _SCHEMA_NAMES = frozenset(
     {
         "dataset-readiness-v1",
         "dataset-manifest-v1",
+        "article-crosswalk-v1",
+        "clickstream-edge-v1",
         "distillation-example-v1",
         "full-release-proof-v1",
+        "monthly-article-v1",
+        "monthly-edge-v1",
         "provenance-v1",
     }
 )
@@ -36,8 +41,31 @@ def _is_finite_json_number(checker: Any, instance: object) -> bool:
     )
 
 
+def _sorted_unique(
+    validator: Any, expected: object, instance: object, schema: Mapping[str, object]
+) -> Iterator[ValidationError]:
+    del validator, schema
+    if expected is True and isinstance(instance, list) and instance != sorted(set(instance)):
+        yield ValidationError("array must be sorted and contain unique values")
+
+
+def _distinct_properties(
+    validator: Any, properties: object, instance: object, schema: Mapping[str, object]
+) -> Iterator[ValidationError]:
+    del validator, schema
+    if not isinstance(instance, Mapping) or not isinstance(properties, list):
+        return
+    values = [instance.get(name) for name in properties]
+    if len(values) != len(set(values)):
+        yield ValidationError(f"properties must be distinct: {properties!r}")
+
+
 _FiniteNumberValidator = validators.extend(
     Draft202012Validator,
+    validators={
+        "x-distinct-properties": _distinct_properties,
+        "x-sorted-unique": _sorted_unique,
+    },
     type_checker=Draft202012Validator.TYPE_CHECKER.redefine("number", _is_finite_json_number),
 )
 

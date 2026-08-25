@@ -101,7 +101,7 @@ Expected: PASS.
 
 - [ ] **Step 1: Write failing end-to-end fixture tests**
 
-Assert exact files, schemas, counts, deterministic bytes, SHA-256 sidecars, manifest key closure, exact period/artifact keys, all artifact descriptors, `fixture_ready`, non-historical claim strings, source pin, hidden-field firewall, and successful verification after rebuilding in a temporary directory.
+Assert exact files, schemas, counts, deterministic bytes, seed-catalog descriptor checksums, manifest key closure, exact period/artifact keys, all artifact descriptors, `fixture_ready`, non-historical claim strings, source pin, hidden-field firewall, and successful verification after rebuilding in a temporary directory.
 
 - [ ] **Step 2: Run tests and verify fixture API/files are absent**
 

@@ -51,16 +51,14 @@ june/
   articles.jsonl
   edges.jsonl
   clickstream.jsonl
-  hidden-archetypes.json
+  hidden-archetypes.jsonl
   backend-seed-catalog.jsonl
-  backend-seed-catalog.sha256
 july/
   articles.jsonl
   edges.jsonl
   clickstream.jsonl
-  hidden-archetypes.json
+  hidden-archetypes.jsonl
   backend-seed-catalog.jsonl
-  backend-seed-catalog.sha256
 ```
 
 Each month has exactly 80 observable articles. The crosswalk demonstrates 76
@@ -98,6 +96,9 @@ The `2016` period exposes at least the byte-faithfully derived article source
 used by the fixture. June and July each expose exactly `articles`, `edges`,
 `clickstream`, `hidden_archetypes`, and `backend_seed_catalog`. Every artifact
 descriptor has `{path, sha256, rows}` with a path relative to the fixture root.
+The seed-catalog descriptor's SHA-256 is its required checksum; no unlisted
+sidecar is created because every release artifact path must appear in the sole
+manifest.
 The provenance also records:
 
 - the pinned private pilot repository, revision, config, source snapshot date,

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://babel.local/schemas/monthly-edge-v1.json",
+  "title": "Monthly hidden directed edge v1",
+  "type": "object",
+  "additionalProperties": false,
+  "x-distinct-properties": ["source_article_key", "target_article_key"],
+  "required": ["period", "source_article_key", "target_article_key"],
+  "properties": {
+    "period": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}$"},
+    "source_article_key": {"type": "string", "pattern": "^enwiki:[1-9][0-9]*$"},
+    "target_article_key": {"type": "string", "pattern": "^enwiki:[1-9][0-9]*$"}
+  }
+}
