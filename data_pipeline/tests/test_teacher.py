@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
 import stat
 import struct
 import sys
@@ -22,9 +24,13 @@ from babel_data.teacher import (  # noqa: E402
     InvalidTeacherArchive,
     InvalidTeacherHeader,
     InvalidTeacherVector,
+    TeacherAudit,
+    TeacherExclusion,
     TeacherRecord,
+    UnsafeTeacherOutput,
     build_teacher_inventory,
     iter_teacher,
+    normalize_teacher_title,
     parse_vector_line,
 )
 
@@ -44,6 +50,36 @@ def teacher_body(
     return (f"{declared_count} {dimension}\n" + "\n".join(rows) + "\n").encode(
         "utf-8"
     )
+
+
+def raw_teacher_body(rows: list[bytes], *, count: int | None = None) -> bytes:
+    declared_count = len(rows) if count is None else count
+    return f"{declared_count} {DIMENSION}\n".encode("ascii") + b"\n".join(rows) + b"\n"
+
+
+def raw_vector_row(title: bytes, *, trailing_space: bool = True) -> bytes:
+    row = title + b" " + b" ".join([b"1"] * DIMENSION)
+    return row + (b" " if trailing_space else b"")
+
+
+def test_numpy_is_a_direct_data_pipeline_runtime_dependency() -> None:
+    pyproject = REPOSITORY_ROOT / "data_pipeline" / "pyproject.toml"
+
+    assert '"numpy==2.2.6"' in pyproject.read_text(encoding="utf-8")
+
+
+def test_fixture_preserves_real_source_trailing_space_bytes() -> None:
+    expected = raw_teacher_body(
+        [
+            raw_vector_row(b"Virtual_memory"),
+            b"Caf\xc3\xa9 " + b" ".join([b"3"] + [b"0"] * 99) + b" ",
+            b"Quantum__mechanics " + b" ".join([b"-0.5"] * 100) + b" ",
+        ]
+    )
+
+    with zipfile.ZipFile(FIXTURE) as archive:
+        assert archive.namelist() == ["teacher-small.txt"]
+        assert archive.read("teacher-small.txt") == expected
 
 
 def write_zip(
@@ -104,6 +140,13 @@ def corrupt_utf8_central_directory_filename(path: Path) -> None:
     path.write_bytes(payload)
 
 
+def declare_excessive_eocd_entries(path: Path, count: int) -> None:
+    payload = bytearray(path.read_bytes())
+    eocd = payload.rindex(b"PK\x05\x06")
+    struct.pack_into("<HH", payload, eocd + 8, count, count)
+    path.write_bytes(payload)
+
+
 def test_fixture_streams_immutable_owned_float32_records() -> None:
     records = list(iter_teacher(FIXTURE))
 
@@ -129,6 +172,48 @@ def test_parse_vector_line_accepts_crlf_and_preserves_title() -> None:
 
     assert record.title == "Virtual_memory"
     np.testing.assert_array_equal(record.vector, np.ones(DIMENSION, dtype=np.float32))
+
+
+@pytest.mark.parametrize("ending", [" \n", " \r\n"])
+def test_real_source_style_row_accepts_one_trailing_ascii_space(
+    ending: str,
+) -> None:
+    values = ["-0.125", "2.5e-03", "+4"] + ["0.25"] * 97
+    record = parse_vector_line(vector_row("Virtual_memory", values) + ending)
+
+    assert record.title == "Virtual_memory"
+    assert record.vector.shape == (100,)
+    assert record.vector[:3].tolist() == pytest.approx([-0.125, 0.0025, 4.0])
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        " " + vector_row("Leading"),
+        vector_row("Internal").replace(" 1 ", "  1 ", 1),
+        vector_row("Trailing") + "  \n",
+    ],
+)
+def test_only_one_trailing_ascii_space_is_tolerated(line: str) -> None:
+    with pytest.raises(InvalidTeacherVector, match="exactly 100|nonblank"):
+        parse_vector_line(line)
+
+
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        ("virtual_memory", "Virtual memory"),
+        ("  not representable as token  ", "Not representable as token"),
+        ("cafe\u0301", "Café"),
+        ("multiple__\u00a0spaces", "Multiple spaces"),
+        ("IndiGo", "IndiGo"),
+        ("ACID", "ACID"),
+    ],
+)
+def test_teacher_title_normalization_matches_mediawiki_first_letter(
+    title: str, expected: str
+) -> None:
+    assert normalize_teacher_title(title) == expected
 
 
 def test_public_line_parser_rejects_non_teacher_dimension() -> None:
@@ -202,12 +287,87 @@ def test_control_characters_in_titles_are_rejected(tmp_path: Path, title: str) -
         list(iter_teacher(path))
 
 
-def test_invalid_utf8_is_rejected_with_row_context(tmp_path: Path) -> None:
-    body = b"1 100\nBad\xff " + b"1 " * 99 + b"1\n"
-    path = write_zip(tmp_path / "teacher.zip", body)
+def test_invalid_utf8_titles_are_quarantined_with_reversible_audit(
+    tmp_path: Path,
+) -> None:
+    invalid_titles = [
+        b"Bad\xff",
+        b"Truncated\xc2",
+        b"Truncated\xe2\x82",
+        b"Truncated\xf0\x9f\x92",
+        b"Bad\xe2(\xa1",
+    ]
+    rows = [raw_vector_row(b"Valid_first")]
+    rows.extend(raw_vector_row(title) for title in invalid_titles)
+    rows.append(raw_vector_row(b"Valid_last"))
+    path = write_zip(tmp_path / "teacher.zip", raw_teacher_body(rows))
+    audit = TeacherAudit()
 
-    with pytest.raises(InvalidTeacherVector, match="row 2.*UTF-8"):
-        list(iter_teacher(path))
+    records = list(iter_teacher(path, audit=audit))
+
+    assert [record.title for record in records] == ["Valid_first", "Valid_last"]
+    assert audit.declared_count == 7
+    assert audit.raw_record_count == 7
+    assert audit.emitted_count == 2
+    assert audit.exclusion_count == 5
+    assert audit.exclusions_by_reason == {"invalid_title_utf8": 5}
+    assert audit.exclusions_truncated is False
+    assert all(isinstance(item, TeacherExclusion) for item in audit.exclusions)
+    assert [item.row for item in audit.exclusions] == [2, 3, 4, 5, 6]
+    assert [item.reason for item in audit.exclusions] == [
+        "invalid_title_utf8"
+    ] * 5
+    assert [item.raw_title_hex for item in audit.exclusions] == [
+        title.hex() for title in invalid_titles
+    ]
+    assert all("byte offset" in item.detail for item in audit.exclusions)
+
+
+def test_default_iteration_deterministically_skips_only_invalid_utf8_titles(
+    tmp_path: Path,
+) -> None:
+    rows = [raw_vector_row(b"Bad\xff"), raw_vector_row(b"Valid")]
+    path = write_zip(tmp_path / "teacher.zip", raw_teacher_body(rows))
+
+    assert [record.title for record in iter_teacher(path)] == ["Valid"]
+
+
+def test_invalid_utf8_in_numeric_payload_remains_fatal(tmp_path: Path) -> None:
+    numeric = [b"1"] * DIMENSION
+    numeric[-1] = b"\xff"
+    row = b"Valid " + b" ".join(numeric) + b" "
+    path = write_zip(tmp_path / "teacher.zip", raw_teacher_body([row]))
+    audit = TeacherAudit()
+
+    with pytest.raises(InvalidTeacherVector, match="numeric.*ASCII|decimal"):
+        list(iter_teacher(path, audit=audit))
+
+    assert audit.raw_record_count == 1
+    assert audit.exclusion_count == 0
+
+
+def test_header_count_compares_raw_records_not_emitted_records(tmp_path: Path) -> None:
+    rows = [raw_vector_row(b"Bad\xff"), raw_vector_row(b"Valid")]
+    path = write_zip(tmp_path / "teacher.zip", raw_teacher_body(rows, count=2))
+    audit = TeacherAudit()
+
+    assert [record.title for record in iter_teacher(path, audit=audit)] == ["Valid"]
+    assert audit.raw_record_count == audit.declared_count == 2
+    assert audit.emitted_count == 1
+
+
+def test_exclusion_records_are_bounded_but_counts_remain_complete(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(teacher, "MAX_EXCLUSION_RECORDS", 2)
+    rows = [raw_vector_row(b"Bad\xff" + bytes([index])) for index in range(5)]
+    path = write_zip(tmp_path / "teacher.zip", raw_teacher_body(rows))
+    audit = TeacherAudit()
+
+    assert list(iter_teacher(path, audit=audit)) == []
+    assert audit.exclusion_count == 5
+    assert len(audit.exclusions) == 2
+    assert audit.exclusions_truncated is True
 
 
 def test_overlong_line_is_rejected_before_unbounded_buffering(tmp_path: Path) -> None:
@@ -225,7 +385,7 @@ def test_overlong_line_is_rejected_before_unbounded_buffering(tmp_path: Path) ->
     ("first", "duplicate"),
     [
         ("Virtual_memory", "virtual__memory"),
-        ("Café", "CAFE\u0301"),
+        ("cafe\u0301", "café"),
     ],
 )
 def test_duplicate_titles_use_documented_normalization(
@@ -244,6 +404,21 @@ def test_duplicate_titles_use_documented_normalization(
     assert raised.value.title == duplicate
     assert "row 2" in str(raised.value)
     assert "row 3" in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [("IndiGo", "Indigo"), ("Acid", "ACID"), ("Café", "CAFÉ")],
+)
+def test_remainder_case_does_not_collapse_distinct_mediawiki_titles(
+    tmp_path: Path, first: str, second: str
+) -> None:
+    path = write_zip(
+        tmp_path / "teacher.zip",
+        teacher_body([vector_row(first), vector_row(second)]),
+    )
+
+    assert [record.title for record in iter_teacher(path)] == [first, second]
 
 
 def test_declared_count_rejects_premature_eof(tmp_path: Path) -> None:
@@ -350,6 +525,60 @@ def test_suspicious_compression_ratio_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(InvalidTeacherArchive, match="compression ratio"):
         list(iter_teacher(path))
+
+
+def test_eocd_entry_limit_is_checked_before_zipfile_allocation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    path = one_row_zip(tmp_path, vector_row("Only"))
+    declare_excessive_eocd_entries(path, 50_000)
+    constructed = False
+
+    class UnexpectedZipFile:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            nonlocal constructed
+            constructed = True
+            raise AssertionError("ZipFile allocated before EOCD preflight")
+
+    monkeypatch.setattr(teacher.zipfile, "ZipFile", UnexpectedZipFile)
+
+    with pytest.raises(InvalidTeacherArchive, match="50000.*1024|too many"):
+        list(iter_teacher(path))
+
+    assert constructed is False
+
+
+def test_eocd_declared_central_directory_must_fit_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    path = one_row_zip(tmp_path, vector_row("Only"))
+    payload = bytearray(path.read_bytes())
+    eocd = payload.rindex(b"PK\x05\x06")
+    struct.pack_into("<L", payload, eocd + 12, len(payload) + 1)
+    path.write_bytes(payload)
+    constructed = False
+
+    class UnexpectedZipFile:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            nonlocal constructed
+            constructed = True
+            raise AssertionError("ZipFile allocated before bounds preflight")
+
+    monkeypatch.setattr(teacher.zipfile, "ZipFile", UnexpectedZipFile)
+
+    with pytest.raises(InvalidTeacherArchive, match="central directory.*bounds"):
+        list(iter_teacher(path))
+
+    assert constructed is False
+
+
+def test_zip64_central_directory_preflight_accepts_safe_archive(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(zipfile, "ZIP64_LIMIT", 100)
+    path = one_row_zip(tmp_path, vector_row("Only"))
+
+    assert [record.title for record in iter_teacher(path)] == ["Only"]
 
 
 def test_corrupt_deflate_stream_is_reported_as_typed_archive_error(
@@ -494,13 +723,21 @@ def test_inventory_is_deterministic_complete_and_uses_stable_norms(
         "declared_count": 3,
         "dimension": 100,
         "duplicate_policy": (
-            "NFC, underscores-to-spaces, whitespace-collapse, Unicode-casefold"
+            "NFC, underscores-to-spaces, Unicode-whitespace-collapse, "
+            "MediaWiki-first-letter-capitalization"
         ),
+        "emitted_count": 3,
+        "exclusion_count": 0,
+        "exclusions": [],
+        "exclusions_by_reason": {},
+        "exclusions_truncated": False,
         "norm_statistics": {"max": 10.0, "mean": 6.0, "min": 3.0},
+        "raw_record_count": 3,
         "schema_version": "teacher-inventory-v1",
         "source_byte_size": FIXTURE.stat().st_size,
         "source_filename": FIXTURE.name,
         "source_sha256": hashlib.sha256(FIXTURE.read_bytes()).hexdigest(),
+        "valid_count": 3,
         "vector_dtype": "float32",
     }
 
@@ -508,19 +745,52 @@ def test_inventory_is_deterministic_complete_and_uses_stable_norms(
 def test_inventory_streams_teacher_records_once(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    original = teacher.iter_teacher
+    original = teacher._iter_teacher_descriptor
     calls = 0
 
-    def counting_iter(path: Path):
+    def counting_iter(source: object, audit: TeacherAudit):
         nonlocal calls
         calls += 1
-        yield from original(path)
+        yield from original(source, audit)
 
-    monkeypatch.setattr(teacher, "iter_teacher", counting_iter)
+    monkeypatch.setattr(teacher, "_iter_teacher_descriptor", counting_iter)
 
     build_teacher_inventory(FIXTURE, tmp_path / "inventory.json")
 
     assert calls == 1
+
+
+def test_inventory_accounts_for_raw_rows_and_title_exclusions(
+    tmp_path: Path,
+) -> None:
+    invalid_title = b"Broken\xe2\x82"
+    rows = [
+        raw_vector_row(b"Valid_one"),
+        raw_vector_row(invalid_title),
+        raw_vector_row(b"Valid_two"),
+    ]
+    source = write_zip(tmp_path / "teacher.zip", raw_teacher_body(rows))
+    output = tmp_path / "inventory.json"
+
+    build_teacher_inventory(source, output)
+
+    inventory = json.loads(output.read_text(encoding="utf-8"))
+    assert inventory["declared_count"] == 3
+    assert inventory["raw_record_count"] == 3
+    assert inventory["actual_count"] == 2
+    assert inventory["emitted_count"] == 2
+    assert inventory["valid_count"] == 2
+    assert inventory["exclusion_count"] == 1
+    assert inventory["exclusions_by_reason"] == {"invalid_title_utf8": 1}
+    assert inventory["exclusions_truncated"] is False
+    assert inventory["exclusions"] == [
+        {
+            "detail": "unexpected end of data at title byte offset 6",
+            "raw_title_hex": invalid_title.hex(),
+            "reason": "invalid_title_utf8",
+            "row": 2,
+        }
+    ]
 
 
 def test_inventory_refuses_to_overwrite_existing_output(tmp_path: Path) -> None:
@@ -533,16 +803,277 @@ def test_inventory_refuses_to_overwrite_existing_output(tmp_path: Path) -> None:
     assert output.read_text(encoding="utf-8") == "keep me\n"
 
 
+def test_existing_inventory_is_rejected_before_reading_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    output = tmp_path / "inventory.json"
+    output.write_text("keep me\n", encoding="utf-8")
+
+    def unexpected_hash(file_descriptor: int) -> str:
+        raise AssertionError(f"hashed source fd {file_descriptor}")
+
+    monkeypatch.setattr(teacher, "_sha256_descriptor", unexpected_hash)
+
+    with pytest.raises(FileExistsError, match="already exists"):
+        build_teacher_inventory(FIXTURE, output)
+
+
+def test_output_parent_is_bound_before_source_streaming(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    output_parent = tmp_path / "output"
+    output_parent.mkdir()
+    moved_parent = tmp_path / "moved"
+    output = output_parent / "inventory.json"
+    original = teacher._iter_teacher_descriptor
+
+    def substituting_iter(opened: object, audit: TeacherAudit):
+        output_parent.rename(moved_parent)
+        output_parent.mkdir()
+        yield from original(opened, audit)
+
+    monkeypatch.setattr(teacher, "_iter_teacher_descriptor", substituting_iter)
+
+    with pytest.raises(UnsafeTeacherOutput, match="parent identity changed"):
+        build_teacher_inventory(FIXTURE, output)
+
+    assert not output.exists()
+    assert not (moved_parent / "inventory.json").exists()
+
+
+def test_teacher_source_symlink_is_rejected(tmp_path: Path) -> None:
+    source = tmp_path / "teacher.zip"
+    source.symlink_to(FIXTURE)
+
+    with pytest.raises(InvalidTeacherArchive, match="safely open|symbolic|regular"):
+        list(iter_teacher(source))
+
+
+def test_teacher_source_with_external_hard_link_is_rejected(tmp_path: Path) -> None:
+    source = tmp_path / "teacher.zip"
+    shutil.copyfile(FIXTURE, source)
+    os.link(source, tmp_path / "external-alias.zip")
+
+    with pytest.raises(InvalidTeacherArchive, match="hard.?link|single link"):
+        list(iter_teacher(source))
+
+
+def test_inventory_rejects_symlinked_output_parent(tmp_path: Path) -> None:
+    real_parent = tmp_path / "real"
+    real_parent.mkdir()
+    linked_parent = tmp_path / "linked"
+    linked_parent.symlink_to(real_parent, target_is_directory=True)
+
+    with pytest.raises(UnsafeTeacherOutput, match="output parent"):
+        build_teacher_inventory(FIXTURE, linked_parent / "inventory.json")
+
+    assert not (real_parent / "inventory.json").exists()
+
+
+def test_inventory_detects_temporary_file_hard_link_injection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    output = tmp_path / "inventory.json"
+    attacker_alias = tmp_path / "attacker-alias.json"
+    real_link = os.link
+
+    def aliasing_link(
+        source: object,
+        destination: object,
+        *args: object,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+        **kwargs: object,
+    ) -> None:
+        real_link(
+            source,
+            attacker_alias,
+            src_dir_fd=src_dir_fd,
+            follow_symlinks=False,
+        )
+        real_link(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=False,
+        )
+
+    monkeypatch.setattr(teacher.os, "link", aliasing_link)
+
+    with pytest.raises(UnsafeTeacherOutput, match="hard.?link"):
+        build_teacher_inventory(FIXTURE, output)
+
+    assert attacker_alias.exists()
+    assert not output.exists()
+
+
+def test_inventory_no_clobber_race_preserves_racing_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    output = tmp_path / "inventory.json"
+
+    def racing_link(
+        source: object,
+        destination: object,
+        *args: object,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+        **kwargs: object,
+    ) -> None:
+        assert dst_dir_fd is not None
+        raced = os.open(
+            destination,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+            dir_fd=dst_dir_fd,
+        )
+        try:
+            os.write(raced, b"racing output\n")
+        finally:
+            os.close(raced)
+        raise FileExistsError(destination)
+
+    monkeypatch.setattr(teacher.os, "link", racing_link)
+
+    with pytest.raises(FileExistsError, match="already exists"):
+        build_teacher_inventory(FIXTURE, output)
+
+    assert output.read_bytes() == b"racing output\n"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["inventory.json"]
+
+
+def test_inventory_detects_output_parent_substitution(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    output_parent = tmp_path / "output"
+    output_parent.mkdir()
+    moved_parent = tmp_path / "moved"
+    output = output_parent / "inventory.json"
+    real_link = os.link
+
+    def replacing_parent_link(
+        source: object,
+        destination: object,
+        *args: object,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+        **kwargs: object,
+    ) -> None:
+        output_parent.rename(moved_parent)
+        output_parent.mkdir()
+        real_link(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=False,
+        )
+
+    monkeypatch.setattr(teacher.os, "link", replacing_parent_link)
+
+    with pytest.raises(UnsafeTeacherOutput, match="parent identity changed"):
+        build_teacher_inventory(FIXTURE, output)
+
+    assert not output.exists()
+    assert not (moved_parent / "inventory.json").exists()
+
+
+def test_inventory_temporary_write_failure_is_cleaned_up(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    output = tmp_path / "inventory.json"
+
+    def failed_write(file_descriptor: int, payload: bytes) -> None:
+        raise OSError("injected write failure")
+
+    monkeypatch.setattr(teacher, "_write_all", failed_write)
+
+    with pytest.raises(OSError, match="injected write failure"):
+        build_teacher_inventory(FIXTURE, output)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_inventory_hashes_and_parses_one_open_source_descriptor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "teacher.zip"
+    shutil.copyfile(FIXTURE, source)
+    output = tmp_path / "inventory.json"
+    real_open = os.open
+    source_open_count = 0
+
+    def tracking_open(
+        path: object,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal source_open_count
+        if path == source.name and dir_fd is not None:
+            source_open_count += 1
+            assert flags & getattr(os, "O_NOFOLLOW", 0)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(teacher.os, "open", tracking_open)
+
+    build_teacher_inventory(source, output)
+
+    assert source_open_count == 1
+
+
+def test_inventory_detects_source_mutation_between_parse_and_rehash(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "teacher.zip"
+    shutil.copyfile(FIXTURE, source)
+    output = tmp_path / "inventory.json"
+    original = teacher._iter_teacher_descriptor
+
+    def mutating_iter(opened: object, audit: TeacherAudit):
+        yield from original(opened, audit)
+        with source.open("ab") as target:
+            target.write(b"hostile mutation")
+
+    monkeypatch.setattr(teacher, "_iter_teacher_descriptor", mutating_iter)
+
+    with pytest.raises(InvalidTeacherArchive, match="changed"):
+        build_teacher_inventory(source, output)
+
+    assert not output.exists()
+
+
+def test_inventory_fsyncs_stable_output_parent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    output = tmp_path / "inventory.json"
+    real_fsync = os.fsync
+    fsynced_modes: list[int] = []
+
+    def tracking_fsync(file_descriptor: int) -> None:
+        fsynced_modes.append(os.fstat(file_descriptor).st_mode)
+        real_fsync(file_descriptor)
+
+    monkeypatch.setattr(teacher.os, "fsync", tracking_fsync)
+
+    build_teacher_inventory(FIXTURE, output)
+
+    assert any(stat.S_ISREG(mode) for mode in fsynced_modes)
+    assert any(stat.S_ISDIR(mode) for mode in fsynced_modes)
+
+
 def test_inventory_validates_source_before_hashing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     source = tmp_path / "directory"
     source.mkdir()
 
-    def unexpected_hash(path: Path) -> str:
-        raise AssertionError(f"hashed invalid source {path}")
+    def unexpected_hash(file_descriptor: int) -> str:
+        raise AssertionError(f"hashed invalid source fd {file_descriptor}")
 
-    monkeypatch.setattr(teacher, "_sha256", unexpected_hash)
+    monkeypatch.setattr(teacher, "_sha256_descriptor", unexpected_hash)
 
     with pytest.raises(InvalidTeacherArchive, match="not a regular file"):
         build_teacher_inventory(source, tmp_path / "inventory.json")
@@ -551,10 +1082,10 @@ def test_inventory_validates_source_before_hashing(
 def test_inventory_wraps_hash_io_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    def failed_hash(path: Path) -> str:
-        raise OSError(f"cannot hash {path}")
+    def failed_hash(file_descriptor: int) -> str:
+        raise OSError(f"cannot hash fd {file_descriptor}")
 
-    monkeypatch.setattr(teacher, "_sha256", failed_hash)
+    monkeypatch.setattr(teacher, "_sha256_descriptor", failed_hash)
 
     with pytest.raises(InvalidTeacherArchive, match="cannot hash teacher archive"):
         build_teacher_inventory(FIXTURE, tmp_path / "inventory.json")

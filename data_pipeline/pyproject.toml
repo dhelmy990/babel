@@ -9,6 +9,7 @@ description = "Babel distillation data acquisition and validation"
 requires-python = ">=3.10,<3.13"
 dependencies = [
   "jsonschema[format-nongpl]==4.23.0",
+  "numpy==2.2.6",
   "pyarrow==17.0.0",
 ]
 
