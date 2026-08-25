@@ -106,18 +106,14 @@ def test_fixture_streams_only_usable_namespace_zero_revision_pages() -> None:
         pages[0].page_id = 99
 
 
-def test_last_dump_revision_is_used_and_revision_id_is_optional(tmp_path: Path) -> None:
+def test_single_dump_revision_id_is_optional(tmp_path: Path) -> None:
     pages = (
-        "<page><title>Newest</title><ns>0</ns><id>7</id>"
-        "<revision><id>1</id><text>Old.</text></revision>"
-        "<revision><id>2</id><text>New.</text></revision></page>"
         "<page><title>No revision ID</title><ns>0</ns><id>8</id>"
         "<revision><text>Useful.</text></revision></page>"
     )
     path = write_dump(tmp_path, pages)
 
-    newest, optional = iter_wikipedia_pages(path)
-    assert (newest.revision_id, newest.article_text) == (2, "New.")
+    [optional] = iter_wikipedia_pages(path)
     assert (optional.revision_id, optional.article_text) == (None, "Useful.")
 
 
@@ -141,6 +137,15 @@ def test_plain_text_handles_entities_links_tables_and_section_boundaries() -> No
     raw = "Lead &amp; [[Page|label]].\n\n{|\n| hidden\n|}\n== Section ==\nBody"
     assert wikitext_to_plain_text(raw) == "Lead & label.\n\nSection\nBody"
     assert extract_lead(raw) == "Lead & label."
+
+
+def test_inline_scanner_preserves_plain_brackets_and_text_after_closing_ref() -> None:
+    assert wikitext_to_plain_text("Range [1, 2].") == "Range [1, 2]."
+    assert wikitext_to_plain_text("Before</ref>after") == "Before after"
+
+
+def test_inline_scanner_offsets_survive_unicode_case_expansion() -> None:
+    assert wikitext_to_plain_text("İ text <REF>x</REF> tail") == "İ text tail"
 
 
 @pytest.mark.parametrize(
@@ -426,9 +431,12 @@ def test_unknown_xml_encoding_is_typed_and_preserves_cause(tmp_path: Path) -> No
         "<page><ns>0</ns><id>1</id><revision><text>x</text></revision></page>",
         "<page><title>X</title><id>1</id><revision><text>x</text></revision></page>",
         "<page><title>X</title><ns>0</ns><revision><text>x</text></revision></page>",
+        "<page><ns>1</ns><id>1</id><revision><text>x</text></revision></page>",
+        "<page><title>Talk:X</title><ns>1</ns>"
+        "<revision><text>x</text></revision></page>",
     ],
 )
-def test_missing_required_namespace_zero_identity_fields_are_typed(
+def test_missing_required_page_identity_fields_are_typed(
     tmp_path: Path, page: str
 ) -> None:
     path = write_dump(tmp_path, page)
@@ -455,6 +463,33 @@ def test_absurd_page_id_and_malformed_present_revision_id_are_typed(
     )
     with pytest.raises(InvalidWikipediaPage):
         list(iter_wikipedia_pages(malformed))
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        "<page><title>X</title><title>Y</title><ns>0</ns><id>1</id>"
+        "<revision><id>1</id><text>x</text></revision></page>",
+        "<page><title>X</title><ns>0</ns><ns>0</ns><id>1</id>"
+        "<revision><id>1</id><text>x</text></revision></page>",
+        "<page><title>X</title><ns>0</ns><id>1</id><id>2</id>"
+        "<revision><id>1</id><text>x</text></revision></page>",
+        "<page><title>X</title><ns>0</ns><id>1</id>"
+        "<revision><id>1</id><text>old</text></revision>"
+        "<revision><id>2</id><text>new</text></revision></page>",
+        "<page><title>X</title><ns>0</ns><id>1</id>"
+        "<revision><id>1</id><id>2</id><text>x</text></revision></page>",
+        "<page><title>X</title><ns>0</ns><id>1</id>"
+        "<revision><id>1</id><text>x</text><text>y</text></revision></page>",
+    ],
+)
+def test_page_and_revision_singletons_reject_duplicate_elements(
+    tmp_path: Path, page: str
+) -> None:
+    path = write_dump(tmp_path, page)
+
+    with pytest.raises(InvalidWikipediaPage, match="duplicate"):
+        list(iter_wikipedia_pages(path))
 
 
 @pytest.mark.parametrize(
@@ -671,3 +706,29 @@ def test_wikitext_limits_reject_pathological_size_and_nesting() -> None:
         wikitext_to_plain_text("x" * (16 * 1024 * 1024 + 1))
     with pytest.raises(InvalidWikipediaXml, match="nesting"):
         wikitext_to_plain_text("{{" * 65 + "x" + "}}" * 65)
+
+
+@pytest.mark.parametrize(
+    "fragment",
+    ["<ref", "<a", "[http://example.invalid ", "<!--", "<a>x</a>"],
+)
+def test_inline_markup_scanner_has_a_linear_operation_budget(
+    monkeypatch: pytest.MonkeyPatch, fragment: str
+) -> None:
+    import babel_data.wikipedia as wikipedia
+
+    original_step = wikipedia._ScanBudget.step
+    counts: list[int] = []
+
+    def counted_step(budget: object) -> None:
+        counts[-1] += 1
+        original_step(budget)
+
+    monkeypatch.setattr(wikipedia._ScanBudget, "step", counted_step)
+
+    for repeats in (2_000, 4_000):
+        counts.append(0)
+        wikitext_to_plain_text(fragment * repeats)
+
+    assert counts[1] <= 2 * counts[0] + 8
+    assert counts[1] <= len(fragment * 4_000) * 4

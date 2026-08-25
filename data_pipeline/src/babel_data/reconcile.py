@@ -79,6 +79,21 @@ class _Resolution:
     hops: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class _Candidate:
+    record: TeacherRecord
+    normalized_title: str
+    teacher_norm: float
+    page: WikipediaPage
+
+
+@dataclass(frozen=True, slots=True)
+class _TeacherInput:
+    record: TeacherRecord
+    normalized_title: str
+    teacher_norm: float
+
+
 def split_for(article_key: str) -> str:
     """Assign a stable 98/1/1 split using the contracted SHA-256 bucket."""
     if not isinstance(article_key, str) or not article_key:
@@ -112,17 +127,12 @@ def _resolve_from_index(
             break
         cached = cache.get(current)
         if cached is not None:
-            if cached.status == "resolved":
-                total_hops = depth + cached.hops
-                resolution = (
-                    cached
-                    if total_hops <= max_depth
-                    else _Resolution("redirect_depth_exceeded", None)
-                )
-            elif cached.status == "title_not_found" and depth:
-                resolution = _Resolution("redirect_target_missing", None)
-            else:
-                resolution = cached
+            total_hops = depth + cached.hops
+            resolution = (
+                cached
+                if total_hops <= max_depth
+                else _Resolution("redirect_depth_exceeded", None)
+            )
             break
         page = index.get(current)
         if page is None:
@@ -146,22 +156,15 @@ def _resolve_from_index(
         current = normalize_title(page.redirect_target)
         depth += 1
 
-    cache_entries: dict[str, _Resolution]
     if resolution.status == "resolved":
-        cache_entries = {
+        cache_entries: dict[str, _Resolution] = {
             key: _Resolution("resolved", resolution.page, total_hops - offset)
             for offset, key in enumerate(path)
         }
         if not path:
             cache_entries[start] = resolution
-    elif resolution.status in {
-        "redirect_target_missing",
-        "duplicate/ambiguous_title",
-    }:
-        cache_entries = {key: resolution for key in path}
-        cache_entries.setdefault(start, resolution)
     else:
-        cache_entries = {start: resolution}
+        cache_entries = {}
     if len(cache) + len(cache_entries) > MAX_REDIRECT_CACHE:
         cache.clear()
     for key, cached_resolution in cache_entries.items():
@@ -233,8 +236,9 @@ def reconcile(
         raise ValueError("max_redirect_depth must be a nonnegative integer")
     index, ambiguous, invalid = _page_index(pages)
     cache: dict[str, _Resolution] = {}
-    seen_teacher_keys: set[str] = set()
     result = ReconciliationResult()
+    candidates: list[_Candidate] = []
+    teacher_groups: dict[str, list[_TeacherInput]] = {}
 
     for record in teacher:
         result.input_count += 1
@@ -253,16 +257,40 @@ def reconcile(
                 invalid_detail,
             )
             continue
-        if normalized in seen_teacher_keys:
+        teacher_groups.setdefault(normalized, []).append(
+            _TeacherInput(record, normalized, teacher_norm)
+        )
+
+    selected_teachers: list[_TeacherInput] = []
+    for normalized, duplicates in teacher_groups.items():
+        winner = min(
+            duplicates,
+            key=lambda item: (
+                item.record.title != normalized,
+                item.record.title,
+                item.record.vector.tobytes(),
+            ),
+        )
+        selected_teachers.append(winner)
+        for duplicate in duplicates:
+            if duplicate is winner:
+                continue
             _exclude(
                 result,
-                record,
+                duplicate.record,
                 normalized,
                 "duplicate/ambiguous_title",
-                "normalized teacher identity was already encountered",
+                f"normalized teacher identity was assigned to "
+                f"{winner.record.title!r}",
             )
-            continue
-        seen_teacher_keys.add(normalized)
+
+    for selected in sorted(
+        selected_teachers,
+        key=lambda item: (item.normalized_title, item.record.title),
+    ):
+        record = selected.record
+        normalized = selected.normalized_title
+        teacher_norm = selected.teacher_norm
 
         if normalized not in index and is_non_article_title(normalized):
             _exclude(
@@ -310,13 +338,43 @@ def reconcile(
             )
             continue
 
-        article_key = f"enwiki:{SNAPSHOT_DATE}:{page.page_id}"
+        candidates.append(_Candidate(record, normalized, teacher_norm, page))
+
+    by_article_key: dict[str, list[_Candidate]] = {}
+    for candidate in candidates:
+        article_key = f"enwiki:{SNAPSHOT_DATE}:{candidate.page.page_id}"
+        by_article_key.setdefault(article_key, []).append(candidate)
+
+    for article_key, collisions in by_article_key.items():
+        winner = min(
+            collisions,
+            key=lambda candidate: (
+                candidate.normalized_title
+                != normalize_title(candidate.page.canonical_title),
+                candidate.normalized_title,
+                candidate.record.title,
+            ),
+        )
+        for loser in collisions:
+            if loser is winner:
+                continue
+            _exclude(
+                result,
+                loser.record,
+                loser.normalized_title,
+                "canonical_identity_collision",
+                f"canonical snapshot identity {article_key} for "
+                f"{winner.page.canonical_title!r} was assigned to teacher "
+                f"{winner.record.title!r}",
+            )
+
+        page = winner.page
         result.rows.append(
             ReconciledRow(
-                teacher_title=record.title,
-                teacher_normalized_title=normalized,
-                teacher_vector=record.vector,
-                teacher_norm=teacher_norm,
+                teacher_title=winner.record.title,
+                teacher_normalized_title=winner.normalized_title,
+                teacher_vector=winner.record.vector,
+                teacher_norm=winner.teacher_norm,
                 page_id=page.page_id,
                 source_revision_id=page.revision_id,
                 canonical_title=page.canonical_title,
@@ -327,12 +385,24 @@ def reconcile(
                 split=split_for(article_key),
                 reconciliation_status=(
                     "matched"
-                    if normalized == normalize_title(page.canonical_title)
+                    if winner.normalized_title
+                    == normalize_title(page.canonical_title)
                     else "redirect_resolved"
                 ),
             )
         )
 
+    result.rows.sort(
+        key=lambda row: (row.article_key, row.teacher_normalized_title, row.teacher_title)
+    )
+    result.exclusions.sort(
+        key=lambda item: (
+            item.normalized_title,
+            item.teacher_title,
+            item.reason,
+            item.detail,
+        )
+    )
     return result
 
 

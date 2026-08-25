@@ -14,7 +14,7 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "data_pipeline" / "src"))
 from babel_data.contracts import validate_document  # noqa: E402
 from babel_data.reconcile import reconcile, split_for  # noqa: E402
 from babel_data.teacher import TeacherRecord  # noqa: E402
-from babel_data.wikipedia import WikipediaPage  # noqa: E402
+from babel_data.wikipedia import WikipediaPage, resolve_redirect  # noqa: E402
 
 
 def teacher(title: str, value: float = 1.0) -> TeacherRecord:
@@ -87,6 +87,92 @@ def test_redirect_source_resolves_to_target_content_and_identity() -> None:
     assert row.reconciliation_status == "redirect_resolved"
 
 
+def test_canonical_teacher_wins_article_identity_collision_in_all_orders() -> None:
+    target = article("Target", page_id=10)
+    alias = article(
+        "Alias", page_id=11, article_text="", lead_text="", redirect_target="Target"
+    )
+
+    forward = reconcile([teacher("Alias"), teacher("Target")], [alias, target])
+    reverse = reconcile([teacher("Target"), teacher("Alias")], [target, alias])
+
+    for result in (forward, reverse):
+        assert [row.teacher_title for row in result.rows] == ["Target"]
+        assert len({row.article_key for row in result.rows}) == len(result.rows) == 1
+        assert [item.reason for item in result.exclusions] == [
+            "canonical_identity_collision"
+        ]
+        assert result.exclusions[0].teacher_title == "Alias"
+        assert "Target" in result.exclusions[0].detail
+        assert "enwiki:2016-10-01:10" in result.exclusions[0].detail
+        assert len(result.rows) + len(result.exclusions) == result.input_count == 2
+
+    assert [row.to_document() for row in forward.rows] == [
+        row.to_document() for row in reverse.rows
+    ]
+    assert forward.exclusions == reverse.exclusions
+
+
+def test_duplicate_teacher_identity_chooses_stable_exact_spelling() -> None:
+    canonical = teacher("Target", 1.0)
+    alternate = teacher("target", 2.0)
+    page = article("Target", page_id=10)
+
+    forward = reconcile([alternate, canonical], [page])
+    reverse = reconcile([canonical, alternate], [page])
+
+    for result in (forward, reverse):
+        assert [row.teacher_title for row in result.rows] == ["Target"]
+        assert [item.teacher_title for item in result.exclusions] == ["target"]
+        assert [item.reason for item in result.exclusions] == [
+            "duplicate/ambiguous_title"
+        ]
+    assert [row.to_document() for row in forward.rows] == [
+        row.to_document() for row in reverse.rows
+    ]
+    assert forward.exclusions == reverse.exclusions
+
+
+def test_redirect_only_collision_uses_stable_normalized_teacher_key() -> None:
+    pages = [
+        article("Target", page_id=10),
+        article(
+            "Zulu alias",
+            page_id=11,
+            article_text="",
+            lead_text="",
+            redirect_target="Target",
+        ),
+        article(
+            "Alpha alias",
+            page_id=12,
+            article_text="",
+            lead_text="",
+            redirect_target="Target",
+        ),
+    ]
+
+    forward = reconcile(
+        [teacher("Zulu_alias"), teacher("Alpha_alias")], pages
+    )
+    reverse = reconcile(
+        [teacher("Alpha_alias"), teacher("Zulu_alias")], reversed(pages)
+    )
+
+    for result in (forward, reverse):
+        assert [row.teacher_normalized_title for row in result.rows] == [
+            "Alpha alias"
+        ]
+        assert [item.teacher_title for item in result.exclusions] == ["Zulu_alias"]
+        assert [item.reason for item in result.exclusions] == [
+            "canonical_identity_collision"
+        ]
+    assert [row.to_document() for row in forward.rows] == [
+        row.to_document() for row in reverse.rows
+    ]
+    assert forward.exclusions == reverse.exclusions
+
+
 def test_exact_only_matching_never_uses_fuzzy_title() -> None:
     result = reconcile([teacher("Virtul_memory")], [article()])
 
@@ -94,7 +180,7 @@ def test_exact_only_matching_never_uses_fuzzy_title() -> None:
     assert [item.reason for item in result.exclusions] == ["title_not_found"]
 
 
-def test_every_teacher_input_is_accepted_or_explicitly_excluded_in_order() -> None:
+def test_every_teacher_input_is_accepted_or_explicitly_excluded() -> None:
     teachers = [
         teacher("Virtual_memory"),
         teacher("Unknown"),
@@ -103,15 +189,15 @@ def test_every_teacher_input_is_accepted_or_explicitly_excluded_in_order() -> No
     ]
     result = reconcile(teachers, [article()])
 
-    assert [row.teacher_title for row in result.rows] == ["Virtual_memory"]
+    assert [row.teacher_title for row in result.rows] == ["Virtual memory"]
     assert [item.teacher_title for item in result.exclusions] == [
-        "Unknown",
         "Talk:Virtual_memory",
-        "Virtual memory",
+        "Unknown",
+        "Virtual_memory",
     ]
     assert [item.reason for item in result.exclusions] == [
-        "title_not_found",
         "non_article_namespace",
+        "title_not_found",
         "duplicate/ambiguous_title",
     ]
     assert result.input_count == len(teachers)
@@ -135,11 +221,36 @@ def test_page_ambiguity_and_redirect_failures_are_explicit() -> None:
     )
 
     assert [item.reason for item in result.exclusions] == [
-        "duplicate/ambiguous_title",
         "redirect_cycle",
-        "redirect_target_missing",
         "redirect_depth_exceeded",
+        "redirect_target_missing",
+        "duplicate/ambiguous_title",
     ]
+
+
+def test_redirect_failure_outcomes_do_not_depend_on_teacher_order_or_cache() -> None:
+    pages = [
+        article("A", page_id=1, article_text="", lead_text="", redirect_target="B"),
+        article(
+            "B",
+            page_id=2,
+            article_text="",
+            lead_text="",
+            redirect_target="Absent",
+        ),
+    ]
+
+    def outcomes(titles: list[str]) -> dict[str, str]:
+        result = reconcile(
+            [teacher(title) for title in titles], pages, max_redirect_depth=1
+        )
+        return {item.teacher_title: item.reason for item in result.exclusions}
+
+    expected = {"A": "redirect_depth_exceeded", "B": "redirect_target_missing"}
+    assert outcomes(["B", "A"]) == expected
+    assert outcomes(["A", "B"]) == expected
+    assert resolve_redirect("A", pages, max_depth=1).status == expected["A"]
+    assert resolve_redirect("B", pages, max_depth=1).status == expected["B"]
 
 
 def test_empty_target_text_and_lead_have_distinct_reasons() -> None:
@@ -151,7 +262,7 @@ def test_empty_target_text_and_lead_have_distinct_reasons() -> None:
         ],
     )
 
-    assert [item.reason for item in result.exclusions] == ["empty_text", "empty_lead"]
+    assert [item.reason for item in result.exclusions] == ["empty_lead", "empty_text"]
 
 
 def test_accepted_row_converts_to_exact_v1_schema_document() -> None:

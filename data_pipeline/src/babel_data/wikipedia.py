@@ -55,14 +55,9 @@ _REDIRECT = re.compile(
     re.IGNORECASE,
 )
 _HEADING = re.compile(r"^\s*(={2,6})\s*(.*?)\s*\1\s*$")
-_COMMENT = re.compile(r"<!--.*?(?:-->|\Z)", re.DOTALL)
-_REF = re.compile(
-    r"<ref\b[^>]*?/>|<ref\b[^>]*>.*?(?:</ref\s*>|\Z)",
-    re.IGNORECASE | re.DOTALL,
+_ASCII_LOWER = str.maketrans(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"
 )
-_INTERNAL_LINK = re.compile(r"\[\[([^\[\]]+)\]\]")
-_EXTERNAL_LINK = re.compile(r"\[(?:https?|ftp)://[^\s\]]+(?:\s+([^\]]+))?\]", re.I)
-_HTML_TAG = re.compile(r"</?[A-Za-z][^>]*>")
 _NON_ARTICLE_PREFIXES = frozenset(
     {
         "Talk",
@@ -141,6 +136,21 @@ class DuplicateWikipediaPageId(InvalidWikipediaPage):
 
 class DuplicateWikipediaTitle(InvalidWikipediaPage):
     """Two retained dump pages have the same normalized title."""
+
+
+class _ScanBudget:
+    """Hard bound proving each inline scan advances in linear operations."""
+
+    __slots__ = ("operations", "limit")
+
+    def __init__(self, text_length: int) -> None:
+        self.operations = 0
+        self.limit = max(1, text_length + 1)
+
+    def step(self) -> None:
+        self.operations += 1
+        if self.operations > self.limit:
+            raise WikipediaLimitExceeded("inline markup operation budget exceeded")
 
 
 @dataclass(frozen=True, slots=True)
@@ -578,17 +588,27 @@ def _local_name(tag: str) -> str:
     return _tag_parts(tag)[1]
 
 
-def _direct_child(
+def _direct_children(
     element: ET.Element, name: str, namespace: str
+) -> list[ET.Element]:
+    return [
+        child
+        for child in element
+        if _tag_parts(child.tag) == (namespace, name)
+    ]
+
+
+def _singleton_child(
+    element: ET.Element,
+    name: str,
+    namespace: str,
+    *,
+    context: str,
 ) -> ET.Element | None:
-    return next(
-        (
-            child
-            for child in element
-            if _tag_parts(child.tag) == (namespace, name)
-        ),
-        None,
-    )
+    children = _direct_children(element, name, namespace)
+    if len(children) > 1:
+        raise InvalidWikipediaPage(f"duplicate direct {name} elements in {context}")
+    return children[0] if children else None
 
 
 def _parse_positive_int(value: str | None) -> int | None:
@@ -632,42 +652,58 @@ def _redirect_from_text(raw_text: str) -> str | None:
 
 def _raw_page(element: ET.Element) -> _RawPage | None:
     element_namespace, _element_name = _tag_parts(element.tag)
-    title_element = _direct_child(element, "title", element_namespace)
-    namespace_element = _direct_child(element, "ns", element_namespace)
-    page_id_element = _direct_child(element, "id", element_namespace)
+    title_element = _singleton_child(
+        element, "title", element_namespace, context="Wikipedia page"
+    )
+    namespace_element = _singleton_child(
+        element, "ns", element_namespace, context="Wikipedia page"
+    )
+    page_id_element = _singleton_child(
+        element, "id", element_namespace, context="Wikipedia page"
+    )
     if namespace_element is None:
         raise InvalidWikipediaPage("Wikipedia page is missing required namespace")
+    if title_element is None:
+        raise InvalidWikipediaPage("Wikipedia page is missing required title")
+    if page_id_element is None:
+        raise InvalidWikipediaPage(
+            f"Wikipedia page {title_element.text!r} is missing required page ID"
+        )
     namespace = _parse_namespace((namespace_element.text or "").strip())
     if namespace is None:
         raise InvalidWikipediaPage("Wikipedia page has a malformed namespace")
-    if namespace != 0:
-        return None
-    if title_element is None:
-        raise InvalidWikipediaPage("namespace-zero page is missing required title")
-    if page_id_element is None:
-        raise InvalidWikipediaPage(
-            f"namespace-zero page {title_element.text!r} is missing required page ID"
-        )
     title = title_element.text or ""
     normalized = normalize_title(title)
     page_id = _parse_positive_int((page_id_element.text or "").strip())
     if page_id is None:
         raise InvalidWikipediaPage(f"nonpositive or malformed page ID for {title!r}")
-    if not normalized:
-        raise InvalidWikipediaPage(f"blank normalized title for page ID {page_id}")
+    if not _valid_title_text(title):
+        raise InvalidWikipediaPage(f"invalid normalized title for page ID {page_id}")
+    if namespace != 0:
+        return None
 
-    revisions = [
-        child
-        for child in element
-        if _tag_parts(child.tag) == (element_namespace, "revision")
-    ]
+    revisions = _direct_children(element, "revision", element_namespace)
+    if len(revisions) > 1:
+        raise InvalidWikipediaPage(
+            f"duplicate direct revision elements for Wikipedia page {title!r}"
+        )
     if not revisions:
         return None
-    revision = revisions[-1]
-    text_element = _direct_child(revision, "text", element_namespace)
+    revision = revisions[0]
+    text_element = _singleton_child(
+        revision,
+        "text",
+        element_namespace,
+        context=f"revision for Wikipedia page {title!r}",
+    )
     if text_element is None:
         return None
-    revision_id_element = _direct_child(revision, "id", element_namespace)
+    revision_id_element = _singleton_child(
+        revision,
+        "id",
+        element_namespace,
+        context=f"revision for Wikipedia page {title!r}",
+    )
     revision_id = None
     if revision_id_element is not None:
         revision_id = _parse_positive_int((revision_id_element.text or "").strip())
@@ -676,7 +712,9 @@ def _raw_page(element: ET.Element) -> _RawPage | None:
                 f"malformed revision ID for namespace-zero page {title!r}"
             )
     raw_text = text_element.text or ""
-    redirect_element = _direct_child(element, "redirect", element_namespace)
+    redirect_element = _singleton_child(
+        element, "redirect", element_namespace, context=f"Wikipedia page {title!r}"
+    )
     redirect_target = None
     if redirect_element is not None:
         raw_redirect_target = redirect_element.attrib.get("title")
@@ -869,13 +907,116 @@ def _remove_balanced(text: str, opening: str, closing: str) -> str:
     return "".join(output)
 
 
-def _internal_link_label(match: re.Match[str]) -> str:
-    content = match.group(1)
+def _internal_link_label(content: str) -> str:
     target, separator, label = content.partition("|")
     namespace = normalize_title(target).partition(":")[0]
     if namespace in {"File", "Image", "Category"}:
         return ""
     return label.rsplit("|", 1)[-1] if separator else target.split("#", 1)[0]
+
+
+def _find_ref_close(
+    lower_text: str, start: int, budget: _ScanBudget
+) -> tuple[int, int] | None:
+    cursor = start
+    while cursor < len(lower_text):
+        budget.step()
+        closing = lower_text.find("</ref", cursor)
+        if closing < 0:
+            return None
+        boundary = closing + len("</ref")
+        if boundary == len(lower_text) or lower_text[boundary].isspace() or lower_text[
+            boundary
+        ] == ">":
+            end = lower_text.find(">", boundary)
+            return None if end < 0 else (closing, end + 1)
+        cursor = boundary
+    return None
+
+
+def _scan_inline_markup(text: str) -> str:
+    """Strip inline wiki/HTML markup with monotonically advancing searches."""
+    lower_text = text.translate(_ASCII_LOWER)
+    budget = _ScanBudget(len(text))
+    output: list[str] = []
+    cursor = 0
+    while cursor < len(text):
+        budget.step()
+        if text.startswith("<!--", cursor):
+            end = text.find("-->", cursor + 4)
+            output.append(" ")
+            if end < 0:
+                break
+            cursor = end + 3
+            continue
+
+        if text.startswith("[[", cursor):
+            end = text.find("]]", cursor + 2)
+            if end < 0:
+                output.append(" ")
+                break
+            output.append(_internal_link_label(text[cursor + 2 : end]))
+            cursor = end + 2
+            continue
+
+        if lower_text.startswith(
+            ("[http://", "[https://", "[ftp://"), cursor
+        ):
+            end = text.find("]", cursor + 1)
+            output.append(" ")
+            if end < 0:
+                break
+            link = text[cursor + 1 : end]
+            parts = link.split(None, 1)
+            if len(parts) == 2:
+                output.append(parts[1].strip())
+            cursor = end + 1
+            continue
+
+        if text[cursor] == "<":
+            name_start = cursor + 1
+            closing_tag = name_start < len(text) and text[name_start] == "/"
+            if closing_tag:
+                name_start += 1
+            if name_start >= len(text) or not text[name_start].isalpha():
+                output.append("<")
+                cursor += 1
+                continue
+            tag_end = text.find(">", name_start + 1)
+            output.append(" ")
+            if tag_end < 0:
+                break
+            tag_body = lower_text[name_start:tag_end].lstrip()
+            is_ref = tag_body.startswith("ref") and (
+                len(tag_body) == 3
+                or tag_body[3].isspace()
+                or tag_body[3] == "/"
+            )
+            if (
+                is_ref
+                and not closing_tag
+                and not tag_body.rstrip().endswith("/")
+            ):
+                closing = _find_ref_close(lower_text, tag_end + 1, budget)
+                if closing is None:
+                    break
+                _closing_start, cursor = closing
+            else:
+                cursor = tag_end + 1
+            continue
+
+        if text[cursor] == "[":
+            output.append("[")
+            cursor += 1
+            continue
+
+        next_html = text.find("<", cursor)
+        next_link = text.find("[", cursor)
+        boundaries = [position for position in (next_html, next_link) if position >= 0]
+        next_markup = min(boundaries) if boundaries else len(text)
+        output.append(text[cursor:next_markup])
+        cursor = next_markup
+    return "".join(output)
 
 
 def _normalize_plain_text(text: str) -> str:
@@ -893,10 +1034,9 @@ def _normalize_plain_text(text: str) -> str:
 
 
 def _remove_structural_markup(text: str) -> str:
-    text = _COMMENT.sub(" ", text)
-    text = _REF.sub(" ", text)
     text = _remove_balanced(text, "{{", "}}")
-    return _remove_balanced(text, "{|", "|}")
+    text = _remove_balanced(text, "{|", "|}")
+    return _scan_inline_markup(text)
 
 
 def wikitext_to_plain_text(wikitext: str) -> str:
@@ -907,9 +1047,6 @@ def wikitext_to_plain_text(wikitext: str) -> str:
         raise WikipediaLimitExceeded("wikitext article is too large")
     text = wikitext.replace("\r\n", "\n").replace("\r", "\n")
     text = _remove_structural_markup(text)
-    text = _INTERNAL_LINK.sub(_internal_link_label, text)
-    text = _EXTERNAL_LINK.sub(lambda match: match.group(1) or "", text)
-    text = _HTML_TAG.sub(" ", text)
     text = html.unescape(text)
     text = text.replace("'''", "").replace("''", "")
     lines: list[str] = []
