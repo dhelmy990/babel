@@ -492,6 +492,52 @@ def test_download_reuses_verified_final_without_request(
     assert opener.requests == []
 
 
+def test_checksum_valid_final_with_external_hard_link_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    payload = b"already present"
+    final = tmp_path / "source.bin"
+    alias = tmp_path / "external-alias.bin"
+    final.write_bytes(payload)
+    os.link(final, alias)
+    opener = FakeOpener()
+    monkeypatch.setattr(sources, "urlopen", opener)
+
+    with pytest.raises(ExistingFileInvalid, match="refusing to overwrite"):
+        download_source(source_spec(payload), tmp_path)
+
+    assert final.read_bytes() == payload
+    assert alias.read_bytes() == payload
+    assert final.stat().st_nlink == 2
+    assert opener.requests == []
+
+
+def test_verified_final_is_revalidated_by_name_before_return(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    payload = b"already present"
+    final = tmp_path / "source.bin"
+    final.write_bytes(payload)
+    original_verify = sources._verify_fd
+    racer_inode: list[int] = []
+
+    def replace_after_verification(file_descriptor: int, spec: SourceSpec) -> None:
+        original_verify(file_descriptor, spec)
+        final.unlink()
+        final.write_bytes(payload)
+        racer_inode.append(final.stat().st_ino)
+
+    monkeypatch.setattr(sources, "_verify_fd", replace_after_verification)
+    monkeypatch.setattr(sources, "urlopen", FakeOpener())
+
+    with pytest.raises(ExistingFileInvalid, match="refusing to overwrite"):
+        download_source(source_spec(payload), tmp_path)
+
+    assert racer_inode
+    assert final.stat().st_ino == racer_inode[0]
+    assert final.read_bytes() == payload
+
+
 def test_download_fails_safely_when_final_is_invalid(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -666,8 +712,66 @@ def test_external_hard_link_injected_during_promotion_is_detected_and_cleaned(
     partial = data_root / "source.bin.part"
     assert partial.read_bytes() == payload
     assert attacker_alias.read_bytes() == payload
-    assert partial.stat().st_nlink == 2
-    assert not (data_root / "source.bin").exists()
+    final = data_root / "source.bin"
+    assert final.read_bytes() == payload
+    assert partial.stat().st_nlink == 3
+    assert final.stat().st_nlink == 3
+
+    no_request = FakeOpener()
+    monkeypatch.setattr(sources, "urlopen", no_request)
+    with pytest.raises(ExistingFileInvalid, match="refusing to overwrite"):
+        download_source(source_spec(payload), data_root)
+    assert no_request.requests == []
+
+
+def test_cleanup_window_final_replacement_is_preserved(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    payload = b"authoritative"
+    external_alias = tmp_path / "alias.bin"
+    real_link = os.link
+    real_stat = os.stat
+    racer_inode: list[int] = []
+
+    def aliasing_link(
+        source: str,
+        destination: str,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int,
+        follow_symlinks: bool,
+    ) -> None:
+        real_link(tmp_path / "source.bin.part", external_alias)
+        real_link(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+
+    def replace_after_identity_stat(
+        path: object, *args: object, **kwargs: object
+    ) -> os.stat_result:
+        result = real_stat(path, *args, **kwargs)
+        if path == "source.bin" and not racer_inode:
+            final = tmp_path / "source.bin"
+            final.unlink()
+            final.write_bytes(b"racer must survive")
+            racer_inode.append(final.stat().st_ino)
+        return result
+
+    monkeypatch.setattr(os, "link", aliasing_link)
+    monkeypatch.setattr(os, "stat", replace_after_identity_stat)
+    monkeypatch.setattr(sources, "urlopen", FakeOpener(FakeResponse(payload)))
+
+    with pytest.raises(SourceError):
+        download_source(source_spec(payload), tmp_path)
+
+    final = tmp_path / "source.bin"
+    assert racer_inode
+    assert final.stat().st_ino == racer_inode[0]
+    assert final.read_bytes() == b"racer must survive"
 
 
 def test_post_link_final_replacement_is_preserved_on_identity_mismatch(

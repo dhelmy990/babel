@@ -390,14 +390,29 @@ def _open_partial(root_descriptor: int, filename: str) -> int:
 def _verify_existing_final(
     root_descriptor: int, filename: str, spec: SourceSpec
 ) -> bool:
-    if _entry_stat(root_descriptor, filename) is None:
-        return False
     try:
+        if _entry_stat(root_descriptor, filename) is None:
+            return False
         final_descriptor = _open_regular_at(
-            root_descriptor, filename, os.O_RDONLY
+            root_descriptor,
+            filename,
+            os.O_RDONLY,
+            require_single_link=True,
         )
         try:
+            _require_named_inode(
+                root_descriptor,
+                filename,
+                final_descriptor,
+                expected_links=1,
+            )
             _verify_fd(final_descriptor, spec)
+            _require_named_inode(
+                root_descriptor,
+                filename,
+                final_descriptor,
+                expected_links=1,
+            )
         finally:
             os.close(final_descriptor)
     except (OSError, SourceError) as exc:
@@ -678,28 +693,22 @@ def _atomic_promote(
     if not _same_inode(linked_stat, current_partial_stat):
         raise DownloadError(f"atomic promotion identity mismatch for {final_name}")
 
-    try:
-        _require_named_inode(
-            root_descriptor,
-            partial_name,
-            partial_descriptor,
-            expected_links=2,
+    _require_named_inode(
+        root_descriptor,
+        partial_name,
+        partial_descriptor,
+        expected_links=2,
+    )
+    if linked_stat.st_nlink != 2 or current_partial_stat.st_nlink != 2:
+        raise UnsafeSourcePath(
+            f"{partial_name} hard-link invariant failed during promotion"
         )
-        if linked_stat.st_nlink != 2 or current_partial_stat.st_nlink != 2:
-            raise UnsafeSourcePath(
-                f"{partial_name} hard-link invariant failed during promotion"
-            )
-    except SourceError:
-        _unlink_if_same_inode(root_descriptor, final_name, current_partial_stat)
-        raise
 
     if not _unlink_if_same_inode(root_descriptor, partial_name, current_partial_stat):
-        _unlink_if_same_inode(root_descriptor, final_name, current_partial_stat)
         raise UnsafeSourcePath(f"{partial_name} changed before safe cleanup")
 
     final_inode = os.fstat(partial_descriptor)
     if final_inode.st_nlink != 1:
-        _unlink_if_same_inode(root_descriptor, final_name, final_inode)
         raise UnsafeSourcePath(
             f"{final_name} retained an unexpected external hard link"
         )
