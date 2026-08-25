@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import FrozenInstanceError
 import json
 from pathlib import Path
+import hashlib
 from uuid import UUID
 
 import pytest
@@ -22,6 +23,8 @@ from babel_online.contracts import (
     RunConfigV1,
     validate_contract,
     contract_schema_documents,
+    canonical_pgvector_snapshot_sha256,
+    canonical_vector_sha256,
 )
 
 
@@ -240,3 +243,32 @@ def test_checked_in_json_schemas_match_typed_contracts() -> None:
         )
         assert checked_in == schema
         assert checked_in["additionalProperties"] is False
+
+
+def test_vector_and_pgvector_snapshot_checksums_are_canonical() -> None:
+    first = "00000000-0000-5000-8000-000000000001"
+    second = "00000000-0000-5000-8000-000000000002"
+    x = [1.0] + [0.0] * 99
+    y = [0.0, 2.0] + [0.0] * 98
+    digest = canonical_vector_sha256({second: y, first: x})
+    expected = hashlib.sha256(
+        bytes.fromhex("0000803f" + "00000000" * 99)
+        + bytes.fromhex("00000000" + "0000803f" + "00000000" * 98)
+    ).hexdigest()
+    assert digest == expected
+
+    rows = [
+        {
+            "babelId": first,
+            "creatorId": "00000000-0000-5000-8000-000000000101",
+            "sourceArticleKey": "enwiki:593",
+            "catalogContentHash": "a" * 64,
+            "embeddingSpaceId": "00000000-0000-5000-8000-000000000003",
+            "servingModelId": "00000000-0000-5000-8000-000000000002",
+            "materializedModelVersion": 0,
+            "vectorSha256": hashlib.sha256(bytes.fromhex("0000803f" + "00000000" * 99)).hexdigest(),
+        }
+    ]
+    assert canonical_pgvector_snapshot_sha256(rows) == canonical_pgvector_snapshot_sha256(
+        list(reversed(rows))
+    )

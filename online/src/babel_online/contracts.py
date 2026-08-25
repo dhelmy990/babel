@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
+import struct
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -314,10 +319,80 @@ def contract_schema_documents() -> dict[str, dict[str, object]]:
     return documents
 
 
+def canonical_vector_sha256(
+    vectors: Mapping[UUID | str, Sequence[float]],
+) -> str:
+    """Hash UUID-sorted normalized vectors as little-endian float32 bytes."""
+    digest = hashlib.sha256()
+    ordered = sorted(
+        ((UUID(str(identifier)), values) for identifier, values in vectors.items()),
+        key=lambda row: str(row[0]).lower(),
+    )
+    for _identifier, values in ordered:
+        if len(values) != 100 or any(not math.isfinite(float(value)) for value in values):
+            raise ValueError("snapshot vectors must contain 100 finite values")
+        norm = math.sqrt(math.fsum(float(value) ** 2 for value in values))
+        if norm == 0.0:
+            raise ValueError("snapshot vectors must be nonzero")
+        digest.update(struct.pack("<100f", *(float(value) / norm for value in values)))
+    return digest.hexdigest()
+
+
+_SNAPSHOT_ROW_FIELDS = {
+    "babelId",
+    "creatorId",
+    "sourceArticleKey",
+    "catalogContentHash",
+    "embeddingSpaceId",
+    "servingModelId",
+    "materializedModelVersion",
+    "vectorSha256",
+}
+
+
+def canonical_pgvector_snapshot_sha256(
+    rows: Iterable[Mapping[str, object]],
+) -> str:
+    """Hash the frozen canonical JSONL identity of active pgvector rows."""
+    canonical: list[dict[str, object]] = []
+    for row in rows:
+        if set(row) != _SNAPSHOT_ROW_FIELDS:
+            raise ValueError("pgvector snapshot row fields do not match v1 contract")
+        value = dict(row)
+        for field in ("babelId", "creatorId", "embeddingSpaceId", "servingModelId"):
+            value[field] = str(UUID(str(value[field]))).lower()
+        if not isinstance(value["materializedModelVersion"], int) or value[
+            "materializedModelVersion"
+        ] < 0:
+            raise ValueError("materializedModelVersion must be nonnegative")
+        for field in ("catalogContentHash", "vectorSha256"):
+            text = value[field]
+            if (
+                not isinstance(text, str)
+                or len(text) != 64
+                or any(character not in "0123456789abcdef" for character in text)
+            ):
+                raise ValueError(f"{field} must be a lowercase SHA-256")
+        if not isinstance(value["sourceArticleKey"], str):
+            raise ValueError("sourceArticleKey must be text")
+        canonical.append(value)
+    canonical.sort(key=lambda row: str(row["babelId"]))
+    payload = b"".join(
+        (
+            json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            + "\n"
+        ).encode("utf-8")
+        for row in canonical
+    )
+    return hashlib.sha256(payload).hexdigest()
+
+
 __all__ = [
     "ActivityLogV1",
     "ActivityDetailsV1",
     "CandidateActionV1",
+    "canonical_pgvector_snapshot_sha256",
+    "canonical_vector_sha256",
     "contract_schema_documents",
     "EmbeddingSpaceV1",
     "FeedbackEventV1",

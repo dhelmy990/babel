@@ -13,7 +13,7 @@ from babel_online.model.candidate_index import (
 )
 from babel_online.model.item_tower import ItemTower
 from babel_online.model.registry import ModelRegistry
-from babel_online.observable import CreatedBabel, VectorRecord
+from babel_online.observable import CreatedBabel, VectorRecord, reject_hidden_fields
 from babel_online.serving.app import create_app
 from babel_online.serving.state import ServingState
 
@@ -79,6 +79,7 @@ def test_post_recommends_only_current_run_created_babels_with_timings() -> None:
 
     assert http.status_code == 200
     response = RecommendationResponseV1.model_validate(http.json())
+    reject_hidden_fields(http.json())
     assert response.modelId == UUID("00000000-0000-5000-8000-000000000002")
     assert response.modelVersion == 0
     assert response.retrievalBackend == "pgvector"
