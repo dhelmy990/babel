@@ -412,6 +412,27 @@ def test_state_resume_preserves_shuffle_buffer_without_duplicates_or_skips() -> 
     assert len(actual) == len(set(actual))
 
 
+def test_state_rejects_rehashed_buffer_replacement_from_already_yielded_row() -> None:
+    values = list({row(i)["article_key"]: row(i) for i in range(1, 30)}.values())[:8]
+
+    def make():
+        return load_distillation_stream(
+            revision=COMMIT, token="secret", api=FakeApi(metadata(count=8)),
+            load_dataset_fn=lambda *a, **k: copy.deepcopy(values),
+            seed=31, shuffle_buffer_size=4,
+        )
+
+    source = make()
+    yielded = next(iter(source))
+    forged = source.state_dict()
+    forged["cursor"]["shuffle_buffer"][0] = copy.deepcopy(yielded)
+    unsigned = {name: forged[name] for name in forged if name != "state_sha256"}
+    forged["state_sha256"] = hashlib.sha256(canonical_json(unsigned)).hexdigest()
+
+    with pytest.raises(ValueError, match="history"):
+        make().load_state_dict(forged)
+
+
 def test_state_rejects_buffer_that_would_duplicate_unconsumed_source_row() -> None:
     values = [row(index) for index in range(1, 12)]
     stream = load_distillation_stream(
@@ -651,7 +672,7 @@ def test_resumption_reads_each_physical_row_once_at_every_cut_point() -> None:
         state = original.state_dict()
         resumed_source = CountingRows(); resumed = make(resumed_source)
         resumed.load_state_dict(state)
-        assert resumed_source.reads == 0
+        assert resumed_source.reads == state["cursor"]["source_cursor"]
         actual = prefix + [item["article_key"] for item in resumed]
         assert actual == expected
         assert resumed_source.reads == 8

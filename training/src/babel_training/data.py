@@ -744,8 +744,8 @@ class StatefulDistillationStream(Iterable[dict[str, object]]):
         self.manifest_sha256 = manifest_sha256
         self.readiness_sha256 = readiness_sha256
         self.expected_examples = expected_examples
-        self._resume: dict[str, object] | None = None
         self._live: dict[str, object] = self._initial_cursor()
+        self._positioned_iterator: Iterator[dict[str, object]] | None = None
         self._iterating = False
 
     def _initial_cursor(self) -> dict[str, object]:
@@ -783,7 +783,7 @@ class StatefulDistillationStream(Iterable[dict[str, object]]):
         return _STATE_BASE_BYTES + buffered * _MAX_PROJECTED_ROW_BYTES
 
     def set_epoch(self, epoch: int) -> None:
-        if self._iterating or self._resume is not None:
+        if self._iterating or self._positioned_iterator is not None:
             raise RuntimeError("cannot change epoch while stream state is active")
         if not _integer(epoch):
             raise ValueError("epoch must be a nonnegative integer")
@@ -791,7 +791,7 @@ class StatefulDistillationStream(Iterable[dict[str, object]]):
         self._live = self._initial_cursor()
 
     def state_dict(self) -> dict[str, object]:
-        state = self._resume if self._resume is not None else self._live
+        state = self._live
         document: dict[str, object] = {
             "state_version": 1,
             "identity": self._identity(),
@@ -880,19 +880,66 @@ class StatefulDistillationStream(Iterable[dict[str, object]]):
             raise ValueError("stream state cursor/shard invariants are invalid")
         supplied_digest = state["state_sha256"]
         unsigned = {name: state[name] for name in state if name != "state_sha256"}
+        # This unkeyed digest detects accidental serialization corruption only;
+        # authenticity comes from the deterministic history comparison below.
         if (
             not _is_sha(supplied_digest, 64)
             or len(_canonical_json(state)) > self.checkpoint_byte_limit
             or hashlib.sha256(_canonical_json(unsigned)).hexdigest() != supplied_digest
         ):
             raise ValueError("stream state checksum or byte budget is invalid")
-        self._resume = restored
-        self._live = deepcopy(restored)
+        if self._positioned_iterator is not None:
+            self._positioned_iterator.close()
+            self._positioned_iterator = None
+        self._live = self._initial_cursor()
+        history = self._iterate()
+        try:
+            for _ in range(int(processed)):
+                next(history)
+            if cursor["complete"]:
+                try:
+                    next(history)
+                except StopIteration:
+                    pass
+                else:
+                    raise ValueError("stream state completes before deterministic history")
+            if self._live != restored:
+                raise ValueError("stream state does not match deterministic stream history")
+        except StopIteration as error:
+            history.close()
+            self._live = self._initial_cursor()
+            raise ValueError("stream state exceeds deterministic stream history") from error
+        except BaseException:
+            history.close()
+            self._live = self._initial_cursor()
+            raise
+        if cursor["complete"]:
+            history.close()
+            self._positioned_iterator = None
+        else:
+            # The sole prefix traversal is retained at its exact source position.
+            # Resumed iteration continues this generator and never scans again.
+            self._iterating = False
+            self._positioned_iterator = history
 
     def __iter__(self) -> Iterator[dict[str, object]]:
         if self._iterating:
             raise RuntimeError("stateful stream does not support concurrent iteration")
+        if self._positioned_iterator is not None:
+            positioned = self._positioned_iterator
+            self._positioned_iterator = None
+            self._iterating = True
+            return self._continue_positioned(positioned)
         return self._iterate()
+
+    def _continue_positioned(
+        self, positioned: Iterator[dict[str, object]]
+    ) -> Iterator[dict[str, object]]:
+        try:
+            yield from positioned
+        finally:
+            positioned.close()
+            self._iterating = False
 
     def _iterate(self) -> Iterator[dict[str, object]]:
         self._iterating = True
@@ -900,7 +947,7 @@ class StatefulDistillationStream(Iterable[dict[str, object]]):
         seen.execute("CREATE TABLE article_keys (article_key TEXT PRIMARY KEY)")
         try:
             source = iter(self._dataset)
-            live = deepcopy(self._resume if self._resume is not None else self._live)
+            live = deepcopy(self._live)
             rng = random.Random()
             rng.setstate(_tuple_state(live["shuffle_rng_state"]))  # type: ignore[arg-type]
 
@@ -924,7 +971,6 @@ class StatefulDistillationStream(Iterable[dict[str, object]]):
                     raise DatasetContractError(
                         "physical split ended before the restored cursor"
                     ) from error
-            self._resume = None
             self._live = live
             buffer = live["shuffle_buffer"]
             assert isinstance(buffer, list)
