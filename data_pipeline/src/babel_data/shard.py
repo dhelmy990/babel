@@ -15,6 +15,7 @@ import json
 import math
 import os
 import shutil
+import sqlite3
 import tempfile
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
@@ -52,7 +53,11 @@ PARQUET_SCHEMA = pa.schema(
         pa.field("wikidata_id", pa.string(), nullable=True),
         pa.field("lead_text", pa.string(), nullable=False),
         pa.field("article_text", pa.string(), nullable=False),
-        pa.field("teacher_vector", pa.list_(pa.float32(), 100), nullable=False),
+        pa.field(
+            "teacher_vector",
+            pa.list_(pa.field("element", pa.float32()), 100),
+            nullable=False,
+        ),
         pa.field("teacher_norm", pa.float64(), nullable=False),
         pa.field("source_revision_id", pa.int64(), nullable=True),
         pa.field("snapshot_date", pa.string(), nullable=False),
@@ -552,6 +557,22 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _fsync_path(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _fsync_staging_directories(root: Path) -> None:
+    directories = [path for path in root.rglob("*") if path.is_dir()]
+    directories.sort(key=lambda path: len(path.relative_to(root).parts), reverse=True)
+    for directory in directories:
+        _fsync_path(directory)
+    _fsync_path(root)
+
+
 def validate_distillation_row(value: object) -> dict[str, object]:
     """Return a normalized row after all schema and semantic checks."""
     if isinstance(value, Mapping):
@@ -714,24 +735,41 @@ def write_shards(
     checked_provenance = deepcopy(dict(provenance))
 
     pilot_heap: list[_PilotCandidate] = []
-    article_keys: set[str] = set()
-    page_ids: set[int] = set()
-    for value in rows:
-        document = validate_distillation_row(value)
-        article_key = str(document["article_key"])
-        page_id = int(document["page_id"])
-        if article_key in article_keys:
-            raise ValueError(f"duplicate article_key: {article_key}")
-        if page_id in page_ids:
-            raise ValueError(f"duplicate page identity: {page_id}")
-        article_keys.add(article_key)
-        page_ids.add(page_id)
-        rank = hashlib.sha256(article_key.encode("utf-8")).hexdigest()
-        heapq.heappush(pilot_heap, _PilotCandidate(rank, article_key, document))
-        if len(pilot_heap) > pilot_size:
-            heapq.heappop(pilot_heap)
+    accepted_rows = 0
+    with tempfile.TemporaryDirectory(prefix="babel-identities-") as identity_directory:
+        database_path = Path(identity_directory) / "identities.sqlite3"
+        connection = sqlite3.connect(database_path)
+        try:
+            connection.execute(
+                "CREATE TABLE identities ("
+                "article_key TEXT PRIMARY KEY, page_id INTEGER UNIQUE NOT NULL)"
+            )
+            for value in rows:
+                document = validate_distillation_row(value)
+                article_key = str(document["article_key"])
+                page_id = int(document["page_id"])
+                try:
+                    connection.execute(
+                        "INSERT INTO identities(article_key, page_id) VALUES (?, ?)",
+                        (article_key, page_id),
+                    )
+                except sqlite3.IntegrityError as error:
+                    if connection.execute(
+                        "SELECT 1 FROM identities WHERE article_key = ?", (article_key,)
+                    ).fetchone():
+                        raise ValueError(f"duplicate article_key: {article_key}") from error
+                    raise ValueError(f"duplicate page identity: {page_id}") from error
+                accepted_rows += 1
+                rank = hashlib.sha256(article_key.encode("utf-8")).hexdigest()
+                heapq.heappush(
+                    pilot_heap, _PilotCandidate(rank, article_key, document)
+                )
+                if len(pilot_heap) > pilot_size:
+                    heapq.heappop(pilot_heap)
+        finally:
+            connection.close()
 
-    if pilot_size > len(article_keys):
+    if pilot_size > accepted_rows:
         raise ValueError("pilot_size cannot exceed accepted unique rows")
     selected = sorted(
         ((item.rank, item.article_key, item.document) for item in pilot_heap),
@@ -759,6 +797,7 @@ def write_shards(
                 shard_path = staging / relative
                 shard_path.parent.mkdir(parents=True, exist_ok=True)
                 _write_table(chunk_items, shard_path)
+                _fsync_path(shard_path)
                 chunk_keys = [str(row["article_key"]) for row in chunk_items]
                 chunk_ranks = [
                     hashlib.sha256(key.encode("utf-8")).hexdigest()
@@ -829,6 +868,7 @@ def write_shards(
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_bytes = _canonical_json(manifest)
         manifest_path.write_bytes(manifest_bytes)
+        _fsync_path(manifest_path)
         artifact = checked_provenance.get("artifacts", {}).get("accepted_jsonl")
         if not isinstance(artifact, dict) or not isinstance(artifact.get("sha256"), str):
             raise ValueError("provenance accepted_jsonl artifact is required")
@@ -846,8 +886,13 @@ def write_shards(
             "remote_commit_sha": None,
         }
         validate_readiness_alignment(readiness_document, manifest)
-        (staging / READINESS_PATH).write_bytes(_canonical_json(readiness_document))
-        (staging / README_PATH).write_bytes(render_dataset_card())
+        readiness_path = staging / READINESS_PATH
+        readiness_path.write_bytes(_canonical_json(readiness_document))
+        _fsync_path(readiness_path)
+        readme_path = staging / README_PATH
+        readme_path.write_bytes(render_dataset_card())
+        _fsync_path(readme_path)
+        _fsync_staging_directories(staging)
         _rename_noreplace(staging, destination)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)

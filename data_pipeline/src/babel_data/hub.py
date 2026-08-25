@@ -28,7 +28,7 @@ from .release import (
     validate_readiness_alignment,
     validate_readiness_extension,
 )
-from .shard import validate_distillation_row
+from .shard import PARQUET_SCHEMA, validate_distillation_row
 
 
 DEFAULT_REPO_ID = "dhelmy990/babel-wikipedia-experiment"
@@ -225,6 +225,132 @@ def _remote_or_missing(
     ) from None
 
 
+def _metadata_sha256(info: object) -> str | None:
+    lfs = getattr(info, "lfs", None)
+    if isinstance(lfs, Mapping):
+        value = lfs.get("sha256")
+    else:
+        value = getattr(lfs, "sha256", None)
+    return value if isinstance(value, str) else None
+
+
+def _remote_shard_chunks(
+    api: object,
+    repo_id: str,
+    path_in_repo: str,
+    revision: str,
+    token: str,
+) -> Iterable[bytes]:
+    streamer = getattr(api, "iter_file_bytes", None)
+    if callable(streamer):
+        yield from streamer(
+            repo_id=repo_id,
+            path_in_repo=path_in_repo,
+            repo_type="dataset",
+            revision=revision,
+            token=token,
+        )
+        return
+    downloader = getattr(api, "hf_hub_download", None)
+    if callable(downloader):
+        downloaded = downloader(
+            repo_id=repo_id,
+            filename=path_in_repo,
+            repo_type="dataset",
+            revision=revision,
+            token=token,
+        )
+        with Path(downloaded).open("rb") as source:
+            yield from iter(lambda: source.read(1024 * 1024), b"")
+        return
+    if (
+        callable(getattr(api, "get_file_bytes", None))
+        and not type(api).__module__.startswith("huggingface_hub")
+    ):
+        raise RemoteVerificationError(
+            "custom remote shard access requires a streaming adapter"
+        )
+    from huggingface_hub import hf_hub_download
+
+    downloaded = hf_hub_download(
+        repo_id=repo_id,
+        filename=path_in_repo,
+        repo_type="dataset",
+        revision=revision,
+        token=token,
+    )
+    with Path(downloaded).open("rb") as source:
+        yield from iter(lambda: source.read(1024 * 1024), b"")
+
+
+def _verify_remote_shards(
+    api: object,
+    repo_id: str,
+    revision: str,
+    token: str,
+    shards: Sequence[Mapping[str, object]],
+) -> frozenset[str]:
+    paths = [str(item["path"]) for item in shards]
+    metadata_getter = getattr(api, "get_paths_info", None)
+    if callable(metadata_getter):
+        infos = list(
+            metadata_getter(
+                repo_id=repo_id,
+                paths=paths,
+                repo_type="dataset",
+                revision=revision,
+                token=token,
+            )
+        )
+        by_path = {
+            str(getattr(info, "path", getattr(info, "rfilename", ""))): info
+            for info in infos
+        }
+        if (
+            len(infos) != len(paths)
+            or len(by_path) != len(infos)
+            or set(by_path) != set(paths)
+        ):
+            raise RemoteVerificationError("remote shard metadata is incomplete")
+        metadata_complete = all(_metadata_sha256(by_path[path]) for path in paths)
+        if metadata_complete:
+            for item in shards:
+                path = str(item["path"])
+                info = by_path[path]
+                if (
+                    getattr(info, "size", None) != int(item["bytes"])
+                    or _metadata_sha256(info) != item["sha256"]
+                ):
+                    raise RemoteVerificationError(
+                        f"remote shard metadata does not match manifest: {path}"
+                    )
+            return frozenset(paths)
+
+    verified: set[str] = set()
+    for item in shards:
+        path = str(item["path"])
+        digest = hashlib.sha256()
+        size = 0
+        try:
+            for chunk in _remote_shard_chunks(
+                api, repo_id, path, revision, token
+            ):
+                if not isinstance(chunk, bytes):
+                    raise TypeError("remote shard stream yielded a non-bytes chunk")
+                digest.update(chunk)
+                size += len(chunk)
+        except RemoteVerificationError:
+            raise
+        except BaseException as error:
+            raise RemoteVerificationError(f"unable to read remote shard: {path}") from error
+        if size != int(item["bytes"]) or digest.hexdigest() != item["sha256"]:
+            raise RemoteVerificationError(
+                f"remote shard bytes do not match manifest: {path}"
+            )
+        verified.add(path)
+    return frozenset(verified)
+
+
 def _private_info(info: object) -> object:
     if getattr(info, "private", None) is not True:
         raise RemoteVerificationError(
@@ -310,10 +436,15 @@ def _validate_local_uploads(
         min_rank: str | None = None
         max_rank: str | None = None
         prior_order: tuple[str, str] | None = None
+        parquet_file = pq.ParquetFile(local)
+        if not parquet_file.schema_arrow.equals(PARQUET_SCHEMA, check_metadata=True):
+            raise ValueError(
+                f"local shard physical Parquet schema does not match contract: {item['path']}"
+            )
 
         def checked_identities() -> Iterable[Mapping[str, object]]:
             nonlocal shard_count, min_key, max_key, min_rank, max_rank, prior_order
-            for batch in pq.ParquetFile(local).iter_batches(batch_size=4096):
+            for batch in parquet_file.iter_batches(batch_size=4096):
                 for raw_row in batch.to_pylist():
                     row = validate_distillation_row(raw_row)
                     if row["split"] != item["split"]:
@@ -476,7 +607,7 @@ def verify_remote(
         isinstance(item, Mapping) for item in shards
     ):
         raise ValueError("local shard manifest has invalid shards")
-    verified_paths = frozenset(str(item["path"]) for item in shards) | METADATA_PATHS
+    verified_paths = METADATA_PATHS
     split_counts = {
         split: sum(int(item["rows"]) for item in shards if item["split"] == split)
         for split in ("train", "validation", "test")
@@ -524,6 +655,9 @@ def verify_remote(
                 raise RemoteVerificationError(
                     "remote README bytes do not match the fixed dataset card"
                 )
+            verified_paths = METADATA_PATHS | _verify_remote_shards(
+                api, repo_id, revision, token, shards
+            )
             dataset = loader(
                 repo_id,
                 name=config_name,
@@ -790,9 +924,26 @@ def write_revision_file(path: str | os.PathLike[str], revision: str) -> None:
     except BaseException:
         if linked:
             os.unlink(destination)
+            directory = os.open(destination.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            except BaseException as rollback_error:
+                raise RemoteVerificationError(
+                    "revision rollback directory fsync failed"
+                ) from rollback_error
+            finally:
+                os.close(directory)
         raise
     finally:
+        removed = False
         try:
             os.unlink(temporary_name)
+            removed = True
         except FileNotFoundError:
             pass
+        if removed:
+            directory = os.open(destination.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)

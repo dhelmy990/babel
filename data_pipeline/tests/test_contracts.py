@@ -37,6 +37,7 @@ def provenance_document() -> dict[str, object]:
     return {
         "schema_version": 1,
         "sources": [{
+            "role": "teacher",
             "filename": "vectors.bin",
             "url": "https://example.test/vectors.bin",
             "size": 12,
@@ -240,6 +241,15 @@ def test_provenance_contract_validates_source_and_report_identity() -> None:
     provenance["sources"][0]["url"] = "not a uri"  # type: ignore[index]
     with pytest.raises(ValidationError):
         validate_document("provenance-v1", provenance)
+
+    for role in (None, "other"):
+        invalid = provenance_document()
+        if role is None:
+            invalid["sources"][0].pop("role")  # type: ignore[index]
+        else:
+            invalid["sources"][0]["role"] = role  # type: ignore[index]
+        with pytest.raises(ValidationError):
+            validate_document("provenance-v1", invalid)
 
 
 @pytest.mark.parametrize(

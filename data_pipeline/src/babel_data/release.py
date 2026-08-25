@@ -268,8 +268,11 @@ def validate_full_release_proof(
     raw = int(report["raw_rows"])
     accepted_rows = int(report["accepted_rows"])
     excluded = int(report["excluded_rows"])
+    matched_wikipedia = int(report["matched_wikipedia_pages"])
     if raw != accepted_rows + excluded or int(accepted["rows"]) != accepted_rows:
         raise ValueError("full release proof reconciliation counts are inconsistent")
+    if matched_wikipedia != accepted_rows:
+        raise ValueError("full release proof Wikipedia matches do not equal accepted rows")
     if checked_manifest["counts"]["total"] != accepted_rows:  # type: ignore[index]
         raise ValueError("full release proof requires every accepted row in the manifest")
     row_counts = provenance["reports"]["row_counts"]  # type: ignore[index]
@@ -279,13 +282,13 @@ def validate_full_release_proof(
             "raw": raw,
             "accepted": accepted_rows,
             "excluded": excluded,
+            "matched_wikipedia_pages": matched_wikipedia,
         }.items()
     ):
         raise ValueError("full release proof counts do not match provenance report")
     inventories = checked_proof["source_inventories"]
     assert isinstance(inventories, list)
     count_fields = {
-        "role",
         "records",
         "emitted_records",
         "upstream_excluded_records",
@@ -303,8 +306,12 @@ def validate_full_release_proof(
     ):
         raise ValueError("full release proof source inventory accounting is incomplete")
     teacher = [item for item in inventories if item["role"] == "teacher"]
-    if not teacher:
-        raise ValueError("full release proof requires a teacher source inventory")
+    wikipedia = [item for item in inventories if item["role"] == "wikipedia"]
+    if {str(item["role"]) for item in inventories} != {"teacher", "wikipedia"}:
+        raise ValueError("full release proof requires teacher and Wikipedia inventories")
     teacher_emitted = sum(int(item["emitted_records"]) for item in teacher)
     if teacher_emitted != raw or row_counts.get("teacher_input_rows") != raw:
         raise ValueError("full release proof teacher input count does not reconcile")
+    wikipedia_emitted = sum(int(item["emitted_records"]) for item in wikipedia)
+    if wikipedia_emitted < matched_wikipedia:
+        raise ValueError("full release proof Wikipedia inventory cannot cover accepted rows")

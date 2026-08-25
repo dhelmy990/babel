@@ -89,6 +89,15 @@ class FakeApi:
             raise EntryNotFoundError(path_in_repo)
         return self.remote[path_in_repo]
 
+    def iter_file_bytes(self, *, path_in_repo: str, **kwargs: object) -> object:
+        if path_in_repo not in self.remote:
+            raise EntryNotFoundError(path_in_repo)
+        value = self.remote[path_in_repo]
+        return (
+            value[offset : offset + 1024 * 1024]
+            for offset in range(0, len(value), 1024 * 1024)
+        )
+
     def create_commit(self, *, operations: list[object], **kwargs: object) -> object:
         self.commit_calls.append(kwargs)
         for operation in operations:
@@ -401,6 +410,10 @@ def test_publish_semantic_preflight_streams_parquet_batches(
         def __init__(self, *args: object, **kwargs: object) -> None:
             self.delegate = real_parquet_file(*args, **kwargs)
 
+        @property
+        def schema_arrow(self) -> pa.Schema:
+            return self.delegate.schema_arrow
+
         def iter_batches(self, *args: object, **kwargs: object) -> object:
             nonlocal calls
             calls += 1
@@ -502,6 +515,74 @@ def test_publish_rejects_local_shard_changed_after_manifest(tmp_path: Path) -> N
             sleep=lambda _: None,
         )
     assert api.private_calls == []
+
+
+def test_publish_rejects_parquet_with_wrong_physical_schema(tmp_path: Path) -> None:
+    result, files, datasets = prepare(tmp_path)
+    shard_path = result.output_root / result.shards[0].path
+    table = pq.read_table(shard_path).replace_schema_metadata(None)
+    pq.write_table(table, shard_path)
+    manifest = json.loads(result.manifest_path.read_text())
+    item = next(entry for entry in manifest["shards"] if entry["path"] == result.shards[0].path)
+    item["bytes"] = shard_path.stat().st_size
+    item["sha256"] = hashlib.sha256(shard_path.read_bytes()).hexdigest()
+    manifest["aggregate_sha256"] = hashlib.sha256(canonical_json(manifest["shards"])).hexdigest()
+    reports = manifest["provenance"]["document"]["reports"]
+    reports["dataset_aggregate_sha256"] = manifest["aggregate_sha256"]
+    result.manifest_path.write_bytes(canonical_json(manifest))
+    readiness = json.loads(result.readiness_path.read_text())
+    next(entry for entry in readiness["verified_shards"] if entry["path"] == item["path"])[
+        "sha256"
+    ] = item["sha256"]
+    result.readiness_path.write_bytes(canonical_json(readiness))
+
+    with pytest.raises(ValueError, match="physical Parquet schema"):
+        publish_verified_shards(
+            FakeApi(), "dhelmy990/babel-wikipedia-experiment", files, "token",
+            root=result.output_root,
+            load_dataset_fn=lambda *args, **kwargs: datasets,
+            retries=1, sleep=lambda _: None,
+        )
+
+
+def test_publish_rejects_float64_teacher_vector_physical_type(tmp_path: Path) -> None:
+    result, files, datasets = prepare(tmp_path)
+    shard_path = result.output_root / result.shards[0].path
+    table = pq.read_table(shard_path)
+    vector_index = table.schema.get_field_index("teacher_vector")
+    vector_field = pa.field(
+        "teacher_vector",
+        pa.list_(pa.field("element", pa.float64()), 100),
+        nullable=False,
+    )
+    table = table.set_column(
+        vector_index,
+        vector_field,
+        pa.array(table.column(vector_index).to_pylist(), type=vector_field.type),
+    )
+    pq.write_table(table, shard_path)
+    manifest = json.loads(result.manifest_path.read_text())
+    item = next(entry for entry in manifest["shards"] if entry["path"] == result.shards[0].path)
+    item["bytes"] = shard_path.stat().st_size
+    item["sha256"] = hashlib.sha256(shard_path.read_bytes()).hexdigest()
+    manifest["aggregate_sha256"] = hashlib.sha256(canonical_json(manifest["shards"])).hexdigest()
+    manifest["provenance"]["document"]["reports"][
+        "dataset_aggregate_sha256"
+    ] = manifest["aggregate_sha256"]
+    result.manifest_path.write_bytes(canonical_json(manifest))
+    readiness = json.loads(result.readiness_path.read_text())
+    next(entry for entry in readiness["verified_shards"] if entry["path"] == item["path"])[
+        "sha256"
+    ] = item["sha256"]
+    result.readiness_path.write_bytes(canonical_json(readiness))
+
+    with pytest.raises(ValueError, match="physical Parquet schema"):
+        publish_verified_shards(
+            FakeApi(), "dhelmy990/babel-wikipedia-experiment", files, "token",
+            root=result.output_root,
+            load_dataset_fn=lambda *args, **kwargs: datasets,
+            retries=1, sleep=lambda _: None,
+        )
 
 
 @pytest.mark.parametrize(
@@ -666,7 +747,7 @@ def test_manifest_extension_preserves_prior_provenance_evidence(tmp_path: Path) 
         api.remote[path.relative_to(result.output_root).as_posix()] = path.read_bytes()
     extension_manifest, extension_files = rolling_extension(result, tmp_path / "rolling")
     extension = json.loads(extension_manifest.read_text())
-    extension["provenance"]["document"]["sources"][0]["size"] += 1
+    extension["provenance"]["document"]["sources"][0]["role"] = "wikipedia"
     extension_manifest.write_text(
         json.dumps(extension, sort_keys=True, separators=(",", ":")) + "\n"
     )
@@ -790,6 +871,190 @@ def test_verify_remote_retries_eventual_consistency_and_rejects_bad_rows(tmp_pat
             retries=1, sleep=lambda _: None,
         )
 
+
+def test_verify_remote_requires_every_manifest_shard_object(tmp_path: Path) -> None:
+    result, files, datasets = prepare(tmp_path)
+    api = FakeApi(current_sha=COMMIT)
+    for path in files:
+        api.remote[path.relative_to(result.output_root).as_posix()] = path.read_bytes()
+    api.remote.pop(result.shards[0].path)
+    with pytest.raises(RemoteVerificationError, match="shard|remote path"):
+        verify_remote(
+            api, "dhelmy990/babel-wikipedia-experiment", COMMIT,
+            result.manifest_path, "token",
+            load_dataset_fn=lambda *args, **kwargs: datasets,
+            retries=1, sleep=lambda _: None,
+        )
+
+
+@pytest.mark.parametrize("metadata_case", ["missing", "wrong", "duplicate"])
+def test_verify_remote_rejects_untrusted_shard_metadata(
+    tmp_path: Path, metadata_case: str
+) -> None:
+    result, files, datasets = prepare(tmp_path)
+
+    class MetadataApi(FakeApi):
+        def get_paths_info(self, *, paths: list[str], **kwargs: object) -> list[object]:
+            infos = [
+                SimpleNamespace(
+                    path=path,
+                    size=(result.output_root / path).stat().st_size,
+                    lfs={
+                        "sha256": hashlib.sha256(
+                            (result.output_root / path).read_bytes()
+                        ).hexdigest()
+                    },
+                )
+                for path in paths
+            ]
+            if metadata_case == "missing":
+                return infos[1:]
+            if metadata_case == "wrong":
+                infos[0].lfs["sha256"] = "f" * 64
+            if metadata_case == "duplicate":
+                infos.append(copy.deepcopy(infos[0]))
+            return infos
+
+    api = MetadataApi(current_sha=COMMIT)
+    for path in files:
+        relative = path.relative_to(result.output_root).as_posix()
+        if relative not in {item.path for item in result.shards}:
+            api.remote[relative] = path.read_bytes()
+    with pytest.raises(RemoteVerificationError, match="shard metadata"):
+        verify_remote(
+            api, "dhelmy990/babel-wikipedia-experiment", COMMIT,
+            result.manifest_path, "token",
+            load_dataset_fn=lambda *args, **kwargs: datasets,
+            retries=1, sleep=lambda _: None,
+        )
+
+
+def test_verify_remote_accepts_exact_shard_metadata_without_downloading_shards(
+    tmp_path: Path,
+) -> None:
+    result, files, datasets = prepare(tmp_path)
+
+    class MetadataApi(FakeApi):
+        def get_paths_info(self, *, paths: list[str], **kwargs: object) -> list[object]:
+            return [
+                SimpleNamespace(
+                    path=path,
+                    size=(result.output_root / path).stat().st_size,
+                    lfs={
+                        "sha256": hashlib.sha256(
+                            (result.output_root / path).read_bytes()
+                        ).hexdigest()
+                    },
+                )
+                for path in paths
+            ]
+
+    api = MetadataApi(current_sha=COMMIT)
+    for path in files:
+        relative = path.relative_to(result.output_root).as_posix()
+        if relative not in {item.path for item in result.shards}:
+            api.remote[relative] = path.read_bytes()
+    verified = verify_remote(
+        api, "dhelmy990/babel-wikipedia-experiment", COMMIT,
+        result.manifest_path, "token",
+        load_dataset_fn=lambda *args, **kwargs: datasets,
+        retries=1, sleep=lambda _: None,
+    )
+    assert verified.verified_paths == {
+        "README.md", "readiness.json", "distillation_2016/manifest.json",
+        *(item.path for item in result.shards),
+    }
+    assert not ({item.path for item in result.shards} & {path for path, _ in api.get_calls})
+
+
+def test_verify_remote_streams_downloaded_shards_when_metadata_lacks_checksums(
+    tmp_path: Path,
+) -> None:
+    result, files, datasets = prepare(tmp_path)
+
+    class DownloadApi(FakeApi):
+        iter_file_bytes = None
+
+        def __init__(self) -> None:
+            super().__init__(current_sha=COMMIT)
+            self.downloaded: list[str] = []
+
+        def get_paths_info(self, *, paths: list[str], **kwargs: object) -> list[object]:
+            return [SimpleNamespace(path=path, size=None, lfs={}) for path in paths]
+
+        def hf_hub_download(self, *, filename: str, **kwargs: object) -> str:
+            self.downloaded.append(filename)
+            return str(result.output_root / filename)
+
+    api = DownloadApi()
+    for path in files:
+        relative = path.relative_to(result.output_root).as_posix()
+        if relative not in {item.path for item in result.shards}:
+            api.remote[relative] = path.read_bytes()
+    verified = verify_remote(
+        api, "dhelmy990/babel-wikipedia-experiment", COMMIT,
+        result.manifest_path, "token",
+        load_dataset_fn=lambda *args, **kwargs: datasets,
+        retries=1, sleep=lambda _: None,
+    )
+    assert api.downloaded == [item.path for item in result.shards]
+    assert verified.verified_paths.issuperset(api.downloaded)
+
+
+def test_verify_remote_rejects_custom_adapter_without_streaming_shard_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import huggingface_hub
+
+    result, files, datasets = prepare(tmp_path)
+
+    class UnstreamableApi(FakeApi):
+        iter_file_bytes = None
+
+    api = UnstreamableApi(current_sha=COMMIT)
+    for path in files:
+        api.remote[path.relative_to(result.output_root).as_posix()] = path.read_bytes()
+    monkeypatch.setattr(
+        huggingface_hub,
+        "hf_hub_download",
+        lambda **kwargs: pytest.fail("custom byte adapters must not use global download"),
+    )
+    with pytest.raises(RemoteVerificationError, match="streaming adapter"):
+        verify_remote(
+            api, "dhelmy990/babel-wikipedia-experiment", COMMIT,
+            result.manifest_path, "token",
+            load_dataset_fn=lambda *args, **kwargs: datasets,
+            retries=1, sleep=lambda _: None,
+        )
+
+
+def test_verify_remote_streams_all_shard_bytes_when_metadata_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    result, files, datasets = prepare(tmp_path)
+
+    class StreamingApi(FakeApi):
+        def __init__(self) -> None:
+            super().__init__(current_sha=COMMIT)
+            self.streamed: list[str] = []
+
+        def iter_file_bytes(self, *, path_in_repo: str, **kwargs: object) -> object:
+            self.streamed.append(path_in_repo)
+            value = self.remote[path_in_repo]
+            return (value[index:index + 17] for index in range(0, len(value), 17))
+
+    api = StreamingApi()
+    for path in files:
+        api.remote[path.relative_to(result.output_root).as_posix()] = path.read_bytes()
+    verified = verify_remote(
+        api, "dhelmy990/babel-wikipedia-experiment", COMMIT,
+        result.manifest_path, "token",
+        load_dataset_fn=lambda *args, **kwargs: datasets,
+        retries=1, sleep=lambda _: None,
+    )
+    assert api.streamed == [item.path for item in result.shards]
+    assert verified.verified_paths.issuperset(api.streamed)
+
     invalid = {name: list(values) for name, values in datasets.items()}
     invalid["train"] = [dict(invalid["train"][0], teacher_norm=2.0)]
     with pytest.raises(RemoteVerificationError, match="semantic-invalid row"):
@@ -879,6 +1144,26 @@ def test_revision_file_publication_failure_leaves_destination_missing(
         write_revision_file(target, COMMIT)
     assert not target.exists()
     assert not list(tmp_path.glob(".revision.txt.*"))
+    assert calls == 4
+
+
+def test_revision_file_fsyncs_parent_after_removing_temporary_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import babel_data.hub as hub
+
+    real_fsync = hub.os.fsync
+    synced: list[Path] = []
+
+    def record_fsync(descriptor: int) -> None:
+        synced.append(Path(hub.os.readlink(f"/proc/self/fd/{descriptor}")))
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(hub.os, "fsync", record_fsync)
+    target = tmp_path / "revision.txt"
+    write_revision_file(target, COMMIT)
+    assert synced.count(tmp_path) == 2
+    assert not list(tmp_path.glob(".revision.txt.*"))
 
 
 def test_prepare_cli_accepts_jsonl_and_emits_structured_result(
@@ -945,6 +1230,16 @@ def complete_release(
         "teacher_input_rows": 4,
         "accepted": 3,
         "excluded": 1,
+        "matched_wikipedia_pages": 3,
+    })
+    provenance["sources"].append({  # type: ignore[union-attr]
+        "role": "wikipedia",
+        "filename": "enwiki.xml.bz2",
+        "url": "https://example.test/enwiki.xml.bz2",
+        "size": 456,
+        "md5": "d" * 32,
+        "sha1": "e" * 40,
+        "downloaded_at": "2016-10-01",
     })
     result = write_shards(
         rows_for_all_splits(),
@@ -969,15 +1264,19 @@ def complete_release(
             "raw_rows": 4,
             "accepted_rows": 3,
             "excluded_rows": 1,
+            "matched_wikipedia_pages": 3,
         },
         "source_inventories": [
             {
                 **provenance["sources"][0],  # type: ignore[index]
-                "role": "teacher",
-                "records": 4,
-                "emitted_records": 4,
+                "records": 4, "emitted_records": 4,
                 "upstream_excluded_records": 0,
-            }
+            },
+            {
+                **provenance["sources"][1],  # type: ignore[index]
+                "records": 10, "emitted_records": 8,
+                "upstream_excluded_records": 2,
+            },
         ],
     }
     proof_path = tmp_path / "full-release-proof.json"
@@ -1020,6 +1319,8 @@ def test_invalid_complete_proof_never_reads_environment_token(
     import babel_data.cli as cli
 
     result, _, _ = prepare(tmp_path)
+    invalid_proof = tmp_path / "invalid-full-release-proof.json"
+    invalid_proof.write_text("{}")
 
     class GuardedEnvironment(dict[str, str]):
         def get(self, key: str, default: object = None) -> object:
@@ -1030,9 +1331,26 @@ def test_invalid_complete_proof_never_reads_environment_token(
     monkeypatch.setattr(cli.os, "environ", GuardedEnvironment())
     assert main([
         "publish-2016", "--input-root", str(result.output_root),
-        "--state", "complete",
+        "--state", "complete", "--full-release-proof", str(invalid_proof),
     ]) == 1
-    assert "full-release-proof" in json.loads(capsys.readouterr().err)["message"]
+    assert "full release proof" in json.loads(capsys.readouterr().err)["message"]
+
+
+def test_invalid_proof_redacts_explicit_token_without_environment_lookup(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result, _, _ = prepare(tmp_path)
+    secret = "explicit-pre-auth-secret"
+    missing_proof = tmp_path / secret
+    assert main([
+        "publish-2016", "--input-root", str(result.output_root),
+        "--state", "complete", "--full-release-proof", str(missing_proof),
+        "--token", secret,
+    ]) == 1
+    error = capsys.readouterr().err
+    assert secret not in error
+    assert "[REDACTED]" in error
 
 
 def test_publish_cli_complete_rejects_incomplete_proof_before_publication(
@@ -1060,7 +1378,10 @@ def test_publish_cli_complete_rejects_incomplete_proof_before_publication(
 
 
 @pytest.mark.parametrize(
-    "invalid_case", ["pilot", "provenance", "artifact", "source", "inventory_count"]
+    "invalid_case", [
+        "pilot", "provenance", "artifact", "source", "inventory_count",
+        "missing_wikipedia", "wikipedia_zero", "matched_wikipedia", "swapped_roles",
+    ]
 )
 def test_publish_cli_complete_rejects_unbound_or_pilot_proof(
     tmp_path: Path,
@@ -1082,6 +1403,19 @@ def test_publish_cli_complete_rejects_unbound_or_pilot_proof(
         proof["source_inventories"][0]["filename"] = "different.jsonl"
     elif invalid_case == "inventory_count":
         proof["source_inventories"][0]["records"] = 999999
+    elif invalid_case == "missing_wikipedia":
+        proof["source_inventories"] = [
+            item for item in proof["source_inventories"] if item["role"] != "wikipedia"
+        ]
+    elif invalid_case == "wikipedia_zero":
+        wiki = next(item for item in proof["source_inventories"] if item["role"] == "wikipedia")
+        wiki["emitted_records"] = 0
+        wiki["upstream_excluded_records"] = wiki["records"]
+    elif invalid_case == "matched_wikipedia":
+        proof["reconciliation_report"]["matched_wikipedia_pages"] = 2
+    elif invalid_case == "swapped_roles":
+        proof["source_inventories"][0]["role"] = "wikipedia"
+        proof["source_inventories"][1]["role"] = "teacher"
     proof_path.write_text(json.dumps(proof))
     monkeypatch.setattr(
         cli,
@@ -1184,6 +1518,22 @@ def test_cli_argument_errors_are_structured(
     assert message["status"] == "error"
     assert message["command"] == "prepare-2016"
     assert message["error"] == "usage"
+
+
+@pytest.mark.parametrize("token_form", ["separate", "equals"])
+def test_cli_redacts_explicit_token_from_argument_parse_errors(
+    capsys: pytest.CaptureFixture[str], token_form: str
+) -> None:
+    secret = f"parse-error-{token_form}-secret"
+    token_arguments = (
+        ["--token", secret] if token_form == "separate" else [f"--token={secret}"]
+    )
+    assert main([
+        "publish-2016", "--state", secret, *token_arguments,
+    ]) == 2
+    error = capsys.readouterr().err
+    assert secret not in error
+    assert "[REDACTED]" in error
 
 
 def test_verify_cli_defaults_manifest_from_external_data_root(

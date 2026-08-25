@@ -33,6 +33,7 @@ def provenance_document() -> dict[str, object]:
     return {
         "schema_version": 1,
         "sources": [{
+            "role": "teacher",
             "filename": "accepted.jsonl",
             "url": "https://example.test/accepted.jsonl",
             "size": 123,
@@ -264,15 +265,104 @@ def test_atomic_directory_publication_rolls_back_after_parent_fsync_failure(
 ) -> None:
     import babel_data.shard as shard
 
+    output = tmp_path / "prepared"
+    real_fsync = shard.os.fsync
+    parent_syncs = 0
+
     def fail_parent_fsync(descriptor: int) -> None:
-        raise OSError("simulated directory fsync failure")
+        nonlocal parent_syncs
+        path = Path(shard.os.readlink(f"/proc/self/fd/{descriptor}"))
+        if path == tmp_path:
+            parent_syncs += 1
+            if output.exists():
+                raise OSError("simulated directory fsync failure")
+        real_fsync(descriptor)
 
     monkeypatch.setattr(shard.os, "fsync", fail_parent_fsync)
-    output = tmp_path / "prepared"
     with pytest.raises(OSError, match="directory fsync"):
         write_test_shards([row("enwiki:2016-10-01:1", 1)], output, pilot_size=1)
     assert not output.exists()
     assert list(tmp_path.iterdir()) == []
+    assert parent_syncs == 2
+
+
+def test_staged_file_fsync_failure_never_publishes_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import babel_data.shard as shard
+
+    real_fsync = shard.os.fsync
+
+    def fail_manifest_fsync(descriptor: int) -> None:
+        path = Path(shard.os.readlink(f"/proc/self/fd/{descriptor}"))
+        if path.name == "manifest.json":
+            raise OSError("simulated staged file fsync failure")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(shard.os, "fsync", fail_manifest_fsync)
+    output = tmp_path / "prepared"
+    with pytest.raises(OSError, match="staged file fsync"):
+        write_test_shards([row("enwiki:2016-10-01:1", 1)], output, pilot_size=1)
+    assert not output.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_shard_publication_fsyncs_files_then_directories_bottom_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import babel_data.shard as shard
+
+    real_fsync = shard.os.fsync
+    synced: list[tuple[str, bool]] = []
+
+    def record_fsync(descriptor: int) -> None:
+        path = Path(shard.os.readlink(f"/proc/self/fd/{descriptor}"))
+        synced.append((path.name, path.is_dir()))
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(shard.os, "fsync", record_fsync)
+    result = write_test_shards(
+        [row("enwiki:2016-10-01:1", 1)], tmp_path / "durable", pilot_size=1
+    )
+    names = [name for name, _ in synced]
+    for required in ("part-00000.parquet", "manifest.json", "readiness.json", "README.md"):
+        assert required in names
+    first_directory = next(index for index, (_, is_dir) in enumerate(synced) if is_dir)
+    assert all(not is_dir for _, is_dir in synced[:first_directory])
+    assert synced[-1] == (tmp_path.name, True)
+    assert result.output_root.exists()
+
+
+def test_identity_uniqueness_uses_cleaned_disk_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import babel_data.shard as shard
+
+    real_connect = shard.sqlite3.connect
+    databases: list[Path] = []
+
+    def connect(database: object, *args: object, **kwargs: object) -> object:
+        databases.append(Path(str(database)))
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(shard.sqlite3, "connect", connect)
+    write_test_shards(
+        [row(f"enwiki:2016-10-01:{number}", number) for number in range(1, 8)],
+        tmp_path / "sqlite-unique",
+        pilot_size=3,
+    )
+    assert len(databases) == 1
+    assert databases[0].exists() is False
+
+    duplicate = row("enwiki:2016-10-01:20", 20)
+    with pytest.raises(ValueError, match="duplicate"):
+        write_test_shards(
+            [duplicate, duplicate],
+            tmp_path / "sqlite-duplicate",
+            pilot_size=2,
+        )
+    assert len(databases) == 2
+    assert databases[1].exists() is False
 
 
 def test_readiness_is_monotonic_and_delete_requires_exact_remote_evidence(tmp_path: Path) -> None:

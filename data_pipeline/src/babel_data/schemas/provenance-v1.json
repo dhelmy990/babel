@@ -13,8 +13,9 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["filename", "url", "size", "md5", "downloaded_at"],
+        "required": ["role", "filename", "url", "size", "md5", "downloaded_at"],
         "properties": {
+          "role": {"enum": ["teacher", "wikipedia"]},
           "url": {"type": "string", "format": "uri"},
           "filename": {"type": "string", "minLength": 1},
           "size": {"type": "integer", "exclusiveMinimum": 0},

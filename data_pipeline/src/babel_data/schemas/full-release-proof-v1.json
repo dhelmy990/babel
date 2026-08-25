@@ -26,7 +26,8 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "sha256", "size", "complete", "raw_rows", "accepted_rows", "excluded_rows"
+        "sha256", "size", "complete", "raw_rows", "accepted_rows", "excluded_rows",
+        "matched_wikipedia_pages"
       ],
       "properties": {
         "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
@@ -34,7 +35,8 @@
         "complete": {"const": true},
         "raw_rows": {"type": "integer", "minimum": 1},
         "accepted_rows": {"type": "integer", "minimum": 1},
-        "excluded_rows": {"type": "integer", "minimum": 0}
+        "excluded_rows": {"type": "integer", "minimum": 0},
+        "matched_wikipedia_pages": {"type": "integer", "minimum": 1}
       }
     },
     "source_inventories": {

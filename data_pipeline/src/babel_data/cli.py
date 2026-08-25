@@ -59,6 +59,18 @@ def _sanitized_message(error: BaseException) -> str:
     return message
 
 
+def _register_explicit_tokens(arguments: Sequence[str]) -> None:
+    for index, value in enumerate(arguments):
+        if value == "--token" and index + 1 < len(arguments):
+            token = arguments[index + 1]
+        elif value.startswith("--token="):
+            token = value.partition("=")[2]
+        else:
+            continue
+        if token:
+            _REGISTERED_SECRETS.add(token)
+
+
 def _jsonl(path: Path) -> Iterator[dict[str, object]]:
     with path.open(encoding="utf-8") as source:
         for line_number, line in enumerate(source, 1):
@@ -233,6 +245,7 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     _REGISTERED_SECRETS.clear()
     effective_argv = list(argv) if argv is not None else sys.argv[1:]
+    _register_explicit_tokens(effective_argv)
     try:
         arguments = _parser().parse_args(effective_argv)
     except _UsageError as error:
@@ -242,13 +255,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "status": "error",
                     "command": effective_argv[0] if effective_argv else None,
                     "error": "usage",
-                    "message": str(error),
+                    "message": _sanitized_message(error),
                 },
                 sort_keys=True,
             ),
             file=sys.stderr,
         )
         return 2
+    explicit_token = getattr(arguments, "token", None)
+    if isinstance(explicit_token, str) and explicit_token:
+        _REGISTERED_SECRETS.add(explicit_token)
     try:
         result = arguments.handler(arguments)
     except BaseException as error:
