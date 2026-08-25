@@ -147,6 +147,42 @@ def declare_excessive_eocd_entries(path: Path, count: int) -> None:
     path.write_bytes(payload)
 
 
+def promote_to_canonical_zip64(path: Path) -> None:
+    payload = bytearray(path.read_bytes())
+    eocd_offset = payload.rindex(b"PK\x05\x06")
+    (
+        _signature,
+        disk_number,
+        central_disk,
+        disk_entries,
+        total_entries,
+        central_size,
+        central_offset,
+        comment_size,
+    ) = struct.unpack_from("<4s4H2LH", payload, eocd_offset)
+    assert disk_number == central_disk == 0
+    assert comment_size == 0
+    zip64_eocd = struct.pack(
+        "<4sQ2H2L4Q",
+        b"PK\x06\x06",
+        44,
+        45,
+        45,
+        0,
+        0,
+        disk_entries,
+        total_entries,
+        central_size,
+        central_offset,
+    )
+    zip64_locator = struct.pack("<4sLQL", b"PK\x06\x07", 0, eocd_offset, 1)
+    classic_eocd = bytearray(payload[eocd_offset:])
+    struct.pack_into("<HHLL", classic_eocd, 8, 0xFFFF, 0xFFFF, 0xFFFFFFFF, 0xFFFFFFFF)
+    path.write_bytes(
+        payload[:eocd_offset] + zip64_eocd + zip64_locator + classic_eocd
+    )
+
+
 def test_fixture_streams_immutable_owned_float32_records() -> None:
     records = list(iter_teacher(FIXTURE))
 
@@ -214,6 +250,16 @@ def test_teacher_title_normalization_matches_mediawiki_first_letter(
     title: str, expected: str
 ) -> None:
     assert normalize_teacher_title(title) == expected
+
+
+def test_real_title_preserves_zero_width_format_characters(tmp_path: Path) -> None:
+    title = "Chorizo_\u200b\u200bde_Pamplona"
+    path = one_row_zip(tmp_path, vector_row(title))
+
+    [record] = iter_teacher(path)
+
+    assert record.title == title
+    assert normalize_teacher_title(title) == "Chorizo \u200b\u200bde Pamplona"
 
 
 def test_public_line_parser_rejects_non_teacher_dimension() -> None:
@@ -605,13 +651,39 @@ def test_eocd_declared_central_directory_must_fit_source(
     assert constructed is False
 
 
-def test_zip64_central_directory_preflight_accepts_safe_archive(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_canonical_zip64_central_directory_preflight_accepts_safe_archive(
+    tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(zipfile, "ZIP64_LIMIT", 100)
     path = one_row_zip(tmp_path, vector_row("Only"))
+    promote_to_canonical_zip64(path)
+    payload = path.read_bytes()
+
+    assert b"PK\x06\x06" in payload
+    assert b"PK\x06\x07" in payload
 
     assert [record.title for record in iter_teacher(path)] == ["Only"]
+
+
+@pytest.mark.parametrize(
+    ("field_offset", "message"),
+    [
+        (32, "ZIP64 end-of-directory"),
+        (40, "central directory.*bounds"),
+    ],
+)
+def test_canonical_zip64_rejects_forged_count_and_bounds(
+    tmp_path: Path, field_offset: int, message: str
+) -> None:
+    path = one_row_zip(tmp_path, vector_row("Only"))
+    promote_to_canonical_zip64(path)
+    payload = bytearray(path.read_bytes())
+    zip64_eocd = payload.index(b"PK\x06\x06")
+    original = struct.unpack_from("<Q", payload, zip64_eocd + field_offset)[0]
+    struct.pack_into("<Q", payload, zip64_eocd + field_offset, original + 1)
+    path.write_bytes(payload)
+
+    with pytest.raises(InvalidTeacherArchive, match=message):
+        list(iter_teacher(path))
 
 
 def test_corrupt_deflate_stream_is_reported_as_typed_archive_error(
@@ -938,7 +1010,82 @@ def test_inventory_detects_temporary_file_hard_link_injection(
         build_teacher_inventory(FIXTURE, output)
 
     assert attacker_alias.exists()
-    assert not output.exists()
+    assert output.exists()
+    assert output.samefile(attacker_alias)
+    assert not any(path.name.endswith(".tmp") for path in tmp_path.iterdir())
+
+
+def test_inventory_never_unlinks_racer_that_replaces_published_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    output = tmp_path / "inventory.json"
+    evidence = tmp_path / "published-evidence.json"
+    attacker_alias = tmp_path / "attacker-alias.json"
+    real_link = os.link
+    real_entry_at = teacher._entry_at
+    output_checks = 0
+    published_stat: os.stat_result | None = None
+
+    def aliasing_link(
+        source: object,
+        destination: object,
+        *args: object,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+        **kwargs: object,
+    ) -> None:
+        real_link(
+            source,
+            attacker_alias,
+            src_dir_fd=src_dir_fd,
+            follow_symlinks=False,
+        )
+        real_link(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=False,
+        )
+
+    def racing_entry_at(parent_descriptor: int, filename: str):
+        nonlocal output_checks, published_stat
+        if filename != output.name:
+            return real_entry_at(parent_descriptor, filename)
+        output_checks += 1
+        if output_checks == 3:
+            published_stat = real_entry_at(parent_descriptor, filename)
+            assert published_stat is not None
+            os.rename(
+                output.name,
+                evidence.name,
+                src_dir_fd=parent_descriptor,
+                dst_dir_fd=parent_descriptor,
+            )
+            racer = os.open(
+                output.name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=parent_descriptor,
+            )
+            try:
+                os.write(racer, b"racing evidence\n")
+            finally:
+                os.close(racer)
+            return published_stat
+        if output_checks == 4 and published_stat is not None:
+            return published_stat
+        return real_entry_at(parent_descriptor, filename)
+
+    monkeypatch.setattr(teacher.os, "link", aliasing_link)
+    monkeypatch.setattr(teacher, "_entry_at", racing_entry_at)
+
+    with pytest.raises(UnsafeTeacherOutput, match="hard.?link"):
+        build_teacher_inventory(FIXTURE, output)
+
+    assert output.read_bytes() == b"racing evidence\n"
+    assert evidence.exists()
+    assert attacker_alias.exists()
 
 
 def test_inventory_no_clobber_race_preserves_racing_output(
@@ -1009,7 +1156,8 @@ def test_inventory_detects_output_parent_substitution(
         build_teacher_inventory(FIXTURE, output)
 
     assert not output.exists()
-    assert not (moved_parent / "inventory.json").exists()
+    assert (moved_parent / "inventory.json").exists()
+    assert not any(path.name.endswith(".tmp") for path in moved_parent.iterdir())
 
 
 def test_inventory_temporary_write_failure_is_cleaned_up(
@@ -1025,6 +1173,40 @@ def test_inventory_temporary_write_failure_is_cleaned_up(
     with pytest.raises(OSError, match="injected write failure"):
         build_teacher_inventory(FIXTURE, output)
 
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_inventory_initial_temp_fstat_failure_closes_and_cleans_temp(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    output = tmp_path / "inventory.json"
+    real_open_temp = teacher._open_inventory_temp
+    real_fstat = os.fstat
+    temp_descriptor: int | None = None
+    failed = False
+
+    def tracking_open_temp(parent_descriptor: int, output_name: str):
+        nonlocal temp_descriptor
+        result = real_open_temp(parent_descriptor, output_name)
+        temp_descriptor = result[0]
+        return result
+
+    def failing_once_fstat(file_descriptor: int):
+        nonlocal failed
+        if file_descriptor == temp_descriptor and not failed:
+            failed = True
+            raise OSError("injected initial temp fstat failure")
+        return real_fstat(file_descriptor)
+
+    monkeypatch.setattr(teacher, "_open_inventory_temp", tracking_open_temp)
+    monkeypatch.setattr(teacher.os, "fstat", failing_once_fstat)
+
+    with pytest.raises(OSError, match="initial temp fstat"):
+        build_teacher_inventory(FIXTURE, output)
+
+    assert temp_descriptor is not None
+    with pytest.raises(OSError):
+        real_fstat(temp_descriptor)
     assert list(tmp_path.iterdir()) == []
 
 

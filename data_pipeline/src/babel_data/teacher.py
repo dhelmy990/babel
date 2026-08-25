@@ -47,6 +47,7 @@ _NUMBER_PATTERN = re.compile(
     re.ASCII,
 )
 _ALLOWED_COMPRESSION = frozenset({zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED})
+_DISALLOWED_TITLE_CATEGORIES = frozenset({"Cc", "Cs"})
 _O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
@@ -182,6 +183,20 @@ def _contains_control(value: str) -> bool:
     return any(unicodedata.category(character).startswith("C") for character in value)
 
 
+def _contains_disallowed_title_character(value: str) -> bool:
+    """Reject true controls/surrogates while preserving valid format characters.
+
+    Format characters (Cf), including U+200B and directional marks, are source
+    key data here rather than rendered UI.  Preserving them avoids silently
+    changing distinct MediaWiki titles; rendering layers must handle display
+    security separately.
+    """
+    return any(
+        unicodedata.category(character) in _DISALLOWED_TITLE_CATEGORIES
+        for character in value
+    )
+
+
 def normalize_teacher_title(title: str) -> str:
     """Return the MediaWiki-compatible key shared with reconciliation."""
     normalized = " ".join(
@@ -272,17 +287,16 @@ def _parse_vector_text(
         raise InvalidTeacherVector(
             "embedded newline or carriage return", row=row, title=title_hint
         )
-    if _contains_control(text):
-        raise InvalidTeacherVector(
-            "line contains a control character", row=row, title=title_hint
-        )
-
     fields = text.split(" ")
     title = fields[0] if fields else ""
     raw_values = fields[1:]
     if not title or title.isspace() or not normalize_teacher_title(title):
         raise InvalidTeacherVector(
             "title must be nonblank", row=row, title=title or None
+        )
+    if _contains_disallowed_title_character(title):
+        raise InvalidTeacherVector(
+            "title contains a control character", row=row, title=title
         )
     vector = _parse_values(raw_values, dimension, row=row, title=title)
     return TeacherRecord(title=title, vector=vector)
@@ -343,7 +357,7 @@ def _parse_vector_bytes(
         return None
     if not title or title.isspace() or not normalize_teacher_title(title):
         raise InvalidTeacherVector("title must be nonblank", row=row, title=title or None)
-    if _contains_control(title):
+    if _contains_disallowed_title_character(title):
         raise InvalidTeacherVector(
             "title contains a control character", row=row, title=title
         )
@@ -975,6 +989,12 @@ def _publish_inventory_at(
     parent_stat: os.stat_result,
     output_name: str,
 ) -> None:
+    """Publish once; preserve any output-name anomaly as forensic evidence.
+
+    Only the private, exclusively created temporary name is ever cleaned up.
+    Once ``output_name`` has been linked, it is never removed because a
+    stat-then-unlink sequence cannot prove ownership atomically.
+    """
     payload = (
         json.dumps(
             document,
@@ -990,8 +1010,9 @@ def _publish_inventory_at(
     if _entry_at(parent_descriptor, output_name) is not None:
         raise FileExistsError(f"inventory output already exists: {output}")
     descriptor, temporary_name = _open_inventory_temp(parent_descriptor, output_name)
-    temporary_stat = os.fstat(descriptor)
+    temporary_stat: os.stat_result | None = None
     try:
+        temporary_stat = os.fstat(descriptor)
         _write_all(descriptor, payload)
         os.fsync(descriptor)
         temporary_stat = os.fstat(descriptor)
@@ -1025,14 +1046,11 @@ def _publish_inventory_at(
             or linked.st_nlink != 2
             or after_link.st_nlink != 2
         ):
-            if linked is not None and _same_inode(linked, after_link):
-                _unlink_at_if_inode(parent_descriptor, output_name, after_link)
             raise UnsafeTeacherOutput(
                 "inventory publication hard-link invariant failed"
             )
 
         if not _unlink_at_if_inode(parent_descriptor, temporary_name, after_link):
-            _unlink_at_if_inode(parent_descriptor, output_name, after_link)
             raise UnsafeTeacherOutput("inventory temporary file changed before cleanup")
         final_stat = os.fstat(descriptor)
         final_entry = _entry_at(parent_descriptor, output_name)
@@ -1042,18 +1060,22 @@ def _publish_inventory_at(
             or final_stat.st_nlink != 1
             or final_entry.st_nlink != 1
         ):
-            if final_entry is not None and _same_inode(final_entry, final_stat):
-                _unlink_at_if_inode(parent_descriptor, output_name, final_stat)
             raise UnsafeTeacherOutput("published inventory identity invariant failed")
-        try:
-            _validate_output_parent(output, parent_stat)
-        except UnsafeTeacherOutput:
-            _unlink_at_if_inode(parent_descriptor, output_name, final_stat)
-            raise
+        _validate_output_parent(output, parent_stat)
         os.fsync(parent_descriptor)
     finally:
-        os.close(descriptor)
-        _unlink_at_if_inode(parent_descriptor, temporary_name, temporary_stat)
+        if temporary_stat is None:
+            try:
+                temporary_stat = os.fstat(descriptor)
+            except OSError:
+                pass
+        try:
+            os.close(descriptor)
+        finally:
+            if temporary_stat is not None:
+                _unlink_at_if_inode(
+                    parent_descriptor, temporary_name, temporary_stat
+                )
 
 
 def build_teacher_inventory(
