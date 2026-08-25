@@ -93,6 +93,17 @@ def corrupt_first_compressed_byte(path: Path) -> None:
     path.write_bytes(payload)
 
 
+def corrupt_utf8_central_directory_filename(path: Path) -> None:
+    payload = bytearray(path.read_bytes())
+    central_header = payload.index(b"PK\x01\x02")
+    flags = struct.unpack_from("<H", payload, central_header + 8)[0]
+    struct.pack_into("<H", payload, central_header + 8, flags | 0x800)
+    filename_length = struct.unpack_from("<H", payload, central_header + 28)[0]
+    assert filename_length > 0
+    payload[central_header + 46] = 0xFF
+    path.write_bytes(payload)
+
+
 def test_fixture_streams_immutable_owned_float32_records() -> None:
     records = list(iter_teacher(FIXTURE))
 
@@ -349,6 +360,29 @@ def test_corrupt_deflate_stream_is_reported_as_typed_archive_error(
 
     with pytest.raises(InvalidTeacherArchive, match="cannot read teacher archive"):
         list(iter_teacher(path))
+
+
+def test_invalid_utf8_zip_filename_is_typed_and_closes_archive_handle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    path = one_row_zip(tmp_path, vector_row("Only"))
+    corrupt_utf8_central_directory_filename(path)
+    opened: list[object] = []
+    original_open = zipfile.io.open
+
+    def tracking_open(*args: object, **kwargs: object):
+        handle = original_open(*args, **kwargs)
+        opened.append(handle)
+        return handle
+
+    monkeypatch.setattr(teacher.zipfile.io, "open", tracking_open)
+
+    with pytest.raises(InvalidTeacherArchive) as raised:
+        list(iter_teacher(path))
+
+    assert isinstance(raised.value.__cause__, UnicodeDecodeError)
+    assert opened
+    assert all(getattr(handle, "closed") for handle in opened)
 
 
 def test_member_reads_are_bounded_and_never_use_readlines(

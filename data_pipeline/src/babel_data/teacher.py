@@ -426,6 +426,7 @@ def iter_teacher(path: str | os.PathLike[str]) -> Iterator[TeacherRecord]:
         EOFError,
         RuntimeError,
         NotImplementedError,
+        UnicodeError,
         zipfile.BadZipFile,
         zipfile.LargeZipFile,
         zlib.error,
