@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import importlib.metadata
 import json
 import os
 import shutil
@@ -14,13 +13,14 @@ from jsonschema import ValidationError
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPOSITORY_ROOT))
 sys.path.insert(0, str(REPOSITORY_ROOT / "data_pipeline" / "src"))
 
 from babel_data.contracts import UnknownSchema, load_schema, validate_document  # noqa: E402
+from test_support.wheel_build import create_offline_build_environment  # noqa: E402
 
 
 FIXTURE = REPOSITORY_ROOT / "fixtures" / "distillation" / "debug-examples.jsonl"
-BUILD_REQUIREMENTS = ("setuptools==75.8.0", "wheel==0.45.1")
 
 
 def read_jsonl(path: Path) -> list[dict[str, object]]:
@@ -239,16 +239,11 @@ def test_installed_data_wheel_imports_and_validates_outside_repository(tmp_path:
             "build", "dist", "*.egg-info", "__pycache__", ".pytest_cache"
         ),
     )
-    for requirement in BUILD_REQUIREMENTS:
-        package, expected_version = requirement.split("==")
-        assert importlib.metadata.version(package) == expected_version
-    environment = os.environ.copy()
-    environment["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
-    environment["PIP_NO_INDEX"] = "1"
+    builder_python, environment = create_offline_build_environment(tmp_path)
     wheel_directory = tmp_path / "wheel"
     subprocess.run(
         [
-            sys.executable,
+            builder_python,
             "-m",
             "pip",
             "wheel",
@@ -267,7 +262,7 @@ def test_installed_data_wheel_imports_and_validates_outside_repository(tmp_path:
     installed = tmp_path / "installed"
     subprocess.run(
         [
-            sys.executable,
+            builder_python,
             "-m",
             "pip",
             "install",
@@ -283,7 +278,8 @@ def test_installed_data_wheel_imports_and_validates_outside_repository(tmp_path:
     )
     outside_repository = tmp_path / "outside"
     outside_repository.mkdir()
-    environment["PYTHONPATH"] = str(installed)
+    runtime_environment = os.environ.copy()
+    runtime_environment["PYTHONPATH"] = str(installed)
     subprocess.run(
         [
             sys.executable,
@@ -299,7 +295,7 @@ def test_installed_data_wheel_imports_and_validates_outside_repository(tmp_path:
             ),
         ],
         cwd=outside_repository,
-        env=environment,
+        env=runtime_environment,
         check=True,
         capture_output=True,
         text=True,
