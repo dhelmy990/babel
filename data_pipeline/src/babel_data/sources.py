@@ -1,4 +1,14 @@
-"""Verified, resumable acquisition of immutable source files."""
+"""Verified, resumable acquisition of immutable source files.
+
+Security requirements and threat model
+--------------------------------------
+Downloads require Linux/POSIX ``dir_fd`` operations, ``O_NOFOLLOW``, ``flock``,
+hard links, and ``/proc/self/fd``. Unsupported systems fail closed. The caller
+must provide a trusted, local writable ``data_root``: the code defends against
+symlink/hard-link substitution and cooperating concurrent writers, but cannot
+make security guarantees for hostile FUSE/network filesystems or an attacker
+that can replace the mounted directory itself while acquisition is running.
+"""
 
 from __future__ import annotations
 
@@ -338,9 +348,13 @@ def _target_lock(root_descriptor: int, filename: str) -> Iterator[None]:
         locked = True
         yield
     finally:
-        if locked:
-            fcntl.flock(lock_descriptor, fcntl.LOCK_UN)  # type: ignore[union-attr]
-        os.close(lock_descriptor)
+        try:
+            if locked:
+                fcntl.flock(  # type: ignore[union-attr]
+                    lock_descriptor, fcntl.LOCK_UN
+                )
+        finally:
+            os.close(lock_descriptor)
 
 
 def _entry_stat(root_descriptor: int, filename: str) -> os.stat_result | None:
@@ -515,7 +529,6 @@ def _stream_response(
 
 
 def _download_full(spec: SourceSpec, partial_descriptor: int) -> None:
-    os.ftruncate(partial_descriptor, 0)
     request = _make_request(spec)
     response = _open_http(request, spec)
     assert response is not None
@@ -525,6 +538,7 @@ def _download_full(spec: SourceSpec, partial_descriptor: int) -> None:
                 f"unexpected HTTP status {_status(response)} for full download "
                 f"of {spec.filename}"
             )
+        os.ftruncate(partial_descriptor, 0)
         _stream_response(response, partial_descriptor, spec, initial_size=0)
 
 
@@ -570,6 +584,47 @@ def _download_or_resume(
         _download_full(spec, partial_descriptor)
 
 
+def _same_inode(first: os.stat_result, second: os.stat_result) -> bool:
+    return (first.st_dev, first.st_ino) == (second.st_dev, second.st_ino)
+
+
+def _require_named_inode(
+    root_descriptor: int,
+    filename: str,
+    file_descriptor: int,
+    *,
+    expected_links: int,
+) -> os.stat_result:
+    descriptor_stat = os.fstat(file_descriptor)
+    entry_stat = _entry_stat(root_descriptor, filename)
+    if (
+        entry_stat is None
+        or not _same_inode(entry_stat, descriptor_stat)
+        or descriptor_stat.st_nlink != expected_links
+        or entry_stat.st_nlink != expected_links
+    ):
+        raise UnsafeSourcePath(
+            f"{filename} hard-link/identity invariant failed: "
+            f"expected {expected_links} link(s)"
+        )
+    return descriptor_stat
+
+
+def _unlink_if_same_inode(
+    root_descriptor: int, filename: str, expected: os.stat_result
+) -> bool:
+    try:
+        entry_stat = os.stat(
+            filename, dir_fd=root_descriptor, follow_symlinks=False
+        )
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISREG(entry_stat.st_mode) or not _same_inode(entry_stat, expected):
+        return False
+    os.unlink(filename, dir_fd=root_descriptor)
+    return True
+
+
 def _atomic_promote(
     root_descriptor: int,
     partial_descriptor: int,
@@ -578,6 +633,12 @@ def _atomic_promote(
     spec: SourceSpec,
 ) -> None:
     _verify_fd(partial_descriptor, spec)
+    partial_stat = _require_named_inode(
+        root_descriptor,
+        partial_name,
+        partial_descriptor,
+        expected_links=1,
+    )
     source_fd_path = f"/proc/self/fd/{partial_descriptor}"
     try:
         os.link(
@@ -590,25 +651,63 @@ def _atomic_promote(
     except FileExistsError:
         if not _verify_existing_final(root_descriptor, final_name, spec):
             raise DownloadError(f"racing final file disappeared: {final_name}")
-        os.unlink(partial_name, dir_fd=root_descriptor)
+        _require_named_inode(
+            root_descriptor,
+            partial_name,
+            partial_descriptor,
+            expected_links=1,
+        )
+        if not _unlink_if_same_inode(root_descriptor, partial_name, partial_stat):
+            raise UnsafeSourcePath(
+                f"{partial_name} changed before safe cleanup"
+            )
+        if os.fstat(partial_descriptor).st_nlink != 0:
+            raise UnsafeSourcePath(
+                f"{partial_name} retained an unexpected external hard link"
+            )
         return
     except OSError as exc:
         raise DownloadError(
             f"could not atomically promote verified {partial_name}: {exc}"
         ) from exc
 
-    linked_stat = os.stat(final_name, dir_fd=root_descriptor, follow_symlinks=False)
-    partial_stat = os.fstat(partial_descriptor)
-    if (linked_stat.st_dev, linked_stat.st_ino) != (
-        partial_stat.st_dev,
-        partial_stat.st_ino,
-    ):
-        os.unlink(final_name, dir_fd=root_descriptor)
+    linked_stat = os.stat(
+        final_name, dir_fd=root_descriptor, follow_symlinks=False
+    )
+    current_partial_stat = os.fstat(partial_descriptor)
+    if not _same_inode(linked_stat, current_partial_stat):
         raise DownloadError(f"atomic promotion identity mismatch for {final_name}")
+
     try:
-        os.unlink(partial_name, dir_fd=root_descriptor)
-    except FileNotFoundError:
-        pass
+        _require_named_inode(
+            root_descriptor,
+            partial_name,
+            partial_descriptor,
+            expected_links=2,
+        )
+        if linked_stat.st_nlink != 2 or current_partial_stat.st_nlink != 2:
+            raise UnsafeSourcePath(
+                f"{partial_name} hard-link invariant failed during promotion"
+            )
+    except SourceError:
+        _unlink_if_same_inode(root_descriptor, final_name, current_partial_stat)
+        raise
+
+    if not _unlink_if_same_inode(root_descriptor, partial_name, current_partial_stat):
+        _unlink_if_same_inode(root_descriptor, final_name, current_partial_stat)
+        raise UnsafeSourcePath(f"{partial_name} changed before safe cleanup")
+
+    final_inode = os.fstat(partial_descriptor)
+    if final_inode.st_nlink != 1:
+        _unlink_if_same_inode(root_descriptor, final_name, final_inode)
+        raise UnsafeSourcePath(
+            f"{final_name} retained an unexpected external hard link"
+        )
+    final_entry = os.stat(
+        final_name, dir_fd=root_descriptor, follow_symlinks=False
+    )
+    if not _same_inode(final_entry, final_inode) or final_entry.st_nlink != 1:
+        raise DownloadError(f"atomic promotion identity mismatch for {final_name}")
 
 
 def download_source(

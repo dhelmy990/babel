@@ -90,6 +90,20 @@ class FakeOpener:
         return response
 
 
+def integrity_md5(payload: bytes) -> str:
+    try:
+        return hashlib.md5(payload, usedforsecurity=False).hexdigest()
+    except TypeError:
+        return hashlib.md5(payload).hexdigest()
+
+
+def integrity_sha1(payload: bytes) -> str:
+    try:
+        return hashlib.sha1(payload, usedforsecurity=False).hexdigest()
+    except TypeError:
+        return hashlib.sha1(payload).hexdigest()
+
+
 def source_spec(
     payload: bytes,
     *,
@@ -101,7 +115,7 @@ def source_spec(
         url="https://example.test/source.bin",
         filename=filename,
         size=len(payload),
-        md5=hashlib.md5(payload).hexdigest(),
+        md5=integrity_md5(payload),
         sha1=sha1,
     )
 
@@ -114,7 +128,7 @@ def test_verify_file_accepts_valid_size_and_digests(tmp_path: Path) -> None:
     payload = b"authoritative bytes"
     path = tmp_path / "source.bin"
     path.write_bytes(payload)
-    spec = source_spec(payload, sha1=hashlib.sha1(payload).hexdigest())
+    spec = source_spec(payload, sha1=integrity_sha1(payload))
 
     assert verify_file(path, spec) is None
 
@@ -128,7 +142,7 @@ def test_verify_file_rejects_wrong_size_before_digesting(tmp_path: Path) -> None
         url="https://example.test/source.bin",
         filename="source.bin",
         size=len(payload) + 1,
-        md5=hashlib.md5(payload).hexdigest(),
+        md5=integrity_md5(payload),
     )
 
     with pytest.raises(SizeMismatch, match=r"source\.bin.*expected 6 bytes.*found 5"):
@@ -361,6 +375,48 @@ def test_http_error_416_closes_response_and_restarts_full_download(
     assert "Range" not in request_headers(opener.requests[1])
 
 
+def test_416_then_transport_failure_preserves_original_partial(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    payload = b"abcdef"
+    partial = tmp_path / "source.bin.part"
+    partial.write_bytes(payload[:3])
+    error_body = io.BytesIO(b"range rejected")
+    range_error = HTTPError(
+        "https://example.test/source.bin", 416, "Range Not Satisfiable", {}, error_body
+    )
+    opener = FakeOpener(range_error, OSError("replacement unavailable"))
+    monkeypatch.setattr(sources, "urlopen", opener)
+
+    with pytest.raises(DownloadError, match="replacement unavailable"):
+        download_source(source_spec(payload), tmp_path)
+
+    assert partial.read_bytes() == payload[:3]
+    assert error_body.closed
+    assert not (tmp_path / "source.bin").exists()
+
+
+def test_416_then_unexpected_full_status_preserves_original_partial(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    payload = b"abcdef"
+    partial = tmp_path / "source.bin.part"
+    partial.write_bytes(payload[:3])
+    error_body = io.BytesIO(b"range rejected")
+    range_error = HTTPError(
+        "https://example.test/source.bin", 416, "Range Not Satisfiable", {}, error_body
+    )
+    unexpected = FakeResponse(b"not a full response", status=206)
+    monkeypatch.setattr(sources, "urlopen", FakeOpener(range_error, unexpected))
+
+    with pytest.raises(DownloadError, match="unexpected HTTP status 206"):
+        download_source(source_spec(payload), tmp_path)
+
+    assert partial.read_bytes() == payload[:3]
+    assert unexpected.closed
+    assert not (tmp_path / "source.bin").exists()
+
+
 def test_non_416_http_error_is_closed_and_wrapped(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -544,6 +600,116 @@ def test_atomic_promotion_never_clobbers_a_racing_invalid_final(
     assert (tmp_path / "source.bin.part").read_bytes() == payload
 
 
+def test_external_hard_link_injected_before_promotion_fails_safely(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    payload = b"authoritative"
+    data_root = tmp_path / "data"
+    outside = tmp_path / "outside"
+    data_root.mkdir()
+    outside.mkdir()
+    attacker_alias = outside / "alias.bin"
+
+    class HardLinkResponse(FakeResponse):
+        def read(self, size: int = -1) -> bytes:
+            block = super().read(size)
+            if not block and not attacker_alias.exists():
+                os.link(data_root / "source.bin.part", attacker_alias)
+            return block
+
+    monkeypatch.setattr(sources, "urlopen", FakeOpener(HardLinkResponse(payload)))
+
+    with pytest.raises(SourceError, match=r"hard.?link"):
+        download_source(source_spec(payload), data_root)
+
+    partial = data_root / "source.bin.part"
+    assert partial.read_bytes() == payload
+    assert attacker_alias.read_bytes() == payload
+    assert partial.stat().st_nlink == 2
+    assert not (data_root / "source.bin").exists()
+
+
+def test_external_hard_link_injected_during_promotion_is_detected_and_cleaned(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    payload = b"authoritative"
+    data_root = tmp_path / "data"
+    outside = tmp_path / "outside"
+    data_root.mkdir()
+    outside.mkdir()
+    attacker_alias = outside / "alias.bin"
+    real_link = os.link
+
+    def aliasing_link(
+        source: str,
+        destination: str,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int,
+        follow_symlinks: bool,
+    ) -> None:
+        real_link(data_root / "source.bin.part", attacker_alias)
+        real_link(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+
+    monkeypatch.setattr(os, "link", aliasing_link)
+    monkeypatch.setattr(sources, "urlopen", FakeOpener(FakeResponse(payload)))
+
+    with pytest.raises(SourceError, match=r"hard.?link"):
+        download_source(source_spec(payload), data_root)
+
+    partial = data_root / "source.bin.part"
+    assert partial.read_bytes() == payload
+    assert attacker_alias.read_bytes() == payload
+    assert partial.stat().st_nlink == 2
+    assert not (data_root / "source.bin").exists()
+
+
+def test_post_link_final_replacement_is_preserved_on_identity_mismatch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    payload = b"authoritative"
+    racer_inode: list[int] = []
+    real_link = os.link
+
+    def replacing_link(
+        source: str,
+        destination: str,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int,
+        follow_symlinks: bool,
+    ) -> None:
+        real_link(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+        final = tmp_path / destination
+        final.unlink()
+        final.write_bytes(b"racer must survive")
+        racer_inode.append(final.stat().st_ino)
+
+    monkeypatch.setattr(os, "link", replacing_link)
+    monkeypatch.setattr(sources, "urlopen", FakeOpener(FakeResponse(payload)))
+
+    with pytest.raises(DownloadError, match="identity mismatch"):
+        download_source(source_spec(payload), tmp_path)
+
+    final = tmp_path / "source.bin"
+    assert racer_inode
+    assert final.stat().st_ino == racer_inode[0]
+    assert final.read_bytes() == b"racer must survive"
+    assert (tmp_path / "source.bin.part").read_bytes() == payload
+
+
 def test_concurrent_downloads_of_same_target_are_serialized(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -622,7 +788,39 @@ def test_complete_verified_part_promotes_without_a_request(
     result = download_source(source_spec(payload), tmp_path)
 
     assert result.read_bytes() == payload
+    assert result.stat().st_nlink == 1
     assert opener.requests == []
+
+
+def test_target_lock_descriptor_closes_even_when_unlock_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root_descriptor = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    real_flock = sources.fcntl.flock
+    lock_descriptors: list[int] = []
+
+    def failing_unlock(file_descriptor: int, operation: int) -> None:
+        lock_descriptors.append(file_descriptor)
+        if operation == sources.fcntl.LOCK_UN:
+            raise OSError("unlock failed")
+        real_flock(file_descriptor, operation)
+
+    monkeypatch.setattr(sources.fcntl, "flock", failing_unlock)
+    try:
+        with pytest.raises(OSError, match="unlock failed"):
+            with sources._target_lock(root_descriptor, "source.bin"):
+                pass
+        lock_descriptor = lock_descriptors[0]
+        try:
+            with pytest.raises(OSError):
+                os.fstat(lock_descriptor)
+        finally:
+            try:
+                os.close(lock_descriptor)
+            except OSError:
+                pass
+    finally:
+        os.close(root_descriptor)
 
 
 def test_integrity_hashes_use_fips_compatible_nonsecurity_mode(
@@ -633,7 +831,7 @@ def test_integrity_hashes_use_fips_compatible_nonsecurity_mode(
     path.write_bytes(payload)
     original_md5 = hashlib.md5
     original_sha1 = hashlib.sha1
-    spec = source_spec(payload, sha1=original_sha1(payload).hexdigest())
+    spec = source_spec(payload, sha1=integrity_sha1(payload))
     md5_modes: list[object] = []
     sha1_modes: list[object] = []
     missing = object()
@@ -643,14 +841,20 @@ def test_integrity_hashes_use_fips_compatible_nonsecurity_mode(
         md5_modes.append(mode)
         if mode is False:
             raise TypeError("old hashlib without usedforsecurity")
-        return original_md5(data)
+        try:
+            return original_md5(data, usedforsecurity=False)
+        except TypeError:
+            return original_md5(data)
 
     def fips_sha1(data: bytes = b"", **kwargs: object) -> object:
         mode = kwargs.get("usedforsecurity", missing)
         sha1_modes.append(mode)
         if mode is False:
             raise TypeError("old hashlib without usedforsecurity")
-        return original_sha1(data)
+        try:
+            return original_sha1(data, usedforsecurity=False)
+        except TypeError:
+            return original_sha1(data)
 
     monkeypatch.setattr(sources.hashlib, "md5", fips_md5)
     monkeypatch.setattr(sources.hashlib, "sha1", fips_sha1)
