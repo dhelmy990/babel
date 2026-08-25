@@ -42,11 +42,11 @@ def create_app(state: ServingState, *, max_concurrent_requests: int = 8) -> Fast
             materialized = snapshot.materialized_state
             if request.runId != materialized.run_id:
                 raise HTTPException(status_code=409, detail="request run is not active")
-            if not state.source_is_available(
-                run_id=request.runId,
-                creator_id=request.creatorId,
-                source_article_key=request.newSourceArticleKey,
-            ):
+            if (
+                request.runId,
+                request.creatorId,
+                request.newSourceArticleKey,
+            ) in snapshot.creator_sources:
                 raise HTTPException(
                     status_code=409,
                     detail="creator already used this source article in the run",

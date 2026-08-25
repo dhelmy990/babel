@@ -107,6 +107,7 @@ def test_post_rejects_duplicate_source_for_same_creator() -> None:
 
 def test_apply_sync_selects_child_without_replacing_original() -> None:
     state, registry, _created_ids, _created_sources = serving_state()
+    held_snapshot = state.snapshot()
     original = registry.original
     child_data = original.model_dump(mode="json")
     child_data.update(
@@ -155,4 +156,6 @@ def test_apply_sync_selects_child_without_replacing_original() -> None:
 
     assert state.snapshot().model.modelId == child.modelId
     assert state.snapshot().materialized_state.model_version == 1
+    assert held_snapshot.model.modelId == original.modelId
+    assert held_snapshot.materialized_state.model_version == 0
     assert registry.original.modelId == original.modelId
