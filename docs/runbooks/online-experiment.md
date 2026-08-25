@@ -9,8 +9,11 @@ immutable child without modifying its selected parent.
 The checked-in model under `fixtures/online/demo-model` is a
 **deterministic Friday demo stand-in**, not the completed 2016 distilled Qwen
 encoder. Its manifest and working-state bytes are checksum verified before it
-can enter the model registry. Point `BABEL_ONLINE_MODEL_ARTIFACT` at the real
-checksum-bearing Colab artifact when it is ready.
+can enter the model registry. The Colab distillation artifact does not yet use
+the online runtime's `ModelManifestV1`/working-state format, and this Friday
+runtime still uses the deterministic item-tower stand-in. A later integration
+slice must adapt the artifact and wire the real encoder before anyone points
+`BABEL_ONLINE_MODEL_ARTIFACT` at it or claims that the local demo serves Qwen.
 
 ## Prerequisites
 
