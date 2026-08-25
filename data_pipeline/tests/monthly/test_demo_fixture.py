@@ -104,6 +104,18 @@ def test_checked_in_fixture_verifies_counts_boundary_and_limitations() -> None:
     assert provenance["snapshot_claim"] == "representative_fixture_not_official_monthly_snapshot"
 
 
+def test_backend_seed_catalogs_have_dashboard_compatible_checksum_companions() -> None:
+    root = Path(__file__).resolve().parents[3] / "fixtures" / "monthly" / "demo"
+    provenance = json.loads((root / "provenance.json").read_text(encoding="utf-8"))
+
+    for period, directory in (("2026-06", "june"), ("2026-07", "july")):
+        descriptor = provenance["periods"][period]["artifacts"]["backend_seed_catalog"]
+        companion = root / directory / "backend-seed-catalog.jsonl.sha256"
+        assert companion.read_text(encoding="ascii") == (
+            f"{descriptor['sha256']}  catalog.jsonl\n"
+        )
+
+
 def test_verifier_rejects_artifact_hash_mismatch(tmp_path: Path) -> None:
     source = tmp_path / "source.jsonl"
     fixture = tmp_path / "fixture"

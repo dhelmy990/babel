@@ -42,6 +42,10 @@ The authoritative checksums are embedded beside paths and row counts in
 `de34ed341cba99fc9464c4939a89ba72f4c564aafa48b171ccfdc1e8e53c6dc7`;
 the July checksum is
 `288451fcd1a8a466852218b947d084ecc4f3aaff69f8649e41a3344246dfc973`.
+The corresponding `backend-seed-catalog.jsonl.sha256` companions contain the
+standard `<sha256>  catalog.jsonl` line expected when these exact bytes are
+uploaded as `backend-seed/2026-06/catalog.jsonl(.sha256)` and
+`backend-seed/2026-07/catalog.jsonl(.sha256)`.
 
 ## Rebuild and verification
 

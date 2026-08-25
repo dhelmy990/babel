@@ -157,6 +157,14 @@ input manifest; the crosswalk and ambiguity files are local expectations only.
         },
         "periods": descriptors,
     }
+    for period in ("2026-06", "2026-07"):
+        catalog = descriptors[period]["artifacts"]["backend_seed_catalog"]
+        assert isinstance(catalog, Mapping)
+        catalog_path = output_root / str(catalog["path"])
+        checksum_payload = f"{catalog['sha256']}  catalog.jsonl\n".encode("ascii")
+        _atomic_write(
+            catalog_path.with_name(f"{catalog_path.name}.sha256"), checksum_payload
+        )
     _atomic_write(output_root / "provenance.json", _json_bytes(manifest))
     verify_demo_fixture(output_root)
     return manifest
@@ -252,6 +260,16 @@ def verify_demo_fixture(root: Path) -> dict[str, object]:
                 seed_counts[str(period)] = len(rows)
                 if len(rows) < 80:
                     raise ValueError("backend seed catalog must contain at least 80 assignments")
+        if period != "2016":
+            catalog_descriptor = _require_mapping(
+                artifacts["backend_seed_catalog"],
+                f"{period} backend seed catalog descriptor",
+            )
+            catalog_path = _safe_artifact(root, catalog_descriptor["path"])
+            checksum_path = catalog_path.with_name(f"{catalog_path.name}.sha256")
+            expected_checksum = f"{catalog_descriptor['sha256']}  catalog.jsonl\n"
+            if checksum_path.read_text(encoding="ascii") != expected_checksum:
+                raise ValueError(f"backend seed checksum companion mismatch for {period}")
 
     crosswalk = _read_jsonl(root / "article-crosswalk.jsonl")
     for row in crosswalk:
