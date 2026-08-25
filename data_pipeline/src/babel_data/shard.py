@@ -27,6 +27,16 @@ import pyarrow.parquet as pq
 
 from .contracts import validate_document
 from .reconcile import split_for
+from .release import (
+    METADATA_PATHS,
+    README_PATH,
+    READINESS_PATH,
+    identity_rows_sha256,
+    render_dataset_card,
+    validate_manifest_document,
+    validate_manifest_bytes,
+    validate_readiness_alignment,
+)
 
 
 DEFAULT_PILOT_SIZE = 10_000
@@ -63,6 +73,7 @@ class ShardInfo:
     rows: int
     bytes: int
     sha256: str
+    rows_sha256: str
     schema: str
     version: int
     min_article_key: str
@@ -77,6 +88,7 @@ class ShardInfo:
             "rows": self.rows,
             "bytes": self.bytes,
             "sha256": self.sha256,
+            "rows_sha256": self.rows_sha256,
             "schema": self.schema,
             "version": self.version,
             "min_article_key": self.min_article_key,
@@ -90,6 +102,8 @@ class ShardInfo:
 class ShardResult:
     output_root: Path
     manifest_path: Path
+    readiness_path: Path
+    readme_path: Path
     shards: tuple[ShardInfo, ...]
     pilot_article_keys: tuple[str, ...]
     row_count: int
@@ -163,6 +177,13 @@ class Readiness:
             if evidence != {
                 "commit_sha": self.remote_commit_sha,
                 "manifest_sha256": self._verified_manifest_sha256,
+                "readiness_sha256": _sha256(
+                    Path(
+                        str(self._evidence_path).removesuffix(
+                            ".remote-verification.json"
+                        )
+                    )
+                ),
                 "verified_paths": sorted(self._verified_paths),
             }:
                 return False
@@ -172,7 +193,7 @@ class Readiness:
                 != self._verified_manifest_sha256
             ):
                 return False
-            manifest = json.loads(manifest_bytes)
+            manifest = validate_manifest_bytes(manifest_bytes, label="local")
             manifest_shards = manifest["shards"]
             if not isinstance(manifest_shards, list):
                 return False
@@ -187,10 +208,13 @@ class Readiness:
             if (
                 len(manifest_identities) != len(manifest_shards)
                 or manifest_identities != readiness_identities
-                or frozenset(manifest_identities) != self._local_paths
+                or frozenset(manifest_identities)
+                != self._local_paths - METADATA_PATHS
             ):
                 return False
             artifact_root = self._artifact_root.resolve()
+            if (artifact_root / README_PATH).read_bytes() != render_dataset_card():
+                return False
             for shard_path, (checksum, _) in manifest_identities.items():
                 local = (artifact_root / shard_path).resolve(strict=True)
                 local.relative_to(artifact_root)
@@ -223,13 +247,59 @@ class Readiness:
         )
         if paths != self._local_paths:
             raise ValueError("remote verification does not cover every local artifact")
-        if self.remote_commit_sha is not None and self.remote_commit_sha != commit_sha:
+        if (
+            self.remote_commit_sha is not None
+            and self.remote_commit_sha != commit_sha
+            and self._verified_manifest_sha256 == self._manifest_sha256
+        ):
             raise ValueError("remote commit identity is immutable once verified")
         self.remote_verified = True
         self.remote_commit_sha = commit_sha
         self._verified_manifest_sha256 = verified_manifest
         self._verified_paths = paths
         self._evidence_durable = False
+
+    def stage_publication(self, state: str) -> None:
+        """Prepare the exact non-self-referential readiness bytes to upload."""
+        if state not in _STATE_ORDER:
+            raise ValueError(f"unknown readiness state: {state!r}")
+        if _STATE_ORDER[state] < _STATE_ORDER[self.state]:
+            raise ValueError(
+                f"readiness state cannot regress from {self.state} to {state}"
+            )
+        self.state = state
+        self.remote_verified = False
+        self.remote_commit_sha = None
+        self._verified_paths = frozenset()
+        self._evidence_durable = False
+        self.to_document()
+
+    def save_verification_evidence(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        readiness_sha256: str | None = None,
+    ) -> None:
+        """Persist the verified commit separately from uploaded readiness bytes."""
+        if not (
+            self.remote_verified
+            and self.remote_commit_sha
+            and self._verified_manifest_sha256 == self._manifest_sha256
+            and self._verified_paths == self._local_paths
+        ):
+            raise ValueError("remote readiness requires exact verification evidence")
+        evidence_path = _verification_evidence_path(Path(path))
+        _atomic_write_json(
+            evidence_path,
+            {
+                "commit_sha": self.remote_commit_sha,
+                "manifest_sha256": self._verified_manifest_sha256,
+                "readiness_sha256": readiness_sha256 or _sha256(Path(path)),
+                "verified_paths": sorted(self._verified_paths),
+            },
+        )
+        self._evidence_path = evidence_path
+        self._evidence_durable = True
 
     def transition(self, state: str) -> None:
         if state not in _STATE_ORDER:
@@ -257,11 +327,16 @@ class Readiness:
                 raise ValueError("persisted readiness state cannot regress")
             if prior["source_checksums"] != self.source_checksums:
                 raise ValueError("persisted source checksum identity is immutable")
-            if prior["remote_verified"] and not self.remote_verified:
+            if (
+                prior["remote_verified"]
+                and not self.remote_verified
+                and self._verified_manifest_sha256 == self._manifest_sha256
+            ):
                 raise ValueError("persisted remote verification cannot regress")
             if (
                 prior["remote_commit_sha"] is not None
                 and prior["remote_commit_sha"] != self.remote_commit_sha
+                and self.remote_verified
             ):
                 raise ValueError("persisted remote commit identity is immutable")
             old = {item["path"]: item["sha256"] for item in prior["verified_shards"]}
@@ -269,25 +344,16 @@ class Readiness:
             for shard_path, checksum in old.items():
                 if shard_path not in new or new[shard_path] != checksum:
                     raise ValueError(f"published shard identity is immutable: {shard_path}")
+        document = self.to_document()
         if self.remote_verified:
-            if (
-                self.remote_commit_sha is None
-                or self._verified_manifest_sha256 is None
-                or self._verified_paths != self._local_paths
-            ):
-                raise ValueError("remote readiness requires durable exact verification evidence")
-            evidence_path = _verification_evidence_path(destination)
-            _atomic_write_json(
-                evidence_path,
-                {
-                    "commit_sha": self.remote_commit_sha,
-                    "manifest_sha256": self._verified_manifest_sha256,
-                    "verified_paths": sorted(self._verified_paths),
-                },
+            self.save_verification_evidence(
+                destination,
+                readiness_sha256=hashlib.sha256(_canonical_json(document)).hexdigest(),
             )
-        _atomic_write_json(destination, self.to_document())
-        self._evidence_path = evidence_path if self.remote_verified else None
-        self._evidence_durable = self.remote_verified
+        else:
+            self._evidence_path = None
+            self._evidence_durable = False
+        _atomic_write_json(destination, document)
 
 
 def build_readiness(
@@ -334,7 +400,7 @@ def build_readiness(
         verified_shards=verified,
         source_checksums=checked_sources,
         _manifest_sha256=manifest_sha256,
-        _local_paths=frozenset(item.path for item in infos),
+        _local_paths=frozenset(item.path for item in infos) | METADATA_PATHS,
         _manifest_path=shards.manifest_path if isinstance(shards, ShardResult) else None,
         _artifact_root=shards.output_root if isinstance(shards, ShardResult) else None,
     )
@@ -352,7 +418,8 @@ def load_readiness(
     validate_document("dataset-readiness-v1", document)
     local_manifest_path = Path(manifest_path)
     manifest_bytes = local_manifest_path.read_bytes()
-    manifest = json.loads(manifest_bytes)
+    manifest = validate_manifest_bytes(manifest_bytes, label="local")
+    validate_readiness_alignment(document, manifest)
     manifest_identities = {
         str(item["path"]): (str(item["sha256"]), int(item["rows"]))
         for item in manifest["shards"]
@@ -363,20 +430,34 @@ def load_readiness(
     }
     if readiness_identities != manifest_identities:
         raise ValueError("readiness shard identities do not match the local manifest")
-    remote_verified = bool(document["remote_verified"])
+    documented_remote_verified = bool(document["remote_verified"])
+    remote_verified = documented_remote_verified
+    remote_commit_sha = document["remote_commit_sha"]
     manifest_sha = hashlib.sha256(manifest_bytes).hexdigest()
-    local_paths = frozenset(manifest_identities)
+    local_paths = frozenset(manifest_identities) | METADATA_PATHS
     verified_manifest_sha: str | None = None
     verified_paths: frozenset[str] = frozenset()
-    if remote_verified:
-        evidence_path = _verification_evidence_path(Path(path))
+    evidence_path = _verification_evidence_path(Path(path))
+    if evidence_path.exists():
         try:
             evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
         except (FileNotFoundError, json.JSONDecodeError) as error:
             raise ValueError("persisted readiness lacks remote verification evidence") from error
-        if set(evidence) != {"commit_sha", "manifest_sha256", "verified_paths"}:
+        if set(evidence) != {
+            "commit_sha",
+            "manifest_sha256",
+            "readiness_sha256",
+            "verified_paths",
+        }:
             raise ValueError("remote verification evidence has unexpected fields")
-        if evidence["commit_sha"] != document["remote_commit_sha"]:
+        evidence_commit = evidence["commit_sha"]
+        if (
+            not isinstance(evidence_commit, str)
+            or len(evidence_commit) != 40
+            or any(character not in "0123456789abcdef" for character in evidence_commit)
+        ):
+            raise ValueError("remote verification commit SHA is invalid")
+        if documented_remote_verified and evidence["commit_sha"] != remote_commit_sha:
             raise ValueError("remote verification commit does not match readiness")
         verified_manifest_sha = evidence["manifest_sha256"]
         if (
@@ -392,16 +473,29 @@ def load_readiness(
             isinstance(item, str) for item in evidence["verified_paths"]
         ):
             raise ValueError("remote verification path evidence is invalid")
-        verified_paths = frozenset(evidence["verified_paths"])
-        if verified_paths != local_paths:
-            raise ValueError("remote verification does not cover every manifest shard")
+        evidence_paths = frozenset(evidence["verified_paths"])
+        readiness_sha = _sha256(Path(path))
+        if (
+            verified_manifest_sha == manifest_sha
+            and evidence["readiness_sha256"] == readiness_sha
+            and evidence_paths == local_paths
+        ):
+            verified_paths = evidence_paths
+            remote_verified = True
+            remote_commit_sha = evidence["commit_sha"]
+        else:
+            remote_verified = documented_remote_verified
+            remote_commit_sha = document["remote_commit_sha"]
+            verified_paths = evidence_paths if documented_remote_verified else frozenset()
+    elif documented_remote_verified:
+        raise ValueError("persisted readiness lacks remote verification evidence")
     return Readiness(
         state=str(document["state"]),
         available_examples=int(document["available_examples"]),
         verified_shards=[dict(item) for item in document["verified_shards"]],
         source_checksums=dict(document["source_checksums"]),
         remote_verified=remote_verified,
-        remote_commit_sha=document["remote_commit_sha"],
+        remote_commit_sha=remote_commit_sha,
         _manifest_sha256=manifest_sha,
         _verified_manifest_sha256=verified_manifest_sha,
         _local_paths=local_paths,
@@ -409,7 +503,7 @@ def load_readiness(
         _manifest_path=local_manifest_path,
         _artifact_root=local_manifest_path.parent.parent,
         _evidence_path=(
-            _verification_evidence_path(Path(path)) if remote_verified else None
+            evidence_path if remote_verified else None
         ),
         _evidence_durable=remote_verified,
     )
@@ -677,6 +771,7 @@ def write_shards(
                         rows=len(chunk_items),
                         bytes=shard_path.stat().st_size,
                         sha256=_sha256(shard_path),
+                        rows_sha256=identity_rows_sha256(chunk_items),
                         schema="distillation-example-v1",
                         version=1,
                         min_article_key=min(chunk_keys),
@@ -689,6 +784,8 @@ def write_shards(
         shard_documents = [item.to_document() for item in shard_infos]
         manifest: dict[str, Any] = {
             "manifest_version": MANIFEST_VERSION,
+            "schema_version": 1,
+            "state": "prepared",
             "schema": "distillation-example-v1",
             "dataset_config": DATASET_CONFIG,
             "pilot_article_keys": list(pilot_keys),
@@ -703,9 +800,7 @@ def write_shards(
             "aggregate_sha256": hashlib.sha256(
                 _canonical_json(shard_documents)
             ).hexdigest(),
-            "rows_sha256": hashlib.sha256(
-                b"".join(_canonical_json(item[2]) for item in selected)
-            ).hexdigest(),
+            "rows_sha256": identity_rows_sha256([item[2] for item in selected]),
             "provenance": {
                 "schema": "provenance-v1",
                 "identifiers": {
@@ -717,10 +812,30 @@ def write_shards(
                 "document": checked_provenance,
             },
         }
+        validate_manifest_document(manifest, label="generated")
         manifest_path = staging / DATASET_CONFIG / "manifest.json"
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_bytes = _canonical_json(manifest)
         manifest_path.write_bytes(manifest_bytes)
+        artifact = checked_provenance.get("artifacts", {}).get("accepted_jsonl")
+        if not isinstance(artifact, dict) or not isinstance(artifact.get("sha256"), str):
+            raise ValueError("provenance accepted_jsonl artifact is required")
+        readiness_document: dict[str, object] = {
+            "state": "building",
+            "schema_version": 1,
+            "teacher_dimension": 100,
+            "available_examples": len(selected),
+            "verified_shards": [
+                {"path": item.path, "sha256": item.sha256, "examples": item.rows}
+                for item in shard_infos
+            ],
+            "source_checksums": {"accepted_jsonl": artifact["sha256"]},
+            "remote_verified": False,
+            "remote_commit_sha": None,
+        }
+        validate_readiness_alignment(readiness_document, manifest)
+        (staging / READINESS_PATH).write_bytes(_canonical_json(readiness_document))
+        (staging / README_PATH).write_bytes(render_dataset_card())
         _rename_noreplace(staging, destination)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
@@ -730,6 +845,8 @@ def write_shards(
     return ShardResult(
         output_root=destination,
         manifest_path=final_manifest,
+        readiness_path=destination / READINESS_PATH,
+        readme_path=destination / README_PATH,
         shards=tuple(shard_infos),
         pilot_article_keys=pilot_keys,
         row_count=len(selected),

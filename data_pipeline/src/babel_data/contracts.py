@@ -16,7 +16,9 @@ from jsonschema import Draft202012Validator, FormatChecker, validators
 _SCHEMA_NAMES = frozenset(
     {
         "dataset-readiness-v1",
+        "dataset-manifest-v1",
         "distillation-example-v1",
+        "full-release-proof-v1",
         "provenance-v1",
     }
 )

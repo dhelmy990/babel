@@ -3,16 +3,31 @@
 from __future__ import annotations
 
 import hashlib
+import heapq
 import json
 import os
 import re
+import shutil
 import tempfile
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from .contracts import validate_document
+import pyarrow.parquet as pq
+
+from .release import (
+    MANIFEST_PATH,
+    METADATA_PATHS,
+    README_PATH,
+    READINESS_PATH,
+    identity_rows_sha256,
+    render_dataset_card,
+    validate_manifest_bytes as _validate_manifest_bytes,
+    validate_manifest_extension as _validate_release_extension,
+    validate_readiness_alignment,
+    validate_readiness_extension,
+)
 from .shard import validate_distillation_row
 
 
@@ -219,131 +234,11 @@ def _private_info(info: object) -> object:
 
 
 def _manifest_document(value: bytes, *, label: str) -> dict[str, object]:
-    try:
-        document = json.loads(value)
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise ValueError(f"{label} manifest is malformed") from error
-    if not isinstance(document, dict):
-        raise ValueError(f"{label} manifest is malformed")
-    try:
-        shards = document["shards"]
-        counts = document["counts"]
-        provenance = document["provenance"]
-        provenance_document = provenance["document"]  # type: ignore[index]
-        identifiers = provenance["identifiers"]  # type: ignore[index]
-    except (KeyError, TypeError) as error:
-        raise ValueError(f"{label} manifest is malformed") from error
-    if not isinstance(shards, list) or not all(isinstance(item, dict) for item in shards):
-        raise ValueError(f"{label} manifest has invalid shards")
-    if not isinstance(counts, dict) or not isinstance(provenance, dict):
-        raise ValueError(f"{label} manifest is malformed")
-    validate_document("provenance-v1", provenance_document)
-    if provenance.get("schema") != "provenance-v1" or identifiers != {
-        "dataset_config": DEFAULT_CONFIG,
-        "example_schema": "distillation-example-v1",
-        "snapshot_date": "2016-10-01",
-        "teacher_dimension": 100,
-    }:
-        raise ValueError(f"{label} manifest has invalid fixed provenance identifiers")
-    expected_counts = {
-        split: sum(int(item["rows"]) for item in shards if item.get("split") == split)
-        for split in ("train", "validation", "test")
-    }
-    if counts != {"total": sum(expected_counts.values()), **expected_counts}:
-        raise ValueError(f"{label} manifest counts do not match shards")
-    aggregate = hashlib.sha256(
-        (json.dumps(shards, sort_keys=True, separators=(",", ":")) + "\n").encode()
-    ).hexdigest()
-    if document.get("aggregate_sha256") != aggregate:
-        raise ValueError(f"{label} manifest aggregate checksum is invalid")
-    return document
-
-
-def _is_monotonic_value(old: object, new: object) -> bool:
-    if isinstance(old, dict):
-        return isinstance(new, dict) and all(
-            key in new and _is_monotonic_value(value, new[key])
-            for key, value in old.items()
-        )
-    if isinstance(old, list):
-        return isinstance(new, list) and len(new) >= len(old) and all(
-            _is_monotonic_value(value, new[index])
-            for index, value in enumerate(old)
-        )
-    if (
-        isinstance(old, (int, float))
-        and not isinstance(old, bool)
-        and isinstance(new, (int, float))
-        and not isinstance(new, bool)
-    ):
-        return new >= old
-    return new == old
-
-
-def _is_monotonic_provenance(old: object, new: object) -> bool:
-    if not isinstance(old, dict) or not isinstance(new, dict):
-        return False
-    if old.get("schema") != new.get("schema") or old.get("identifiers") != new.get(
-        "identifiers"
-    ):
-        return False
-    old_document = old.get("document")
-    new_document = new.get("document")
-    if not isinstance(old_document, dict) or not isinstance(new_document, dict):
-        return False
-    old_sources = old_document.get("sources")
-    new_sources = new_document.get("sources")
-    if not (
-        isinstance(old_sources, list)
-        and isinstance(new_sources, list)
-        and new_sources[: len(old_sources)] == old_sources
-    ):
-        return False
-    old_artifacts = old_document.get("artifacts")
-    new_artifacts = new_document.get("artifacts")
-    if not isinstance(old_artifacts, dict) or not isinstance(new_artifacts, dict):
-        return False
-    if any(
-        new_artifacts.get(name) != evidence
-        for name, evidence in old_artifacts.items()
-    ):
-        return False
-    return (
-        old_document.get("schema_version") == new_document.get("schema_version")
-        and _is_monotonic_value(
-            old_document.get("reports"), new_document.get("reports")
-        )
-    )
+    return _validate_manifest_bytes(value, label=label)
 
 
 def _validate_manifest_extension(old_bytes: bytes, new_bytes: bytes) -> None:
-    old = _manifest_document(old_bytes, label="remote")
-    new = _manifest_document(new_bytes, label="local")
-    for field in ("manifest_version", "schema", "dataset_config"):
-        if old.get(field) != new.get(field):
-            raise ValueError(f"manifest extension is not monotonic: changed {field}")
-    old_shard_items = old["shards"]  # type: ignore[assignment]
-    new_shard_items = new["shards"]  # type: ignore[assignment]
-    old_shards = {str(item["path"]): item for item in old_shard_items}
-    new_shards = {str(item["path"]): item for item in new_shard_items}
-    if len(old_shards) != len(old_shard_items) or len(new_shards) != len(
-        new_shard_items
-    ):
-        raise ValueError("manifest extension is not monotonic: duplicate shard path")
-    if new_shard_items[: len(old_shard_items)] != old_shard_items:
-        raise ValueError("manifest extension is not monotonic: prior shard changed")
-    old_pilot = old.get("pilot_article_keys")
-    new_pilot = new.get("pilot_article_keys")
-    if not (
-        isinstance(old_pilot, list)
-        and isinstance(new_pilot, list)
-        and new_pilot[: len(old_pilot)] == old_pilot
-    ):
-        raise ValueError("manifest extension is not monotonic: pilot keys changed")
-    old_provenance = old["provenance"]  # type: ignore[index]
-    new_provenance = new["provenance"]  # type: ignore[index]
-    if not _is_monotonic_provenance(old_provenance, new_provenance):
-        raise ValueError("manifest extension is not monotonic: provenance regressed")
+    _validate_release_extension(old_bytes, new_bytes)
 
 
 def _relative_uploads(
@@ -371,7 +266,9 @@ def _relative_uploads(
             relative = absolute.relative_to(root).as_posix()
         except ValueError as error:
             raise ValueError(f"upload file is outside root: {path}") from error
-        if relative == "manifest.json":
+        if relative in {README_PATH, READINESS_PATH}:
+            pass
+        elif relative == "manifest.json":
             relative = f"{DEFAULT_CONFIG}/manifest.json"
         elif not relative.startswith(f"{DEFAULT_CONFIG}/"):
             relative = f"{DEFAULT_CONFIG}/{relative}"
@@ -379,8 +276,12 @@ def _relative_uploads(
             raise ValueError(f"duplicate remote path: {relative}")
         seen.add(relative)
         uploads.append((relative, absolute))
-    if f"{DEFAULT_CONFIG}/manifest.json" not in seen:
-        raise ValueError("files must include the config manifest")
+    missing_metadata = METADATA_PATHS - seen
+    if missing_metadata:
+        raise ValueError(
+            "files must include manifest, readiness, and README exactly: "
+            + ", ".join(sorted(missing_metadata))
+        )
     return sorted(uploads, key=lambda item: (item[0].endswith("/manifest.json"), item[0]))
 
 
@@ -393,8 +294,8 @@ def _validate_local_uploads(
     if manifest.get("dataset_config") != config_name:
         raise ValueError("local shard manifest configuration does not match upload")
     shards = manifest["shards"]
-    expected = {str(item["path"]) for item in shards}
-    supplied = set(by_remote_path) - {f"{config_name}/manifest.json"}
+    expected = {str(item["path"]) for item in shards} | METADATA_PATHS
+    supplied = set(by_remote_path)
     if supplied != expected:
         raise ValueError("upload files do not exactly match the local shard manifest")
     for item in shards:
@@ -403,6 +304,131 @@ def _validate_local_uploads(
             raise ValueError(f"local shard size does not match manifest: {item['path']}")
         if _file_sha256(local) != item["sha256"]:
             raise ValueError(f"local shard checksum does not match manifest: {item['path']}")
+        shard_count = 0
+        min_key: str | None = None
+        max_key: str | None = None
+        min_rank: str | None = None
+        max_rank: str | None = None
+        prior_order: tuple[str, str] | None = None
+
+        def checked_identities() -> Iterable[Mapping[str, object]]:
+            nonlocal shard_count, min_key, max_key, min_rank, max_rank, prior_order
+            for batch in pq.ParquetFile(local).iter_batches(batch_size=4096):
+                for raw_row in batch.to_pylist():
+                    row = validate_distillation_row(raw_row)
+                    if row["split"] != item["split"]:
+                        raise ValueError(
+                            f"local shard split does not match manifest: {item['path']}"
+                        )
+                    key = str(row["article_key"])
+                    page_id = int(row["page_id"])
+                    rank = hashlib.sha256(key.encode("utf-8")).hexdigest()
+                    order = (rank, key)
+                    if prior_order is not None and order <= prior_order:
+                        raise ValueError(
+                            f"local shard rows are not in canonical rank order: {item['path']}"
+                        )
+                    prior_order = order
+                    shard_count += 1
+                    min_key = key if min_key is None else min(min_key, key)
+                    max_key = key if max_key is None else max(max_key, key)
+                    min_rank = rank if min_rank is None else min(min_rank, rank)
+                    max_rank = rank if max_rank is None else max(max_rank, rank)
+                    yield {"article_key": key, "page_id": page_id}
+
+        shard_digest = identity_rows_sha256(checked_identities())
+        if shard_count != int(item["rows"]):
+            raise ValueError(f"local shard row count does not match manifest: {item['path']}")
+        if shard_digest != item["rows_sha256"]:
+            raise ValueError(
+                f"local shard row identity digest does not match manifest: {item['path']}"
+            )
+        if (
+            item["min_article_key"] != min_key
+            or item["max_article_key"] != max_key
+            or item["min_rank"] != min_rank
+            or item["max_rank"] != max_rank
+        ):
+            raise ValueError(f"local shard bounds do not match rows: {item['path']}")
+
+    def identity_stream(local: Path) -> Iterable[tuple[str, str, int]]:
+        prior: tuple[str, str] | None = None
+        parquet = pq.ParquetFile(local)
+        for batch in parquet.iter_batches(
+            batch_size=4096, columns=["article_key", "page_id"]
+        ):
+            for row in batch.to_pylist():
+                key = str(row["article_key"])
+                page_id = int(row["page_id"])
+                rank = hashlib.sha256(key.encode("utf-8")).hexdigest()
+                order = (rank, key)
+                if prior is not None and order <= prior:
+                    raise ValueError("local shard identity order changed during validation")
+                prior = order
+                yield rank, key, page_id
+
+    def merged_identities() -> Iterable[Mapping[str, object]]:
+        streams = [
+            iter(identity_stream(by_remote_path[str(item["path"])]))
+            for item in shards
+        ]
+        heap: list[tuple[str, str, int, int]] = []
+        for index, stream in enumerate(streams):
+            try:
+                rank, key, page_id = next(stream)
+            except StopIteration:
+                continue
+            heapq.heappush(heap, (rank, key, page_id, index))
+        pilot_keys = manifest["pilot_article_keys"]
+        emitted = 0
+        prior_identity: tuple[str, int] | None = None
+        while heap:
+            rank, key, page_id, index = heapq.heappop(heap)
+            identity = (key, page_id)
+            if identity == prior_identity:
+                raise ValueError("local shards contain an overlapping row identity")
+            if emitted >= len(pilot_keys) or pilot_keys[emitted] != key:
+                raise ValueError("local pilot article keys do not match manifest rows")
+            emitted += 1
+            prior_identity = identity
+            yield {"article_key": key, "page_id": page_id}
+            try:
+                next_rank, next_key, next_page_id = next(streams[index])
+            except StopIteration:
+                continue
+            heapq.heappush(
+                heap, (next_rank, next_key, next_page_id, index)
+            )
+        if emitted != len(pilot_keys):
+            raise ValueError("local pilot article keys do not match manifest rows")
+
+    if identity_rows_sha256(merged_identities()) != manifest["rows_sha256"]:
+        raise ValueError("local aggregate row identity digest does not match manifest")
+    for item in shards:
+        local = by_remote_path[str(item["path"])]
+        if local.stat().st_size != int(item["bytes"]) or _file_sha256(local) != item["sha256"]:
+            raise ValueError(f"local shard changed during validation: {item['path']}")
+    try:
+        readiness = json.loads(by_remote_path[READINESS_PATH].read_bytes())
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("local readiness is malformed") from error
+    if not isinstance(readiness, dict):
+        raise ValueError("local readiness is malformed")
+    validate_readiness_alignment(readiness, manifest)
+    if by_remote_path[README_PATH].read_bytes() != render_dataset_card():
+        raise ValueError("local README does not match the fixed dataset card")
+
+
+def _snapshot_uploads(
+    uploads: Sequence[tuple[str, Path]], snapshot_root: Path
+) -> list[tuple[str, Path]]:
+    snapshot: list[tuple[str, Path]] = []
+    for path_in_repo, source in uploads:
+        destination = snapshot_root / path_in_repo
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+        snapshot.append((path_in_repo, destination))
+    return snapshot
 
 
 def verify_remote(
@@ -429,6 +455,18 @@ def verify_remote(
     local_manifest_path = Path(manifest_path)
     local_bytes = local_manifest_path.read_bytes()
     manifest = _manifest_document(local_bytes, label="local")
+    artifact_root = local_manifest_path.parent.parent
+    local_readiness_bytes = (artifact_root / READINESS_PATH).read_bytes()
+    local_readme_bytes = (artifact_root / README_PATH).read_bytes()
+    try:
+        local_readiness = json.loads(local_readiness_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("local readiness is malformed") from error
+    if not isinstance(local_readiness, dict):
+        raise ValueError("local readiness is malformed")
+    validate_readiness_alignment(local_readiness, manifest)
+    if local_readme_bytes != render_dataset_card():
+        raise ValueError("local README does not match the fixed dataset card")
     try:
         shards = manifest["shards"]
         pilot_keys = frozenset(manifest["pilot_article_keys"])
@@ -438,7 +476,7 @@ def verify_remote(
         isinstance(item, Mapping) for item in shards
     ):
         raise ValueError("local shard manifest has invalid shards")
-    verified_paths = frozenset(str(item["path"]) for item in shards)
+    verified_paths = frozenset(str(item["path"]) for item in shards) | METADATA_PATHS
     split_counts = {
         split: sum(int(item["rows"]) for item in shards if item["split"] == split)
         for split in ("train", "validation", "test")
@@ -458,18 +496,34 @@ def verify_remote(
             remote_manifest = _remote_bytes(
                 api, repo_id, f"{config_name}/manifest.json", revision, token
             )
+            remote_manifest_document = _manifest_document(
+                remote_manifest, label="remote"
+            )
             if remote_manifest != local_bytes:
                 raise RemoteVerificationError("remote manifest bytes do not match local manifest")
-            # Validate all advertised digests before trusting the manifest as evidence.
-            for item in shards:
-                checksum = item.get("sha256")
-                if (
-                    not isinstance(checksum, str)
-                    or re.fullmatch(r"[0-9a-f]{64}", checksum) is None
-                ):
-                    raise RemoteVerificationError(
-                        "remote manifest contains an invalid shard checksum"
-                    )
+            remote_readiness = _remote_bytes(
+                api, repo_id, READINESS_PATH, revision, token
+            )
+            remote_readme = _remote_bytes(
+                api, repo_id, README_PATH, revision, token
+            )
+            if remote_readiness != local_readiness_bytes:
+                raise RemoteVerificationError(
+                    "remote readiness bytes do not match local readiness"
+                )
+            try:
+                readiness_document = json.loads(remote_readiness)
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise RemoteVerificationError("remote readiness is malformed") from error
+            if not isinstance(readiness_document, dict):
+                raise RemoteVerificationError("remote readiness is malformed")
+            validate_readiness_alignment(
+                readiness_document, remote_manifest_document
+            )
+            if remote_readme != local_readme_bytes or remote_readme != render_dataset_card():
+                raise RemoteVerificationError(
+                    "remote README bytes do not match the fixed dataset card"
+                )
             dataset = loader(
                 repo_id,
                 name=config_name,
@@ -558,112 +612,157 @@ def publish_verified_shards(
         label="private dataset repository creation",
     )
     manifest_remote_path = f"{config_name}/manifest.json"
-    returned_sha: str | None = None
     for publication_attempt in range(retries):
-        _validate_local_uploads(uploads, config_name)
-        info = _private_info(
-            _retry(
-                lambda: api.dataset_info(
-                    repo_id, revision="main", token=token
-                ),
-                retries=retries,
-                backoff_seconds=backoff_seconds,
-                sleep=sleep,
-                label="main revision resolution",
+        with tempfile.TemporaryDirectory(prefix="babel-upload-snapshot-") as temporary:
+            attempt_uploads = _snapshot_uploads(uploads, Path(temporary))
+            _validate_local_uploads(attempt_uploads, config_name)
+            by_remote_path = dict(attempt_uploads)
+            local_manifest_bytes = by_remote_path[manifest_remote_path].read_bytes()
+            local_manifest = _manifest_document(local_manifest_bytes, label="local")
+            info = _private_info(
+                _retry(
+                    lambda: api.dataset_info(
+                        repo_id, revision="main", token=token
+                    ),
+                    retries=retries,
+                    backoff_seconds=backoff_seconds,
+                    sleep=sleep,
+                    label="main revision resolution",
+                )
             )
-        )
-        parent_sha = _checked_sha(
-            getattr(info, "sha", None), label="main dataset info SHA"
-        )
-        pending: list[tuple[str, Path]] = []
-        for path_in_repo, local in uploads:
-            existing = _remote_or_missing(
+            parent_sha = _checked_sha(
+                getattr(info, "sha", None), label="main dataset info SHA"
+            )
+            remote_manifest_bytes = _remote_or_missing(
                 api,
                 repo_id,
-                path_in_repo,
+                manifest_remote_path,
                 parent_sha,
                 token,
                 retries=retries,
                 backoff_seconds=backoff_seconds,
                 sleep=sleep,
             )
-            if existing is None:
-                pending.append((path_in_repo, local))
-                continue
-            local_bytes = local.read_bytes()
-            if existing != local_bytes:
-                if path_in_repo == manifest_remote_path:
-                    _validate_manifest_extension(existing, local_bytes)
+            remote_manifest = (
+                _manifest_document(remote_manifest_bytes, label="remote")
+                if remote_manifest_bytes is not None
+                else None
+            )
+            if (
+                remote_manifest_bytes is not None
+                and remote_manifest_bytes != local_manifest_bytes
+            ):
+                _validate_manifest_extension(
+                    remote_manifest_bytes, local_manifest_bytes
+                )
+            pending: list[tuple[str, Path]] = []
+            for path_in_repo, local in attempt_uploads:
+                existing = (
+                    remote_manifest_bytes
+                    if path_in_repo == manifest_remote_path
+                    else _remote_or_missing(
+                        api,
+                        repo_id,
+                        path_in_repo,
+                        parent_sha,
+                        token,
+                        retries=retries,
+                        backoff_seconds=backoff_seconds,
+                        sleep=sleep,
+                    )
+                )
+                if existing is None:
                     pending.append((path_in_repo, local))
                     continue
-                raise ValueError(
-                    "refusing to overwrite remote path with a different checksum: "
-                    f"{path_in_repo}"
-                )
+                local_bytes = local.read_bytes()
+                if existing != local_bytes:
+                    if path_in_repo == manifest_remote_path:
+                        pending.append((path_in_repo, local))
+                        continue
+                    if path_in_repo == READINESS_PATH:
+                        if remote_manifest is None:
+                            raise ValueError(
+                                "refusing readiness update without an existing manifest"
+                            )
+                        validate_readiness_extension(
+                            existing,
+                            local_bytes,
+                            remote_manifest,
+                            local_manifest,
+                        )
+                        pending.append((path_in_repo, local))
+                        continue
+                    raise ValueError(
+                        "refusing to overwrite remote path with a different checksum: "
+                        f"{path_in_repo}"
+                    )
 
-        if not pending:
             returned_sha = parent_sha
-            break
-        if not callable(getattr(api, "create_commit", None)):
-            raise RemoteVerificationError(
-                "atomic append-only publication requires create_commit support"
-            )
-        try:
-            result = api.create_commit(
-                repo_id=repo_id,
-                repo_type="dataset",
-                revision="main",
-                parent_commit=parent_sha,
-                operations=[
-                    _add_operation(api, path, local) for path, local in pending
-                ],
-                commit_message=f"Publish verified {config_name} shards",
-                token=token,
-            )
-            returned_sha = _commit_sha(result)
-            break
-        except BaseException as error:
-            if isinstance(error, RemoteVerificationError):
-                raise
-            if (
-                (_is_parent_conflict(error) or _is_transient(error))
-                and publication_attempt + 1 < retries
-            ):
-                sleep(backoff_seconds * (2**publication_attempt))
-                continue
-            raise RemoteVerificationError(
-                "atomic Hub commit failed "
-                f"after {publication_attempt + 1} attempt(s) ({type(error).__name__})"
-            ) from None
-    if returned_sha is None:
-        raise RemoteVerificationError("atomic Hub commit retries were exhausted")
+            if pending:
+                if not callable(getattr(api, "create_commit", None)):
+                    raise RemoteVerificationError(
+                        "atomic append-only publication requires create_commit support"
+                    )
+                try:
+                    result = api.create_commit(
+                        repo_id=repo_id,
+                        repo_type="dataset",
+                        revision="main",
+                        parent_commit=parent_sha,
+                        operations=[
+                            _add_operation(api, path, local) for path, local in pending
+                        ],
+                        commit_message=f"Publish verified {config_name} shards",
+                        token=token,
+                    )
+                    returned_sha = _commit_sha(result)
+                except BaseException as error:
+                    if isinstance(error, RemoteVerificationError):
+                        raise
+                    if (
+                        (_is_parent_conflict(error) or _is_transient(error))
+                        and publication_attempt + 1 < retries
+                    ):
+                        sleep(backoff_seconds * (2**publication_attempt))
+                        continue
+                    raise RemoteVerificationError(
+                        "atomic Hub commit failed "
+                        f"after {publication_attempt + 1} attempt(s) "
+                        f"({type(error).__name__})"
+                    ) from None
 
-    info = _private_info(
-        _retry(
-            lambda: api.dataset_info(repo_id, revision=returned_sha, token=token),
-            retries=retries,
-            backoff_seconds=backoff_seconds,
-            sleep=sleep,
-            label="published revision resolution",
-        )
-    )
-    info_sha = _checked_sha(getattr(info, "sha", None), label="dataset info SHA")
-    if info_sha != returned_sha:
-        raise RemoteVerificationError("returned commit SHA does not match dataset info SHA")
-    manifest = next(local for path, local in uploads if path == f"{config_name}/manifest.json")
-    verify_remote(
-        api,
-        repo_id,
-        returned_sha,
-        manifest,
-        token,
-        config_name=config_name,
-        load_dataset_fn=load_dataset_fn,
-        retries=retries,
-        backoff_seconds=backoff_seconds,
-        sleep=sleep,
-    )
-    return returned_sha
+            published_info = _private_info(
+                _retry(
+                    lambda: api.dataset_info(
+                        repo_id, revision=returned_sha, token=token
+                    ),
+                    retries=retries,
+                    backoff_seconds=backoff_seconds,
+                    sleep=sleep,
+                    label="published revision resolution",
+                )
+            )
+            info_sha = _checked_sha(
+                getattr(published_info, "sha", None), label="dataset info SHA"
+            )
+            if info_sha != returned_sha:
+                raise RemoteVerificationError(
+                    "returned commit SHA does not match dataset info SHA"
+                )
+            verify_remote(
+                api,
+                repo_id,
+                returned_sha,
+                by_remote_path[manifest_remote_path],
+                token,
+                config_name=config_name,
+                load_dataset_fn=load_dataset_fn,
+                retries=retries,
+                backoff_seconds=backoff_seconds,
+                sleep=sleep,
+            )
+            return returned_sha
+    raise RemoteVerificationError("atomic Hub commit retries were exhausted")
 
 
 def write_revision_file(path: str | os.PathLike[str], revision: str) -> None:

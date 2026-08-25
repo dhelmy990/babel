@@ -15,6 +15,12 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "data_pipeline" / "src"))
 
 from babel_data.reconcile import split_for  # noqa: E402
 from babel_data.contracts import validate_document  # noqa: E402
+from babel_data.release import (  # noqa: E402
+    canonical_json,
+    render_dataset_card,
+    validate_manifest_document,
+    validate_readiness_alignment,
+)
 from babel_data.shard import (  # noqa: E402
     PARQUET_SCHEMA,
     build_readiness,
@@ -133,6 +139,9 @@ def test_writer_uses_explicit_schema_and_separate_split_paths(tmp_path: Path) ->
         assert pq.read_schema(result.output_root / item.path) == PARQUET_SCHEMA
 
     manifest = json.loads(result.manifest_path.read_text())
+    validate_manifest_document(manifest)
+    assert manifest["schema_version"] == 1
+    assert manifest["state"] == "prepared"
     assert manifest["provenance"]["schema"] == "provenance-v1"
     assert manifest["provenance"]["identifiers"] == {
         "dataset_config": "distillation_2016",
@@ -140,6 +149,19 @@ def test_writer_uses_explicit_schema_and_separate_split_paths(tmp_path: Path) ->
         "snapshot_date": "2016-10-01",
         "teacher_dimension": 100,
     }
+    for item in manifest["shards"]:
+        table = pq.read_table(result.output_root / item["path"])
+        identities = [
+            [row["article_key"], row["page_id"]]
+            for row in table.select(["article_key", "page_id"]).to_pylist()
+        ]
+        assert item["rows_sha256"] == hashlib.sha256(
+            canonical_json(identities)
+        ).hexdigest()
+
+    assert result.readme_path.read_bytes() == render_dataset_card()
+    readiness = json.loads(result.readiness_path.read_text())
+    validate_readiness_alignment(readiness, manifest)
 
 
 def test_writer_requires_schema_valid_provenance(tmp_path: Path) -> None:
@@ -259,7 +281,7 @@ def test_readiness_is_monotonic_and_delete_requires_exact_remote_evidence(tmp_pa
     )
     readiness_path = result.output_root / "readiness.json"
     readiness = build_readiness(
-        result, source_checksums={"teacher": "a" * 64}, path=readiness_path
+        result, source_checksums={"accepted_jsonl": "c" * 64}, path=readiness_path
     )
 
     validate_document("dataset-readiness-v1", readiness.to_document())
@@ -279,6 +301,10 @@ def test_readiness_is_monotonic_and_delete_requires_exact_remote_evidence(tmp_pa
     evidence["commit_sha"] = "c" * 40
     evidence_path.write_text(json.dumps(evidence))
     assert readiness.can_delete_local is False
+    evidence["commit_sha"] = "not-a-commit"
+    evidence_path.write_text(json.dumps(evidence))
+    with pytest.raises(ValueError, match="commit SHA"):
+        load_readiness(readiness_path, result.manifest_path)
     readiness.save(readiness_path)
     assert readiness.can_delete_local is True
     readiness.transition("pilot_ready")
@@ -304,7 +330,7 @@ def test_failed_verification_evidence_save_never_enables_delete(
     )
     readiness_path = result.output_root / "readiness.json"
     readiness = build_readiness(
-        result, source_checksums={"teacher": "a" * 64}, path=readiness_path
+        result, source_checksums={"accepted_jsonl": "c" * 64}, path=readiness_path
     )
     readiness.mark_remote_verified("b" * 40)
     real_write = shard._atomic_write_json
@@ -332,7 +358,7 @@ def test_delete_rehashes_every_shard_from_the_manifest(tmp_path: Path) -> None:
     )
     readiness_path = result.output_root / "readiness.json"
     readiness = build_readiness(
-        result, source_checksums={"teacher": "a" * 64}, path=readiness_path
+        result, source_checksums={"accepted_jsonl": "c" * 64}, path=readiness_path
     )
     readiness.mark_remote_verified("b" * 40)
     readiness.save(readiness_path)
@@ -351,7 +377,7 @@ def test_reloaded_readiness_does_not_trust_a_changed_local_manifest(tmp_path: Pa
     )
     readiness_path = result.output_root / "readiness.json"
     readiness = build_readiness(
-        result, source_checksums={"teacher": "a" * 64}, path=readiness_path
+        result, source_checksums={"accepted_jsonl": "c" * 64}, path=readiness_path
     )
     readiness.mark_remote_verified("b" * 40)
     readiness.save(readiness_path)
@@ -367,6 +393,36 @@ def test_reloaded_readiness_does_not_trust_a_changed_local_manifest(tmp_path: Pa
     assert restored.can_delete_local is False
 
 
+def test_readiness_evidence_pointer_advances_only_for_new_exact_release(
+    tmp_path: Path,
+) -> None:
+    result = write_test_shards(
+        [row("enwiki:2016-10-01:1", 1)], tmp_path / "prepared", pilot_size=1
+    )
+    readiness_path = result.output_root / "readiness.json"
+    readiness = load_readiness(readiness_path, result.manifest_path)
+    readiness.stage_publication("pilot_ready")
+    readiness.save(readiness_path)
+    readiness.mark_remote_verified("a" * 40)
+    readiness.save_verification_evidence(readiness_path)
+    assert load_readiness(readiness_path, result.manifest_path).remote_commit_sha == "a" * 40
+
+    manifest = json.loads(result.manifest_path.read_text())
+    manifest["provenance"]["document"]["reports"]["row_counts"]["release"] = 2
+    result.manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n"
+    )
+    next_release = load_readiness(readiness_path, result.manifest_path)
+    assert next_release.remote_verified is False
+    next_release.stage_publication("pilot_ready")
+    next_release.save(readiness_path)
+    next_release.mark_remote_verified("b" * 40)
+    next_release.save_verification_evidence(readiness_path)
+    restored = load_readiness(readiness_path, result.manifest_path)
+    assert restored.remote_verified is True
+    assert restored.remote_commit_sha == "b" * 40
+
+
 def test_persisted_readiness_rejects_source_or_remote_verification_regression(
     tmp_path: Path,
 ) -> None:
@@ -375,15 +431,15 @@ def test_persisted_readiness_rejects_source_or_remote_verification_regression(
     )
     readiness_path = result.output_root / "readiness.json"
     readiness = build_readiness(
-        result, source_checksums={"teacher": "a" * 64}, path=readiness_path
+        result, source_checksums={"accepted_jsonl": "c" * 64}, path=readiness_path
     )
     readiness.mark_remote_verified("b" * 40)
     readiness.save(readiness_path)
 
-    readiness.source_checksums["teacher"] = "c" * 64
+    readiness.source_checksums["accepted_jsonl"] = "d" * 64
     with pytest.raises(ValueError, match="source checksum"):
         readiness.save(readiness_path)
-    readiness.source_checksums["teacher"] = "a" * 64
+    readiness.source_checksums["accepted_jsonl"] = "c" * 64
     readiness.remote_verified = False
     readiness.remote_commit_sha = None
     with pytest.raises(ValueError, match="remote verification"):

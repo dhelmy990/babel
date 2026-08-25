@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import shutil
@@ -17,6 +18,11 @@ sys.path.insert(0, str(REPOSITORY_ROOT))
 sys.path.insert(0, str(REPOSITORY_ROOT / "data_pipeline" / "src"))
 
 from babel_data.contracts import UnknownSchema, load_schema, validate_document  # noqa: E402
+from babel_data.release import (  # noqa: E402
+    canonical_json,
+    validate_manifest_document,
+    validate_readiness_alignment,
+)
 from test_support.wheel_build import create_offline_build_environment  # noqa: E402
 
 
@@ -65,6 +71,45 @@ def provenance_document() -> dict[str, object]:
                 "p95_norm": 1.18,
                 "non_finite_count": 0,
             },
+        },
+    }
+
+
+def manifest_document() -> dict[str, object]:
+    shard = {
+        "path": "distillation_2016/train/part-00000.parquet",
+        "split": "train",
+        "rows": 1,
+        "bytes": 100,
+        "sha256": "d" * 64,
+        "rows_sha256": "e" * 64,
+        "schema": "distillation-example-v1",
+        "version": 1,
+        "min_article_key": "enwiki:2016-10-01:1",
+        "max_article_key": "enwiki:2016-10-01:1",
+        "min_rank": "1" * 64,
+        "max_rank": "1" * 64,
+    }
+    return {
+        "manifest_version": 1,
+        "schema_version": 1,
+        "state": "prepared",
+        "schema": "distillation-example-v1",
+        "dataset_config": "distillation_2016",
+        "pilot_article_keys": ["enwiki:2016-10-01:1"],
+        "counts": {"total": 1, "train": 1, "validation": 0, "test": 0},
+        "shards": [shard],
+        "aggregate_sha256": hashlib.sha256(canonical_json([shard])).hexdigest(),
+        "rows_sha256": "f" * 64,
+        "provenance": {
+            "schema": "provenance-v1",
+            "identifiers": {
+                "dataset_config": "distillation_2016",
+                "example_schema": "distillation-example-v1",
+                "snapshot_date": "2016-10-01",
+                "teacher_dimension": 100,
+            },
+            "document": provenance_document(),
         },
     }
 
@@ -228,6 +273,58 @@ def test_provenance_statistics_reject_typos_and_invalid_histogram_buckets(
         validate_document("provenance-v1", provenance)
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda value: value.update(unplanned=True),
+        lambda value: value.pop("schema_version"),
+        lambda value: value["shards"][0].update(bytes=True),
+        lambda value: value["shards"][0].update(rows_sha256="bad"),
+        lambda value: value["counts"].update(total=2),
+        lambda value: value.update(aggregate_sha256="0" * 64),
+    ],
+)
+def test_manifest_v1_is_closed_and_semantically_consistent(mutation: object) -> None:
+    manifest = manifest_document()
+    mutation(manifest)  # type: ignore[operator]
+    with pytest.raises((ValidationError, ValueError)):
+        validate_manifest_document(manifest, label="test")
+
+
+def test_manifest_rejects_duplicate_blob_identity_and_overlapping_rank_evidence() -> None:
+    manifest = manifest_document()
+    duplicate = copy.deepcopy(manifest["shards"][0])  # type: ignore[index]
+    duplicate["path"] = "distillation_2016/train/part-00001.parquet"
+    manifest["shards"].append(duplicate)  # type: ignore[union-attr]
+    manifest["counts"] = {"total": 2, "train": 2, "validation": 0, "test": 0}
+    manifest["aggregate_sha256"] = hashlib.sha256(
+        canonical_json(manifest["shards"])
+    ).hexdigest()
+
+    with pytest.raises(ValueError, match="duplicate|overlap"):
+        validate_manifest_document(manifest, label="test")
+
+
+def test_readiness_requires_provenance_bound_accepted_input() -> None:
+    manifest = manifest_document()
+    readiness = {
+        "state": "building",
+        "schema_version": 1,
+        "teacher_dimension": 100,
+        "available_examples": 1,
+        "verified_shards": [{
+            "path": manifest["shards"][0]["path"],  # type: ignore[index]
+            "sha256": manifest["shards"][0]["sha256"],  # type: ignore[index]
+            "examples": 1,
+        }],
+        "source_checksums": {},
+        "remote_verified": False,
+        "remote_commit_sha": None,
+    }
+    with pytest.raises(ValueError, match="accepted JSONL"):
+        validate_readiness_alignment(readiness, manifest)
+
+
 def test_installed_data_wheel_imports_and_validates_outside_repository(tmp_path: Path) -> None:
     source = REPOSITORY_ROOT / "data_pipeline"
     assert not (source / "build").exists()
@@ -288,6 +385,10 @@ def test_installed_data_wheel_imports_and_validates_outside_repository(tmp_path:
                 "import babel_data; "
                 "schema = babel_data.load_schema('distillation-example-v1'); "
                 "assert schema['title'] == 'Distillation example v1'; "
+                "assert babel_data.load_schema('dataset-manifest-v1')['title'] "
+                "== 'Dataset manifest v1'; "
+                "assert babel_data.load_schema('full-release-proof-v1')['title'] "
+                "== 'Full release proof v1'; "
                 "babel_data.validate_document('dataset-readiness-v1', "
                 "{'state': 'building', 'schema_version': 1, 'teacher_dimension': 100, "
                 "'available_examples': 0, 'verified_shards': [], 'source_checksums': {}, "
@@ -300,11 +401,30 @@ def test_installed_data_wheel_imports_and_validates_outside_repository(tmp_path:
         capture_output=True,
         text=True,
     )
+    entrypoint = installed / "bin" / "babel-data"
+    assert entrypoint.is_file()
+    help_result = subprocess.run(
+        [sys.executable, str(entrypoint), "--help"],
+        cwd=outside_repository,
+        env=runtime_environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "prepare-2016" in help_result.stdout
+    assert "publish-2016" in help_result.stdout
+    assert "verify-remote" in help_result.stdout
     assert not (source / "build").exists()
 
 
 def test_packaged_schemas_exactly_match_canonical_contracts() -> None:
-    for schema in ("distillation-example-v1", "dataset-readiness-v1", "provenance-v1"):
+    for schema in (
+        "distillation-example-v1",
+        "dataset-readiness-v1",
+        "provenance-v1",
+        "dataset-manifest-v1",
+        "full-release-proof-v1",
+    ):
         canonical = (REPOSITORY_ROOT / "schemas" / f"{schema}.json").read_bytes()
         packaged = (REPOSITORY_ROOT / "data_pipeline" / "src" / "babel_data" / "schemas" / f"{schema}.json").read_bytes()
         assert packaged == canonical

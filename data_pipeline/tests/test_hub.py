@@ -9,6 +9,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import pyarrow as pa
+import pyarrow.parquet as pq
 from jsonschema import ValidationError
 
 
@@ -23,7 +25,8 @@ from babel_data.hub import (  # noqa: E402
 )
 from babel_data.cli import main  # noqa: E402
 from babel_data.reconcile import split_for  # noqa: E402
-from babel_data.shard import write_shards  # noqa: E402
+from babel_data.release import canonical_json, identity_rows_sha256  # noqa: E402
+from babel_data.shard import load_readiness, write_shards  # noqa: E402
 from test_shard import provenance_document  # noqa: E402
 
 
@@ -126,7 +129,7 @@ def prepare(tmp_path: Path):
         provenance=provenance_document(),
     )
     files = [result.output_root / shard.path for shard in result.shards]
-    files.append(result.manifest_path)
+    files.extend([result.readiness_path, result.readme_path, result.manifest_path])
     datasets = {split: [next(value for value in values if value["split"] == split)] for split in ("train", "validation", "test")}
     return result, files, datasets
 
@@ -138,18 +141,191 @@ def rolling_extension(result: object, destination: Path) -> tuple[Path, list[Pat
     original = manifest["shards"][0]
     added = copy.deepcopy(original)
     added["path"] = f"distillation_2016/{added['split']}/part-99999.parquet"
-    shutil.copy2(destination / original["path"], destination / added["path"])
+    added_path = destination / added["path"]
+    original_table = pq.read_table(destination / original["path"])
+    added_row = original_table.to_pylist()[0]
+    minimum_rank = max(item["max_rank"] for item in manifest["shards"])
+    page_id = 999999
+    while True:
+        article_key = f"enwiki:2016-10-01:{page_id}"
+        rank = hashlib.sha256(article_key.encode()).hexdigest()
+        if rank > minimum_rank and split_for(article_key) == added["split"]:
+            break
+        page_id += 1
+    added_row["article_key"] = article_key
+    added_row["page_id"] = page_id
+    pq.write_table(pa.Table.from_pylist([added_row], schema=original_table.schema), added_path)
+    added["bytes"] = added_path.stat().st_size
+    added["sha256"] = hashlib.sha256(added_path.read_bytes()).hexdigest()
+    added["rows_sha256"] = identity_rows_sha256([added_row])
+    added["min_rank"] = added["max_rank"] = rank
+    added["min_article_key"] = added["max_article_key"] = article_key
     manifest["shards"].append(added)
     manifest["counts"]["total"] += added["rows"]
     manifest["counts"][added["split"]] += added["rows"]
     manifest["provenance"]["document"]["reports"]["row_counts"]["matched"] += added["rows"]
+    manifest["pilot_article_keys"].append(article_key)
     manifest["aggregate_sha256"] = hashlib.sha256(
         (json.dumps(manifest["shards"], sort_keys=True, separators=(",", ":")) + "\n").encode()
     ).hexdigest()
-    manifest["rows_sha256"] = "d" * 64
+    manifest["rows_sha256"] = identity_rows_sha256(
+        [
+            {"article_key": key, "page_id": int(key.rsplit(":", 1)[1])}
+            for key in manifest["pilot_article_keys"]
+        ]
+    )
     manifest_path.write_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n")
-    files = [destination / item["path"] for item in manifest["shards"]] + [manifest_path]
+    readiness_path = destination / "readiness.json"
+    readiness = json.loads(readiness_path.read_text())
+    readiness["available_examples"] += added["rows"]
+    readiness["verified_shards"].append({
+        "path": added["path"], "sha256": added["sha256"], "examples": added["rows"]
+    })
+    readiness_path.write_text(
+        json.dumps(readiness, sort_keys=True, separators=(",", ":")) + "\n"
+    )
+    files = [destination / item["path"] for item in manifest["shards"]] + [
+        readiness_path, destination / "README.md", manifest_path
+    ]
     return manifest_path, files
+
+
+def test_publish_requires_exact_readiness_and_dataset_card(tmp_path: Path) -> None:
+    result, files, datasets = prepare(tmp_path)
+    for omitted in (result.readiness_path, result.readme_path):
+        with pytest.raises(ValueError, match="readiness|README|exactly"):
+            publish_verified_shards(
+                FakeApi(), "dhelmy990/babel-wikipedia-experiment",
+                [path for path in files if path != omitted], "token",
+                root=result.output_root,
+                load_dataset_fn=lambda *args, **kwargs: datasets,
+                retries=1, sleep=lambda _: None,
+            )
+
+
+@pytest.mark.parametrize("metadata_path", ["readiness.json", "README.md"])
+def test_verify_remote_rejects_changed_release_metadata(
+    tmp_path: Path, metadata_path: str
+) -> None:
+    result, files, datasets = prepare(tmp_path)
+    api = FakeApi(current_sha=COMMIT)
+    for path in files:
+        api.remote[path.relative_to(result.output_root).as_posix()] = path.read_bytes()
+    api.remote[metadata_path] += b"changed"
+
+    with pytest.raises(RemoteVerificationError, match="readiness|README"):
+        verify_remote(
+            api,
+            "dhelmy990/babel-wikipedia-experiment",
+            COMMIT,
+            result.manifest_path,
+            "token",
+            load_dataset_fn=lambda *args, **kwargs: datasets,
+            retries=1,
+            sleep=lambda _: None,
+        )
+
+
+def test_manifest_extension_rejects_copied_or_identity_aliased_shard(
+    tmp_path: Path,
+) -> None:
+    result, files, datasets = prepare(tmp_path)
+    api = FakeApi(current_sha=COMMIT)
+    for path in files:
+        api.remote[path.relative_to(result.output_root).as_posix()] = path.read_bytes()
+    extension_manifest, extension_files = rolling_extension(result, tmp_path / "rolling")
+    extension = json.loads(extension_manifest.read_text())
+    added = extension["shards"][-1]
+    original = extension["shards"][0]
+
+    for field in ("sha256", "rows_sha256"):
+        candidate = copy.deepcopy(extension)
+        candidate["shards"][-1][field] = original[field]
+        candidate["aggregate_sha256"] = hashlib.sha256(
+            (json.dumps(candidate["shards"], sort_keys=True, separators=(",", ":")) + "\n").encode()
+        ).hexdigest()
+        extension_manifest.write_text(
+            json.dumps(candidate, sort_keys=True, separators=(",", ":")) + "\n"
+        )
+        with pytest.raises(ValueError, match="duplicate|overlap"):
+            publish_verified_shards(
+                api, "dhelmy990/babel-wikipedia-experiment", extension_files, "token",
+                root=extension_manifest.parent.parent,
+                load_dataset_fn=lambda *args, **kwargs: datasets,
+                retries=1, sleep=lambda _: None,
+            )
+    assert added["path"] != original["path"]
+
+
+def test_manifest_extension_rejects_reencoded_copy_with_forged_identity_digest(
+    tmp_path: Path,
+) -> None:
+    result, files, datasets = prepare(tmp_path)
+    api = FakeApi(current_sha=COMMIT)
+    for path in files:
+        api.remote[path.relative_to(result.output_root).as_posix()] = path.read_bytes()
+    extension_manifest, extension_files = rolling_extension(result, tmp_path / "rolling")
+    manifest = json.loads(extension_manifest.read_text())
+    original = manifest["shards"][0]
+    added = manifest["shards"][-1]
+    added_path = extension_manifest.parent.parent / added["path"]
+    pq.write_table(
+        pq.read_table(extension_manifest.parent.parent / original["path"]),
+        added_path,
+        compression="gzip",
+    )
+    added["bytes"] = added_path.stat().st_size
+    added["sha256"] = hashlib.sha256(added_path.read_bytes()).hexdigest()
+    added["rows_sha256"] = "9" * 64
+    manifest["aggregate_sha256"] = hashlib.sha256(
+        (json.dumps(manifest["shards"], sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
+    extension_manifest.write_text(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n"
+    )
+    readiness_path = extension_manifest.parent.parent / "readiness.json"
+    readiness = json.loads(readiness_path.read_text())
+    readiness["verified_shards"][-1]["sha256"] = added["sha256"]
+    readiness_path.write_text(
+        json.dumps(readiness, sort_keys=True, separators=(",", ":")) + "\n"
+    )
+
+    with pytest.raises(ValueError, match="row identity digest|overlapping row identity"):
+        publish_verified_shards(
+            api, "dhelmy990/babel-wikipedia-experiment", extension_files, "token",
+            root=extension_manifest.parent.parent,
+            load_dataset_fn=lambda *args, **kwargs: datasets,
+            retries=1, sleep=lambda _: None,
+        )
+
+
+@pytest.mark.parametrize("forgery", ["bounds", "root_digest", "pilot_keys"])
+def test_publish_recomputes_manifest_identity_evidence_from_parquet(
+    tmp_path: Path, forgery: str
+) -> None:
+    result, files, datasets = prepare(tmp_path)
+    manifest = json.loads(result.manifest_path.read_text())
+    if forgery == "bounds":
+        manifest["shards"][0]["min_rank"] = "0" * 64
+        manifest["shards"][0]["max_rank"] = "0" * 64
+        manifest["aggregate_sha256"] = hashlib.sha256(
+            canonical_json(manifest["shards"])
+        ).hexdigest()
+    elif forgery == "root_digest":
+        manifest["rows_sha256"] = "0" * 64
+    else:
+        manifest["pilot_article_keys"] = list(reversed(manifest["pilot_article_keys"]))
+    result.manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n"
+    )
+
+    with pytest.raises(ValueError, match="bounds|aggregate row|pilot article"):
+        publish_verified_shards(
+            FakeApi(), "dhelmy990/babel-wikipedia-experiment", files, "token",
+            root=result.output_root,
+            load_dataset_fn=lambda *args, **kwargs: datasets,
+            retries=1, sleep=lambda _: None,
+        )
 
 
 def test_publish_is_private_batched_ordered_and_verified_at_returned_sha(tmp_path: Path) -> None:
@@ -193,6 +369,39 @@ def test_publish_is_private_batched_ordered_and_verified_at_returned_sha(tmp_pat
         "streaming": True,
         "token": "super-secret",
     }]
+
+
+def test_publish_semantic_preflight_streams_parquet_batches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import babel_data.hub as hub
+
+    result, files, datasets = prepare(tmp_path)
+    calls = 0
+    real_parquet_file = hub.pq.ParquetFile
+
+    class StreamingParquetFile:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.delegate = real_parquet_file(*args, **kwargs)
+
+        def iter_batches(self, *args: object, **kwargs: object) -> object:
+            nonlocal calls
+            calls += 1
+            return self.delegate.iter_batches(*args, **kwargs)
+
+    monkeypatch.setattr(
+        hub.pq,
+        "read_table",
+        lambda *args, **kwargs: pytest.fail("publication must not materialize a shard"),
+    )
+    monkeypatch.setattr(hub.pq, "ParquetFile", StreamingParquetFile)
+    assert publish_verified_shards(
+        FakeApi(), "dhelmy990/babel-wikipedia-experiment", files, "token",
+        root=result.output_root,
+        load_dataset_fn=lambda *args, **kwargs: datasets,
+        retries=1, sleep=lambda _: None,
+    ) == COMMIT
+    assert calls == len(result.shards) * 4
 
 
 def test_publish_treats_hub_entry_not_found_as_an_append(tmp_path: Path) -> None:
@@ -337,11 +546,12 @@ def test_publish_allows_only_a_monotonic_manifest_extension(tmp_path: Path) -> N
             path.relative_to(extension_manifest.parent.parent).as_posix()
             for path in extension_files if "part-99999" in path.name
         ),
+        "readiness.json",
         "distillation_2016/manifest.json",
     ]
 
     regressed = json.loads(extension_manifest.read_text())
-    regressed["shards"][0]["min_article_key"] = "changed"
+    regressed["shards"][0]["rows_sha256"] = "e" * 64
     regressed["aggregate_sha256"] = hashlib.sha256(
         (json.dumps(regressed["shards"], sort_keys=True, separators=(",", ":")) + "\n").encode()
     ).hexdigest()
@@ -351,7 +561,7 @@ def test_publish_allows_only_a_monotonic_manifest_extension(tmp_path: Path) -> N
     api.remote["distillation_2016/manifest.json"] = files[-1].read_bytes()
     api.remote.pop(api.operations[0])
     api.current_sha = COMMIT
-    with pytest.raises(ValueError, match="monotonic"):
+    with pytest.raises(ValueError, match="monotonic|overlapping|row identity"):
         publish_verified_shards(
             api, "dhelmy990/babel-wikipedia-experiment", extension_files, "token",
             root=extension_manifest.parent.parent,
@@ -375,7 +585,7 @@ def test_manifest_extension_cannot_reorder_prior_shards(tmp_path: Path) -> None:
         json.dumps(extension, sort_keys=True, separators=(",", ":")) + "\n"
     )
 
-    with pytest.raises(ValueError, match="monotonic"):
+    with pytest.raises(ValueError, match="monotonic|overlapping"):
         publish_verified_shards(
             api, "dhelmy990/babel-wikipedia-experiment", extension_files, "token",
             root=extension_manifest.parent.parent,
@@ -666,6 +876,200 @@ def test_prepare_cli_rejects_provenance_not_bound_to_input(
     ]) == 1
     assert "provenance" in json.loads(capsys.readouterr().err)["message"]
     assert not (tmp_path / "prepared").exists()
+
+
+def complete_release(
+    tmp_path: Path, *, pilot_size: int = 3
+) -> tuple[object, Path]:
+    provenance = provenance_document()
+    provenance["artifacts"]["reconciliation_report"] = {  # type: ignore[index]
+        "sha256": "d" * 64,
+        "size": 17,
+    }
+    provenance["reports"]["row_counts"].update({  # type: ignore[index]
+        "raw": 4,
+        "teacher_input_rows": 4,
+        "accepted": 3,
+        "excluded": 1,
+    })
+    result = write_shards(
+        rows_for_all_splits(),
+        tmp_path / "full-release",
+        pilot_size=pilot_size,
+        provenance=provenance,
+    )
+    proof = {
+        "schema_version": 1,
+        "dataset_config": "distillation_2016",
+        "provenance_sha256": hashlib.sha256(canonical_json(provenance)).hexdigest(),
+        "accepted_jsonl": {"sha256": "c" * 64, "size": 123, "rows": 3},
+        "reconciliation_report": {
+            "sha256": "d" * 64,
+            "size": 17,
+            "complete": True,
+            "raw_rows": 4,
+            "accepted_rows": 3,
+            "excluded_rows": 1,
+        },
+        "source_inventories": [
+            {
+                **provenance["sources"][0],  # type: ignore[index]
+                "role": "teacher",
+                "records": 4,
+                "emitted_records": 4,
+                "upstream_excluded_records": 0,
+            }
+        ],
+    }
+    proof_path = tmp_path / "full-release-proof.json"
+    proof_path.write_text(json.dumps(proof))
+    return result, proof_path
+
+
+def test_publish_cli_complete_requires_full_release_proof_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import babel_data.cli as cli
+
+    result, _, _ = prepare(tmp_path)
+    called = False
+
+    def publish(*args: object, **kwargs: object) -> str:
+        nonlocal called
+        called = True
+        return COMMIT
+
+    monkeypatch.setattr(cli, "publish_verified_shards", publish)
+    revision = tmp_path / "revision.txt"
+    assert main([
+        "publish-2016", "--input-root", str(result.output_root),
+        "--state", "complete", "--token", "token",
+        "--revision-out", str(revision),
+    ]) == 1
+    assert called is False
+    assert revision.exists() is False
+    assert "full-release-proof" in json.loads(capsys.readouterr().err)["message"]
+
+
+def test_invalid_complete_proof_never_reads_environment_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import babel_data.cli as cli
+
+    result, _, _ = prepare(tmp_path)
+
+    class GuardedEnvironment(dict[str, str]):
+        def get(self, key: str, default: object = None) -> object:
+            if key == "HF_TOKEN":
+                pytest.fail("invalid proof must fail before HF_TOKEN lookup")
+            return super().get(key, default)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(cli.os, "environ", GuardedEnvironment())
+    assert main([
+        "publish-2016", "--input-root", str(result.output_root),
+        "--state", "complete",
+    ]) == 1
+    assert "full-release-proof" in json.loads(capsys.readouterr().err)["message"]
+
+
+def test_publish_cli_complete_rejects_incomplete_proof_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import babel_data.cli as cli
+
+    result, proof_path = complete_release(tmp_path)
+    proof = json.loads(proof_path.read_text())
+    proof["reconciliation_report"]["complete"] = False
+    proof_path.write_text(json.dumps(proof))
+    monkeypatch.setattr(
+        cli,
+        "publish_verified_shards",
+        lambda *args, **kwargs: pytest.fail("publication must not be attempted"),
+    )
+    assert main([
+        "publish-2016", "--input-root", str(result.output_root),
+        "--state", "complete", "--full-release-proof", str(proof_path),
+        "--token", "token",
+    ]) == 1
+    assert "full release proof" in json.loads(capsys.readouterr().err)["message"]
+
+
+@pytest.mark.parametrize(
+    "invalid_case", ["pilot", "provenance", "artifact", "source", "inventory_count"]
+)
+def test_publish_cli_complete_rejects_unbound_or_pilot_proof(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    invalid_case: str,
+) -> None:
+    import babel_data.cli as cli
+
+    result, proof_path = complete_release(
+        tmp_path, pilot_size=2 if invalid_case == "pilot" else 3
+    )
+    proof = json.loads(proof_path.read_text())
+    if invalid_case == "provenance":
+        proof["provenance_sha256"] = "e" * 64
+    elif invalid_case == "artifact":
+        proof["accepted_jsonl"]["sha256"] = "e" * 64
+    elif invalid_case == "source":
+        proof["source_inventories"][0]["filename"] = "different.jsonl"
+    elif invalid_case == "inventory_count":
+        proof["source_inventories"][0]["records"] = 999999
+    proof_path.write_text(json.dumps(proof))
+    monkeypatch.setattr(
+        cli,
+        "publish_verified_shards",
+        lambda *args, **kwargs: pytest.fail("publication must not be attempted"),
+    )
+
+    assert main([
+        "publish-2016", "--input-root", str(result.output_root),
+        "--state", "complete", "--full-release-proof", str(proof_path),
+        "--token", "token",
+    ]) == 1
+    assert "full release proof" in json.loads(capsys.readouterr().err)["message"]
+
+
+def test_publish_cli_complete_accepts_bound_full_release_proof(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import babel_data.cli as cli
+
+    result, proof_path = complete_release(tmp_path)
+    readiness_path = result.output_root / "readiness.json"
+    published_readiness: bytes | None = None
+
+    def publish(*args: object, **kwargs: object) -> str:
+        nonlocal published_readiness
+        published_readiness = readiness_path.read_bytes()
+        document = json.loads(published_readiness)
+        assert document["state"] == "complete"
+        assert document["remote_verified"] is False
+        assert document["remote_commit_sha"] is None
+        return COMMIT
+
+    monkeypatch.setattr(cli, "_api", object)
+    monkeypatch.setattr(cli, "publish_verified_shards", publish)
+    assert main([
+        "publish-2016", "--input-root", str(result.output_root),
+        "--state", "complete", "--full-release-proof", str(proof_path),
+        "--token", "token",
+    ]) == 0
+    assert json.loads(capsys.readouterr().out)["state"] == "complete"
+    assert readiness_path.read_bytes() == published_readiness
+    restored = load_readiness(readiness_path, result.manifest_path)
+    assert restored.remote_verified is True
+    assert restored.remote_commit_sha == COMMIT
 
 
 def test_cli_failure_is_structured_and_does_not_echo_token(

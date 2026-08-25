@@ -16,7 +16,13 @@ from .hub import (
     verify_remote,
     write_revision_file,
 )
-from .shard import build_readiness, load_readiness, write_shards
+from .release import (
+    README_PATH,
+    READINESS_PATH,
+    validate_full_release_proof,
+    validate_manifest_bytes,
+)
+from .shard import load_readiness, write_shards
 
 
 DEFAULT_DATA_ROOT = Path("/home/dhelmy990/Data/babel-data")
@@ -64,10 +70,10 @@ def _source_sha256(path: Path) -> str:
 
 
 def _manifest_files(manifest_path: Path) -> list[Path]:
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest = validate_manifest_bytes(manifest_path.read_bytes(), label="local")
     root = manifest_path.parent.parent
     files = [root / item["path"] for item in manifest["shards"]]
-    files.append(manifest_path)
+    files.extend([root / READINESS_PATH, root / README_PATH, manifest_path])
     return files
 
 
@@ -103,11 +109,6 @@ def _prepare(arguments: argparse.Namespace) -> dict[str, object]:
         target_shard_bytes=arguments.target_shard_bytes,
         provenance=provenance,
     )
-    build_readiness(
-        result,
-        source_checksums={"accepted_jsonl": source_checksum},
-        path=output / "readiness.json",
-    )
     return {
         "status": "ok",
         "command": "prepare-2016",
@@ -123,21 +124,33 @@ def _publish(arguments: argparse.Namespace) -> dict[str, object]:
         else Path(arguments.data_root) / "prepared" / "2016-pilot"
     )
     manifest_path = root / "distillation_2016" / "manifest.json"
+    manifest = validate_manifest_bytes(manifest_path.read_bytes(), label="local")
+    if arguments.state == "complete":
+        if not arguments.full_release_proof:
+            raise ValueError(
+                "--state complete requires --full-release-proof"
+            )
+        proof_path = Path(arguments.full_release_proof)
+        try:
+            proof = json.loads(proof_path.read_text(encoding="utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError("full release proof is malformed") from error
+        if not isinstance(proof, dict):
+            raise ValueError("full release proof must be a JSON object")
+        try:
+            validate_full_release_proof(proof, manifest)
+        except Exception as error:
+            raise ValueError(f"full release proof is invalid: {error}") from error
+    readiness_path = root / READINESS_PATH
+    readiness = load_readiness(readiness_path, manifest_path)
+    readiness.stage_publication(arguments.state)
+    readiness.save(readiness_path)
     token = _token(arguments)
     revision = publish_verified_shards(
         _api(), arguments.repo, _manifest_files(manifest_path), token, root=root
     )
-    readiness_path = root / "readiness.json"
-    readiness = load_readiness(readiness_path, manifest_path)
     readiness.mark_remote_verified(revision)
-    # Persist and fsync the exact remote evidence before it can authorize a
-    # readiness transition or local artifact deletion.
-    readiness.save(readiness_path)
-    if readiness.state == "building":
-        readiness.transition("pilot_ready")
-    if arguments.state == "complete" and readiness.state == "pilot_ready":
-        readiness.transition("complete")
-    readiness.save(readiness_path)
+    readiness.save_verification_evidence(readiness_path)
     if arguments.revision_out:
         write_revision_file(arguments.revision_out, revision)
     return {
@@ -191,6 +204,7 @@ def _parser() -> argparse.ArgumentParser:
     publish.add_argument("--data-root", default=str(DEFAULT_DATA_ROOT))
     publish.add_argument("--input-root")
     publish.add_argument("--state", choices=("pilot_ready", "complete"), default="pilot_ready")
+    publish.add_argument("--full-release-proof")
     publish.add_argument("--token")
     publish.add_argument("--revision-out")
     publish.set_defaults(handler=_publish)
@@ -228,7 +242,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         result = arguments.handler(arguments)
     except BaseException as error:
-        token = getattr(arguments, "token", None) or os.environ.get("HF_TOKEN")
+        token = getattr(arguments, "token", None)
         message = str(error)
         if token:
             message = message.replace(token, "[REDACTED]")
