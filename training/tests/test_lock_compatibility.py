@@ -33,6 +33,38 @@ def locked_requirements() -> dict[str, Requirement]:
     return result
 
 
+def test_training_metadata_and_colab_lock_support_python_313() -> None:
+    project = tomllib.loads(
+        (REPOSITORY_ROOT / "training" / "pyproject.toml").read_text()
+    )
+    dependencies = [Requirement(value) for value in project["project"]["dependencies"]]
+    numpy_requirements = [
+        requirement
+        for requirement in dependencies
+        if canonicalize_name(requirement.name) == "numpy"
+    ]
+    lock = (REPOSITORY_ROOT / "training" / "requirements-colab.lock").read_text()
+
+    assert project["project"]["requires-python"] == ">=3.10,<3.14"
+    assert len(numpy_requirements) == 2
+    assert {
+        (str(requirement.specifier), str(requirement.marker))
+        for requirement in numpy_requirements
+    } == {
+        ("==1.26.4", 'python_version < "3.13"'),
+        ("==2.2.6", 'python_version >= "3.13"'),
+    }
+    assert any(
+        "--python-version=3.13" in line for line in lock.splitlines()[:10]
+    )
+    assert re.search(
+        r'^numpy==2\.2\.6 ; python_version >= "3\.13" \\$',
+        lock,
+        re.MULTILINE,
+    )
+    assert not re.search(r"^numpy==1\.26\.4 \\$", lock, re.MULTILINE)
+
+
 def test_training_runtime_pins_archived_torchdata_0_11() -> None:
     pyproject = (REPOSITORY_ROOT / "training" / "pyproject.toml").read_text()
 
