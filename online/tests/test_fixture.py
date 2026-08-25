@@ -66,7 +66,7 @@ def test_tiny_world_contract_documents_round_trip() -> None:
         document = json.loads((FIXTURE / relative).read_text())
         assert validate_contract(contract, document)
     run = json.loads((FIXTURE / "run.json").read_text())
-    assert run["datasetConfig"] == "demo_catalog_2026_06"
+    assert run["datasetConfig"] == "demo_crosswalk"
     assert run["runSeed"] == 7
 
 

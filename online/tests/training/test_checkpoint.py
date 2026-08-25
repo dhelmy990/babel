@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+from uuid import UUID
 
 import numpy as np
+import pytest
 
 from babel_online.feedback.bus import InMemoryFeedbackBus, TopicPartition
-from babel_online.training.checkpoint import load_latest_checkpoint
+from babel_online.training.checkpoint import CheckpointIdentity, load_latest_checkpoint
 from babel_online.training.consumer import OnlineTrainer
 from babel_online.training.working import NumpyWorkingModel
 
@@ -48,3 +50,36 @@ def test_offset_commits_only_after_complete_atomic_checkpoint(tmp_path) -> None:
     assert loaded.manifest_sha256 == hashlib.sha256(
         (checkpoint / "state.json").read_bytes()
     ).hexdigest()
+
+
+def test_checkpoint_binds_run_model_and_embedding_identity(tmp_path) -> None:
+    event = event_with_three_actions()
+    identity = CheckpointIdentity(
+        run_id=event.runId,
+        model_id=event.modelId,
+        embedding_space_id=event.embeddingSpaceId,
+    )
+    bus = InMemoryFeedbackBus()
+    bus.publish(key=str(event.creatorId), event=event)
+    trainer = OnlineTrainer(
+        model=working_model(),
+        consumer=bus.consumer(group_id=f"trainer.{event.runId}", auto_commit=False),
+        checkpoint_root=tmp_path,
+        identity=identity,
+    )
+    trainer.process_available()
+    trainer.checkpoint_and_commit()
+
+    assert load_latest_checkpoint(tmp_path).identity == identity
+    incompatible = OnlineTrainer(
+        model=working_model(),
+        consumer=bus.consumer(group_id="different-run", auto_commit=False),
+        checkpoint_root=tmp_path,
+        identity=CheckpointIdentity(
+            run_id=event.runId,
+            model_id=event.modelId,
+            embedding_space_id=UUID(int=999),
+        ),
+    )
+    with pytest.raises(ValueError, match="identity"):
+        incompatible.restore_latest()

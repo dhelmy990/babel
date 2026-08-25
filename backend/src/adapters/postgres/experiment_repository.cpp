@@ -163,7 +163,9 @@ Json runConfig(ExperimentRunId run_id, const ExperimentLaunchSnapshot& snapshot)
   for (const auto& month : snapshot.environment_sequence) {
     budgets[month] = snapshot.request.event_budget_per_month;
   }
-  return nlohmann::ordered_json{
+  // std::map-backed JSON gives the same sorted-key, compact UTF-8 bytes used by
+  // the Python worker's canonical launch verifier after PostgreSQL jsonb decode.
+  return Json{
       {"schemaVersion", 1},
       {"runId", run_id.value},
       {"datasetRepo", snapshot.source.repository},

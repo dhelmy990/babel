@@ -87,18 +87,44 @@ class NumpyWorkingModel:
         gradients = {
             item_id: np.zeros(100, dtype=np.float32) for item_id in self._residuals
         }
+        query_gradient = np.zeros(100, dtype=np.float32)
         for pair, coefficient in zip(pairs, coefficients, strict=True):
             gradients[pair.positive_id] += float(coefficient) * self._query
             gradients[pair.negative_id] -= float(coefficient) * self._query
+            query_gradient += float(coefficient) * (
+                self._frozen[pair.positive_id]
+                + self._residuals[pair.positive_id]
+                - self._frozen[pair.negative_id]
+                - self._residuals[pair.negative_id]
+            )
         for item_id, gradient in gradients.items():
             self._residuals[item_id] -= self.learning_rate * gradient
             if not np.isfinite(self._residuals[item_id]).all():
                 raise FloatingPointError("online residual update is non-finite")
+        self._query = np.asarray(self._query - self.learning_rate * query_gradient, dtype="<f4")
+        query_norm = float(np.linalg.norm(self._query))
+        if query_norm == 0.0 or not np.isfinite(query_norm):
+            raise FloatingPointError("online context update is non-finite")
+        self._query /= query_norm
         return loss
+
+    def transfer_state_dict(self) -> dict[str, Any]:
+        """State that can initialize a child on a different run's Babel IDs."""
+        return {"queryVector": self._query.tolist()}
+
+    def load_transfer_state(self, state: Mapping[str, Any]) -> None:
+        vector = np.asarray(state.get("queryVector"), dtype="<f4").reshape(-1)
+        if vector.shape != (100,) or not np.isfinite(vector).all():
+            raise ValueError("transfer query vector must be finite 100d float32")
+        norm = float(np.linalg.norm(vector))
+        if norm == 0.0:
+            raise ValueError("transfer query vector must be nonzero")
+        self._query = np.asarray(vector / norm, dtype="<f4")
 
     def state_dict(self) -> dict[str, Any]:
         return {
             "learningRate": self.learning_rate,
+            "transferState": self.transfer_state_dict(),
             "residuals": {
                 str(item_id): self._residuals[item_id].tolist()
                 for item_id in sorted(self._residuals, key=lambda value: value.hex)
@@ -125,6 +151,11 @@ class NumpyWorkingModel:
                 raise ValueError("working residual must be finite 100d float32")
             self._residuals[item_id] = vector.copy()
         self.learning_rate = float(learning_rate)
+        transfer = state.get("transferState")
+        if transfer is not None:
+            if not isinstance(transfer, Mapping):
+                raise ValueError("working transfer state is invalid")
+            self.load_transfer_state(transfer)
 
 
 __all__ = ["NumpyWorkingModel"]

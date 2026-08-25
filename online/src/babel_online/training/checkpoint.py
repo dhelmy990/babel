@@ -14,6 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import numpy as np
 
@@ -21,6 +22,13 @@ from babel_online.feedback.bus import TopicPartition
 
 
 _CHECKPOINT = re.compile(r"checkpoint-step-([0-9]{8})$")
+
+
+@dataclass(frozen=True, slots=True)
+class CheckpointIdentity:
+    run_id: UUID
+    model_id: UUID
+    embedding_space_id: UUID
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +41,7 @@ class CheckpointState:
     model_state: dict[str, Any]
     rng_state: bytes
     manifest_sha256: str
+    identity: CheckpointIdentity | None
 
 
 def _canonical_json(value: object) -> bytes:
@@ -83,6 +92,7 @@ def save_online_checkpoint(
     metrics: Mapping[str, float | int],
     model_state: Mapping[str, Any],
     rng_state: bytes | None = None,
+    identity: CheckpointIdentity | None = None,
 ) -> Path:
     root_path = Path(root)
     root_path.mkdir(parents=True, exist_ok=True)
@@ -112,6 +122,15 @@ def save_online_checkpoint(
                 },
                 "rngStateBase64": base64.b64encode(rng_state or _rng_bytes()).decode(
                     "ascii"
+                ),
+                "identity": (
+                    {
+                        "runId": str(identity.run_id),
+                        "modelId": str(identity.model_id),
+                        "embeddingSpaceId": str(identity.embedding_space_id),
+                    }
+                    if identity is not None
+                    else None
                 ),
             }
         )
@@ -155,6 +174,16 @@ def _load_checkpoint(path: Path) -> CheckpointState:
     }:
         raise ValueError(f"checkpoint checksum mismatch: {path}")
     state = json.loads(state_bytes)
+    identity_row = state.get("identity")
+    identity = (
+        CheckpointIdentity(
+            run_id=UUID(identity_row["runId"]),
+            model_id=UUID(identity_row["modelId"]),
+            embedding_space_id=UUID(identity_row["embeddingSpaceId"]),
+        )
+        if identity_row is not None
+        else None
+    )
     return CheckpointState(
         path=path,
         step=int(state["step"]),
@@ -164,6 +193,7 @@ def _load_checkpoint(path: Path) -> CheckpointState:
         model_state=dict(state["modelState"]),
         rng_state=base64.b64decode(state["rngStateBase64"], validate=True),
         manifest_sha256=state_sha,
+        identity=identity,
     )
 
 
@@ -183,6 +213,7 @@ def load_latest_checkpoint(root: str | Path) -> CheckpointState | None:
 
 
 __all__ = [
+    "CheckpointIdentity",
     "CheckpointState",
     "load_latest_checkpoint",
     "restore_rng",

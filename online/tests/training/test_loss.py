@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from uuid import UUID
 
 import numpy as np
 import pytest
@@ -36,3 +37,25 @@ def test_weighted_pairwise_loss_and_tiny_update_are_finite_and_decrease() -> Non
     assert materialized.dtype == np.dtype("<f4")
     assert np.linalg.norm(materialized) == pytest.approx(1.0)
     assert hashlib.sha256(model.frozen_bytes()).hexdigest() == frozen_before
+
+
+def test_child_transfers_learned_context_without_reusing_prior_run_item_ids() -> None:
+    pairs = pairs_from_event(event_with_three_actions())
+    first = NumpyWorkingModel(
+        {key: np.eye(100, dtype=np.float32)[index] for index, key in enumerate((INCLUDED, EXCLUDED, IGNORED))},
+        query_vector=np.eye(100, dtype=np.float32)[0],
+    )
+    first.train_pairs(pairs)
+    transfer = first.transfer_state_dict()
+    new_ids = [UUID(int=900 + index) for index in range(3)]
+    second = NumpyWorkingModel(
+        {key: np.eye(100, dtype=np.float32)[index] for index, key in enumerate(new_ids)},
+        query_vector=np.eye(100, dtype=np.float32)[0],
+    )
+
+    second.load_transfer_state(transfer)
+
+    np.testing.assert_allclose(
+        second.transfer_state_dict()["queryVector"], transfer["queryVector"], atol=1e-7
+    )
+    assert set(second.state_dict()["residuals"]) == {str(key) for key in new_ids}

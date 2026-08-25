@@ -92,17 +92,17 @@ Kafka offset/lag, trainer step and rolling rank loss, checkpoint state, serving
 sync, and active model version. Hidden graph/PPR/clickstream/profile/random
 inputs and Colab losses are not part of the backend DTOs.
 
-The backend owns persistence and calls an `ExperimentWorker` with only the run
-UUID after the immutable launch JSON is committed. The current runtime leaves
-that callback disconnected until the loopback `babel-online run --run-id
-<uuid>` integration is composed; attempted starts fail durably instead of
-falling back to an in-process Python or browser launch. See
-[the online worker runbook](docs/runbooks/online-demo-worker.md).
+The backend owns persistence and calls the authenticated loopback
+`babel-online serve` worker with only the run UUID after the immutable launch
+JSON is committed. The Python worker reloads and verifies the immutable launch
+from PostgreSQL, then acquires the full June/July bundle from the private Hub at
+the exact recorded commit. It has no live-Wikipedia or arbitrary-local-data
+fallback. See [the experiment runbook](docs/runbooks/online-experiment.md).
 
-Migration 005 is schema-only: it never inserts placeholder model provenance.
-The release/worker integration must register a verified immutable original
-manifest before an experiment can start. Until then the selector is empty and
-unknown model IDs are rejected.
+Migrations 005 and 006 are schema-only: they never insert placeholder model
+provenance. The worker registers only a configured checksum-verified artifact.
+The repository fixture is visibly labeled as a deterministic demo stand-in and
+must be replaced by the complete Colab artifact for research runs.
 
 ## Migrate Personal Data
 

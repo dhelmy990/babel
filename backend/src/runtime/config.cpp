@@ -22,6 +22,15 @@ bool validInstanceToken(std::string_view value) {
          });
 }
 
+bool validLoopbackEndpoint(std::string_view value) {
+  constexpr std::string_view prefix = "http://127.0.0.1:";
+  return value.starts_with(prefix) && value.size() > prefix.size() &&
+         std::all_of(value.begin() + static_cast<std::ptrdiff_t>(prefix.size()), value.end(),
+                     [](unsigned char character) {
+                       return character >= '0' && character <= '9';
+                     });
+}
+
 }  // namespace
 
 Result<RuntimeConfig> RuntimeConfig::fromEnvironment() {
@@ -42,6 +51,18 @@ Result<RuntimeConfig> RuntimeConfig::fromEnvironment(const Environment& environm
   config.instance_token = environment("BABEL_INSTANCE_TOKEN");
   if (config.instance_token && !validInstanceToken(*config.instance_token)) {
     return invalidArgument("BABEL_INSTANCE_TOKEN must contain exactly 64 lowercase hex digits");
+  }
+  if (const auto endpoint = environment("BABEL_ONLINE_WORKER_ENDPOINT")) {
+    if (!validLoopbackEndpoint(*endpoint)) {
+      return invalidArgument(
+          "BABEL_ONLINE_WORKER_ENDPOINT must be numeric IPv4 loopback HTTP");
+    }
+    config.online_worker_endpoint = *endpoint;
+  }
+  config.online_worker_token = environment("BABEL_ONLINE_WORKER_TOKEN");
+  if (config.online_worker_token && !validInstanceToken(*config.online_worker_token)) {
+    return invalidArgument(
+        "BABEL_ONLINE_WORKER_TOKEN must contain exactly 64 lowercase hex digits");
   }
   config.huggingface_token = environment("HF_TOKEN");
   if (config.huggingface_token && invalidEnvironmentValue(*config.huggingface_token)) {

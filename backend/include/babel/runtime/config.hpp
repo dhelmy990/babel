@@ -33,9 +33,11 @@ struct RuntimeConfig {
       "/home/dhelmy990/Data/babel-data/cache/backend-seed"};
   ExperimentSourcePin experiment_source{
       .repository = "dhelmy990/babel-wikipedia-experiment",
-      .configuration = "demo_catalog_2026_06",
+      .configuration = "demo_crosswalk",
       .commit_sha = "e1acc648fcace8820dd5ee70bae9216ea4334555",
   };
+  std::string online_worker_endpoint{"http://127.0.0.1:8790"};
+  std::optional<std::string> online_worker_token;
 
   static Result<RuntimeConfig> fromEnvironment();
   static Result<RuntimeConfig> fromEnvironment(const Environment&);

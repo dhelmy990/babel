@@ -95,6 +95,25 @@ def test_post_recommends_only_current_run_created_babels_with_timings() -> None:
     assert "Server-Timing" in http.headers
 
 
+def test_post_serializes_the_wire_payload_once(monkeypatch) -> None:
+    state, _registry, _created_ids, _created_sources = serving_state()
+    request = json.loads((FIXTURE / "observable/request.json").read_text())
+    calls = 0
+    original = RecommendationResponseV1.model_dump_json
+
+    def counted(self, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(RecommendationResponseV1, "model_dump_json", counted)
+
+    http = TestClient(create_app(state)).post("/api/v1/recommendations", json=request)
+
+    assert http.status_code == 200
+    assert calls == 1
+
+
 def test_post_rejects_duplicate_source_for_same_creator() -> None:
     state, _registry, _created_ids, _created_sources = serving_state()
     request = json.loads((FIXTURE / "observable/request.json").read_text())

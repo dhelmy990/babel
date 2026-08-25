@@ -20,8 +20,17 @@ PGVECTOR_CREATED_BABEL_QUERY = """
 SELECT eb.babel_id,
        eb.creator_id,
        xb.source_article_key,
-       1 - (eb.embedding <=> %(query)s::vector) AS score
-FROM babel_embeddings AS eb
+       1 - (eb.embedding <=> %(query)s::public.vector) AS score
+FROM (
+  SELECT DISTINCT ON (run_id, babel_id)
+         run_id, babel_id, creator_id, embedding_space_id, serving_model_id,
+         materialized_model_version, embedding
+  FROM babel_embeddings
+  WHERE run_id = %(run_id)s
+    AND serving_model_id = %(model_id)s
+    AND materialized_model_version <= %(model_version)s
+  ORDER BY run_id, babel_id, materialized_model_version DESC
+) AS eb
 JOIN experiment_babels AS xb
   ON xb.run_id = eb.run_id AND xb.babel_id = eb.babel_id
 JOIN run_embedding_states AS rs ON rs.run_id = eb.run_id
@@ -32,7 +41,7 @@ WHERE eb.run_id = %(run_id)s
   AND eb.serving_model_id = %(model_id)s
   AND eb.materialized_model_version <= %(model_version)s
   AND eb.creator_id <> %(exclude_creator_id)s
-ORDER BY eb.embedding <=> %(query)s::vector, eb.babel_id
+ORDER BY eb.embedding <=> %(query)s::public.vector, eb.babel_id
 LIMIT %(limit)s
 """.strip()
 

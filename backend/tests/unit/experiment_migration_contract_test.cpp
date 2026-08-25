@@ -25,3 +25,19 @@ TEST_CASE("online experiment migration freezes launch identity and source reuse"
   CHECK(migration.find("prevent_recommender_model_mutation") != std::string::npos);
   CHECK(migration.find("INSERT INTO recommender_models") == std::string::npos);
 }
+
+TEST_CASE("online runtime migration gives pgvector and the worker durable state") {
+  const auto migration_path =
+      std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
+      "migrations/006_online_runtime.sql";
+  std::ifstream migration_file(migration_path);
+  REQUIRE(migration_file.good());
+
+  const std::string migration{std::istreambuf_iterator<char>{migration_file}, {}};
+  CHECK(migration.find("CREATE TABLE babel_embeddings") != std::string::npos);
+  CHECK(migration.find("embedding public.vector(100)") != std::string::npos);
+  CHECK(migration.find("USING hnsw") != std::string::npos);
+  CHECK(migration.find("CREATE TABLE run_embedding_states") != std::string::npos);
+  CHECK(migration.find("finalized_at") != std::string::npos);
+  CHECK(migration.find("INSERT INTO recommender_models") == std::string::npos);
+}

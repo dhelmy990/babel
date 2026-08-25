@@ -195,10 +195,11 @@ The start body is a closed operator DTO: `startingModelId`,
 `retrievalBackend`, `creatorCount`, `scenario`, `eventBudgetPerMonth`, and
 `runSeed`. The service freezes the dataset repository/configuration/revision and
 all worker defaults into `experiment-run-v1` JSON, hashes it, and commits the run
-before calling `ExperimentWorker::start(runId)`. The production callback is the
-future loopback `babel-online run --run-id <uuid>` integration; it receives no
-hidden configuration over the CLI. An unavailable callback marks the persisted
-launch failed. Graceful stop first records `stop_requested`, then calls
+before calling `ExperimentWorker::start(runId)`. The production callback is an
+authenticated loopback POST to `babel-online serve`; it receives only the run
+UUID. Python reloads the launch JSON from PostgreSQL and verifies its canonical
+SHA-256 before starting. An unavailable callback marks the persisted launch
+failed. Graceful stop first records `stop_requested`, then calls
 `requestGracefulStop(runId)` and never terminates a process.
 
 The default source pin can be replaced with
@@ -208,11 +209,11 @@ The default source pin can be replaced with
 the original and immutable children independently and disables incompatible
 embedding spaces.
 
-Migration 005 creates the registry but does not bootstrap a fixture or
-placeholder model. Release composition must register the verified immutable
-original manifest before serving the operator workflow. With no registered
-model, the selector stays empty and launch rejects the model ID before creating
-a run.
+Migrations 005 and 006 create the registry/vector runtime but do not bootstrap
+a fixture or placeholder model. Worker composition must provide a
+checksum-verified immutable artifact before serving the operator workflow. The
+included deterministic stand-in is explicitly labeled as a demo fixture; with
+no configured model, the selector stays empty and launch rejects model IDs.
 
 Run and activity responses use camelCase and `Cache-Control: no-store`. Their
 observable whitelist covers new Babel and recommendation decisions, accepted

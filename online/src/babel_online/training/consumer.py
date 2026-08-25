@@ -9,6 +9,7 @@ from typing import Any, Callable
 from babel_online.feedback.bus import FeedbackConsumer, TopicPartition
 
 from .checkpoint import (
+    CheckpointIdentity,
     CheckpointState,
     load_latest_checkpoint,
     restore_rng,
@@ -24,10 +25,12 @@ class OnlineTrainer:
         model: Any,
         consumer: FeedbackConsumer,
         checkpoint_root: str | Path,
+        identity: CheckpointIdentity | None = None,
     ) -> None:
         self.model = model
         self.consumer = consumer
         self.checkpoint_root = Path(checkpoint_root)
+        self.identity = identity
         self.global_step = 0
         self.training_version = 0
         self.processed_events = 0
@@ -132,6 +135,7 @@ class OnlineTrainer:
             next_offsets=self.next_offsets,
             metrics=self.metrics,
             model_state=self.model.state_dict(),
+            identity=self.identity,
         )
         self.consumer.commit(self.next_offsets)
         return checkpoint
@@ -140,6 +144,8 @@ class OnlineTrainer:
         checkpoint = load_latest_checkpoint(self.checkpoint_root)
         if checkpoint is None:
             return None
+        if self.identity is not None and checkpoint.identity != self.identity:
+            raise ValueError("online checkpoint identity does not match this run")
         self.model.load_state_dict(checkpoint.model_state)
         self.global_step = int(checkpoint.metrics["optimizerSteps"])
         self.training_version = checkpoint.version

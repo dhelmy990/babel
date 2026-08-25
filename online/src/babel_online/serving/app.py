@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from threading import BoundedSemaphore
 from time import perf_counter_ns
 
 import numpy as np
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, Response
 
 from ..contracts import (
     RecommendationCandidateV1,
@@ -32,7 +30,7 @@ def create_app(state: ServingState, *, max_concurrent_requests: int = 8) -> Fast
     semaphore = BoundedSemaphore(max_concurrent_requests)
 
     @app.post("/api/v1/recommendations")
-    def recommend(request: RecommendationRequestV1) -> JSONResponse:
+    def recommend(request: RecommendationRequestV1) -> Response:
         request_started = perf_counter_ns()
         queued_at = request_started
         semaphore.acquire()
@@ -123,32 +121,27 @@ def create_app(state: ServingState, *, max_concurrent_requests: int = 8) -> Fast
                 "queryVectorSha256": query_sha,
                 "candidates": candidates,
             }
-            started = perf_counter_ns()
-            json.dumps(
-                {
-                    **base,
-                    "requestId": str(request.requestId),
-                    "runId": str(request.runId),
-                    "modelId": str(snapshot.model.modelId),
-                    "embeddingSpaceId": str(materialized.embedding_space_id),
-                    "candidates": [row.model_dump(mode="json") for row in candidates],
-                },
-                separators=(",", ":"),
-                sort_keys=True,
-            )
-            serialization_ns = perf_counter_ns() - started
+            serialization_started = perf_counter_ns()
             timings = {
                 "queue": queue_ns,
                 "encode": encode_ns,
                 "context": context_ns,
                 "ann": ann_ns,
                 "filtering": filtering_ns,
-                "serialization": serialization_ns,
+                "serialization": 0,
                 "serverTotal": perf_counter_ns() - request_started,
             }
             response = RecommendationResponseV1(**base, timingsNs=timings)
-            return JSONResponse(
-                content=response.model_dump(mode="json"),
+            timings["serialization"] = perf_counter_ns() - serialization_started
+            timings["serverTotal"] = max(
+                perf_counter_ns() - request_started,
+                sum(value for name, value in timings.items() if name != "serverTotal"),
+            )
+            response = response.model_copy(update={"timingsNs": timings})
+            payload = response.model_dump_json()
+            return Response(
+                content=payload,
+                media_type="application/json",
                 headers={"Server-Timing": server_timing_header(timings)},
             )
         finally:

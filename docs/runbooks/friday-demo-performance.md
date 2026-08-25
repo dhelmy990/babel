@@ -18,10 +18,10 @@ RPS, errors, timeouts, trainer step time, Kafka lag when available, maximum sync
 duration, and p95 slowdown relative to serving-only. Percentiles use nearest
 rank and exclude warmup rows.
 
-Slice 3 currently times a duplicate `json.dumps` for its `serialization` stage,
-not the framework's actual response encoding/socket write. Use client total as
-the authoritative latency number and treat `serialization` only as a server
-estimate until that instrumentation is corrected by its owning lane.
+Slice 3 serializes the wire payload once and returns those exact bytes. Its
+`serialization` stage measures response-model preparation; socket write time is
+therefore represented only by client total/overhead. Use client total as the
+authoritative end-to-end latency number.
 
 ## Install and verify
 

@@ -35,7 +35,7 @@ def default_run_config(
         schemaVersion=1,
         runId=run_id,
         datasetRepo="dhelmy990/babel-wikipedia-experiment",
-        datasetConfig="demo_catalog_2026_06",
+        datasetConfig="demo_crosswalk",
         datasetRevision=dataset_revision,
         startingModelId=starting_model_id,
         retrievalBackend="pgvector",

@@ -31,6 +31,7 @@
 #include "babel/http/profile_controller.hpp"
 #include "babel/runtime/seed_job_runner.hpp"
 #include "babel/runtime/experiment_job_runner.hpp"
+#include "babel/runtime/experiment_worker_http_client.hpp"
 
 namespace babel {
 class BackendInstanceLease::State final {
@@ -211,7 +212,9 @@ Result<void> Application::verifySchemaReady() {
           to_regclass('public.recommender_models') IS NOT NULL AND
           to_regclass('public.experiment_runs') IS NOT NULL AND
           to_regclass('public.experiment_babels') IS NOT NULL AND
-          to_regclass('public.experiment_activity_logs') IS NOT NULL
+          to_regclass('public.experiment_activity_logs') IS NOT NULL AND
+          to_regclass('public.babel_embeddings') IS NOT NULL AND
+          to_regclass('public.run_embedding_states') IS NOT NULL
       )");
     if (!tables_ready.one_field().as<bool>()) {
       return tl::make_unexpected(ApplicationError{
@@ -220,8 +223,8 @@ Result<void> Application::verifySchemaReady() {
       });
     }
     if (transaction.exec(
-            "SELECT count(*) = 5 FROM schema_migrations "
-            "WHERE version IN ('1', '2', '3', '4', '5')")
+            "SELECT count(*) = 6 FROM schema_migrations "
+            "WHERE version IN ('1', '2', '3', '4', '5', '6')")
             .one_field()
             .as<bool>() == false) {
       return tl::make_unexpected(ApplicationError{
@@ -299,8 +302,15 @@ Result<void> Application::serve() {
   if (!admin_nonce) return tl::make_unexpected(admin_nonce.error());
   AdminSecurity admin_security(std::move(*admin_nonce));
 
-  ExperimentJobRunner experiment_worker({}, {});
-  ExperimentService experiment_service(experiment_runs, experiment_worker,
+  std::unique_ptr<ExperimentWorker> experiment_worker;
+  if (config_.online_worker_token) {
+    experiment_worker = std::make_unique<ExperimentWorkerHttpClient>(
+        config_.online_worker_endpoint, *config_.online_worker_token);
+  } else {
+    experiment_worker = std::make_unique<ExperimentJobRunner>(
+        ExperimentJobRunner::Start{}, ExperimentJobRunner::GracefulStop{});
+  }
+  ExperimentService experiment_service(experiment_runs, *experiment_worker,
                                        config_.experiment_source);
   ExperimentController experiment_controller(admin_security, experiment_service);
 

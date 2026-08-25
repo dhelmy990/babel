@@ -1,0 +1,704 @@
+"""Runnable 50-creator Friday-demo worker composed across HTTP, Kafka, and PostgreSQL."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import threading
+import time
+from collections.abc import Callable, Mapping
+from pathlib import Path
+from typing import Any
+from uuid import UUID, uuid5
+
+import numpy as np
+
+from ..contracts import (
+    ActivityLogV1,
+    CandidateActionV1,
+    FeedbackEventV1,
+    ModelManifestV1,
+    RecommendationActivityV1,
+    RecommendationRequestV1,
+    canonical_pgvector_snapshot_sha256,
+)
+from ..feedback import (
+    KafkaFeedbackConsumer,
+    KafkaFeedbackProducer,
+    OffsetRange,
+    TopicPartition,
+    export_offset_ranges,
+)
+from ..model.candidate_index import MaterializedServingState
+from ..model.item_tower import ItemTower
+from ..model.pgvector_index import PgvectorCandidateIndex
+from ..model.registry import ModelRegistry
+from ..observable import CreatedBabel, VectorRecord
+from ..serving import ServingState, create_app
+from ..simulation.client import RecommendationClient
+from ..simulation.decisions import (
+    action_probabilities,
+    combined_relevance,
+    decide_candidate,
+    deterministic_draw,
+)
+from ..training.checkpoint import CheckpointIdentity, load_latest_checkpoint
+from ..training.consumer import OnlineTrainer
+from ..training.synchronization import AtomicSynchronizer, export_immutable_child
+from ..training.working import NumpyWorkingModel
+from .database import RuntimeDatabase, lifecycle_activity
+from .dataset_bundle import DatasetBundle
+
+
+def isolate_new_run_offsets(consumer: Any) -> dict[TopicPartition, int]:
+    """Ignore historical topic records by starting at one captured watermark."""
+    start = consumer.high_watermarks()
+    consumer.seek(start)
+    return start
+
+
+class RunScopedConsumer:
+    """Fail closed if another run appears after this run's start watermark."""
+
+    def __init__(self, consumer: Any, *, run_id: UUID) -> None:
+        self._consumer = consumer
+        self.run_id = run_id
+
+    def poll(self, timeout_seconds: float = 0.0):
+        record = self._consumer.poll(timeout_seconds)
+        if record is not None and record.event.runId != self.run_id:
+            raise RuntimeError("cross-run Kafka feedback contamination detected")
+        return record
+
+    def __getattr__(self, name: str):
+        return getattr(self._consumer, name)
+
+    def records(self, offset_range: OffsetRange):
+        records = self._consumer.records(offset_range)
+        if any(record.event.runId != self.run_id for record in records):
+            raise RuntimeError("cross-run Kafka export contamination detected")
+        return records
+
+
+class _UvicornThread:
+    def __init__(self, app: Any, *, host: str, port: int) -> None:
+        import uvicorn
+
+        self.server = uvicorn.Server(
+            uvicorn.Config(app, host=host, port=port, log_level="warning", access_log=False)
+        )
+        self.thread = threading.Thread(target=self.server.run, daemon=True)
+
+    def start(self) -> None:
+        self.thread.start()
+        deadline = time.monotonic() + 10.0
+        while not self.server.started:
+            if not self.thread.is_alive() or time.monotonic() >= deadline:
+                raise RuntimeError("recommendation server did not start")
+            time.sleep(0.02)
+
+    def stop(self) -> None:
+        self.server.should_exit = True
+        self.thread.join(timeout=5.0)
+
+
+def _vector_sha(vector: tuple[float, ...]) -> str:
+    return hashlib.sha256(np.asarray(vector, dtype="<f4").tobytes()).hexdigest()
+
+
+def _snapshot_sha(records: list[VectorRecord]) -> str:
+    return canonical_pgvector_snapshot_sha256(
+        {
+            "babelId": row.babel.babelId,
+            "creatorId": row.babel.creatorId,
+            "sourceArticleKey": row.babel.sourceArticleKey,
+            "catalogContentHash": row.catalogContentHash,
+            "embeddingSpaceId": row.embeddingSpaceId,
+            "servingModelId": row.servingModelId,
+            "materializedModelVersion": row.materializedModelVersion,
+            "vectorSha256": _vector_sha(row.vector),
+        }
+        for row in records
+    )
+
+
+def _activity(
+    run_id: UUID,
+    *,
+    component: str,
+    event: str,
+    message: str,
+    metrics: Mapping[str, int | float],
+    details: object,
+) -> ActivityLogV1:
+    return ActivityLogV1(
+        schemaVersion=1,
+        runId=run_id,
+        sequence=1,
+        occurredAtNs=time.time_ns(),
+        level="info",
+        component=component,
+        event=event,
+        message=message,
+        metrics=dict(metrics),
+        details=details,
+    )
+
+
+class FridayDemoRuntime:
+    """One immutable run selected by the dashboard and persisted in PostgreSQL."""
+
+    def __init__(
+        self,
+        *,
+        config: Any,
+        database: RuntimeDatabase,
+        bundle: DatasetBundle,
+        model_lineage: list[Any],
+        kafka_bootstrap_servers: str,
+        recommendation_port: int,
+        stop_event: threading.Event,
+    ) -> None:
+        self.config = config
+        self.database = database
+        self.bundle = bundle
+        if not model_lineage:
+            raise ValueError("model lineage cannot be empty")
+        self.model_lineage = model_lineage
+        self.starting_artifact = model_lineage[-1]
+        self.starting_model = self.starting_artifact.manifest
+        self.kafka_bootstrap_servers = kafka_bootstrap_servers
+        self.recommendation_port = recommendation_port
+        self.stop_event = stop_event
+        self.recommendation_endpoint = f"http://127.0.0.1:{recommendation_port}"
+        self._server: _UvicornThread | None = None
+        self._trainer_thread: threading.Thread | None = None
+        self._trainer_stop = threading.Event()
+        self._records: list[VectorRecord] = []
+        self._created: list[CreatedBabel] = []
+        self._content_hashes: dict[UUID, str] = {}
+        self._histories: dict[UUID, list[UUID]] = {}
+        self._last_sync_version = 0
+        self._serving_version = 0
+        self._last_logged_training_step = 0
+        self._serving_vectors: dict[UUID, np.ndarray] = {}
+
+    def request_stop(self) -> None:
+        self.stop_event.set()
+
+    def stop_serving(self) -> None:
+        if self._server is not None:
+            self._server.stop()
+            self._server = None
+
+    def _catalogs(self) -> dict[str, list[dict[str, Any]]]:
+        return {
+            "2026-06": list(self.bundle.configs["demo_catalog_2026_06"]),
+            "2026-07": list(self.bundle.configs["demo_catalog_2026_07"]),
+        }
+
+    def _hidden_edges(self) -> dict[str, set[tuple[str, str]]]:
+        result: dict[str, set[tuple[str, str]]] = {"2026-06": set(), "2026-07": set()}
+        for period in result:
+            config = f"demo_simulator_{period.replace('-', '_')}_hidden"
+            for row in self.bundle.configs[config]:
+                if row.get("record_type") != "edges":
+                    continue
+                payload = json.loads(row["payload_json"])
+                result[period].add(
+                    (payload["source_article_key"], payload["target_article_key"])
+                )
+        return result
+
+    def _plan(self) -> list[tuple[str, UUID, dict[str, Any], UUID]]:
+        catalogs = self._catalogs()
+        used: dict[UUID, set[str]] = {}
+        plan: list[tuple[str, UUID, dict[str, Any], UUID]] = []
+        creators = [uuid5(self.config.runId, f"creator:{index}") for index in range(self.config.creatorCount)]
+        sequence = 0
+        for period in self.config.environmentSequence:
+            rows = catalogs[period]
+            budget = self.config.perMonthEventBudget[period]
+            for month_index in range(budget):
+                creator = creators[month_index % len(creators)]
+                chosen = None
+                for shift in range(len(rows)):
+                    row = rows[(month_index * 37 + shift + (17 if period == "2026-07" else 0)) % len(rows)]
+                    if row["article_key"] not in used.setdefault(creator, set()):
+                        chosen = row
+                        break
+                if chosen is None:
+                    raise RuntimeError("creator source support exhausted without replacement")
+                used[creator].add(chosen["article_key"])
+                babel_id = uuid5(self.config.runId, f"babel:{period}:{sequence}:{creator}")
+                plan.append((period, creator, chosen, babel_id))
+                sequence += 1
+        return plan
+
+    def _materialized_records(self, version: int) -> list[VectorRecord]:
+        return [
+            VectorRecord(
+                babel=babel,
+                catalogContentHash=self._content_hashes[babel.babelId],
+                embeddingSpaceId=self.starting_model.embeddingSpace.embeddingSpaceId,
+                servingModelId=self.starting_model.modelId,
+                materializedModelVersion=version,
+                vector=tuple(float(value) for value in self._serving_vectors[babel.babelId]),
+            )
+            for babel in self._created
+        ]
+
+    def _state(self, version: int, sha: str) -> MaterializedServingState:
+        return MaterializedServingState(
+            run_id=self.config.runId,
+            model_id=self.starting_model.modelId,
+            model_version=version,
+            embedding_space_id=self.starting_model.embeddingSpace.embeddingSpaceId,
+            pgvector_snapshot_sha256=sha,
+            backend_snapshot_sha256=sha,
+        )
+
+    def _persist_and_activate(self, version: int, *, synchronize: bool) -> None:
+        if synchronize:
+            self._serving_vectors = {
+                babel.babelId: self.model.materialized_vector(babel.babelId)
+                for babel in self._created
+            }
+            self._serving_version = version
+        records = self._materialized_records(version)
+        self.database.insert_vectors(records)
+        sha = _snapshot_sha(records)
+        state = self._state(version, sha)
+        self.database.activate_embedding_state(
+            run_id=self.config.runId,
+            model_id=self.starting_model.modelId,
+            model_version=version,
+            embedding_space_id=self.starting_model.embeddingSpace.embeddingSpaceId,
+            pgvector_sha256=sha,
+            backend_sha256=sha,
+        )
+        if synchronize:
+            artifact = self.synchronizer.publish(
+                model=self.model,
+                selected_model_id=self.starting_model.modelId,
+                materialized_state=state,
+                candidate_index=self.index,
+                vector_records=records,
+            )
+            self._last_sync_version = version
+            self.database.append_activity(
+                _activity(
+                    self.config.runId,
+                    component="training",
+                    event="serving_synchronized",
+                    message=f"Serving synchronized to online version {version}.",
+                    metrics={"modelVersion": version},
+                    details={
+                        "kind": "synchronization",
+                        "checkpointPath": str(artifact.path),
+                        "checkpointSha256": artifact.state_sha256,
+                        "synchronizationVersion": version,
+                        "modelId": self.starting_model.modelId,
+                        "modelVersion": version,
+                    },
+                )
+            )
+        else:
+            self.serving.apply_sync(
+                selected_model_id=self.starting_model.modelId,
+                materialized_state=state,
+                candidate_index=self.index,
+                vector_records=records,
+            )
+        self._records = records
+
+    def _materialize_new_babel(self) -> None:
+        """Index a new Babel without exposing unsynchronized trainer state."""
+        self._persist_and_activate(self._serving_version, synchronize=False)
+
+    def _record_recommendation(self, babel: CreatedBabel, response: Any, event: FeedbackEventV1, client_ns: int) -> None:
+        actions = {"include": [], "exclude": [], "ignore": []}
+        for action in event.candidateActions:
+            actions[action.action].append(action.babelId)
+        server_ns = response.timingsNs["serverTotal"]
+        self.database.append_activity(
+            _activity(
+                self.config.runId,
+                component="serving",
+                event="recommendation_completed",
+                message=f'Creator {str(babel.creatorId)[:8]} created "{babel.title}".',
+                metrics={
+                    **{f"{name}Ns": value for name, value in response.timingsNs.items()},
+                    "clientTotalNs": client_ns,
+                    "clientOverheadNs": max(0, client_ns - server_ns),
+                },
+                details=RecommendationActivityV1(
+                    kind="recommendation",
+                    creatorId=babel.creatorId,
+                    newBabelId=babel.babelId,
+                    newBabelTitle=babel.title,
+                    candidateBabelIds=[row.babelId for row in response.candidates],
+                    includeBabelIds=actions["include"],
+                    excludeBabelIds=actions["exclude"],
+                    ignoreBabelIds=actions["ignore"],
+                    acceptedEdgeCount=len(actions["include"]),
+                    modelId=response.modelId,
+                    modelVersion=response.modelVersion,
+                ),
+            )
+        )
+
+    def _simulate(self, plan: list[tuple[str, UUID, dict[str, Any], UUID]], hidden: dict[str, set[tuple[str, str]]]) -> None:
+        client = RecommendationClient(self.recommendation_endpoint)
+        started = time.monotonic()
+        try:
+            for event_number, (period, creator_id, article, babel_id) in enumerate(plan):
+                if self.stop_event.is_set() or self.database.stop_requested(self.config.runId):
+                    break
+                text = article.get("lead_text") or article["article_text"]
+                babel = CreatedBabel(
+                    babelId=babel_id,
+                    runId=self.config.runId,
+                    creatorId=creator_id,
+                    sourceArticleKey=article["article_key"],
+                    title=article["canonical_title"],
+                    text=text,
+                    createdAtNs=time.time_ns(),
+                )
+                self.database.stage_babel(
+                    babel=babel,
+                    content_hash=article["content_hash"],
+                    event_number=event_number,
+                )
+                request = RecommendationRequestV1(
+                    schemaVersion=1,
+                    requestId=uuid5(self.config.runId, f"request:{event_number}"),
+                    runId=self.config.runId,
+                    creatorId=creator_id,
+                    newBabelId=babel_id,
+                    newSourceArticleKey=babel.sourceArticleKey,
+                    title=babel.title,
+                    text=babel.text,
+                    historyBabelIds=self._histories.setdefault(creator_id, []),
+                    candidateCount=self.config.recommendationK,
+                )
+                client_started = time.perf_counter_ns()
+                response = client.recommend(request)
+                client_ns = time.perf_counter_ns() - client_started
+                candidate_actions = []
+                for candidate in response.candidates:
+                    related = 0.95 if (babel.sourceArticleKey, candidate.sourceArticleKey) in hidden[period] else 0.55
+                    preference = 0.7 if deterministic_draw(creator_id, candidate.babelId, period) < 0.5 else 0.4
+                    probabilities = action_probabilities(
+                        relevance=combined_relevance(
+                            relatedness_rank=related, preference_rank=preference
+                        ),
+                        epsilon=0.2,
+                        exclusion_propensity=0.25,
+                    )
+                    candidate_actions.append(
+                        CandidateActionV1(
+                            babelId=candidate.babelId,
+                            sourceArticleKey=candidate.sourceArticleKey,
+                            rank=candidate.rank,
+                            modelScore=candidate.modelScore,
+                            action=decide_candidate(
+                                probabilities,
+                                draw=deterministic_draw(
+                                    self.config.runId,
+                                    creator_id,
+                                    event_number,
+                                    candidate.babelId,
+                                ),
+                            ),
+                        )
+                    )
+                feedback = FeedbackEventV1(
+                    schemaVersion=1,
+                    eventId=uuid5(self.config.runId, f"feedback:{event_number}"),
+                    requestId=request.requestId,
+                    runId=self.config.runId,
+                    creatorId=creator_id,
+                    newBabelId=babel_id,
+                    newSourceArticleKey=babel.sourceArticleKey,
+                    modelId=response.modelId,
+                    modelVersion=response.modelVersion,
+                    embeddingSpaceId=response.embeddingSpaceId,
+                    retrievalBackend=response.retrievalBackend,
+                    candidateActions=candidate_actions,
+                    occurredAtNs=time.time_ns(),
+                )
+                record = self.producer.publish(key=str(creator_id), event=feedback)
+                self.database.finalize_babel(self.config.runId, babel_id, request.requestId)
+                self._created.append(babel)
+                self._content_hashes[babel_id] = article["content_hash"]
+                self._histories[creator_id].append(babel_id)
+                self._serving_vectors[babel_id] = self._frozen_vectors[babel_id]
+                current_version = self.trainer.training_version
+                self._materialize_new_babel()
+                self._record_recommendation(babel, response, feedback, client_ns)
+                lag = max(0, event_number + 1 - self.trainer.processed_events)
+                self.database.update_metrics(
+                    self.config.runId,
+                    created_babel_count=len(self._created),
+                    feedback_count=event_number + 1,
+                    event_rate=(event_number + 1) / max(time.monotonic() - started, 1e-6),
+                    kafka_offset=record.offset + 1,
+                    kafka_lag=lag,
+                    trainer_steps=self.trainer.global_step,
+                    rolling_rank_loss=self.trainer.metrics["rollingRankLoss"],
+                )
+                if self.trainer.global_step > self._last_logged_training_step:
+                    self._last_logged_training_step = self.trainer.global_step
+                    self.database.append_activity(
+                        _activity(
+                            self.config.runId,
+                            component="training",
+                            event="online_training_progress",
+                            message=f"Online trainer reached step {self.trainer.global_step}.",
+                            metrics={"stepTimeMs": 0.0},
+                            details={
+                                "kind": "training",
+                                "trainerStep": self.trainer.global_step,
+                                "rollingRankLoss": self.trainer.metrics["rollingRankLoss"],
+                            },
+                        )
+                    )
+                self.database.append_activity(
+                    _activity(
+                        self.config.runId,
+                        component="feedback",
+                        event="feedback_acknowledged",
+                        message=f"Feedback acknowledged at Kafka offset {record.offset}.",
+                        metrics={"kafkaLag": lag},
+                        details={
+                            "kind": "feedback",
+                            "kafkaOffset": record.offset,
+                            "kafkaLag": lag,
+                        },
+                    )
+                )
+                if (
+                    current_version >= self._last_sync_version + self.config.syncEverySteps
+                ):
+                    self._persist_and_activate(current_version, synchronize=True)
+        finally:
+            client.close()
+
+    def _finalize(self) -> ModelManifestV1:
+        self.database.transition(self.config.runId, "draining_feedback")
+        self._trainer_stop.set()
+        if self._trainer_thread is not None:
+            self._trainer_thread.join(timeout=10.0)
+        end_offsets = self.scoped_consumer.high_watermarks()
+        self.trainer.drain_to(end_offsets)
+        self.database.transition(self.config.runId, "checkpointing")
+        checkpoint = self.trainer.checkpoint_and_commit()
+        loaded_checkpoint = load_latest_checkpoint(checkpoint.parent)
+        if loaded_checkpoint is None:
+            raise RuntimeError("final online checkpoint is missing")
+        ranges = [
+            OffsetRange(partition, self.start_offsets.get(partition, 0), end)
+            for partition, end in sorted(end_offsets.items())
+        ]
+        self.database.transition(self.config.runId, "exporting_interactions")
+        export_offset_ranges(self.scoped_consumer, ranges, Path(self.config.artifactRoot) / str(self.config.runId) / "feedback")
+        version = self.trainer.training_version
+        if version > self._last_sync_version:
+            self._persist_and_activate(version, synchronize=True)
+        child_id = uuid5(self.config.runId, "immutable-child-model")
+        child = export_immutable_child(
+            Path(self.config.artifactRoot) / str(self.config.runId) / "models",
+            model=self.model,
+            parent=self.starting_model,
+            registry=self.registry,
+            run_id=self.config.runId,
+            child_model_id=child_id,
+            label=f"Post-run model {str(self.config.runId)[:8]}",
+            training_examples=self.trainer.processed_events,
+        )
+        child_root = Path(self.config.artifactRoot) / str(self.config.runId) / "models" / f"model-{child_id}"
+        self.database.register_child(child, child_root / child.checkpointPath)
+        self.database.update_metrics(
+            self.config.runId,
+            kafka_lag=0,
+            trainer_steps=self.trainer.global_step,
+            rolling_rank_loss=self.trainer.metrics["rollingRankLoss"],
+            checkpoint_path=str(checkpoint),
+            checkpoint_sha256=loaded_checkpoint.manifest_sha256,
+            serving_synced=True,
+            active_model_id=child.modelId,
+            active_model_version=version,
+        )
+        self.database.transition(self.config.runId, "completed")
+        self.database.append_activity(
+            lifecycle_activity(
+                self.config.runId,
+                "run_completed",
+                f"Run completed; immutable child {child.modelId} is selectable.",
+                metrics={"feedbackCount": self.trainer.processed_events, "modelVersion": version},
+            )
+        )
+        self.producer.close()
+        self.scoped_consumer.close()
+        return child
+
+    def run(self) -> ModelManifestV1:
+        self.database.claim_run(self.config.runId)
+        self.database.append_activity(
+            lifecycle_activity(
+                self.config.runId,
+                "run_started",
+                f"Started deterministic {self.config.creatorCount}-creator Friday demo.",
+                metrics={"creatorCount": self.config.creatorCount},
+            )
+        )
+        plan = self._plan()
+        tower = ItemTower(self.starting_model.embeddingSpace)
+        frozen = {
+            babel_id: tower.encode(
+                f"{article['canonical_title']}\n\n{article.get('lead_text') or article['article_text']}"
+            )
+            for _period, _creator, article, babel_id in plan
+        }
+        self._frozen_vectors = {key: value.copy() for key, value in frozen.items()}
+        query = np.mean(np.stack(list(frozen.values())), axis=0)
+        self.model = NumpyWorkingModel(frozen, query_vector=query, learning_rate=0.05)
+        try:
+            starting_state = json.loads(self.starting_artifact.checkpoint_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            starting_state = {}
+        if isinstance(starting_state, dict) and isinstance(
+            starting_state.get("transferState"), dict
+        ):
+            self.model.load_transfer_state(starting_state["transferState"])
+        self.registry = ModelRegistry()
+        self.registry.register_original(self.model_lineage[0].manifest)
+        for artifact in self.model_lineage[1:]:
+            self.registry.register_child(artifact.manifest)
+        self.index = PgvectorCandidateIndex(self.database.query_candidates)
+        empty_sha = _snapshot_sha([])
+        initial_state = self._state(0, empty_sha)
+        self.database.activate_embedding_state(
+            run_id=self.config.runId,
+            model_id=self.starting_model.modelId,
+            model_version=0,
+            embedding_space_id=self.starting_model.embeddingSpace.embeddingSpaceId,
+            pgvector_sha256=empty_sha,
+            backend_sha256=empty_sha,
+        )
+        self.serving = ServingState(
+            registry=self.registry,
+            selected_model_id=self.starting_model.modelId,
+            materialized_state=initial_state,
+            candidate_index=self.index,
+            vector_records=[],
+        )
+        self.synchronizer = AtomicSynchronizer(
+            Path(self.config.stateRoot) / str(self.config.runId) / "sync",
+            serving_state=self.serving,
+        )
+        self._server = _UvicornThread(
+            create_app(self.serving), host="127.0.0.1", port=self.recommendation_port
+        )
+        self._server.start()
+        self.producer = KafkaFeedbackProducer(self.kafka_bootstrap_servers)
+        raw_consumer = KafkaFeedbackConsumer(
+            self.kafka_bootstrap_servers,
+            group_id=f"{self.config.kafkaGroup}.{self.config.runId}",
+        )
+        self.start_offsets = isolate_new_run_offsets(raw_consumer)
+        self.scoped_consumer = RunScopedConsumer(raw_consumer, run_id=self.config.runId)
+        self.trainer = OnlineTrainer(
+            model=self.model,
+            consumer=self.scoped_consumer,
+            checkpoint_root=Path(self.config.stateRoot) / str(self.config.runId) / "checkpoints",
+            identity=CheckpointIdentity(
+                run_id=self.config.runId,
+                model_id=self.starting_model.modelId,
+                embedding_space_id=self.starting_model.embeddingSpace.embeddingSpaceId,
+            ),
+        )
+        self._trainer_thread = threading.Thread(
+            target=self.trainer.run_until_stopped,
+            kwargs={
+                "stop_requested": self._trainer_stop.is_set,
+                "checkpoint_every_events": self.config.checkpointEveryEvents,
+            },
+            daemon=True,
+        )
+        self._trainer_thread.start()
+        self._simulate(plan, self._hidden_edges())
+        return self._finalize()
+
+
+class WorkerManager:
+    """Starts one persisted run asynchronously; dashboard remains the operator surface."""
+
+    def __init__(
+        self,
+        *,
+        database: RuntimeDatabase,
+        runtime_factory: Callable[[Any, threading.Event], FridayDemoRuntime],
+    ) -> None:
+        self.database = database
+        self.runtime_factory = runtime_factory
+        self._lock = threading.Lock()
+        self._run_id: UUID | None = None
+        self._runtime: FridayDemoRuntime | None = None
+        self._stop_event: threading.Event | None = None
+        self._thread: threading.Thread | None = None
+
+    def start(self, run_id: UUID) -> None:
+        persisted = self.database.load_run(run_id)
+        if persisted.status != "starting":
+            raise RuntimeError("persisted run is not in starting state")
+        if persisted.config.datasetConfig != "demo_crosswalk":
+            raise RuntimeError(
+                "online experiment requires the pinned demo_crosswalk dataset bundle"
+            )
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                raise RuntimeError("another online run is active")
+            if self._runtime is not None:
+                self._runtime.stop_serving()
+            stop_event = threading.Event()
+            self._run_id = run_id
+            self._stop_event = stop_event
+
+            def execute() -> None:
+                try:
+                    runtime = self.runtime_factory(persisted.config, stop_event)
+                    self._runtime = runtime
+                    runtime.run()
+                except Exception as error:
+                    self.database.transition(run_id, "failed", failure=str(error)[:1000])
+                    try:
+                        self.database.append_activity(
+                            lifecycle_activity(run_id, "run_failed", f"Online run failed: {error}")
+                        )
+                    except Exception:
+                        pass
+
+            self._thread = threading.Thread(target=execute, daemon=True)
+            self._thread.start()
+
+    def request_stop(self, run_id: UUID) -> None:
+        with self._lock:
+            if self._run_id != run_id or self._stop_event is None:
+                raise KeyError(run_id)
+            self._stop_event.set()
+            if self._runtime is not None:
+                self._runtime.request_stop()
+
+    @property
+    def active_runtime(self) -> FridayDemoRuntime | None:
+        return self._runtime
+
+
+__all__ = [
+    "FridayDemoRuntime",
+    "RunScopedConsumer",
+    "WorkerManager",
+    "isolate_new_run_offsets",
+]

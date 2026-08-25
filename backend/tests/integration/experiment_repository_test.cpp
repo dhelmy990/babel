@@ -3,16 +3,33 @@
 #include <cstdlib>
 #include <memory>
 #include <random>
+#include <array>
+#include <iomanip>
+#include <sstream>
 #include <string>
 
 #include <pqxx/pqxx>
 #include <nlohmann/json.hpp>
+#include <openssl/evp.h>
 
 #include "babel/adapters/postgres/experiment_repository.hpp"
 #include "babel/adapters/postgres/migration_runner.hpp"
 #include "babel/adapters/postgres/postgres_database.hpp"
 
 namespace {
+
+std::string sha256(std::string_view value) {
+  std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+  unsigned int size = 0;
+  REQUIRE(EVP_Digest(value.data(), value.size(), digest.data(), &size, EVP_sha256(), nullptr) ==
+          1);
+  std::ostringstream encoded;
+  encoded << std::hex << std::setfill('0');
+  for (unsigned int index = 0; index < size; ++index) {
+    encoded << std::setw(2) << static_cast<unsigned int>(digest[index]);
+  }
+  return encoded.str();
+}
 
 std::string baseUrl() {
   if (const auto* configured = std::getenv("BABEL_TEST_DATABASE_URL")) return configured;
@@ -57,7 +74,7 @@ class ExperimentPostgresFixture {
         },
         .source = babel::ExperimentSourcePin{
             .repository = "dhelmy990/babel-wikipedia-experiment",
-            .configuration = "demo_catalog_2026_06",
+            .configuration = "demo_crosswalk",
             .commit_sha = std::string(40, 'c'),
         },
         .environment_sequence = {"2026-06", "2026-07"},
@@ -118,12 +135,13 @@ TEST_CASE_METHOD(ExperimentPostgresFixture,
   const auto launch_config = nlohmann::json::parse(row["launch_config"].as<std::string>());
   CHECK(row["dataset_repository"].as<std::string>() ==
         "dhelmy990/babel-wikipedia-experiment");
-  CHECK(row["dataset_config"].as<std::string>() == "demo_catalog_2026_06");
+  CHECK(row["dataset_config"].as<std::string>() == "demo_crosswalk");
   CHECK(row["dataset_revision"].as<std::string>() == std::string(40, 'c'));
   CHECK(row["run_seed"].as<std::uint64_t>() == 7);
   CHECK(row["launch_sha256"].as<std::string>().size() == 64);
+  CHECK(row["launch_sha256"].as<std::string>() == sha256(launch_config.dump()));
   CHECK(launch_config.at("schemaVersion") == 1);
-  CHECK(launch_config.at("datasetConfig") == "demo_catalog_2026_06");
+  CHECK(launch_config.at("datasetConfig") == "demo_crosswalk");
   CHECK(launch_config.at("runSeed") == 7);
   CHECK(launch_config.at("embeddingDimension") == 100);
   CHECK(launch_config.at("perMonthEventBudget").at("2026-07") == 100);

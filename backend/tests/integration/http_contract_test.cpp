@@ -371,7 +371,7 @@ TEST_CASE("runtime configuration is fixed to loopback and rejects unsafe databas
   CHECK(defaults->seed_source.configuration == "demo_catalog_2026_06");
   CHECK(defaults->experiment_source.repository ==
         "dhelmy990/babel-wikipedia-experiment");
-  CHECK(defaults->experiment_source.configuration == "demo_catalog_2026_06");
+  CHECK(defaults->experiment_source.configuration == "demo_crosswalk");
   CHECK(defaults->experiment_source.commit_sha ==
         "e1acc648fcace8820dd5ee70bae9216ea4334555");
   CHECK(defaults->seed_source.requested_revision ==
@@ -381,6 +381,8 @@ TEST_CASE("runtime configuration is fixed to loopback and rejects unsafe databas
   CHECK(defaults->huggingface_cache_root ==
         "/home/dhelmy990/Data/babel-data/cache/backend-seed");
   CHECK_FALSE(defaults->huggingface_token.has_value());
+  CHECK(defaults->online_worker_endpoint == "http://127.0.0.1:8790");
+  CHECK_FALSE(defaults->online_worker_token.has_value());
 
   const auto nul = RuntimeConfig::fromEnvironment([](std::string_view name) {
     return name == "BABEL_DATABASE_URL"
@@ -399,6 +401,10 @@ TEST_CASE("runtime configuration is fixed to loopback and rejects unsafe databas
       return std::optional<std::string>{"online_demo"};
     if (name == "BABEL_ONLINE_DATASET_REVISION")
       return std::optional<std::string>{std::string(40, 'd')};
+    if (name == "BABEL_ONLINE_WORKER_ENDPOINT")
+      return std::optional<std::string>{"http://127.0.0.1:9876"};
+    if (name == "BABEL_ONLINE_WORKER_TOKEN")
+      return std::optional<std::string>{std::string(64, 'e')};
     if (name == "BABEL_DATA_ROOT") return std::optional<std::string>{"/srv/babel-data"};
     return std::optional<std::string>{};
   });
@@ -410,6 +416,8 @@ TEST_CASE("runtime configuration is fixed to loopback and rejects unsafe databas
   CHECK(configured->experiment_source.configuration == "online_demo");
   CHECK(configured->experiment_source.commit_sha == std::string(40, 'd'));
   CHECK(configured->huggingface_cache_root == "/srv/babel-data/cache/backend-seed");
+  CHECK(configured->online_worker_endpoint == "http://127.0.0.1:9876");
+  CHECK(configured->online_worker_token == std::optional{std::string(64, 'e')});
 }
 
 TEST_CASE("runtime command parser exposes migrate serve and typed Personal migration only") {

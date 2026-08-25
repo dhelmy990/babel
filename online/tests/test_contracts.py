@@ -26,11 +26,22 @@ from babel_online.contracts import (
     canonical_pgvector_snapshot_sha256,
     canonical_vector_sha256,
 )
+from babel_online.config import default_run_config
 
 
 RUN_ID = UUID("00000000-0000-5000-8000-000000000001")
 MODEL_ID = UUID("00000000-0000-5000-8000-000000000002")
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_default_experiment_config_pins_the_connected_crosswalk_bundle() -> None:
+    run = default_run_config(
+        run_id=RUN_ID,
+        dataset_revision="e1acc648fcace8820dd5ee70bae9216ea4334555",
+        starting_model_id=MODEL_ID,
+    )
+
+    assert run.datasetConfig == "demo_crosswalk"
 
 
 def valid_request() -> dict[str, object]:

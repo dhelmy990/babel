@@ -22,11 +22,12 @@ def test_real_kafka_publish_manual_commit_and_restart(tmp_path) -> None:
         pytest.skip("set BABEL_KAFKA_BOOTSTRAP to run the real Kafka smoke")
     group_id = f"babel-online-smoke-{uuid4()}"
     event = feedback_event()
+    consumer = KafkaFeedbackConsumer(bootstrap, group_id=group_id)
+    start_offsets = consumer.high_watermarks()
     producer = KafkaFeedbackProducer(bootstrap)
     produced = producer.publish(key=str(event.creatorId), event=event)
     producer.close()
-
-    consumer = KafkaFeedbackConsumer(bootstrap, group_id=group_id)
+    consumer.seek(start_offsets)
     vector = np.zeros(100, dtype=np.float32)
     vector[0] = 1.0
     model = NumpyWorkingModel(

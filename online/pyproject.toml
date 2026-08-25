@@ -9,6 +9,7 @@ description = "Babel synchronous online recommendation demo"
 requires-python = ">=3.10,<3.13"
 dependencies = [
   "fastapi>=0.115,<0.116",
+  "huggingface-hub>=0.30,<1",
   "numpy>=2.2,<2.3",
   "pydantic>=2.10,<2.11",
   "uvicorn>=0.34,<0.35",
@@ -29,6 +30,9 @@ kafka = [
 parquet = [
   "pyarrow>=17,<26",
 ]
+
+[project.scripts]
+babel-online = "babel_online.runtime.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
