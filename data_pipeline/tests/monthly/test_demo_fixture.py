@@ -18,12 +18,12 @@ EXPECTED_RELEASE_FILES = {
     "june/edges.jsonl",
     "june/clickstream.jsonl",
     "june/hidden-archetypes.jsonl",
-    "june/resolved-catalog-v1.jsonl",
+    "june/resolved-catalog-v2.jsonl",
     "july/articles.jsonl",
     "july/edges.jsonl",
     "july/clickstream.jsonl",
     "july/hidden-archetypes.jsonl",
-    "july/resolved-catalog-v1.jsonl",
+    "july/resolved-catalog-v2.jsonl",
 }
 
 
@@ -110,9 +110,9 @@ def test_backend_seed_catalogs_have_dashboard_compatible_checksum_companions() -
 
     for period, directory in (("2026-06", "june"), ("2026-07", "july")):
         descriptor = provenance["periods"][period]["artifacts"]["backend_seed_catalog"]
-        companion = root / directory / "resolved-catalog-v1.jsonl.sha256"
+        companion = root / directory / "resolved-catalog-v2.jsonl.sha256"
         assert companion.read_text(encoding="ascii") == (
-            f"{descriptor['sha256']}  resolved-catalog-v1.jsonl\n"
+            f"{descriptor['sha256']}  resolved-catalog-v2.jsonl\n"
         )
         catalog = read_jsonl(root / descriptor["path"])
         assert len(catalog) == 80
@@ -127,6 +127,12 @@ def test_backend_seed_catalogs_have_dashboard_compatible_checksum_companions() -
             } <= set(row)
             for row in catalog
         )
+        assert all(
+            row["declared_title"]
+            in {row["canonical_title"], *row["redirect_titles"]}
+            for row in catalog
+        )
+        assert len({(row["creator_id"], row["article_key"]) for row in catalog}) == 80
 
 
 def test_verifier_rejects_artifact_hash_mismatch(tmp_path: Path) -> None:

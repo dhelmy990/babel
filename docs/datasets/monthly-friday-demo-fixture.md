@@ -42,14 +42,15 @@ hidden-relevance, or simulator-randomness fields.
 
 The authoritative checksums are embedded beside paths and row counts in
 `provenance.json`. The June backend seed catalog checksum is
-`6d7c6c505cfc9ceefb67f6cd6c992cde75504390de5a0c256bb19d811e8c0a5a`;
+`bc8a86dc89242a61aa6c81a9bd7210b2971d323ef63dc7ff22005d19ebbeda2b`;
 the July checksum is
-`061e3e2eebf67d36eabe447eb561eaca52a0171e322dabac256dba773bfc8c93`.
-The corresponding `resolved-catalog-v1.jsonl.sha256` companions contain the
-standard `<sha256>  resolved-catalog-v1.jsonl` line expected when these exact
+`bd66a0fd7e1d56cae077ea3ff5dec5dd96892f1602b3916acc2c20ee6beac99a`.
+The corresponding `resolved-catalog-v2.jsonl.sha256` companions contain the
+standard `<sha256>  resolved-catalog-v2.jsonl` line expected when these exact
 bytes are uploaded as
-`backend-seed/2026-06/resolved-catalog-v1.jsonl(.sha256)` and
-`backend-seed/2026-07/resolved-catalog-v1.jsonl(.sha256)`.
+`backend-seed/2026-06/resolved-catalog-v2.jsonl(.sha256)` and
+`backend-seed/2026-07/resolved-catalog-v2.jsonl(.sha256)`. Version 1 paths and
+bytes remain preserved as append-only history.
 
 ## Rebuild and verification
 

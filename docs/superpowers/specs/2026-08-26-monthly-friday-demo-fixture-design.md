@@ -54,6 +54,8 @@ june/
   hidden-archetypes.jsonl
   resolved-catalog-v1.jsonl
   resolved-catalog-v1.jsonl.sha256
+  resolved-catalog-v2.jsonl
+  resolved-catalog-v2.jsonl.sha256
 july/
   articles.jsonl
   edges.jsonl
@@ -61,6 +63,8 @@ july/
   hidden-archetypes.jsonl
   resolved-catalog-v1.jsonl
   resolved-catalog-v1.jsonl.sha256
+  resolved-catalog-v2.jsonl
+  resolved-catalog-v2.jsonl.sha256
 ```
 
 Each month has exactly 80 observable articles. The crosswalk demonstrates 76
@@ -83,7 +87,9 @@ it does not pretend that title resolution occurred against an official monthly
 snapshot. Each resolved catalog row retains its creator/assignment fields and
 joins the complete prepared article identity, text, redirects, content hash,
 snapshot, and revision metadata. Both periods emit exactly 80 rows sorted by
-page ID plus a SHA-256 companion.
+page ID plus a SHA-256 companion. Every declared title is the joined row's
+canonical title or one of its real redirects and resolves uniquely across the
+transport. Version 1 transport files remain byte-for-byte append-only history.
 
 ## Provenance and Readiness
 
@@ -103,9 +109,9 @@ used by the fixture. June and July each expose exactly `articles`, `edges`,
 descriptor has `{path, sha256, rows}` with a path relative to the fixture root.
 The seed-catalog descriptor's SHA-256 is authoritative. Each catalog also has a
 dashboard-compatible checksum companion containing
-`<sha256>  resolved-catalog-v1.jsonl\n`; it is a transport companion, not a
-sixth JSONL
-period artifact, so the frozen five-artifact release manifest remains closed.
+`<sha256>  resolved-catalog-v2.jsonl\n`; it is a transport companion, not a
+sixth JSONL period artifact, so the frozen five-artifact release manifest
+remains closed.
 The provenance also records:
 
 - the pinned private pilot repository, revision, config, source snapshot date,

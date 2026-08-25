@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections import Counter
+from collections import Counter, defaultdict
 
 from babel_data.contracts import validate_document
 from babel_data.monthly import (
@@ -31,6 +31,11 @@ def source_rows() -> list[dict[str, object]]:
         }
         for index in range(1, 81)
     ]
+
+
+def normalized_title(value: str) -> str:
+    collapsed = " ".join(value.replace("_", " ").split())
+    return collapsed[:1].upper() + collapsed[1:]
 
 
 def test_period_catalogs_are_deterministic_safe_and_observable_only() -> None:
@@ -138,8 +143,21 @@ def test_hidden_archetypes_and_seed_catalog_match_backend_roster() -> None:
         and row["snapshot"] == "2026-06"
         for row in catalog
     )
-    assert catalog[0]["declared_title"] == "Distributed computing"
-    assert catalog[-1]["declared_title"] == "Regulation"
+    assert all(
+        row["declared_title"]
+        in {row["canonical_title"], *row["redirect_titles"]}
+        for row in catalog
+    )
+    assert len({(row["creator_id"], row["article_key"]) for row in catalog}) == 80
+    assert set(Counter(row["creator_id"] for row in catalog).values()) == {4}
+    lookup: dict[str, set[int]] = defaultdict(set)
+    for row in catalog:
+        for title in (row["canonical_title"], *row["redirect_titles"]):
+            lookup[normalized_title(title)].add(row["page_id"])
+    assert all(
+        lookup[normalized_title(row["declared_title"])] == {row["page_id"]}
+        for row in catalog
+    )
     payload = canonical_jsonl(catalog)
     assert hashlib.sha256(payload).hexdigest() == hashlib.sha256(
         canonical_jsonl(build_seed_catalog(build_archetypes(articles), articles))

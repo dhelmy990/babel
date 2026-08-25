@@ -108,7 +108,7 @@ def build_demo_fixture(source_path: Path, output_root: Path) -> dict[str, object
         "edges": "edges.jsonl",
         "clickstream": "clickstream.jsonl",
         "hidden_archetypes": "hidden-archetypes.jsonl",
-        "backend_seed_catalog": "resolved-catalog-v1.jsonl",
+        "backend_seed_catalog": "resolved-catalog-v2.jsonl",
     }
     descriptors: dict[str, dict[str, object]] = {}
     for period, rows_by_artifact in artifact_rows.items():
@@ -143,7 +143,7 @@ The
 observable catalogs contain no graph, Clickstream, archetype, seed-weight, PPR,
 hidden-relevance, or random-draw fields. `provenance.json` is the sole release
 input manifest; the crosswalk and ambiguity files are local expectations only.
-Each `resolved-catalog-v1.jsonl` row joins its creator assignment to the full
+Each `resolved-catalog-v2.jsonl` row joins its creator assignment to the full
 prepared observable article payload required by the pinned dashboard adapter.
 """
     _atomic_write(output_root / "README.md", readme.encode("utf-8"))
@@ -190,6 +190,50 @@ def _require_mapping(value: object, label: str) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         raise ValueError(f"{label} must be an object")
     return value
+
+
+def _normalize_backend_title(value: str) -> str:
+    collapsed = " ".join(value.replace("_", " ").split())
+    return collapsed[:1].upper() + collapsed[1:]
+
+
+def _verify_resolved_seed_catalog(rows: list[dict[str, object]], period: str) -> None:
+    if len(rows) != 80:
+        raise ValueError("backend seed catalog must contain exactly 80 assignments")
+    page_ids = [row.get("page_id") for row in rows]
+    if page_ids != sorted(page_ids) or len(set(page_ids)) != 80:
+        raise ValueError("backend seed catalog page IDs must be sorted and unique")
+    pairs = {(row.get("creator_id"), row.get("article_key")) for row in rows}
+    if len(pairs) != 80:
+        raise ValueError("backend seed creator/source pairs must be unique")
+    title_index: dict[str, set[object]] = {}
+    for row in rows:
+        article_text = row.get("article_text")
+        content_hash = row.get("content_hash")
+        redirects = row.get("redirect_titles")
+        canonical_title = row.get("canonical_title")
+        if (
+            not isinstance(article_text, str)
+            or not isinstance(content_hash, str)
+            or hashlib.sha256(article_text.encode("utf-8")).hexdigest() != content_hash
+            or not isinstance(canonical_title, str)
+            or not isinstance(redirects, list)
+            or row.get("snapshot") != period
+        ):
+            raise ValueError("backend seed resolved article fields are invalid")
+        for title in (canonical_title, *redirects):
+            if not isinstance(title, str):
+                raise ValueError("backend seed title must be a string")
+            title_index.setdefault(_normalize_backend_title(title), set()).add(
+                row["page_id"]
+            )
+    for row in rows:
+        declared_title = row.get("declared_title")
+        allowed = {row["canonical_title"], *row["redirect_titles"]}
+        if not isinstance(declared_title, str) or declared_title not in allowed:
+            raise ValueError("backend seed declared title is not resolved by its article")
+        if title_index[_normalize_backend_title(declared_title)] != {row["page_id"]}:
+            raise ValueError("backend seed declared title does not resolve uniquely")
 
 
 def verify_demo_fixture(root: Path) -> dict[str, object]:
@@ -262,8 +306,7 @@ def verify_demo_fixture(root: Path) -> dict[str, object]:
                     raise ValueError("hidden archetype weights do not match the frozen contract")
             elif name == "backend_seed_catalog":
                 seed_counts[str(period)] = len(rows)
-                if len(rows) < 80:
-                    raise ValueError("backend seed catalog must contain at least 80 assignments")
+                _verify_resolved_seed_catalog(rows, str(period))
         if period != "2016":
             catalog_descriptor = _require_mapping(
                 artifacts["backend_seed_catalog"],

@@ -102,10 +102,12 @@ def build_archetypes(
         seeds = []
         for seed_index, (title, weight) in enumerate(zip(titles, _WEIGHTS, strict=True)):
             article = ordered[profile_index * 4 + seed_index]
+            resolved_title = str(article["canonical_title"])
             seeds.append(
                 {
-                    "assignment_id": _uuid_v5(f"seed:{slug}:{title}"),
-                    "declared_title": title,
+                    "assignment_id": _uuid_v5(f"seed:{slug}:{resolved_title}"),
+                    "declared_title": resolved_title,
+                    "archetype_prompt_title": title,
                     "article_key": article["article_key"],
                     "page_id": article["page_id"],
                     "canonical_title": article["canonical_title"],
@@ -154,7 +156,7 @@ def build_seed_catalog(
                     "creator_id": archetype["creator_id"],
                     "creator_slug": archetype["archetype_slug"],
                     "display_name": archetype["display_name"],
-                    "declared_title": seed["declared_title"],
+                    "declared_title": article["canonical_title"],
                     "weight": seed["weight"],
                 }
             )
