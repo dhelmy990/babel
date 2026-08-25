@@ -992,16 +992,17 @@ def test_inventory_detects_temporary_file_hard_link_injection(
     ) -> None:
         real_link(
             source,
-            attacker_alias,
+            attacker_alias.name,
             src_dir_fd=src_dir_fd,
-            follow_symlinks=False,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=True,
         )
         real_link(
             source,
             destination,
             src_dir_fd=src_dir_fd,
             dst_dir_fd=dst_dir_fd,
-            follow_symlinks=False,
+            follow_symlinks=True,
         )
 
     monkeypatch.setattr(teacher.os, "link", aliasing_link)
@@ -1036,16 +1037,17 @@ def test_inventory_never_unlinks_racer_that_replaces_published_output(
     ) -> None:
         real_link(
             source,
-            attacker_alias,
+            attacker_alias.name,
             src_dir_fd=src_dir_fd,
-            follow_symlinks=False,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=True,
         )
         real_link(
             source,
             destination,
             src_dir_fd=src_dir_fd,
             dst_dir_fd=dst_dir_fd,
-            follow_symlinks=False,
+            follow_symlinks=True,
         )
 
     def racing_entry_at(parent_descriptor: int, filename: str):
@@ -1147,7 +1149,7 @@ def test_inventory_detects_output_parent_substitution(
             destination,
             src_dir_fd=src_dir_fd,
             dst_dir_fd=dst_dir_fd,
-            follow_symlinks=False,
+            follow_symlinks=True,
         )
 
     monkeypatch.setattr(teacher.os, "link", replacing_parent_link)
@@ -1174,6 +1176,36 @@ def test_inventory_temporary_write_failure_is_cleaned_up(
         build_teacher_inventory(FIXTURE, output)
 
     assert list(tmp_path.iterdir()) == []
+
+
+def test_inventory_uses_unnamed_temp_without_cleanup_race(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    output = tmp_path / "inventory.json"
+    real_open = os.open
+    used_unnamed_temp = False
+
+    def tracking_open(
+        path: object,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal used_unnamed_temp
+        if isinstance(path, str) and path.startswith(f".{output.name}."):
+            raise AssertionError("named inventory temp reintroduces unlink race")
+        if path == "." and flags & getattr(os, "O_TMPFILE", 0):
+            used_unnamed_temp = True
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(teacher.os, "open", tracking_open)
+
+    build_teacher_inventory(FIXTURE, output)
+
+    assert used_unnamed_temp is True
+    assert output.exists()
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["inventory.json"]
 
 
 def test_inventory_initial_temp_fstat_failure_closes_and_cleans_temp(

@@ -51,6 +51,7 @@ _DISALLOWED_TITLE_CATEGORIES = frozenset({"Cc", "Cs"})
 _O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_TMPFILE = getattr(os, "O_TMPFILE", 0)
 _EOCD_SIGNATURE = b"PK\x05\x06"
 _ZIP64_EOCD_SIGNATURE = b"PK\x06\x06"
 _ZIP64_LOCATOR_SIGNATURE = b"PK\x06\x07"
@@ -904,16 +905,6 @@ def _entry_at(parent_descriptor: int, filename: str) -> os.stat_result | None:
         return None
 
 
-def _unlink_at_if_inode(
-    parent_descriptor: int, filename: str, expected: os.stat_result
-) -> bool:
-    entry = _entry_at(parent_descriptor, filename)
-    if entry is None or not _same_inode(entry, expected):
-        return False
-    os.unlink(filename, dir_fd=parent_descriptor)
-    return True
-
-
 @contextmanager
 def _open_output_parent(output: Path) -> Iterator[tuple[int, os.stat_result, str]]:
     if not _O_DIRECTORY or not _O_NOFOLLOW:
@@ -954,22 +945,25 @@ def _validate_output_parent(
         raise UnsafeTeacherOutput(f"output parent identity changed: {output.parent}")
 
 
-def _open_inventory_temp(parent_descriptor: int, output_name: str) -> tuple[int, str]:
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC
-    for counter in range(100):
-        temporary_name = f".{output_name}.{os.getpid()}.{counter}.tmp"
-        try:
-            descriptor = os.open(
-                temporary_name, flags, 0o600, dir_fd=parent_descriptor
-            )
-            return descriptor, temporary_name
-        except FileExistsError:
-            continue
-        except OSError as error:
-            raise UnsafeTeacherOutput(
-                f"cannot safely create inventory temporary file: {error}"
-            ) from error
-    raise UnsafeTeacherOutput("cannot allocate a unique inventory temporary file")
+def _open_inventory_temp(
+    parent_descriptor: int, output_name: str
+) -> tuple[int, None]:
+    if not _O_TMPFILE:
+        raise UnsafeTeacherOutput(
+            "secure inventory publication requires unnamed O_TMPFILE support"
+        )
+    try:
+        descriptor = os.open(
+            ".",
+            os.O_WRONLY | _O_TMPFILE | _O_CLOEXEC,
+            0o600,
+            dir_fd=parent_descriptor,
+        )
+    except OSError as error:
+        raise UnsafeTeacherOutput(
+            f"cannot safely create unnamed inventory temp for {output_name!r}: {error}"
+        ) from error
+    return descriptor, None
 
 
 def _write_all(file_descriptor: int, payload: bytes) -> None:
@@ -989,11 +983,12 @@ def _publish_inventory_at(
     parent_stat: os.stat_result,
     output_name: str,
 ) -> None:
-    """Publish once; preserve any output-name anomaly as forensic evidence.
+    """Publish an unnamed inode; preserve output anomalies as evidence.
 
-    Only the private, exclusively created temporary name is ever cleaned up.
-    Once ``output_name`` has been linked, it is never removed because a
-    stat-then-unlink sequence cannot prove ownership atomically.
+    ``O_TMPFILE`` removes the cleanup race entirely: before publication there
+    is no pathname, and closing the descriptor releases the inode.  Once
+    ``output_name`` has been linked, it is never removed because a
+    pathname-based unlink cannot prove ownership atomically.
     """
     payload = (
         json.dumps(
@@ -1009,24 +1004,24 @@ def _publish_inventory_at(
     _validate_output_parent(output, parent_stat)
     if _entry_at(parent_descriptor, output_name) is not None:
         raise FileExistsError(f"inventory output already exists: {output}")
-    descriptor, temporary_name = _open_inventory_temp(parent_descriptor, output_name)
-    temporary_stat: os.stat_result | None = None
+    descriptor, _temporary_name = _open_inventory_temp(
+        parent_descriptor, output_name
+    )
     try:
         temporary_stat = os.fstat(descriptor)
         _write_all(descriptor, payload)
         os.fsync(descriptor)
         temporary_stat = os.fstat(descriptor)
-        if not stat.S_ISREG(temporary_stat.st_mode) or temporary_stat.st_nlink != 1:
+        if not stat.S_ISREG(temporary_stat.st_mode) or temporary_stat.st_nlink != 0:
             raise UnsafeTeacherOutput(
-                "inventory temporary file violated the single-link invariant"
+                "unnamed inventory temp violated its zero-link invariant"
             )
         try:
             os.link(
-                temporary_name,
+                f"/proc/self/fd/{descriptor}",
                 output_name,
-                src_dir_fd=parent_descriptor,
                 dst_dir_fd=parent_descriptor,
-                follow_symlinks=False,
+                follow_symlinks=True,
             )
         except FileExistsError as error:
             raise FileExistsError(
@@ -1043,15 +1038,13 @@ def _publish_inventory_at(
             linked is None
             or not _same_inode(linked, after_link)
             or not _same_inode(temporary_stat, after_link)
-            or linked.st_nlink != 2
-            or after_link.st_nlink != 2
+            or linked.st_nlink != 1
+            or after_link.st_nlink != 1
         ):
             raise UnsafeTeacherOutput(
                 "inventory publication hard-link invariant failed"
             )
 
-        if not _unlink_at_if_inode(parent_descriptor, temporary_name, after_link):
-            raise UnsafeTeacherOutput("inventory temporary file changed before cleanup")
         final_stat = os.fstat(descriptor)
         final_entry = _entry_at(parent_descriptor, output_name)
         if (
@@ -1064,18 +1057,7 @@ def _publish_inventory_at(
         _validate_output_parent(output, parent_stat)
         os.fsync(parent_descriptor)
     finally:
-        if temporary_stat is None:
-            try:
-                temporary_stat = os.fstat(descriptor)
-            except OSError:
-                pass
-        try:
-            os.close(descriptor)
-        finally:
-            if temporary_stat is not None:
-                _unlink_at_if_inode(
-                    parent_descriptor, temporary_name, temporary_stat
-                )
+        os.close(descriptor)
 
 
 def build_teacher_inventory(
