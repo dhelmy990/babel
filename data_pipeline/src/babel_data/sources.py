@@ -17,7 +17,7 @@ DOWNLOAD_CHUNK_SIZE = 8 * 1024 * 1024
 DOWNLOAD_TIMEOUT_SECONDS = 30.0
 _MD5_PATTERN = re.compile(r"[0-9a-f]{32}")
 _SHA1_PATTERN = re.compile(r"[0-9a-f]{40}")
-_CONTENT_RANGE_PATTERN = re.compile(r"bytes (\d+)-(\d+)/(?:\d+|\*)", re.IGNORECASE)
+_CONTENT_RANGE_PATTERN = re.compile(r"bytes (\d+)-(\d+)/(\d+)", re.IGNORECASE)
 
 
 class SourceError(Exception):
@@ -163,7 +163,9 @@ def _status(response: object) -> int:
     return int(status)
 
 
-def _confirmed_range(response: object, expected_start: int) -> bool:
+def _confirmed_range(
+    response: object, expected_start: int, expected_total: int
+) -> bool:
     if _status(response) != 206:
         return False
     content_range = response.headers.get("Content-Range")  # type: ignore[attr-defined]
@@ -172,8 +174,13 @@ def _confirmed_range(response: object, expected_start: int) -> bool:
     match = _CONTENT_RANGE_PATTERN.fullmatch(content_range.strip())
     if match is None:
         return False
-    start, end = (int(value) for value in match.groups())
-    return start == expected_start and end >= start
+    start, end, total = (int(value) for value in match.groups())
+    return (
+        start == expected_start
+        and end >= start
+        and total == expected_total
+        and end < total
+    )
 
 
 def _stream_response(
@@ -274,7 +281,7 @@ def download_source(
         )
         response = _open(ranged_request, spec)
         with response:  # type: ignore[attr-defined]
-            if _confirmed_range(response, resume_start):
+            if _confirmed_range(response, resume_start, spec.size):
                 _stream_response(response, partial, spec, append=True)
             elif _status(response) == 200:
                 _stream_response(response, partial, spec, append=False)

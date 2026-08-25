@@ -233,7 +233,16 @@ def test_download_restarts_partial_when_server_ignores_range(
 
 @pytest.mark.parametrize(
     "content_range",
-    [None, "not-a-range", "bytes 0-5/6", "bytes 3-2/6"],
+    [
+        None,
+        "not-a-range",
+        "bytes 0-5/6",
+        "bytes 3-2/6",
+        "bytes 3-5/*",
+        "bytes 3-5/7",
+        "bytes 3-5/3",
+        "bytes 3-7/6",
+    ],
 )
 def test_download_restarts_with_a_new_request_for_malformed_range_response(
     monkeypatch: pytest.MonkeyPatch,
@@ -333,7 +342,7 @@ def test_manifest_contains_exact_approved_sources_and_constructs_specs() -> None
     assert entries == [
         {
             "name": "Teacher ZIP",
-            "url": "https://ndownloader.figshare.com/files/10411714",
+            "url": "https://ndownloader.figshare.com/files/7455673",
             "filename": "2016-09-01_2016-09-30_en_100.zip",
             "size": 727429988,
             "md5": "ac70acfc41aff7a23cc9439e3bb1771f",
@@ -344,15 +353,15 @@ def test_manifest_contains_exact_approved_sources_and_constructs_specs() -> None
             "filename": "enwiki-20161001-pages-articles-multistream.xml.bz2",
             "size": 14178624372,
             "md5": "5df8e610829c336138dcb9191071b283",
-            "sha1": "86ba11a2c6954f42f2114f21e9f0d1778e6c90e4",
+            "sha1": "86ba305ecc41dafcf03ba3e67c2eacb95724d5ca",
         },
         {
             "name": "Wikipedia multistream index",
             "url": "https://archive.org/download/enwiki-20161001/enwiki-20161001-pages-articles-multistream-index.txt.bz2",
             "filename": "enwiki-20161001-pages-articles-multistream-index.txt.bz2",
             "size": 185177516,
-            "md5": "7c948764d256ab2856278399befc4163",
-            "sha1": "f13b20115f06d768a0741b4b5dc4a8193043f7fd",
+            "md5": "7c9486cde3f9c43ff4e23443dd2323f3",
+            "sha1": "f13aebe90c8bea2157d826659e0320157a1978d9",
         },
     ]
     assert [SourceSpec(**entry) for entry in entries]
