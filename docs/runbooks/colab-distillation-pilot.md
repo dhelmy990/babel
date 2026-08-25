@@ -15,7 +15,7 @@ You need:
 - enough Google Drive space for complete checkpoints (recommended: 10 GB).
 
 The checked-in notebook already pins source commit
-`9d4c0c5e6a191a6a33e5319b21dc7a389d06b6c3`, dataset commit
+`92f3ac697d78eb827d75b033df92dcbed887def7`, dataset commit
 `c8cbb81fdb81f71a3aa5d0e5beb10348843ede6b`, manifest SHA-256
 `6d99276635ec76f58c945dc3b2eb32273f113a4c9163dc926b9a6fc18300ff6a`,
 and readiness SHA-256
@@ -41,8 +41,9 @@ same URL used by the notebook, so Colab does not need a GitHub secret.
    `USE_DRIVE = True`.
 
 The install cell checks out the exact source commit and uses the hash-locked
-Colab requirements. A successful GPU cell prints `Tesla T4` and `fp16`. The
-token value is never printed.
+Colab requirements. Python 3.13 selects NumPy 2.2.6; older supported Python
+runtimes retain NumPy 1.26.4 in the package metadata. A successful GPU cell
+prints `Tesla T4` and `fp16`. The token value is never printed.
 
 ## Demo configuration
 

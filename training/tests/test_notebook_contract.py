@@ -53,6 +53,18 @@ def test_notebook_has_ordered_single_purpose_handoff_cells() -> None:
         ast.parse(python_source)
 
 
+def test_notebook_pins_python_313_compatible_source() -> None:
+    cells = _notebook()["cells"]
+    environment = _source(cells[EXPECTED_TAGS.index("environment-check")])
+    package_install = _source(cells[EXPECTED_TAGS.index("package-install")])
+
+    assert "sys.version_info[:2] < (3, 14)" in environment
+    assert (
+        "SOURCE_COMMIT_SHA = '92f3ac697d78eb827d75b033df92dcbed887def7'"
+        in package_install
+    )
+
+
 def test_notebook_reads_colab_secret_without_printing_or_embedding_it() -> None:
     cells = _notebook()["cells"]
     secret_source = _source(cells[EXPECTED_TAGS.index("hf-token-secret")])

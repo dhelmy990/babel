@@ -12,7 +12,7 @@ Please run the Babel 2016 distillation pilot in Google Colab using the attached
 Frozen identities:
 
 ```text
-SOURCE_COMMIT_SHA=9d4c0c5e6a191a6a33e5319b21dc7a389d06b6c3
+SOURCE_COMMIT_SHA=92f3ac697d78eb827d75b033df92dcbed887def7
 DATASET_REPO_ID=dhelmy990/babel-wikipedia-experiment
 DATASET_CONFIG=distillation_2016
 DATASET_REVISION_SHA=c8cbb81fdb81f71a3aa5d0e5beb10348843ede6b
@@ -33,6 +33,8 @@ credential under the exact Colab Secret name `HF_TOKEN`, enable notebook
 access, and never paste or print its value. Keep the demo defaults: max length
 512, batch size 2, gradient accumulation 8, fp16 on T4, 20 optimizer steps,
 45-minute runtime budget, and a complete checkpoint every 5 optimizer steps.
+The pinned training package and lock support Colab Python 3.13 and select
+NumPy 2.2.6 there.
 
 Run all ordered cells. The expected milestones are:
 
