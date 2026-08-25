@@ -14,9 +14,11 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 from .release import (
+    EMPTY_TEST_PATH,
     MANIFEST_PATH,
     METADATA_PATHS,
     README_PATH,
@@ -424,6 +426,12 @@ def _validate_local_uploads(
     supplied = set(by_remote_path)
     if supplied != expected:
         raise ValueError("upload files do not exactly match the local shard manifest")
+    empty_test = pq.ParquetFile(by_remote_path[EMPTY_TEST_PATH])
+    if (
+        not empty_test.schema_arrow.equals(PARQUET_SCHEMA, check_metadata=True)
+        or empty_test.metadata.num_rows != 0
+    ):
+        raise ValueError("local empty test sentinel violates the zero-row schema")
     for item in shards:
         local = by_remote_path[str(item["path"])]
         if local.stat().st_size != int(item["bytes"]):
@@ -589,6 +597,7 @@ def verify_remote(
     artifact_root = local_manifest_path.parent.parent
     local_readiness_bytes = (artifact_root / READINESS_PATH).read_bytes()
     local_readme_bytes = (artifact_root / README_PATH).read_bytes()
+    local_empty_test_bytes = (artifact_root / EMPTY_TEST_PATH).read_bytes()
     try:
         local_readiness = json.loads(local_readiness_bytes)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -638,6 +647,9 @@ def verify_remote(
             remote_readme = _remote_bytes(
                 api, repo_id, README_PATH, revision, token
             )
+            remote_empty_test = _remote_bytes(
+                api, repo_id, EMPTY_TEST_PATH, revision, token
+            )
             if remote_readiness != local_readiness_bytes:
                 raise RemoteVerificationError(
                     "remote readiness bytes do not match local readiness"
@@ -654,6 +666,18 @@ def verify_remote(
             if remote_readme != local_readme_bytes or remote_readme != render_dataset_card():
                 raise RemoteVerificationError(
                     "remote README bytes do not match the fixed dataset card"
+                )
+            if remote_empty_test != local_empty_test_bytes:
+                raise RemoteVerificationError(
+                    "remote empty test sentinel bytes do not match local bytes"
+                )
+            empty_test = pq.ParquetFile(pa.BufferReader(remote_empty_test))
+            if (
+                not empty_test.schema_arrow.equals(PARQUET_SCHEMA, check_metadata=True)
+                or empty_test.metadata.num_rows != 0
+            ):
+                raise RemoteVerificationError(
+                    "remote empty test sentinel violates the zero-row schema"
                 )
             verified_paths = METADATA_PATHS | _verify_remote_shards(
                 api, repo_id, revision, token, shards

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import fcntl
 import hashlib
 import heapq
 import json
@@ -29,6 +30,7 @@ import pyarrow.parquet as pq
 from .contracts import validate_document
 from .reconcile import split_for
 from .release import (
+    EMPTY_TEST_PATH,
     METADATA_PATHS,
     README_PATH,
     READINESS_PATH,
@@ -612,32 +614,73 @@ def validate_distillation_row(value: object) -> dict[str, object]:
     return document
 
 
+def _cooperative_rename_noreplace(source: Path, destination: Path) -> None:
+    """Publish on filesystems that reject ``RENAME_NOREPLACE`` flags.
+
+    The parent-directory lock serializes babel writers on filesystems such as
+    eCryptfs.  The destination check preserves no-clobber behavior for those
+    cooperating writers before the ordinary atomic rename.
+    """
+    if source.parent != destination.parent:
+        raise OSError(errno.EXDEV, "fallback rename requires one parent directory")
+    parent = os.open(source.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        fcntl.flock(parent, fcntl.LOCK_EX)
+        try:
+            os.stat(destination.name, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), destination)
+        os.rename(
+            source.name,
+            destination.name,
+            src_dir_fd=parent,
+            dst_dir_fd=parent,
+        )
+    finally:
+        try:
+            fcntl.flock(parent, fcntl.LOCK_UN)
+        finally:
+            os.close(parent)
+
+
 def _rename_noreplace(source: Path, destination: Path) -> None:
-    """Atomically publish a directory without ever replacing another entry."""
+    """Atomically publish a directory without replacing another entry."""
     library = ctypes.CDLL(None, use_errno=True)
     renameat2 = getattr(library, "renameat2", None)
-    if renameat2 is None:
-        raise OSError(errno.ENOSYS, "renameat2(RENAME_NOREPLACE) is unavailable")
-    renameat2.argtypes = [
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
-    ]
-    renameat2.restype = ctypes.c_int
-    result = renameat2(
-        -100,
-        os.fsencode(source),
-        -100,
-        os.fsencode(destination),
-        1,
-    )
-    if result != 0:
-        error_number = ctypes.get_errno()
-        if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
-            raise FileExistsError(error_number, os.strerror(error_number), destination)
-        raise OSError(error_number, os.strerror(error_number), destination)
+    used_fallback = renameat2 is None
+    if renameat2 is not None:
+        renameat2.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renameat2.restype = ctypes.c_int
+        result = renameat2(
+            -100,
+            os.fsencode(source),
+            -100,
+            os.fsencode(destination),
+            1,
+        )
+        if result != 0:
+            error_number = ctypes.get_errno()
+            if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
+                raise FileExistsError(
+                    error_number, os.strerror(error_number), destination
+                )
+            if error_number not in {
+                errno.EINVAL,
+                errno.ENOSYS,
+                getattr(errno, "EOPNOTSUPP", errno.ENOSYS),
+            }:
+                raise OSError(error_number, os.strerror(error_number), destination)
+            used_fallback = True
+    if used_fallback:
+        _cooperative_rename_noreplace(source, destination)
     try:
         directory = os.open(destination.parent, os.O_RDONLY)
         try:
@@ -648,20 +691,31 @@ def _rename_noreplace(source: Path, destination: Path) -> None:
         # The name became visible before its durability check failed. Move it
         # back to the private staging name with the same no-clobber primitive,
         # so the caller's cleanup can fail closed without deleting a racer.
-        rollback = renameat2(
-            -100,
-            os.fsencode(destination),
-            -100,
-            os.fsencode(source),
-            1,
-        )
-        if rollback != 0:
-            rollback_error = ctypes.get_errno()
-            raise OSError(
-                rollback_error,
-                "directory fsync failed and atomic publication rollback failed",
-                destination,
-            ) from publication_error
+        if used_fallback:
+            try:
+                _cooperative_rename_noreplace(destination, source)
+            except OSError as rollback_error:
+                raise OSError(
+                    rollback_error.errno,
+                    "directory fsync failed and atomic publication rollback failed",
+                    destination,
+                ) from publication_error
+        else:
+            assert renameat2 is not None
+            rollback = renameat2(
+                -100,
+                os.fsencode(destination),
+                -100,
+                os.fsencode(source),
+                1,
+            )
+            if rollback != 0:
+                rollback_error = ctypes.get_errno()
+                raise OSError(
+                    rollback_error,
+                    "directory fsync failed and atomic publication rollback failed",
+                    destination,
+                ) from publication_error
         try:
             directory = os.open(destination.parent, os.O_RDONLY)
             try:
@@ -892,6 +946,10 @@ def write_shards(
         readme_path = staging / README_PATH
         readme_path.write_bytes(render_dataset_card())
         _fsync_path(readme_path)
+        empty_test_path = staging / EMPTY_TEST_PATH
+        empty_test_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_table([], empty_test_path)
+        _fsync_path(empty_test_path)
         _fsync_staging_directories(staging)
         _rename_noreplace(staging, destination)
     except BaseException:

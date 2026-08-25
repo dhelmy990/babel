@@ -17,6 +17,7 @@ from .hub import (
     write_revision_file,
 )
 from .release import (
+    EMPTY_TEST_PATH,
     README_PATH,
     READINESS_PATH,
     validate_full_release_proof,
@@ -94,7 +95,9 @@ def _manifest_files(manifest_path: Path) -> list[Path]:
     manifest = validate_manifest_bytes(manifest_path.read_bytes(), label="local")
     root = manifest_path.parent.parent
     files = [root / item["path"] for item in manifest["shards"]]
-    files.extend([root / READINESS_PATH, root / README_PATH, manifest_path])
+    files.extend(
+        [root / READINESS_PATH, root / README_PATH, root / EMPTY_TEST_PATH, manifest_path]
+    )
     return files
 
 

@@ -15,7 +15,10 @@ DATASET_CONFIG = "distillation_2016"
 MANIFEST_PATH = f"{DATASET_CONFIG}/manifest.json"
 READINESS_PATH = "readiness.json"
 README_PATH = "README.md"
-METADATA_PATHS = frozenset({MANIFEST_PATH, READINESS_PATH, README_PATH})
+EMPTY_TEST_PATH = f"{DATASET_CONFIG}/test/empty.parquet"
+METADATA_PATHS = frozenset(
+    {MANIFEST_PATH, READINESS_PATH, README_PATH, EMPTY_TEST_PATH}
+)
 SPLITS = ("train", "validation", "test")
 
 DATASET_CARD = """---

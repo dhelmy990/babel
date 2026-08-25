@@ -26,6 +26,7 @@ from babel_data.hub import (  # noqa: E402
 from babel_data.cli import main  # noqa: E402
 from babel_data.reconcile import split_for  # noqa: E402
 from babel_data.release import (  # noqa: E402
+    EMPTY_TEST_PATH,
     canonical_json,
     identity_rows_sha256,
     validate_manifest_extension,
@@ -142,7 +143,12 @@ def prepare(tmp_path: Path):
         provenance=provenance_document(),
     )
     files = [result.output_root / shard.path for shard in result.shards]
-    files.extend([result.readiness_path, result.readme_path, result.manifest_path])
+    files.extend([
+        result.readiness_path,
+        result.readme_path,
+        result.output_root / EMPTY_TEST_PATH,
+        result.manifest_path,
+    ])
     datasets = {split: [next(value for value in values if value["split"] == split)] for split in ("train", "validation", "test")}
     return result, files, datasets
 
@@ -202,7 +208,10 @@ def rolling_extension(result: object, destination: Path) -> tuple[Path, list[Pat
         json.dumps(readiness, sort_keys=True, separators=(",", ":")) + "\n"
     )
     files = [destination / item["path"] for item in manifest["shards"]] + [
-        readiness_path, destination / "README.md", manifest_path
+        readiness_path,
+        destination / "README.md",
+        destination / EMPTY_TEST_PATH,
+        manifest_path,
     ]
     return manifest_path, files
 
@@ -413,6 +422,10 @@ def test_publish_semantic_preflight_streams_parquet_batches(
         @property
         def schema_arrow(self) -> pa.Schema:
             return self.delegate.schema_arrow
+
+        @property
+        def metadata(self) -> object:
+            return self.delegate.metadata
 
         def iter_batches(self, *args: object, **kwargs: object) -> object:
             nonlocal calls
@@ -962,6 +975,7 @@ def test_verify_remote_accepts_exact_shard_metadata_without_downloading_shards(
     )
     assert verified.verified_paths == {
         "README.md", "readiness.json", "distillation_2016/manifest.json",
+        EMPTY_TEST_PATH,
         *(item.path for item in result.shards),
     }
     assert not ({item.path for item in result.shards} & {path for path, _ in api.get_calls})

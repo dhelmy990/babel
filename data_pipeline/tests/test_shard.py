@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ctypes
+import errno
 import hashlib
 import json
 import sys
@@ -165,6 +167,27 @@ def test_writer_uses_explicit_schema_and_separate_split_paths(tmp_path: Path) ->
     validate_readiness_alignment(readiness, manifest)
 
 
+def test_writer_materializes_zero_row_test_sentinel_for_non_test_pilot(
+    tmp_path: Path,
+) -> None:
+    key = next(
+        f"enwiki:2016-10-01:{page_id}"
+        for page_id in range(1, 100)
+        if split_for(f"enwiki:2016-10-01:{page_id}") == "train"
+    )
+    result = write_test_shards(
+        [row(key, int(key.rsplit(":", 1)[1]))],
+        tmp_path / "prepared",
+        pilot_size=1,
+    )
+
+    sentinel = pq.read_table(
+        result.output_root / "distillation_2016/test/empty.parquet"
+    )
+    assert sentinel.schema == PARQUET_SCHEMA
+    assert sentinel.num_rows == 0
+
+
 def test_writer_requires_schema_valid_provenance(tmp_path: Path) -> None:
     value = row("enwiki:2016-10-01:1", 1)
     with pytest.raises((TypeError, ValueError, ValidationError), match="provenance"):
@@ -258,6 +281,36 @@ def test_atomic_directory_publication_never_replaces_racing_destination(
         write_test_shards([row("enwiki:2016-10-01:1", 1)], output, pilot_size=1)
     assert output.is_dir()
     assert list(output.iterdir()) == []
+
+
+def test_atomic_directory_publication_falls_back_when_renameat2_is_unsupported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import babel_data.shard as shard
+
+    class UnsupportedRename:
+        argtypes: object = None
+        restype: object = None
+
+        def __call__(self, *args: object) -> int:
+            ctypes.set_errno(errno.EINVAL)
+            return -1
+
+    class UnsupportedLibrary:
+        renameat2 = UnsupportedRename()
+
+    monkeypatch.setattr(
+        shard.ctypes,
+        "CDLL",
+        lambda *args, **kwargs: UnsupportedLibrary(),
+    )
+    output = tmp_path / "prepared"
+    result = write_test_shards(
+        [row("enwiki:2016-10-01:1", 1)], output, pilot_size=1
+    )
+
+    assert result.output_root == output
+    assert output.is_dir()
 
 
 def test_atomic_directory_publication_rolls_back_after_parent_fsync_failure(
