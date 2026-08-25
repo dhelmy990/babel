@@ -93,6 +93,7 @@ def _resolve_from_index(
     start: str,
     index: dict[str, WikipediaPage],
     ambiguous: set[str],
+    invalid: dict[str, str],
     cache: dict[str, _Resolution],
     *,
     max_depth: int,
@@ -103,6 +104,12 @@ def _resolve_from_index(
     depth = 0
     total_hops = 0
     while True:
+        if current in ambiguous:
+            resolution = _Resolution("duplicate/ambiguous_title", None)
+            break
+        if current in invalid:
+            resolution = _Resolution("invalid_wikipedia_page", None)
+            break
         cached = cache.get(current)
         if cached is not None:
             if cached.status == "resolved":
@@ -116,9 +123,6 @@ def _resolve_from_index(
                 resolution = _Resolution("redirect_target_missing", None)
             else:
                 resolution = cached
-            break
-        if current in ambiguous:
-            resolution = _Resolution("duplicate/ambiguous_title", None)
             break
         page = index.get(current)
         if page is None:
@@ -227,7 +231,7 @@ def reconcile(
         or max_redirect_depth < 0
     ):
         raise ValueError("max_redirect_depth must be a nonnegative integer")
-    index, ambiguous = _page_index(pages)
+    index, ambiguous, invalid = _page_index(pages)
     cache: dict[str, _Resolution] = {}
     seen_teacher_keys: set[str] = set()
     result = ReconciliationResult()
@@ -273,6 +277,7 @@ def reconcile(
             normalized,
             index,
             ambiguous,
+            invalid,
             cache,
             max_depth=max_redirect_depth,
         )

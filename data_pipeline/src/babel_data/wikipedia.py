@@ -16,6 +16,7 @@ import os
 import re
 import sqlite3
 import stat
+import unicodedata
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
@@ -122,6 +123,10 @@ class InvalidWikipediaUtf8(WikipediaError):
     """The decompressed XML is not strict UTF-8."""
 
 
+class InvalidWikipediaEncoding(InvalidWikipediaXml):
+    """The XML declaration names an unavailable or unsupported encoding."""
+
+
 class WikipediaLimitExceeded(InvalidWikipediaXml):
     """A bounded decompression, XML, page, or wikitext limit was exceeded."""
 
@@ -186,6 +191,17 @@ def is_non_article_title(title: str) -> bool:
     normalized = normalize_title(title)
     prefix, separator, _rest = normalized.partition(":")
     return bool(separator) and prefix in _NON_ARTICLE_PREFIXES
+
+
+def _valid_title_text(title: object) -> bool:
+    return (
+        isinstance(title, str)
+        and bool(normalize_title(title))
+        and not any(
+            unicodedata.category(character) in {"Cc", "Cs"}
+            for character in title
+        )
+    )
 
 
 def _same_inode(first: os.stat_result, second: os.stat_result) -> bool:
@@ -663,7 +679,12 @@ def _raw_page(element: ET.Element) -> _RawPage | None:
     redirect_element = _direct_child(element, "redirect", element_namespace)
     redirect_target = None
     if redirect_element is not None:
-        redirect_target = normalize_title(redirect_element.attrib.get("title", "")) or None
+        raw_redirect_target = redirect_element.attrib.get("title")
+        if not _valid_title_text(raw_redirect_target):
+            raise InvalidWikipediaPage(
+                f"redirect metadata has an invalid target for {title!r}"
+            )
+        redirect_target = normalize_title(raw_redirect_target)
     fallback = _redirect_from_text(raw_text)
     if redirect_target is None:
         redirect_target = fallback
@@ -673,7 +694,7 @@ def _raw_page(element: ET.Element) -> _RawPage | None:
         )
     return _RawPage(
         page_id,
-        title,
+        normalized,
         normalized,
         revision_id,
         raw_text,
@@ -796,6 +817,10 @@ def _iter_raw_pages_source(
                     yield page
             except (InvalidWikipediaUtf8, CorruptWikipediaBzip, WikipediaLimitExceeded):
                 raise
+            except LookupError as error:
+                raise InvalidWikipediaEncoding(
+                    f"Wikipedia XML declares an unknown encoding: {error}"
+                ) from error
             except ET.ParseError as error:
                 raise InvalidWikipediaXml(f"malformed Wikipedia XML: {error}") from error
             finally:
@@ -952,8 +977,10 @@ def iter_wikipedia_pages(
         raise ValueError("max_redirect_depth must be a nonnegative integer")
     with _open_wikipedia_source(Path(xml_bz2_path)) as source:
         if title_filter is None:
-            for raw in _iter_raw_pages_source(source):
-                yield _to_page(raw)
+            with _identity_database() as database:
+                for raw in _iter_raw_pages_source(source, check_duplicates=False):
+                    _record_identity(database, raw)
+                    yield _to_page(raw)
             return
 
         candidates = {normalize_title(title) for title in title_filter}
@@ -979,44 +1006,9 @@ def _candidate_closure(
     max_redirect_depth: int,
 ) -> set[str]:
     """Spill full identity metadata to disk; retain only closure keys in RAM."""
-    database = sqlite3.connect("")
-    try:
-        database.execute("PRAGMA journal_mode=OFF")
-        database.execute("PRAGMA synchronous=OFF")
-        database.execute("PRAGMA temp_store=FILE")
-        database.execute(
-            "CREATE TABLE page_identity ("
-            "normalized_title TEXT PRIMARY KEY, "
-            "canonical_title TEXT NOT NULL, "
-            "page_id INTEGER NOT NULL UNIQUE, "
-            "redirect_target TEXT)"
-        )
+    with _identity_database() as database:
         for raw in _iter_raw_pages_source(source, check_duplicates=False):
-            try:
-                database.execute(
-                    "INSERT INTO page_identity VALUES (?, ?, ?, ?)",
-                    (
-                        raw.normalized_title,
-                        raw.canonical_title,
-                        raw.page_id,
-                        raw.redirect_target,
-                    ),
-                )
-            except sqlite3.IntegrityError as error:
-                title_duplicate = database.execute(
-                    "SELECT canonical_title FROM page_identity "
-                    "WHERE normalized_title = ?",
-                    (raw.normalized_title,),
-                ).fetchone()
-                if title_duplicate is not None:
-                    raise DuplicateWikipediaTitle(
-                        "duplicate normalized Wikipedia title "
-                        f"{raw.normalized_title!r}: {title_duplicate[0]!r} and "
-                        f"{raw.canonical_title!r}"
-                    ) from error
-                raise DuplicateWikipediaPageId(
-                    f"duplicate Wikipedia page ID: {raw.page_id}"
-                ) from error
+            _record_identity(database, raw)
         database.commit()
 
         wanted = set(candidates)
@@ -1037,30 +1029,126 @@ def _candidate_closure(
                 current = str(row[0])
                 wanted.add(current)
         return wanted
+
+
+@contextmanager
+def _identity_database() -> Iterator[sqlite3.Connection]:
+    database = sqlite3.connect("")
+    try:
+        database.execute("PRAGMA journal_mode=OFF")
+        database.execute("PRAGMA synchronous=OFF")
+        database.execute("PRAGMA temp_store=FILE")
+        database.execute(
+            "CREATE TABLE page_identity ("
+            "normalized_title TEXT PRIMARY KEY, "
+            "canonical_title TEXT NOT NULL, "
+            "page_id INTEGER NOT NULL UNIQUE, "
+            "redirect_target TEXT)"
+        )
+        yield database
     finally:
         database.close()
 
 
+def _record_identity(database: sqlite3.Connection, raw: _RawPage) -> None:
+    try:
+        database.execute(
+            "INSERT INTO page_identity VALUES (?, ?, ?, ?)",
+            (
+                raw.normalized_title,
+                raw.canonical_title,
+                raw.page_id,
+                raw.redirect_target,
+            ),
+        )
+    except sqlite3.IntegrityError as error:
+        title_duplicate = database.execute(
+            "SELECT canonical_title FROM page_identity WHERE normalized_title = ?",
+            (raw.normalized_title,),
+        ).fetchone()
+        if title_duplicate is not None:
+            raise DuplicateWikipediaTitle(
+                "duplicate normalized Wikipedia title "
+                f"{raw.normalized_title!r}: {title_duplicate[0]!r} and "
+                f"{raw.canonical_title!r}"
+            ) from error
+        raise DuplicateWikipediaPageId(
+            f"duplicate Wikipedia page ID: {raw.page_id}"
+        ) from error
+
+
 def _page_index(
     pages: Mapping[str, WikipediaPage] | Iterable[WikipediaPage],
-) -> tuple[dict[str, WikipediaPage], set[str]]:
+) -> tuple[dict[str, WikipediaPage], set[str], dict[str, str]]:
     values = pages.values() if isinstance(pages, Mapping) else pages
     index: dict[str, WikipediaPage] = {}
     ambiguous: set[str] = set()
+    invalid: dict[str, str] = {}
     ids: dict[int, str] = {}
+    seen_titles: set[str] = set()
     for page in values:
+        if not isinstance(page, WikipediaPage):
+            raise InvalidWikipediaPage(
+                "Wikipedia page input is not a WikipediaPage instance"
+            )
+        if not _valid_title_text(page.canonical_title):
+            raise InvalidWikipediaPage(
+                "Wikipedia page has no usable canonical title identity"
+            )
         key = normalize_title(page.canonical_title)
-        if key in index:
+        if key in seen_titles:
             ambiguous.add(key)
         else:
-            index[key] = page
-        previous_key = ids.get(page.page_id)
-        if previous_key is not None:
-            ambiguous.add(previous_key)
-            ambiguous.add(key)
-        else:
-            ids[page.page_id] = key
-    return index, ambiguous
+            seen_titles.add(key)
+        error = _wikipedia_page_error(page, key)
+        if (
+            isinstance(page.page_id, int)
+            and not isinstance(page.page_id, bool)
+            and 0 < page.page_id <= MAX_ID_VALUE
+        ):
+            previous_key = ids.get(page.page_id)
+            if previous_key is not None:
+                ambiguous.add(previous_key)
+                ambiguous.add(key)
+            else:
+                ids[page.page_id] = key
+        if key not in ambiguous:
+            if error is not None:
+                invalid.setdefault(key, error)
+            elif key not in invalid:
+                index[key] = page
+    return index, ambiguous, invalid
+
+
+def _wikipedia_page_error(page: WikipediaPage, normalized_title: str) -> str | None:
+    if (
+        not isinstance(page.page_id, int)
+        or isinstance(page.page_id, bool)
+        or page.page_id <= 0
+        or page.page_id > MAX_ID_VALUE
+    ):
+        return "page_id must be a positive signed-64-bit non-boolean integer"
+    if page.revision_id is not None and (
+        not isinstance(page.revision_id, int)
+        or isinstance(page.revision_id, bool)
+        or page.revision_id <= 0
+        or page.revision_id > MAX_ID_VALUE
+    ):
+        return "revision_id must be a positive signed-64-bit integer or None"
+    if page.canonical_title != normalized_title:
+        return "canonical_title must already use canonical normalization"
+    if not isinstance(page.article_text, str):
+        return "article_text must be text"
+    if not isinstance(page.lead_text, str):
+        return "lead_text must be text"
+    if page.redirect_target is not None:
+        if not _valid_title_text(page.redirect_target):
+            return "redirect_target must be a valid nonblank title or None"
+        if page.redirect_target != normalize_title(page.redirect_target):
+            return "redirect_target must already use canonical normalization"
+        if page.article_text or page.lead_text:
+            return "redirect pages cannot also carry article or lead text"
+    return None
 
 
 def resolve_redirect(
@@ -1072,7 +1160,7 @@ def resolve_redirect(
     """Resolve exact normalized identities with explicit bounded outcomes."""
     if not isinstance(max_depth, int) or isinstance(max_depth, bool) or max_depth < 0:
         raise ValueError("max_depth must be a nonnegative integer")
-    index, ambiguous = _page_index(pages)
+    index, ambiguous, invalid = _page_index(pages)
     current = normalize_title(title)
     chain: list[str] = []
     visited: set[str] = set()
@@ -1080,6 +1168,8 @@ def resolve_redirect(
     while True:
         if current in ambiguous:
             return RedirectResolution("duplicate/ambiguous_title", None, tuple(chain))
+        if current in invalid:
+            return RedirectResolution("invalid_wikipedia_page", None, tuple(chain))
         page = index.get(current)
         if page is None:
             status = "title_not_found" if not chain else "redirect_target_missing"
@@ -1102,6 +1192,7 @@ __all__ = [
     "DuplicateWikipediaPageId",
     "DuplicateWikipediaTitle",
     "InvalidWikipediaPage",
+    "InvalidWikipediaEncoding",
     "InvalidWikipediaSource",
     "InvalidWikipediaUtf8",
     "InvalidWikipediaXml",

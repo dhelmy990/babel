@@ -22,6 +22,7 @@ from babel_data.wikipedia import (  # noqa: E402
     DuplicateWikipediaPageId,
     DuplicateWikipediaTitle,
     InvalidWikipediaPage,
+    InvalidWikipediaEncoding,
     InvalidWikipediaSource,
     InvalidWikipediaUtf8,
     InvalidWikipediaXml,
@@ -202,6 +203,55 @@ def test_filtered_identity_state_is_candidate_bounded_in_python_memory(
     assert peak < 4 * 1024 * 1024
 
 
+def test_unfiltered_identity_state_is_disk_spilled_and_memory_bounded(
+    tmp_path: Path,
+) -> None:
+    pages = [xml_page(f"Article {index}", index) for index in range(1, 20_001)]
+    path = write_dump(tmp_path, "".join(pages))
+    del pages
+    gc.collect()
+
+    tracemalloc.start()
+    try:
+        assert sum(1 for _page in iter_wikipedia_pages(path)) == 20_000
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 4 * 1024 * 1024
+
+
+def test_unfiltered_spill_database_closes_when_generator_closes_early(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import babel_data.wikipedia as wikipedia
+
+    real_connect = wikipedia.sqlite3.connect
+    closed: list[bool] = []
+
+    class TrackingConnection:
+        def __init__(self) -> None:
+            self._connection = real_connect("")
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._connection, name)
+
+        def close(self) -> None:
+            self._connection.close()
+            closed.append(True)
+
+    monkeypatch.setattr(
+        wikipedia.sqlite3,
+        "connect",
+        lambda _path: TrackingConnection(),
+    )
+    pages = iter_wikipedia_pages(FIXTURE)
+    next(pages)
+    pages.close()
+
+    assert closed == [True]
+
+
 def test_completed_non_page_subtrees_do_not_accumulate_in_dom(tmp_path: Path) -> None:
     children = [f"<junk>{'x' * 4096}</junk>" for _ in range(2000)]
     payload = (
@@ -232,6 +282,28 @@ def test_redirect_metadata_and_fallback_form_consistent_chain() -> None:
     assert first.page is not None
     assert first.page.page_id == 10
     assert first.chain == ("VM alias", "VM overview", "Virtual memory")
+
+
+@pytest.mark.parametrize(
+    "redirect",
+    [
+        "<redirect />",
+        '<redirect title="   " />',
+        '<redirect title="&#127;" />',
+    ],
+)
+def test_present_redirect_metadata_requires_nonblank_valid_target(
+    tmp_path: Path, redirect: str
+) -> None:
+    page = (
+        "<page><title>Bad redirect</title><ns>0</ns><id>1</id>"
+        + redirect
+        + "<revision><id>1</id><text>Ordinary article text.</text></revision></page>"
+    )
+    path = write_dump(tmp_path, page)
+
+    with pytest.raises(InvalidWikipediaPage, match="redirect"):
+        list(iter_wikipedia_pages(path))
 
 
 def test_redirect_outcomes_cover_cycle_missing_depth_and_ambiguity() -> None:
@@ -332,6 +404,20 @@ def test_truncated_utf8_at_decompressed_eof_is_typed_as_utf8(tmp_path: Path) -> 
 
     with pytest.raises(InvalidWikipediaUtf8):
         list(iter_wikipedia_pages(path))
+
+
+def test_unknown_xml_encoding_is_typed_and_preserves_cause(tmp_path: Path) -> None:
+    payload = (
+        b'<?xml version="1.0" encoding="not-a-real-codec"?>'
+        + f'<mediawiki xmlns="{XMLNS}"></mediawiki>'.encode()
+    )
+    path = tmp_path / "unknown-encoding.xml.bz2"
+    path.write_bytes(bz2.compress(payload))
+
+    with pytest.raises(InvalidWikipediaEncoding) as raised:
+        list(iter_wikipedia_pages(path))
+
+    assert isinstance(raised.value.__cause__, LookupError)
 
 
 @pytest.mark.parametrize(

@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -210,3 +211,60 @@ def test_structurally_invalid_teacher_record_is_explicitly_accounted() -> None:
     assert result.rows == []
     assert result.input_count == 1
     assert [item.reason for item in result.exclusions] == ["invalid_teacher_source"]
+
+
+def invalid_page(**overrides: object) -> WikipediaPage:
+    values: dict[str, object] = {
+        "page_id": 9,
+        "canonical_title": "Invalid page",
+        "revision_id": 10,
+        "article_text": "Useful body.",
+        "lead_text": "Useful lead.",
+        "redirect_target": None,
+    }
+    values.update(overrides)
+    return WikipediaPage(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        invalid_page(page_id=0),
+        invalid_page(page_id=True),
+        invalid_page(page_id=2**100),
+        invalid_page(revision_id=0),
+        invalid_page(revision_id=True),
+        invalid_page(revision_id=2**100),
+        invalid_page(canonical_title="invalid_page"),
+        invalid_page(article_text=None),
+        invalid_page(lead_text=None),
+        invalid_page(redirect_target=""),
+        invalid_page(redirect_target="\x7f"),
+        invalid_page(redirect_target="Target", article_text="not empty"),
+    ],
+)
+def test_direct_malformed_wikipedia_pages_are_explicitly_excluded(
+    page: WikipediaPage,
+) -> None:
+    result = reconcile([teacher("Invalid_page")], [page])
+
+    assert result.rows == []
+    assert result.input_count == 1
+    assert [item.reason for item in result.exclusions] == [
+        "invalid_wikipedia_page"
+    ]
+
+
+def test_invalid_page_cannot_emit_schema_invalid_row_and_valid_peer_still_emits() -> None:
+    result = reconcile(
+        [teacher("Valid"), teacher("Invalid page")],
+        [article("Valid", page_id=1), invalid_page(page_id=0)],
+    )
+
+    assert len(result.rows) == 1
+    validate_document("distillation-example-v1", result.rows[0].to_document())
+    assert result.rows[0].page_id == 1
+    assert [item.reason for item in result.exclusions] == [
+        "invalid_wikipedia_page"
+    ]
+    assert len(result.rows) + len(result.exclusions) == result.input_count == 2
