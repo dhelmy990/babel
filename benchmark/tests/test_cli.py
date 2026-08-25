@@ -5,7 +5,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from babel_benchmark.cli import main
+from babel_benchmark.cli import _parser, main
 from babel_benchmark.contracts import RequestMeasurementV1, load_jsonl
 
 
@@ -99,3 +99,39 @@ def test_replay_command_wraps_the_real_loopback_http_post(tmp_path: Path) -> Non
     assert len(rows) == 6
     assert all(row.outcome == "success" for row in rows)
     assert all(row.clientTotalNs >= row.serverTimingsNs["serverTotal"] for row in rows)
+
+
+def test_live_replay_cli_exposes_real_trainer_and_sync_inputs() -> None:
+    args = _parser().parse_args(
+        [
+            "live-replay",
+            "--manifest",
+            "manifest.json",
+            "--requests",
+            "requests.jsonl",
+            "--candidate-universe",
+            "created.jsonl",
+            "--condition",
+            "pgvector_training_and_sync",
+            "--measurements",
+            "measurements.jsonl",
+            "--telemetry",
+            "telemetry.jsonl",
+            "--dsn",
+            "postgresql://localhost/babel",
+            "--kafka-bootstrap",
+            "127.0.0.1:29092",
+            "--feedback",
+            "feedback.jsonl",
+            "--run-id",
+            "00000000-0000-5000-8000-000000000001",
+            "--model-version",
+            "48",
+            "--sync-root",
+            "sync",
+        ]
+    )
+
+    assert args.command == "live-replay"
+    assert args.publish_limit == 4000
+    assert args.sync_every_steps == 50

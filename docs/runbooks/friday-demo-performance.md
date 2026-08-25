@@ -46,9 +46,11 @@ runs.
 
 ## Run the paired conditions
 
-The CLI deliberately assumes the operator has already configured the selected
-condition. It never changes the online service and therefore cannot silently
-enable training or synchronization.
+The plain `replay` command assumes the operator has configured the selected
+condition externally. The `live-replay` command is the Friday-only adapter for
+the integrated runtime: it keeps the real loopback POST active while producing
+real Kafka feedback, running the real `OnlineTrainer`, and optionally publishing
+locked snapshots through the real `AtomicSynchronizer`.
 
 Create an artifact directory:
 
@@ -68,80 +70,65 @@ babel-friday-benchmark replay \
   --measurements artifacts/performance/friday-demo/serving-only.jsonl
 ```
 
-Reset to the identical starting model and pgvector snapshot. Start the online
-trainer while withholding all calls to `AtomicSynchronizer.publish`, replay the
-same feedback offsets at the same rate, and run:
+Reset to the identical starting model and pgvector snapshot. Run the trainer
+without synchronization against the frozen feedback export:
 
 ```bash
-babel-friday-benchmark replay \
+babel-friday-benchmark live-replay \
   --manifest artifacts/performance/friday-demo/manifest.json \
   --requests artifacts/performance/friday-demo/requests.jsonl \
   --candidate-universe artifacts/performance/friday-demo/created-babels.jsonl \
   --condition pgvector_training_no_sync \
-  --measurements artifacts/performance/friday-demo/training-no-sync.jsonl
+  --measurements artifacts/performance/friday-demo/training-no-sync.jsonl \
+  --telemetry artifacts/performance/friday-demo/training-no-sync-telemetry.jsonl \
+  --dsn "$BABEL_DATABASE_URL" \
+  --kafka-bootstrap "$BABEL_KAFKA_BOOTSTRAP_SERVERS" \
+  --feedback "artifacts/online/$BABEL_PERF_RUN_ID/feedback/feedback-export/feedback.jsonl" \
+  --run-id "$BABEL_PERF_RUN_ID" --model-version "$BABEL_PERF_MODEL_VERSION" \
+  --publish-limit 4000
 ```
 
 Reset again. Start the trainer and enable the declared synchronization cadence,
 then run:
 
 ```bash
-babel-friday-benchmark replay \
+babel-friday-benchmark live-replay \
   --manifest artifacts/performance/friday-demo/manifest.json \
   --requests artifacts/performance/friday-demo/requests.jsonl \
   --candidate-universe artifacts/performance/friday-demo/created-babels.jsonl \
   --condition pgvector_training_and_sync \
-  --measurements artifacts/performance/friday-demo/training-and-sync.jsonl
+  --measurements artifacts/performance/friday-demo/training-and-sync.jsonl \
+  --telemetry artifacts/performance/friday-demo/training-and-sync-telemetry.jsonl \
+  --dsn "$BABEL_DATABASE_URL" \
+  --kafka-bootstrap "$BABEL_KAFKA_BOOTSTRAP_SERVERS" \
+  --feedback "artifacts/online/$BABEL_PERF_RUN_ID/feedback/feedback-export/feedback.jsonl" \
+  --run-id "$BABEL_PERF_RUN_ID" --model-version "$BABEL_PERF_MODEL_VERSION" \
+  --publish-limit 4000 \
+  --sync-root "$BABEL_PERF_SYNC_ROOT" \
+  --sync-every-steps 50
 ```
 
-The sync condition must start at the frozen snapshot but may report later
-snapshot checksums and model versions after atomic synchronization. Those
-identities remain in every raw row; retain the runtime's sync ledger with the
-artifacts and verify each change against it before accepting the report.
+The benchmark sync publisher uses the exact version, model state, and vectors
+returned by `OnlineTrainer.capture_sync_state()` under its training lock. Give
+every invocation a fresh `--sync-root`; an existing sync-version directory is a
+hard error. The adapter swaps an isolated serving snapshot so it can measure
+publication interference without mutating the completed run's PostgreSQL active
+state. Consequently, its sync duration excludes vector-row insertion and the
+active-row transaction; disclose that limitation in the report.
 
 Any backend switch, candidate-universe violation, response identity mismatch,
 or incomplete server timing invalidates the condition. HTTP failures and
 timeouts are retained as raw rows.
 
-## Connect trainer, lag, and sync telemetry
+## Trainer, lag, and sync telemetry
 
-Slice 3 does not yet expose trainer-step duration, Kafka lag, and synchronization
-duration through one public stream. The benchmark therefore supplies a narrow
-adapter without importing or modifying `babel_online`:
-
-```python
-from time import monotonic_ns
-
-from babel_benchmark.contracts import dump_jsonl
-from babel_benchmark.runner import (
-    ConditionTelemetryRecorder,
-    MeasuredConditionOperations,
-)
-
-recorder = ConditionTelemetryRecorder(manifest, condition, monotonic_ns)
-measured = MeasuredConditionOperations(recorder, monotonic_ns=monotonic_ns)
-
-measured.trainer_step(
-    step=next_optimizer_step,
-    operation=run_one_actual_optimizer_step,
-)
-measured.kafka_lag(current_kafka_lag)  # omit when the broker cannot provide it
-measured.synchronization(
-    version=trainer.training_version,
-    operation=publish_sync,
-)
-
-telemetry_path.write_text(dump_jsonl(tuple(recorder.rows)))
-```
-
-The condition driver owns when those existing public operations run. The
-adapter only measures them and emits `ConditionTelemetryV1`; it does not change
-trainer offsets, event order, model state, or sync semantics. Until the runtime
-composition exposes a callback at the actual optimizer-step boundary, this is
-the explicit integration seam. Do not label the duration of
-`OnlineTrainer.process_available()` as trainer-step time: it also includes poll
-and event handling and may perform no optimizer step. The HTTP CLI can collect
-real POST latency now; a fully accepted training-interference report additionally
-requires this condition-driver callback and a measured sync operation.
+`live-replay` wraps the model's actual `train_pairs` call with
+`time.monotonic_ns()`; it does not mislabel consumer poll/event handling as step
+time. Kafka lag is sampled from real broker high watermarks and trainer offsets,
+clamped to the condition's captured starting watermark so records already on a
+shared topic are excluded. Sync timing covers locked capture consumption,
+created-Babel materialization, canonical hashing, fsync/atomic rename, and the
+isolated serving-snapshot swap. Raw rows use `ConditionTelemetryV1`.
 
 ## Generate the real report
 
