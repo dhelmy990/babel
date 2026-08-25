@@ -68,6 +68,7 @@ def test_training_config_accepts_valid_overrides() -> None:
         {"teacher_dimension": 99},
         {"max_length": 0},
         {"max_length": -1},
+        {"max_length": 1025},
         {"lora_rank": 0},
         {"lora_rank": -1},
         {"lora_alpha": 0},

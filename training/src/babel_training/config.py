@@ -25,11 +25,17 @@ class DistillationConfig:
             or self.teacher_dimension != 100
         ):
             raise ValueError("teacher_dimension must be exactly 100")
+        if (
+            not isinstance(self.max_length, int)
+            or isinstance(self.max_length, bool)
+            or not 1 <= self.max_length <= 1024
+        ):
+            raise ValueError("max_length must be an integer in [1, 1024]")
         if any(
             not isinstance(value, int) or isinstance(value, bool) or value <= 0
-            for value in (self.max_length, self.lora_rank, self.lora_alpha)
+            for value in (self.lora_rank, self.lora_alpha)
         ):
-            raise ValueError("max_length, lora_rank, and lora_alpha must be positive")
+            raise ValueError("lora_rank and lora_alpha must be positive integers")
         if (
             not isinstance(self.lambda_rel, Real)
             or isinstance(self.lambda_rel, bool)
