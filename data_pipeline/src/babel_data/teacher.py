@@ -53,9 +53,11 @@ _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _EOCD_SIGNATURE = b"PK\x05\x06"
 _ZIP64_EOCD_SIGNATURE = b"PK\x06\x06"
 _ZIP64_LOCATOR_SIGNATURE = b"PK\x06\x07"
+_CENTRAL_DIRECTORY_SIGNATURE = b"PK\x01\x02"
 _EOCD = struct.Struct("<4s4H2LH")
 _ZIP64_EOCD = struct.Struct("<4sQ2H2L4Q")
 _ZIP64_LOCATOR = struct.Struct("<4sLQL")
+_CENTRAL_DIRECTORY_HEADER = struct.Struct("<4s6H3L5H2L")
 
 
 class TeacherError(ValueError):
@@ -383,6 +385,61 @@ def _find_eocd(file_descriptor: int, archive_size: int) -> tuple[int, bytes]:
         search_end = position
 
 
+def _preflight_central_directory(
+    file_descriptor: int,
+    *,
+    central_offset: int,
+    central_size: int,
+    declared_entries: int,
+) -> None:
+    cursor = central_offset
+    central_end = central_offset + central_size
+    actual_entries = 0
+
+    while cursor < central_end:
+        remaining = central_end - cursor
+        if remaining < _CENTRAL_DIRECTORY_HEADER.size:
+            raise InvalidTeacherArchive(
+                "central directory has trailing or truncated metadata"
+            )
+        fields = _CENTRAL_DIRECTORY_HEADER.unpack(
+            _read_at(file_descriptor, _CENTRAL_DIRECTORY_HEADER.size, cursor)
+        )
+        if fields[0] != _CENTRAL_DIRECTORY_SIGNATURE:
+            raise InvalidTeacherArchive(
+                f"invalid central-directory header at entry {actual_entries + 1}"
+            )
+        filename_size, extra_size, comment_size = fields[10:13]
+        entry_size = (
+            _CENTRAL_DIRECTORY_HEADER.size
+            + filename_size
+            + extra_size
+            + comment_size
+        )
+        if entry_size > remaining:
+            raise InvalidTeacherArchive(
+                f"central-directory entry {actual_entries + 1} exceeds its bounds"
+            )
+
+        actual_entries += 1
+        if actual_entries > MAX_ARCHIVE_MEMBERS:
+            raise InvalidTeacherArchive(
+                f"archive has too many members: more than {MAX_ARCHIVE_MEMBERS}"
+            )
+        if actual_entries > declared_entries:
+            raise InvalidTeacherArchive(
+                "central-directory entry count does not match the declared count: "
+                f"declared {declared_entries}, found at least {actual_entries}"
+            )
+        cursor += entry_size
+
+    if actual_entries != declared_entries:
+        raise InvalidTeacherArchive(
+            "central-directory entry count does not match the declared count: "
+            f"declared {declared_entries}, found {actual_entries}"
+        )
+
+
 def _preflight_zip(file_descriptor: int, archive_size: int) -> None:
     eocd_offset, raw_eocd = _find_eocd(file_descriptor, archive_size)
     (
@@ -456,10 +513,16 @@ def _preflight_zip(file_descriptor: int, archive_size: int) -> None:
         raise InvalidTeacherArchive(
             f"central directory is too large: {central_size} bytes"
         )
-    if central_size < total_entries * 46:
+    if central_size < total_entries * _CENTRAL_DIRECTORY_HEADER.size:
         raise InvalidTeacherArchive("central directory entry bounds are invalid")
     if central_offset + central_size != central_end_limit:
         raise InvalidTeacherArchive("central directory exceeds source bounds")
+    _preflight_central_directory(
+        file_descriptor,
+        central_offset=central_offset,
+        central_size=central_size,
+        declared_entries=total_entries,
+    )
 
 
 def _same_inode(first: os.stat_result, second: os.stat_result) -> bool:

@@ -548,6 +548,39 @@ def test_eocd_entry_limit_is_checked_before_zipfile_allocation(
     assert constructed is False
 
 
+def test_forged_low_eocd_count_is_rejected_before_zipfile_allocation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    path = tmp_path / "many-members.zip"
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
+        for index in range(teacher.MAX_ARCHIVE_MEMBERS + 1):
+            archive.writestr(f"entry-{index:04d}", b"")
+    declare_excessive_eocd_entries(path, 1)
+    constructed = False
+    pread_sizes: list[int] = []
+    real_pread = os.pread
+
+    def bounded_pread(file_descriptor: int, size: int, offset: int) -> bytes:
+        pread_sizes.append(size)
+        assert size <= 65_557
+        return real_pread(file_descriptor, size, offset)
+
+    class UnexpectedZipFile:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            nonlocal constructed
+            constructed = True
+            raise AssertionError("ZipFile allocated before header-count preflight")
+
+    monkeypatch.setattr(teacher.os, "pread", bounded_pread)
+    monkeypatch.setattr(teacher.zipfile, "ZipFile", UnexpectedZipFile)
+
+    with pytest.raises(InvalidTeacherArchive, match="entry count|too many"):
+        list(iter_teacher(path))
+
+    assert constructed is False
+    assert len(pread_sizes) <= 4
+
+
 def test_eocd_declared_central_directory_must_fit_source(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
