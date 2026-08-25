@@ -1,8 +1,7 @@
 # Colab Distillation Pilot Handoff Prompt
 
-Paste the message below to the pilot operator only after replacing every exact
-placeholder. Do not send it with an unresolved placeholder and do not include a
-Hugging Face token.
+The message below is ready to use with the remotely verified Friday pilot. Do
+not include a Hugging Face token when sharing results.
 
 ---
 
@@ -13,24 +12,15 @@ Please run the Babel 2016 distillation pilot in Google Colab using the attached
 Frozen identities:
 
 ```text
-SOURCE_COMMIT_SHA=<SOURCE_COMMIT_SHA_40_HEX>
+SOURCE_COMMIT_SHA=9d4c0c5e6a191a6a33e5319b21dc7a389d06b6c3
 DATASET_REPO_ID=dhelmy990/babel-wikipedia-experiment
 DATASET_CONFIG=distillation_2016
-DATASET_REVISION_SHA=<DATASET_REVISION_SHA_40_HEX>
-DATASET_MANIFEST_SHA256=<DATASET_MANIFEST_SHA256_64_HEX>
-DATASET_READINESS_SHA256=<DATASET_READINESS_SHA256_64_HEX>
+DATASET_REVISION_SHA=c8cbb81fdb81f71a3aa5d0e5beb10348843ede6b
+DATASET_MANIFEST_SHA256=6d99276635ec76f58c945dc3b2eb32273f113a4c9163dc926b9a6fc18300ff6a
+DATASET_READINESS_SHA256=763b40f911c34a0479efdcbe2851f6c5151656d25f2e23d167c4d4560ef9acc2
 MODEL_ID=Qwen/Qwen3-Embedding-0.6B
 MODEL_REVISION_SHA=97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3
 TOKENIZER_REVISION_SHA=97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3
-```
-
-Before sending this prompt, replace these strings in the notebook too:
-
-```text
-<SOURCE_COMMIT_SHA_40_HEX>
-<DATASET_REVISION_SHA_40_HEX>
-<DATASET_MANIFEST_SHA256_64_HEX>
-<DATASET_READINESS_SHA256_64_HEX>
 ```
 
 Use **Runtime > Change runtime type > T4 GPU**. Add a read-only private-Hub
@@ -63,6 +53,9 @@ result, resumed step, artifact ID/path, and the exception type for any failure.
 
 ---
 
-Handoff owner preflight: verify both 40-character placeholders and both
-64-character placeholders use lowercase hexadecimal and refer to one coherent,
-locally verified release before sending this prompt.
+Local trusted-path acceptance already passed against these identities on a
+CPU-only host: the actual Qwen model produced a finite loss, exactly 112 LoRA
+tensors plus projection weight/bias received gradients, an atomic checkpoint
+reloaded in a fresh Python process with an identical 100d fingerprint, and the
+trainer resumed one step. The Colab run remains the GPU handoff and should
+report its own evidence using the checklist above.

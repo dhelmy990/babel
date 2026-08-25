@@ -14,10 +14,13 @@ You need:
 - a read-only Hugging Face token (dataset read permission only); and
 - enough Google Drive space for complete checkpoints (recommended: 10 GB).
 
-The handoff owner must have replaced every angle-bracket placeholder in the
-notebook. In particular, `SOURCE_COMMIT_SHA` and `dataset_ref` must each be
-exactly 40 lowercase hexadecimal characters. The manifest and readiness
-checksums must each be exactly 64 lowercase hexadecimal characters.
+The checked-in notebook already pins source commit
+`9d4c0c5e6a191a6a33e5319b21dc7a389d06b6c3`, dataset commit
+`c8cbb81fdb81f71a3aa5d0e5beb10348843ede6b`, manifest SHA-256
+`6d99276635ec76f58c945dc3b2eb32273f113a4c9163dc926b9a6fc18300ff6a`,
+and readiness SHA-256
+`763b40f911c34a0479efdcbe2851f6c5151656d25f2e23d167c4d4560ef9acc2`.
+Do not substitute a branch name or floating revision.
 
 ## Launch: exact clicks
 
@@ -139,3 +142,15 @@ Copy no tokens or private row text. Send only:
 The Friday demo is accepted when the one-batch gate passes, a complete
 checkpoint reloads with the same validation fingerprint, one additional step
 resumes, and the structured validation report/export are produced.
+
+## Pre-handoff acceptance evidence
+
+Before this Colab handoff, the trusted path was exercised locally against the
+same private dataset SHA using the actual pinned Qwen model. The CPU-only smoke
+used batch size 1 and length 8. All 112 LoRA tensors plus projection weight and
+bias—and no frozen base tensors—received gradients. Manual loss was
+`0.9819909`; optimizer-step loss was `0.9663436`. A 28 MB complete checkpoint
+reloaded in a fresh Python process with a 100-dimensional validation
+fingerprint at `max_abs=0.0`, then resumed from step 1 to step 2 with finite
+loss `0.9487882`. This evidence validates the package path; the Colab run
+validates the intended T4 settings and longer sequences.
