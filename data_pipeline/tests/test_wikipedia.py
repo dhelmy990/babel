@@ -173,6 +173,16 @@ def test_ref_close_tokens_inside_quoted_attributes_are_inert() -> None:
 
 
 @pytest.mark.parametrize(
+    "citation",
+    ["citation < 5", "citation <3", "citation </3", "citation <!not-markup>"],
+)
+def test_literal_less_than_inside_ref_does_not_hide_real_close(
+    citation: str,
+) -> None:
+    assert wikitext_to_plain_text(f"Lead <ref>{citation}</ref> tail") == "Lead tail"
+
+
+@pytest.mark.parametrize(
     "inert_markup",
     ["<![CDATA[</ref>]]>", '<?citation value="</ref>"?>'],
 )
@@ -777,6 +787,7 @@ def test_wikitext_limits_reject_pathological_size_and_nesting() -> None:
         "<!--",
         "<a>x</a>",
         '<ref><span title="</ref>">x</span></ref>',
+        "<ref>citation <3</ref>",
     ],
 )
 def test_inline_markup_scanner_has_a_linear_operation_budget(

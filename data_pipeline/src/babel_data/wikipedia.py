@@ -943,6 +943,15 @@ def _find_ref_close(
             cursor = instruction_end + 2
             continue
 
+        name_start = markup_start + 1
+        plausible_tag = name_start < len(text) and text[name_start].isalpha()
+        if name_start < len(text) and text[name_start] == "/":
+            name_start += 1
+            plausible_tag = name_start < len(text) and text[name_start].isalpha()
+        if not plausible_tag:
+            cursor = markup_start + 1
+            continue
+
         tag_end = _find_tag_end(text, markup_start + 1, budget)
         if tag_end is None:
             return None
