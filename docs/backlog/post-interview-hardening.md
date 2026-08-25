@@ -4,6 +4,23 @@ The Friday pilot deliberately targets one trusted, bounded, manually observed
 Colab run. The following work is deferred; none should be improvised in the
 demo notebook.
 
+## Known concrete follow-ups from the demo review
+
+- Remove the cooperative-only `flock` fallback used when encrypted filesystems
+  reject `renameat2(RENAME_NOREPLACE)`, or replace it with a portable truly
+  no-clobber primitive. The Friday run has one trusted writer, so no
+  non-cooperating publication race exists in the demo.
+- When a final release declares a zero-row split, enumerate the pinned remote
+  split directory and prove that it contains no stale nonempty shard. The pilot
+  revision was manually verified and contains only its zero-row test sentinel.
+- Re-run clean Colab installation and GPU smoke tests against the exact runtime
+  image before promoting the pilot package to a long-lived training release.
+- Complete the full 2016 inventory and authoritative June/July dumps; the
+  Friday temporal release is explicitly a representative fixture and must not
+  be reported as a complete historical corpus.
+- Replace single-operator Hub publication assumptions with tested concurrent
+  writer, partial-response, retry, and recovery behavior before automation.
+
 ## Validation scale and observability
 
 - Replace exact NumPy search with a tested FAISS path once the held-out pool no
