@@ -9,9 +9,9 @@ Babel currently has three deployed local processes:
 3. Electron, the supported profile-selection and graph-viewing application.
 
 The backend also serves a small local operations dashboard at `/admin`. The
-dashboard is not part of Electron and has one operational responsibility:
-starting and monitoring generated-profile population from a pinned Wikipedia
-snapshot on Hugging Face.
+dashboard is not part of Electron. It starts and monitors generated-profile
+population from a pinned Wikipedia snapshot and is the production operator
+surface for representative online experiments.
 
 There is no end-user authentication in this release. Loopback binding, strict
 local request checks, an instance-local admin nonce, and a single-backend
@@ -28,17 +28,19 @@ administrative commands:
 - pinned Hugging Face catalog acquisition, Wikipedia identity lookup,
   sanitization, and import
 - background seed orchestration and status
+- immutable online experiment launch, status, activity, and graceful-stop control
 - explicit legacy migration into Personal
 - database migrations and local HTTP composition
 
-Training, model serving, and parameter synchronization are separate boundaries
-from day one. They are not linked into the backend, represented as backend
-modules, or deployed yet. The current slice requires no GPU.
+Training, model serving, simulation, and parameter synchronization remain a
+separate loopback Python worker boundary. They are not linked into the backend.
+The C++ control plane persists immutable launch configuration and calls the
+worker seam with only a run UUID.
 
-Recommendations, personalized PageRank (PPR), FAISS or other vector-indexing
-jobs, simulator behavior, and metrics/monitoring beyond the current seed status
-are explicit non-goals for this slice. They must not be folded into the
-application modular monolith as incidental extensions.
+Personalized PageRank (PPR), production-scale vector-indexing jobs, and
+non-representative monitoring remain out of scope. Representative retrieval,
+simulation, serving, and training live behind the separate worker boundary and
+must not be folded into the application modular monolith.
 
 PostgreSQL stores sanitized Quill-compatible HTML as the only content
 representation. It does not store normalized text or embedding input. A future
@@ -112,6 +114,14 @@ optional seed assignment. Dashboard-created sources additionally record the
 Hugging Face repository, configuration, exact commit, article key, snapshot
 date, and prepared-text SHA-256.
 
+**Experiment run:** An immutable dataset/model/runtime snapshot plus durable
+lifecycle and public health state. At most one run is active. The terminal
+states are completed, failed, and interrupted.
+
+**Recommender model:** An immutable original or child artifact registration.
+Original models cannot be overwritten, deleted, or promoted in place; a child
+keeps its parent and producing-run identity.
+
 **Personal migration:** A digest-addressed, atomic conversion of one legacy JSON
 file into Babels and edges owned only by Personal.
 
@@ -153,8 +163,16 @@ The server is fixed to loopback and intentionally emits no CORS allow header.
 | `GET` | `/admin/dashboard.css` | dashboard stylesheet |
 | `GET` | `/admin/dashboard.js` | dashboard controller |
 | `GET` | `/admin/seed-status.js` | seed status view model |
+| `GET` | `/admin/experiment-status.js` | experiment status/activity view model |
+| `GET` | `/admin/experiment-dashboard.js` | experiment dashboard controller |
 | `GET` | `/admin/api/v1/seed` | latest durable seed status |
 | `POST` | `/admin/api/v1/seed` | start or attach to a seed run |
+| `GET` | `/admin/api/v1/experiment/models` | immutable compatible model choices |
+| `GET` | `/admin/api/v1/experiment/runs/latest` | latest durable run status |
+| `GET` | `/admin/api/v1/experiment/runs/{uuid}` | one durable run status |
+| `GET` | `/admin/api/v1/experiment/runs/{uuid}/logs` | typed activity after a sequence |
+| `POST` | `/admin/api/v1/experiment/runs` | persist and start one run |
+| `POST` | `/admin/api/v1/experiment/runs/{uuid}/graceful-stop` | persist graceful-stop intent |
 
 Profile responses use camelCase JSON. The graph response contains `profile`,
 `babels`, and `edges`; an existing profile with no content returns empty arrays,
@@ -170,6 +188,39 @@ The admin mutation endpoint exists to support the served dashboard. Operational
 practice is stricter than HTTP reachability: population is started only by
 pressing the visible dashboard button, never by scripts, CLI commands, Electron,
 or direct API requests.
+
+### Online experiment control
+
+The start body is a closed operator DTO: `startingModelId`,
+`retrievalBackend`, `creatorCount`, `scenario`, `eventBudgetPerMonth`, and
+`runSeed`. The service freezes the dataset repository/configuration/revision and
+all worker defaults into `experiment-run-v1` JSON, hashes it, and commits the run
+before calling `ExperimentWorker::start(runId)`. The production callback is the
+future loopback `babel-online run --run-id <uuid>` integration; it receives no
+hidden configuration over the CLI. An unavailable callback marks the persisted
+launch failed. Graceful stop first records `stop_requested`, then calls
+`requestGracefulStop(runId)` and never terminates a process.
+
+The default source pin can be replaced with
+`BABEL_ONLINE_DATASET_REPOSITORY`, `BABEL_ONLINE_DATASET_CONFIG`, and
+`BABEL_ONLINE_DATASET_REVISION`. The dashboard defaults to 50 creators,
+`pgvector`, June → July, 100 events per month, and seed 0. Model selection lists
+the original and immutable children independently and disables incompatible
+embedding spaces.
+
+Migration 005 creates the registry but does not bootstrap a fixture or
+placeholder model. Release composition must register the verified immutable
+original manifest before serving the operator workflow. With no registered
+model, the selector stays empty and launch rejects the model ID before creating
+a run.
+
+Run and activity responses use camelCase and `Cache-Control: no-store`. Their
+observable whitelist covers new Babel and recommendation decisions, accepted
+edges, event rate, Kafka offset/lag, trainer steps and rolling rank loss,
+checkpoints, serving synchronization, and model version. Hidden
+graph/PPR/clickstream/profile/random fields and Colab losses have no response
+field. Activity pagination is forward-only (`after`, maximum `limit=200`), and
+the browser retains at most 1,000 rows.
 
 ## Snapshot-backed Wikipedia Population
 

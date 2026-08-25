@@ -26,6 +26,8 @@ class AdminController final {
   void dashboardCss(const drogon::HttpRequestPtr&, Callback) const;
   void dashboardJs(const drogon::HttpRequestPtr&, Callback) const;
   void seedStatusJs(const drogon::HttpRequestPtr&, Callback) const;
+  void experimentStatusJs(const drogon::HttpRequestPtr&, Callback) const;
+  void experimentDashboardJs(const drogon::HttpRequestPtr&, Callback) const;
   void seedStatus(const drogon::HttpRequestPtr&, Callback) const;
   void startSeed(const drogon::HttpRequestPtr&, Callback) const;
 

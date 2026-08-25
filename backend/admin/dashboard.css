@@ -44,6 +44,9 @@ h1 {
   line-height: .9;
 }
 
+h2, h3 { font-weight: 500; }
+.masthead h2 { margin: 2rem 0 .6rem; font-size: 1.15rem; }
+
 .status { margin: 0; color: var(--accent); font-size: .95rem; }
 .run { padding: 2.25rem 0; border-bottom: 1px solid var(--line); }
 .current { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -85,8 +88,34 @@ button:disabled { cursor: wait; opacity: .45; }
 .errors ul { margin: .9rem 0 0; padding: 0; list-style: none; }
 .errors li { padding: .65rem 0; border-top: 1px solid var(--line); color: #d6b4a4; font-size: .82rem; line-height: 1.5; overflow-wrap: anywhere; }
 
+.experiment { margin-top: 4rem; padding-top: 3rem; border-top: 1px solid var(--line); }
+.section-heading h2 { margin: .4rem 0 .75rem; font-size: clamp(1.6rem, 4vw, 2.6rem); }
+.experiment-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1rem; margin: 2rem 0 1rem; }
+.experiment-grid label { color: var(--muted); font-size: .72rem; letter-spacing: .06em; text-transform: uppercase; }
+select, input {
+  width: 100%; margin-top: .45rem; border: 1px solid var(--line); border-radius: 0;
+  padding: .7rem; background: var(--surface); color: var(--ink); font: inherit;
+}
+select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+select:disabled, input:disabled { opacity: .5; }
+.experiment-actions { display: flex; gap: .75rem; padding: .6rem 0 1.5rem; border-bottom: 1px solid var(--line); }
+button.secondary { background: transparent; color: var(--accent); }
+.is-error { color: #d6b4a4; }
+.experiment h3 { margin: 1.8rem 0 .8rem; font-size: .76rem; letter-spacing: .08em; text-transform: uppercase; }
+.health { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; margin: 0; background: var(--line); }
+.health > div { min-width: 0; padding: .9rem; background: var(--surface); }
+.health dt { color: var(--muted); font-size: .66rem; text-transform: uppercase; }
+.health dd { margin: .35rem 0 0; overflow-wrap: anywhere; font-size: .8rem; }
+.activity { max-height: 28rem; margin: 0; padding: 0; overflow-y: auto; list-style: none; }
+.activity li { display: grid; grid-template-columns: 13rem 1fr; gap: 1rem; padding: .8rem 0; border-top: 1px solid var(--line); font-size: .76rem; line-height: 1.5; overflow-wrap: anywhere; }
+.activity strong { color: var(--accent); font-weight: 500; }
+.activity-error span, .activity-warning span { color: #d6b4a4; }
+
 @media (max-width: 560px) {
   .operations { width: min(100% - 2rem, 58rem); padding-top: 3rem; }
   h1 { letter-spacing: -.07em; }
   button { width: 100%; }
+  .experiment-grid, .health { grid-template-columns: 1fr; }
+  .experiment-actions { flex-direction: column; }
+  .activity li { grid-template-columns: 1fr; gap: .25rem; }
 }

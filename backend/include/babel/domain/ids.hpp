@@ -161,6 +161,26 @@ class SeedAssignmentId final : public detail::UuidId<SeedAssignmentId> {
   explicit SeedAssignmentId(std::string value) : UuidId(std::move(value)) {}
 };
 
+class ExperimentRunId final : public detail::UuidId<ExperimentRunId> {
+ public:
+  using UuidId::parse;
+  using UuidId::v5;
+
+ private:
+  friend class detail::UuidId<ExperimentRunId>;
+  explicit ExperimentRunId(std::string value) : UuidId(std::move(value)) {}
+};
+
+class RecommenderModelId final : public detail::UuidId<RecommenderModelId> {
+ public:
+  using UuidId::parse;
+  using UuidId::v5;
+
+ private:
+  friend class detail::UuidId<RecommenderModelId>;
+  explicit RecommenderModelId(std::string value) : UuidId(std::move(value)) {}
+};
+
 class WikipediaPageId {
  public:
   [[nodiscard]] static Result<WikipediaPageId> fromInt(std::int64_t value) {
@@ -213,6 +233,20 @@ struct hash<babel::SeedRunId> {
 template <>
 struct hash<babel::SeedAssignmentId> {
   std::size_t operator()(const babel::SeedAssignmentId& id) const noexcept {
+    return hash<std::string>{}(id.value);
+  }
+};
+
+template <>
+struct hash<babel::ExperimentRunId> {
+  std::size_t operator()(const babel::ExperimentRunId& id) const noexcept {
+    return hash<std::string>{}(id.value);
+  }
+};
+
+template <>
+struct hash<babel::RecommenderModelId> {
+  std::size_t operator()(const babel::RecommenderModelId& id) const noexcept {
     return hash<std::string>{}(id.value);
   }
 };

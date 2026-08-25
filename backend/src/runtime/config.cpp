@@ -77,6 +77,21 @@ Result<RuntimeConfig> RuntimeConfig::fromEnvironment(const Environment& environm
       !result) {
     return tl::make_unexpected(result.error());
   }
+  if (auto result = assignSourceValue("BABEL_ONLINE_DATASET_REPOSITORY",
+                                      config.experiment_source.repository);
+      !result) {
+    return tl::make_unexpected(result.error());
+  }
+  if (auto result = assignSourceValue("BABEL_ONLINE_DATASET_CONFIG",
+                                      config.experiment_source.configuration);
+      !result) {
+    return tl::make_unexpected(result.error());
+  }
+  if (auto result = assignSourceValue("BABEL_ONLINE_DATASET_REVISION",
+                                      config.experiment_source.commit_sha);
+      !result) {
+    return tl::make_unexpected(result.error());
+  }
   if (const auto data_root = environment("BABEL_DATA_ROOT")) {
     if (invalidEnvironmentValue(*data_root)) {
       return invalidArgument("BABEL_DATA_ROOT must be a non-empty single-line value");

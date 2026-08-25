@@ -8,6 +8,7 @@
 #include <string_view>
 
 #include "babel/application/errors.hpp"
+#include "babel/application/experiment_models.hpp"
 #include "babel/domain/models.hpp"
 
 namespace babel {
@@ -30,6 +31,11 @@ struct RuntimeConfig {
   };
   std::filesystem::path huggingface_cache_root{
       "/home/dhelmy990/Data/babel-data/cache/backend-seed"};
+  ExperimentSourcePin experiment_source{
+      .repository = "dhelmy990/babel-wikipedia-experiment",
+      .configuration = "demo_catalog_2026_06",
+      .commit_sha = "e1acc648fcace8820dd5ee70bae9216ea4334555",
+  };
 
   static Result<RuntimeConfig> fromEnvironment();
   static Result<RuntimeConfig> fromEnvironment(const Environment&);

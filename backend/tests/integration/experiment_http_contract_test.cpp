@@ -1,0 +1,261 @@
+#include <catch2/catch_test_macros.hpp>
+
+#include <future>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include <drogon/HttpRequest.h>
+#include <nlohmann/json.hpp>
+
+#include "babel/http/experiment_controller.hpp"
+
+namespace {
+
+using namespace babel;
+using NJson = nlohmann::json;
+
+ExperimentRunId runId() {
+  return ExperimentRunId::parse("22222222-2222-5222-8222-222222222222").value();
+}
+
+RecommenderModelId modelId() {
+  return RecommenderModelId::parse("11111111-1111-5111-8111-111111111111").value();
+}
+
+RecommenderModelDto model() {
+  return RecommenderModelDto{
+      .model_id = modelId(),
+      .label = "Original 2016 baseline",
+      .parent_model_id = std::nullopt,
+      .producing_run_id = std::nullopt,
+      .encoder_repo = "dhelmy990/babel-two-tower-recommender",
+      .encoder_revision = std::string(40, 'a'),
+      .dataset_repo = "dhelmy990/babel-wikipedia-experiment",
+      .dataset_revision = std::string(40, 'b'),
+      .environment_sequence = {"2026-06"},
+      .training_examples = 100,
+      .checkpoint_path = "models/original/checkpoint.safetensors",
+      .checkpoint_sha256 = std::string(64, 'c'),
+      .embedding_space = EmbeddingSpaceDto{
+          .schema_version = 1,
+          .embedding_space_id = "66666666-6666-5666-8666-666666666666",
+          .dimension = 100,
+          .distance = "cosine",
+          .distilled_encoder_artifact = "encoder@revision",
+          .dataset_revision = std::string(40, 'b'),
+          .compatibility_version = "babel-embedding-v1",
+      },
+      .created_at = "2026-08-26T00:00:00Z",
+      .immutable = true,
+      .compatible = true,
+      .incompatibility_reason = std::nullopt,
+  };
+}
+
+ExperimentRunStatusDto status() {
+  ExperimentRunStatusDto value{
+      .run_id = runId(),
+      .status = ExperimentStatus::running,
+      .retrieval_backend = RetrievalBackend::pgvector,
+      .creator_count = 50,
+      .environment_sequence = {"2026-06", "2026-07"},
+      .starting_model_id = modelId(),
+      .active_model_id = modelId(),
+      .active_model_version = 4,
+      .created_babel_count = 21,
+      .feedback_count = 18,
+      .event_rate = 3.5,
+      .kafka_offset = 42,
+      .kafka_lag = 2,
+      .trainer_steps = 9,
+      .rolling_rank_loss = 0.25,
+      .checkpoint_path = "checkpoints/run/9",
+      .checkpoint_sha256 = std::string(64, 'd'),
+      .serving_synced = true,
+      .started_at = "2026-08-26T00:00:00Z",
+  };
+  return value;
+}
+
+class Repository final : public ExperimentRepository {
+ public:
+  Result<std::vector<RecommenderModelDto>> listModels() override {
+    return std::vector<RecommenderModelDto>{model()};
+  }
+  Result<RecommenderModelDto> getModel(RecommenderModelId) override { return model(); }
+  Result<ExperimentRunStatusDto> createRun(const ExperimentLaunchSnapshot& snapshot) override {
+    last_snapshot = snapshot;
+    auto result = status();
+    result.status = ExperimentStatus::starting;
+    result.creator_count = snapshot.request.creator_count;
+    result.retrieval_backend = snapshot.request.retrieval_backend;
+    return result;
+  }
+  Result<ExperimentRunStatusDto> latestRun() override { return status(); }
+  Result<ExperimentRunStatusDto> getRun(ExperimentRunId) override { return status(); }
+  Result<ExperimentRunStatusDto> requestGracefulStop(ExperimentRunId) override {
+    auto result = status();
+    result.status = ExperimentStatus::stop_requested;
+    return result;
+  }
+  Result<void> markLaunchFailed(ExperimentRunId, std::string_view) override { return {}; }
+  Result<std::vector<ExperimentActivityDto>> activity(ExperimentRunId id,
+                                                       std::uint64_t,
+                                                       std::size_t) override {
+    return std::vector<ExperimentActivityDto>{ExperimentActivityDto{
+        .schema_version = 1,
+        .run_id = id,
+        .sequence = 7,
+        .occurred_at_ns = 99,
+        .level = "info",
+        .component = "serving",
+        .event = "recommendation_completed",
+        .message = "Creator created a Babel and evaluated candidates",
+        .metrics = {{"eventRate", 3.5}, {"pprScore", 0.9}, {"randomDraw", 0.2}},
+        .details = ExperimentRecommendationActivityDto{
+            .creator_id = CreatorId::parse(
+                "33333333-3333-5333-8333-333333333333").value(),
+            .new_babel_id = BabelId::parse(
+                "44444444-4444-5444-8444-444444444444").value(),
+            .new_babel_title = "Virtual memory",
+            .candidate_babel_ids = {BabelId::parse(
+                "55555555-5555-5555-8555-555555555555").value()},
+            .include_babel_ids = {BabelId::parse(
+                "55555555-5555-5555-8555-555555555555").value()},
+            .exclude_babel_ids = {},
+            .ignore_babel_ids = {},
+            .accepted_edge_count = 1,
+            .model_id = modelId(),
+            .model_version = 4,
+        },
+    }};
+  }
+  std::optional<ExperimentLaunchSnapshot> last_snapshot;
+};
+
+class Worker final : public ExperimentWorker {
+ public:
+  Result<void> start(ExperimentRunId) override { return {}; }
+  Result<void> requestGracefulStop(ExperimentRunId) override { return {}; }
+};
+
+drogon::HttpRequestPtr request(drogon::HttpMethod method, std::string body = {}) {
+  auto value = drogon::HttpRequest::newHttpRequest();
+  value->setMethod(method);
+  value->addHeader("host", "127.0.0.1:8787");
+  value->addHeader("origin", "http://127.0.0.1:8787");
+  if (!body.empty()) {
+    value->setBody(std::move(body));
+    value->setContentTypeCode(drogon::CT_APPLICATION_JSON);
+  }
+  return value;
+}
+
+template <typename Invoke>
+drogon::HttpResponsePtr invoke(Invoke call) {
+  std::promise<drogon::HttpResponsePtr> promise;
+  auto result = promise.get_future();
+  call([&](const drogon::HttpResponsePtr& response) { promise.set_value(response); });
+  return result.get();
+}
+
+NJson body(const drogon::HttpResponsePtr& response) {
+  return NJson::parse(std::string{response->body()});
+}
+
+}  // namespace
+
+TEST_CASE("experiment start and stop require the existing admin mutation boundary") {
+  Repository repository;
+  Worker worker;
+  ExperimentService service(repository, worker,
+                            ExperimentSourcePin{"repo", "config", std::string(40, 'e')});
+  AdminSecurity security("nonce");
+  ExperimentController controller(security, service);
+  const auto launch = NJson{{"startingModelId", modelId().value},
+                           {"retrievalBackend", "pgvector"},
+                           {"creatorCount", 50},
+                           {"scenario", "june_to_july"},
+                           {"eventBudgetPerMonth", 100},
+                           {"runSeed", 7}}
+                          .dump();
+
+  const auto forbidden = invoke([&](auto callback) {
+    controller.start(request(drogon::Post, launch), std::move(callback));
+  });
+  CHECK(forbidden->getStatusCode() == drogon::k403Forbidden);
+
+  auto authorized = request(drogon::Post, launch);
+  authorized->addHeader("x-babel-admin-nonce", "nonce");
+  const auto accepted = invoke(
+      [&](auto callback) { controller.start(authorized, std::move(callback)); });
+  REQUIRE(accepted->getStatusCode() == drogon::k202Accepted);
+  CHECK(body(accepted).at("run").at("creatorCount") == 50);
+  CHECK(repository.last_snapshot->request.run_seed == 7);
+
+  auto stop = request(drogon::Post);
+  stop->addHeader("x-babel-admin-nonce", "nonce");
+  const auto stopping = invoke([&](auto callback) {
+    controller.gracefulStop(stop, runId().value, std::move(callback));
+  });
+  REQUIRE(stopping->getStatusCode() == drogon::k202Accepted);
+  CHECK(body(stopping).at("status") == "stop_requested");
+}
+
+TEST_CASE("experiment read DTOs expose health and typed observable activity only") {
+  Repository repository;
+  Worker worker;
+  ExperimentService service(repository, worker,
+                            ExperimentSourcePin{"repo", "config", std::string(40, 'e')});
+  AdminSecurity security("nonce");
+  ExperimentController controller(security, service);
+
+  const auto latest = invoke(
+      [&](auto callback) { controller.latest(request(drogon::Get), std::move(callback)); });
+  REQUIRE(latest->getStatusCode() == drogon::k200OK);
+  const auto latest_json = body(latest).at("run");
+  CHECK(latest_json.at("kafkaLag") == 2);
+  CHECK(latest_json.at("trainerSteps") == 9);
+  CHECK(latest_json.at("rollingRankLoss") == 0.25);
+  const auto rendered = latest_json.dump();
+  CHECK(rendered.find("vectorLoss") == std::string::npos);
+  CHECK(rendered.find("relationalLoss") == std::string::npos);
+  CHECK(rendered.find("ppr") == std::string::npos);
+  CHECK(rendered.find("clickstream") == std::string::npos);
+
+  const auto logs = invoke([&](auto callback) {
+    controller.activity(request(drogon::Get), runId().value, std::move(callback));
+  });
+  REQUIRE(logs->getStatusCode() == drogon::k200OK);
+  const auto row = body(logs).at("activity").at(0);
+  CHECK(row.at("details").at("kind") == "recommendation");
+  CHECK(row.at("details").at("newBabelTitle") == "Virtual memory");
+  CHECK(row.at("details").at("includeBabelIds").size() == 1);
+  CHECK(row.at("details").at("acceptedEdgeCount") == 1);
+  CHECK(row.at("metrics").at("eventRate") == 3.5);
+  CHECK(row.at("metrics").find("pprScore") == row.at("metrics").end());
+  CHECK(row.at("metrics").find("randomDraw") == row.at("metrics").end());
+}
+
+TEST_CASE("experiment launch rejects malformed and unknown operator fields") {
+  Repository repository;
+  Worker worker;
+  ExperimentService service(repository, worker,
+                            ExperimentSourcePin{"repo", "config", std::string(40, 'e')});
+  AdminSecurity security("nonce");
+  ExperimentController controller(security, service);
+
+  for (const auto& launch : {
+           NJson{{"startingModelId", modelId().value}, {"retrievalBackend", 7}},
+           NJson{{"startingModelId", modelId().value}, {"hiddenProfile", "no"}},
+           NJson{{"startingModelId", modelId().value}, {"runSeed", -1}},
+       }) {
+    auto malformed = request(drogon::Post, launch.dump());
+    malformed->addHeader("x-babel-admin-nonce", "nonce");
+    const auto rejected = invoke(
+        [&](auto callback) { controller.start(malformed, std::move(callback)); });
+    CHECK(rejected->getStatusCode() == drogon::k400BadRequest);
+  }
+  CHECK_FALSE(repository.last_snapshot.has_value());
+}

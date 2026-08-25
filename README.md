@@ -4,7 +4,8 @@ Babel is a local-first knowledge graph application. A C++ modular monolith owns
 profiles, Babels, edges, snapshot-backed Wikipedia ingestion, and administrative commands in
 PostgreSQL. Electron is the supported user application. A separate, narrow web
 dashboard starts and monitors population from a commit-pinned private Hugging
-Face dataset.
+Face dataset and is the production operator surface for representative online
+experiments.
 
 The initial roster is fixed at 21 profiles: `Personal` followed by 20 generated
 creator profiles. Profiles exist after migration even when they have no Babels.
@@ -75,6 +76,34 @@ profile/article, and live errors. It remains usable if individual imports fail:
 
 The dashboard never populates `Personal`.
 
+## Run The Online Experiment
+
+The same `/admin` dashboard offers an online experiment panel. Choose the
+original immutable model or an immutable child, keep the default `pgvector`
+retrieval backend, select June only or the representative June → July scenario,
+and start a run. The defaults are 50 creators, 100 events per month, and run
+seed 0. A second active run is rejected. **Graceful stop** records stop intent;
+it never kills the worker or overwrites, deletes, or promotes the original
+model.
+
+The dashboard polls durable run status and typed observable activity: created
+Babels, candidate/include/exclude/ignore decisions, accepted edges, event rate,
+Kafka offset/lag, trainer step and rolling rank loss, checkpoint state, serving
+sync, and active model version. Hidden graph/PPR/clickstream/profile/random
+inputs and Colab losses are not part of the backend DTOs.
+
+The backend owns persistence and calls an `ExperimentWorker` with only the run
+UUID after the immutable launch JSON is committed. The current runtime leaves
+that callback disconnected until the loopback `babel-online run --run-id
+<uuid>` integration is composed; attempted starts fail durably instead of
+falling back to an in-process Python or browser launch. See
+[the online worker runbook](docs/runbooks/online-demo-worker.md).
+
+Migration 005 is schema-only: it never inserts placeholder model provenance.
+The release/worker integration must register a verified immutable original
+manifest before an experiment can start. Until then the selector is empty and
+unknown model IDs are rejected.
+
 ## Migrate Personal Data
 
 Stop `just start` before running an administrative command, then migrate a copy
@@ -128,15 +157,16 @@ provenance, seed state, and Personal migration digests. Babel content is stored 
 Quill-compatible HTML. The application does not store a normalized/plain-text
 copy for embeddings.
 
-Training-time conversion from sanitized HTML into model input belongs to a
-future training boundary and must be derived transiently. Training, model
-serving, and parameter synchronization are separate architectural boundaries
-from day one and are not deployed by this repository yet. A GPU is not required
-for this application slice.
+Training-time conversion from sanitized HTML into model input is derived
+transiently. Training, model serving, simulation, and parameter synchronization
+remain a separate Python worker boundary. The backend stores experiment control
+state and exposes only the dashboard operator contract; Python is never embedded
+into the C++ process.
 
-Also deferred are recommendations, personalized PageRank (PPR), FAISS or other
-vector-indexing jobs, simulator behavior, and metrics/monitoring beyond the seed
-status dashboard. None belongs in the current modular monolith.
+Personalized PageRank (PPR), production-scale vector-indexing jobs, and
+non-representative monitoring remain deferred. The representative simulator,
+retrieval, serving, and training path stays behind the separate Python worker
+boundary rather than entering the modular monolith.
 
 ## Troubleshooting
 

@@ -4,16 +4,19 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="babel-admin-nonce" content="{{BABEL_ADMIN_NONCE}}">
-    <title>Babel Seed Operations</title>
+    <title>Babel Operations</title>
     <link rel="stylesheet" href="/admin/dashboard.css">
     <script src="/admin/seed-status.js" defer></script>
+    <script src="/admin/experiment-status.js" defer></script>
     <script src="/admin/dashboard.js" defer></script>
+    <script src="/admin/experiment-dashboard.js" defer></script>
   </head>
   <body>
     <main class="operations" aria-labelledby="page-title">
       <header class="masthead">
         <p class="eyebrow">Babel / local operations</p>
-        <h1 id="page-title">Wikipedia seed</h1>
+        <h1 id="page-title">Babel operations</h1>
+        <h2>Wikipedia seed</h2>
         <p id="seed-status" class="status" aria-live="polite">Loading seed status</p>
       </header>
 
@@ -27,6 +30,51 @@
       <section class="errors" aria-labelledby="errors-title" aria-live="polite">
         <h2 id="errors-title">Live errors</h2>
         <ul id="seed-errors"></ul>
+      </section>
+
+      <section class="experiment" aria-labelledby="experiment-title">
+        <header class="section-heading">
+          <p class="eyebrow">Representative online pilot</p>
+          <h2 id="experiment-title">Recommendation experiment</h2>
+          <p id="experiment-status" class="status" aria-live="polite">Loading experiment status</p>
+        </header>
+
+        <div class="experiment-grid">
+          <label>Starting model
+            <select id="experiment-model" aria-label="Starting model"></select>
+          </label>
+          <label>Retrieval backend
+            <select id="experiment-retrieval">
+              <option value="pgvector">pgvector (default)</option>
+              <option value="hnswlib">hnswlib (optional)</option>
+            </select>
+          </label>
+          <label>Scenario
+            <select id="experiment-scenario">
+              <option value="june_to_july">June → July</option>
+              <option value="june_only">June only</option>
+            </select>
+          </label>
+          <label>Creators
+            <input id="experiment-creators" type="number" min="1" max="10000" value="50">
+          </label>
+          <label>Events / month
+            <input id="experiment-budget" type="number" min="1" max="1000000" value="100">
+          </label>
+          <label>Run seed
+            <input id="experiment-seed" type="number" min="0" max="9223372036854775807" value="0">
+          </label>
+        </div>
+        <div class="experiment-actions">
+          <button id="experiment-start" type="button">Start experiment</button>
+          <button id="experiment-stop" class="secondary" type="button" disabled>Graceful stop</button>
+        </div>
+
+        <h3>Live health</h3>
+        <dl id="experiment-health" class="health" aria-live="polite"></dl>
+
+        <h3>Observable activity</h3>
+        <ol id="experiment-activity" class="activity" aria-live="polite"></ol>
       </section>
     </main>
   </body>

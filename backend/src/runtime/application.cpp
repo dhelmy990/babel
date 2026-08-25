@@ -15,18 +15,22 @@
 
 #include "babel/adapters/html/libxml_html_sanitizer.hpp"
 #include "babel/adapters/huggingface/huggingface_article_source.hpp"
+#include "babel/adapters/postgres/experiment_repository.hpp"
 #include "babel/adapters/postgres/migration_runner.hpp"
 #include "babel/adapters/postgres/postgres_database.hpp"
 #include "babel/adapters/postgres/postgres_repositories.hpp"
 #include "babel/adapters/postgres/profile_roster_installer.hpp"
 #include "babel/application/profile_manifest.hpp"
+#include "babel/application/experiment_service.hpp"
 #include "babel/application/profile_query_service.hpp"
 #include "babel/application/seed_service.hpp"
 #include "babel/application/wikipedia_import_service.hpp"
 #include "babel/http/admin_controller.hpp"
 #include "babel/http/admin_security.hpp"
+#include "babel/http/experiment_controller.hpp"
 #include "babel/http/profile_controller.hpp"
 #include "babel/runtime/seed_job_runner.hpp"
+#include "babel/runtime/experiment_job_runner.hpp"
 
 namespace babel {
 class BackendInstanceLease::State final {
@@ -203,7 +207,11 @@ Result<void> Application::verifySchemaReady() {
           to_regclass('public.edges') IS NOT NULL AND
           to_regclass('public.seed_runs') IS NOT NULL AND
           to_regclass('public.seed_run_items') IS NOT NULL AND
-          to_regclass('public.legacy_migrations') IS NOT NULL
+          to_regclass('public.legacy_migrations') IS NOT NULL AND
+          to_regclass('public.recommender_models') IS NOT NULL AND
+          to_regclass('public.experiment_runs') IS NOT NULL AND
+          to_regclass('public.experiment_babels') IS NOT NULL AND
+          to_regclass('public.experiment_activity_logs') IS NOT NULL
       )");
     if (!tables_ready.one_field().as<bool>()) {
       return tl::make_unexpected(ApplicationError{
@@ -212,7 +220,8 @@ Result<void> Application::verifySchemaReady() {
       });
     }
     if (transaction.exec(
-            "SELECT count(*) = 4 FROM schema_migrations WHERE version IN ('1', '2', '3', '4')")
+            "SELECT count(*) = 5 FROM schema_migrations "
+            "WHERE version IN ('1', '2', '3', '4', '5')")
             .one_field()
             .as<bool>() == false) {
       return tl::make_unexpected(ApplicationError{
@@ -257,6 +266,7 @@ Result<void> Application::serve() {
   PostgresGraphRepository graphs(database);
   PostgresWikipediaBabelRepository wikipedia_babels(database);
   PostgresSeedRunRepository seed_runs(database);
+  PostgresExperimentRepository experiment_runs(database);
   CurlHttpTransport transport;
   HuggingFaceArticleSourceFactory article_source_factory(
       transport, config_.huggingface_cache_root, *config_.huggingface_token);
@@ -289,8 +299,17 @@ Result<void> Application::serve() {
   if (!admin_nonce) return tl::make_unexpected(admin_nonce.error());
   AdminSecurity admin_security(std::move(*admin_nonce));
 
+  ExperimentJobRunner experiment_worker({}, {});
+  ExperimentService experiment_service(experiment_runs, experiment_worker,
+                                       config_.experiment_source);
+  ExperimentController experiment_controller(admin_security, experiment_service);
+
   auto interrupted = seed_runner.markInterruptedRuns();
   if (!interrupted) return tl::make_unexpected(interrupted.error());
+  auto interrupted_experiments = experiment_runs.markInterruptedRuns();
+  if (!interrupted_experiments) {
+    return tl::make_unexpected(interrupted_experiments.error());
+  }
 
   ProfileController profile_controller(profiles, std::move(instance_token));
   AdminController admin_controller(admin_security, config_.admin_asset_directory, seed_runner);
@@ -347,6 +366,20 @@ Result<void> Application::serve() {
       },
       {drogon::Get});
   server.registerHandler(
+      "/admin/experiment-status.js",
+      [&admin_controller](const drogon::HttpRequestPtr& request,
+                          AdminController::Callback&& callback) {
+        admin_controller.experimentStatusJs(request, std::move(callback));
+      },
+      {drogon::Get});
+  server.registerHandler(
+      "/admin/experiment-dashboard.js",
+      [&admin_controller](const drogon::HttpRequestPtr& request,
+                          AdminController::Callback&& callback) {
+        admin_controller.experimentDashboardJs(request, std::move(callback));
+      },
+      {drogon::Get});
+  server.registerHandler(
       "/admin/api/v1/seed",
       [&admin_controller](const drogon::HttpRequestPtr& request,
                           AdminController::Callback&& callback) {
@@ -358,6 +391,52 @@ Result<void> Application::serve() {
       [&admin_controller](const drogon::HttpRequestPtr& request,
                           AdminController::Callback&& callback) {
         admin_controller.startSeed(request, std::move(callback));
+      },
+      {drogon::Post});
+  server.registerHandler(
+      "/admin/api/v1/experiment/models",
+      [&experiment_controller](const drogon::HttpRequestPtr& request,
+                               ExperimentController::Callback&& callback) {
+        experiment_controller.models(request, std::move(callback));
+      },
+      {drogon::Get});
+  server.registerHandler(
+      "/admin/api/v1/experiment/runs/latest",
+      [&experiment_controller](const drogon::HttpRequestPtr& request,
+                               ExperimentController::Callback&& callback) {
+        experiment_controller.latest(request, std::move(callback));
+      },
+      {drogon::Get});
+  server.registerHandler(
+      "/admin/api/v1/experiment/runs/{1}",
+      [&experiment_controller](const drogon::HttpRequestPtr& request,
+                               ExperimentController::Callback&& callback,
+                               std::string run_id) {
+        experiment_controller.run(request, std::move(run_id), std::move(callback));
+      },
+      {drogon::Get});
+  server.registerHandler(
+      "/admin/api/v1/experiment/runs/{1}/logs",
+      [&experiment_controller](const drogon::HttpRequestPtr& request,
+                               ExperimentController::Callback&& callback,
+                               std::string run_id) {
+        experiment_controller.activity(request, std::move(run_id), std::move(callback));
+      },
+      {drogon::Get});
+  server.registerHandler(
+      "/admin/api/v1/experiment/runs",
+      [&experiment_controller](const drogon::HttpRequestPtr& request,
+                               ExperimentController::Callback&& callback) {
+        experiment_controller.start(request, std::move(callback));
+      },
+      {drogon::Post});
+  server.registerHandler(
+      "/admin/api/v1/experiment/runs/{1}/graceful-stop",
+      [&experiment_controller](const drogon::HttpRequestPtr& request,
+                               ExperimentController::Callback&& callback,
+                               std::string run_id) {
+        experiment_controller.gracefulStop(request, std::move(run_id),
+                                           std::move(callback));
       },
       {drogon::Post});
 
