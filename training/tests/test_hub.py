@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from safetensors import safe_open
+from safetensors.numpy import save_file
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -30,6 +31,60 @@ PUBLISHED = "c" * 40
 
 
 def export(tmp_path: Path, **overrides: object):
+    training_config = {
+        "config_version": 1,
+        "model_id": "Qwen/Qwen3-Embedding-0.6B",
+        "model_revision": MODEL_REVISION,
+        "tokenizer_revision": MODEL_REVISION,
+        "dataset_repo_id": "dhelmy990/babel-wikipedia-experiment",
+        "dataset_config": "distillation_2016",
+        "dataset_commit_sha": DATASET_REVISION,
+        "dataset_manifest_sha256": "d" * 64,
+        "dataset_readiness_sha256": "e" * 64,
+        "teacher_dimension": 100,
+        "projection_input_dimension": 1024,
+        "projection_output_dimension": 100,
+        "max_length": 512,
+        "lambda_rel": 0.5,
+        "lora_rank": 16,
+        "lora_alpha": 32,
+        "lora_dropout": 0.05,
+        "lora_targets": ["q_proj", "v_proj"],
+        "lora_bias": "none",
+        "seed": 7,
+    }
+    validation_report = {
+        "report_version": 1,
+        "dataset": {
+            "repo_id": "dhelmy990/babel-wikipedia-experiment",
+            "config": "distillation_2016",
+            "commit_sha": DATASET_REVISION,
+            "manifest_sha256": "d" * 64,
+            "readiness_sha256": "e" * 64,
+            "split": "validation",
+            "subset": "pilot",
+            "example_count": 10,
+        },
+        "model": {
+            "id": "Qwen/Qwen3-Embedding-0.6B",
+            "revision": MODEL_REVISION,
+            "tokenizer_revision": MODEL_REVISION,
+        },
+        "pool_size": 10,
+        "metrics": {
+            "mean_paired_cosine": 0.75,
+            "recall_at_10": 0.5,
+            "recall_at_50": 0.8,
+            "ndcg_at_10": 0.6,
+            "ndcg_at_50": 0.85,
+        },
+        "invalid_vector_count": 0,
+        "norm_statistics": {
+            "student_min": 0.99, "student_mean": 1.0, "student_max": 1.01,
+            "teacher_min": 0.8, "teacher_mean": 1.0, "teacher_max": 1.2,
+        },
+        "examples": [],
+    }
     arguments: dict[str, object] = {
         "projection_tensors": {
             "weight": np.arange(102400, dtype=np.float32).reshape(100, 1024),
@@ -51,8 +106,8 @@ def export(tmp_path: Path, **overrides: object):
         "dataset_commit_sha": DATASET_REVISION,
         "dataset_manifest_sha256": "d" * 64,
         "dataset_readiness_sha256": "e" * 64,
-        "training_config": {"seed": 7, "max_length": 512},
-        "validation_report": {"mean_cosine": 0.75, "examples": 10},
+        "training_config": training_config,
+        "validation_report": validation_report,
     }
     arguments.update(overrides)
     return export_distilled_artifact(tmp_path, **arguments)
@@ -134,6 +189,29 @@ def test_export_rejects_invalid_projection_and_adapter_layouts(tmp_path: Path) -
             export(tmp_path / f"invalid-{index}", **overrides)
 
 
+def test_export_rejects_empty_or_forged_training_and_validation_metadata(tmp_path: Path) -> None:
+    valid = export(tmp_path / "valid")
+    manifest = valid.document
+    training = dict(manifest["training_config"])
+    report = json.loads(json.dumps(manifest["validation_report"]))
+    invalid = [
+        {"training_config": {}},
+        {"validation_report": {}},
+        {"training_config": {**training, "dataset_commit_sha": "f" * 40}},
+        {"training_config": {**training, "lora_rank": 8}},
+        {"validation_report": {**report, "pool_size": 9}},
+        {"validation_report": {**report, "invalid_vector_count": 11}},
+        {"validation_report": {**report, "unexpected": True}},
+        {"validation_report": {
+            **report,
+            "metrics": {**report["metrics"], "recall_at_10": float("nan")},
+        }},
+    ]
+    for index, overrides in enumerate(invalid):
+        with pytest.raises(ArtifactExportError):
+            export(tmp_path / f"metadata-{index}", **overrides)
+
+
 class Missing(Exception):
     pass
 
@@ -180,7 +258,7 @@ class FakeApi:
 def test_publish_proves_private_uses_expected_parent_and_verifies_every_remote_file(tmp_path: Path) -> None:
     artifact = export(tmp_path)
     api = FakeApi()
-    evidence = publish_model_artifact(api, artifact.path, "secret", sleep=lambda _: None)
+    evidence = publish_model_artifact(api, artifact, "secret", sleep=lambda _: None)
     assert evidence.commit_sha == PUBLISHED
     assert api.create_calls == [{
         "repo_id": DEFAULT_MODEL_REPO, "repo_type": "model", "private": True,
@@ -197,15 +275,15 @@ def test_publish_proves_private_uses_expected_parent_and_verifies_every_remote_f
 def test_publish_is_idempotent_for_same_bytes_and_rejects_conflict(tmp_path: Path) -> None:
     artifact = export(tmp_path)
     api = FakeApi()
-    first = publish_model_artifact(api, artifact.path, "secret", sleep=lambda _: None)
-    second = publish_model_artifact(api, artifact.path, "secret", sleep=lambda _: None)
+    first = publish_model_artifact(api, artifact, "secret", sleep=lambda _: None)
+    second = publish_model_artifact(api, artifact, "secret", sleep=lambda _: None)
     assert second == first
     assert len(api.commit_calls) == 1
     conflict = FakeApi()
     path = f"artifacts/{artifact.artifact_id}/artifact_manifest.json"
     conflict.remote[path] = b"conflict"
     with pytest.raises(ArtifactPublicationError, match="conflict"):
-        publish_model_artifact(conflict, artifact.path, "secret", sleep=lambda _: None)
+        publish_model_artifact(conflict, artifact, "secret", sleep=lambda _: None)
 
 
 def test_publish_retries_parent_race(tmp_path: Path) -> None:
@@ -223,7 +301,7 @@ def test_publish_retries_parent_race(tmp_path: Path) -> None:
             return super().create_commit(**kwargs)  # type: ignore[arg-type]
 
     api = RacingApi()
-    assert publish_model_artifact(api, artifact.path, "secret", retries=2, sleep=lambda _: None).commit_sha == PUBLISHED
+    assert publish_model_artifact(api, artifact, "secret", retries=2, sleep=lambda _: None).commit_sha == PUBLISHED
     assert api.attempts == 2
 
 
@@ -245,7 +323,7 @@ def test_publish_retries_http_412_parent_race(tmp_path: Path) -> None:
             return super().create_commit(**kwargs)  # type: ignore[arg-type]
 
     api = RacingApi()
-    publish_model_artifact(api, artifact.path, "secret", retries=2, sleep=lambda _: None)
+    publish_model_artifact(api, artifact, "secret", retries=2, sleep=lambda _: None)
     assert api.attempts == 2
 
 
@@ -259,7 +337,7 @@ def test_publish_snapshots_validated_artifact_before_mutable_hub_calls(tmp_path:
             (artifact.path / "projection.safetensors").write_bytes(b"replaced-after-validation")
 
     api = MutatingApi()
-    publish_model_artifact(api, artifact.path, "secret", sleep=lambda _: None)
+    publish_model_artifact(api, artifact, "secret", sleep=lambda _: None)
     remote_path = f"artifacts/{artifact.artifact_id}/projection.safetensors"
     assert api.remote[remote_path] == original
 
@@ -279,12 +357,71 @@ def test_publish_rejects_remote_missing_or_tampered_bytes(tmp_path: Path, mode: 
             return result
 
     with pytest.raises(ArtifactPublicationError, match="remote"):
-        publish_model_artifact(BadRemote(), artifact.path, "secret", sleep=lambda _: None)
+        publish_model_artifact(BadRemote(), artifact, "secret", sleep=lambda _: None)
 
 
 def test_publish_rejects_unproved_privacy_and_redacts_token(tmp_path: Path) -> None:
     artifact = export(tmp_path)
     token = "never-show-this"
     with pytest.raises(ArtifactPublicationError) as captured:
-        publish_model_artifact(FakeApi(private=None), artifact.path, token, sleep=lambda _: None)
+        publish_model_artifact(FakeApi(private=None), artifact, token, sleep=lambda _: None)
     assert token not in str(captured.value)
+
+
+def test_publish_requires_immutable_export_identity_and_rejects_manifest_mutation(
+    tmp_path: Path,
+) -> None:
+    artifact = export(tmp_path)
+    with pytest.raises((TypeError, ArtifactPublicationError), match="export identity"):
+        publish_model_artifact(FakeApi(), artifact.path, "secret", sleep=lambda _: None)
+
+    manifest_path = artifact.path / "artifact_manifest.json"
+    document = json.loads(manifest_path.read_bytes())
+    document["validation_report"]["metrics"]["recall_at_10"] = 0.25
+    manifest_path.write_text(
+        json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ArtifactPublicationError, match="export identity"):
+        publish_model_artifact(FakeApi(), artifact, "secret", sleep=lambda _: None)
+
+
+def test_publish_revalidates_safetensors_even_after_recomputed_manifest(
+    tmp_path: Path,
+) -> None:
+    artifact = export(tmp_path)
+    old_path = artifact.path
+    adapter_path = old_path / "adapter_model.safetensors"
+    save_file(
+        {"base_model.model.embed_tokens.weight": np.ones((2, 2), dtype=np.float32)},
+        adapter_path,
+    )
+    manifest_path = old_path / "artifact_manifest.json"
+    document = json.loads(manifest_path.read_bytes())
+    value = adapter_path.read_bytes()
+    document["files"]["adapter_model.safetensors"] = {
+        "sha256": hashlib.sha256(value).hexdigest(), "size": len(value),
+    }
+    identity = dict(document)
+    identity.pop("artifact_id")
+    artifact_id = hashlib.sha256(
+        (json.dumps(identity, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
+    document["artifact_id"] = artifact_id
+    manifest_path.write_text(
+        json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    forged_path = old_path.with_name(artifact_id)
+    old_path.rename(forged_path)
+    forged_manifest = forged_path / "artifact_manifest.json"
+    forged = type(artifact)(
+        path=forged_path,
+        document=document,
+        artifact_id=artifact_id,
+        manifest_sha256=hashlib.sha256(forged_manifest.read_bytes()).hexdigest(),
+    )
+    # Even a forged caller-side descriptor with the matching physical manifest must fail
+    # because publication validates the safetensors key contract again.
+    with pytest.raises(ArtifactPublicationError, match="base model|LoRA|adapter"):
+        publish_model_artifact(FakeApi(), forged, "secret", sleep=lambda _: None)

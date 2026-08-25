@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://babel.local/schemas/provenance-v1.json",
+  "title": "Distillation provenance v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "sources", "artifacts", "reports"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["role", "filename", "url", "size", "md5", "downloaded_at"],
+        "properties": {
+          "role": {"enum": ["teacher", "wikipedia"]},
+          "url": {"type": "string", "format": "uri"},
+          "filename": {"type": "string", "minLength": 1},
+          "size": {"type": "integer", "exclusiveMinimum": 0},
+          "md5": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+          "sha1": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+          "downloaded_at": {"type": "string", "format": "date"}
+        }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sha256", "size"],
+        "properties": {
+          "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+          "size": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "reports": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["row_counts", "match_rate", "exclusion_counts", "text_statistics", "vector_statistics"],
+      "properties": {
+        "dataset_aggregate_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "dataset_rows_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "dataset_counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["total", "train", "validation", "test"],
+          "properties": {
+            "total": {"type": "integer", "minimum": 1},
+            "train": {"type": "integer", "minimum": 0},
+            "validation": {"type": "integer", "minimum": 0},
+            "test": {"type": "integer", "minimum": 0}
+          }
+        },
+        "row_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+        "match_rate": {"type": "number", "minimum": 0, "maximum": 1},
+        "exclusion_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+        "text_statistics": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "count",
+            "min_length",
+            "max_length",
+            "mean_length",
+            "stddev_length",
+            "p50_length",
+            "p95_length",
+            "p99_length",
+            "histogram"
+          ],
+          "properties": {
+            "count": {"type": "integer", "minimum": 0},
+            "min_length": {"type": "integer", "minimum": 0},
+            "max_length": {"type": "integer", "minimum": 0},
+            "mean_length": {"type": "number", "minimum": 0},
+            "stddev_length": {"type": "number", "minimum": 0},
+            "p50_length": {"type": "number", "minimum": 0},
+            "p95_length": {"type": "number", "minimum": 0},
+            "p99_length": {"type": "number", "minimum": 0},
+            "histogram": {
+              "type": "array",
+              "minItems": 1,
+              "items": {"type": "integer", "minimum": 0}
+            }
+          }
+        },
+        "vector_statistics": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "dimension",
+            "count",
+            "min_norm",
+            "max_norm",
+            "mean_norm",
+            "stddev_norm",
+            "p50_norm",
+            "p95_norm",
+            "non_finite_count"
+          ],
+          "properties": {
+            "dimension": {"const": 100},
+            "count": {"type": "integer", "minimum": 0},
+            "min_norm": {"type": "number", "minimum": 0},
+            "max_norm": {"type": "number", "minimum": 0},
+            "mean_norm": {"type": "number", "minimum": 0},
+            "stddev_norm": {"type": "number", "minimum": 0},
+            "p50_norm": {"type": "number", "minimum": 0},
+            "p95_norm": {"type": "number", "minimum": 0},
+            "non_finite_count": {"type": "integer", "minimum": 0}
+          }
+        }
+      }
+    }
+  }
+}

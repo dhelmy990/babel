@@ -20,7 +20,9 @@ from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
-from safetensors.numpy import save_file
+from safetensors.numpy import load_file, save_file
+
+from .config import DistillationConfig
 
 
 DEFAULT_MODEL_REPO = "dhelmy990/babel-qwen-navigation-2016"
@@ -77,6 +79,14 @@ def _sha256(path: Path) -> str:
 def _is_sha(value: object, length: int) -> bool:
     pattern = _SHA40 if length == 40 else _SHA64
     return isinstance(value, str) and pattern.fullmatch(value) is not None
+
+
+def _finite(value: object) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    )
 
 
 def _ensure_no_symlink_components(path: Path) -> None:
@@ -170,8 +180,14 @@ def _validate_projection_layout(tensors: Mapping[str, np.ndarray]) -> None:
 
 
 def _validate_adapter_layout(
-    tensors: Mapping[str, np.ndarray], adapter_config: Mapping[str, object]
+    tensors: Mapping[str, np.ndarray],
+    adapter_config: Mapping[str, object],
+    training_config: Mapping[str, object],
 ) -> None:
+    if set(adapter_config) != {
+        "r", "lora_alpha", "lora_dropout", "bias", "target_modules"
+    }:
+        raise ArtifactExportError("adapter_config must use the closed LoRA fields")
     rank = adapter_config.get("r")
     targets = adapter_config.get("target_modules")
     if (
@@ -211,6 +227,167 @@ def _validate_adapter_layout(
         represented.add(target)
     if any(set(pair) != {"A", "B"} for pair in pairs.values()) or represented != target_set:
         raise ArtifactExportError("adapter requires paired A/B tensors for every target")
+    if any(
+        training_config.get(name) != expected
+        for name, expected in {
+            "lora_rank": rank,
+            "lora_alpha": adapter_config.get("lora_alpha"),
+            "lora_dropout": adapter_config.get("lora_dropout"),
+            "lora_bias": adapter_config.get("bias"),
+            "lora_targets": list(targets),
+        }.items()
+    ):
+        raise ArtifactExportError("adapter_config contradicts training_config")
+
+
+def _validate_training_config(
+    value: Mapping[str, object],
+    *,
+    dataset_commit_sha: str,
+    dataset_manifest_sha256: str,
+    dataset_readiness_sha256: str,
+) -> None:
+    expected_keys = {
+        "config_version", "model_id", "model_revision", "tokenizer_revision",
+        "dataset_repo_id", "dataset_config", "dataset_commit_sha",
+        "dataset_manifest_sha256", "dataset_readiness_sha256",
+        "teacher_dimension", "projection_input_dimension",
+        "projection_output_dimension", "max_length", "lambda_rel", "lora_rank",
+        "lora_alpha", "lora_dropout", "lora_targets", "lora_bias", "seed",
+    }
+    if set(value) != expected_keys:
+        raise ArtifactExportError("training_config must use the closed version-1 fields")
+    fixed = {
+        "config_version": 1,
+        "model_id": MODEL_ID,
+        "model_revision": MODEL_REVISION,
+        "tokenizer_revision": MODEL_REVISION,
+        "dataset_repo_id": DATASET_REPO,
+        "dataset_config": DATASET_CONFIG,
+        "dataset_commit_sha": dataset_commit_sha,
+        "dataset_manifest_sha256": dataset_manifest_sha256,
+        "dataset_readiness_sha256": dataset_readiness_sha256,
+        "teacher_dimension": 100,
+        "projection_input_dimension": 1024,
+        "projection_output_dimension": 100,
+        "lora_rank": 16,
+        "lora_alpha": 32,
+        "lora_dropout": 0.05,
+        "lora_targets": ["q_proj", "v_proj"],
+        "lora_bias": "none",
+    }
+    if any(value[name] != expected for name, expected in fixed.items()):
+        raise ArtifactExportError("training_config contradicts frozen model or dataset identity")
+    if not isinstance(value["seed"], int) or isinstance(value["seed"], bool):
+        raise ArtifactExportError("training_config seed must be an integer")
+    try:
+        DistillationConfig(
+            model_id=str(value["model_id"]),
+            model_revision=str(value["model_revision"]),
+            teacher_dimension=int(value["teacher_dimension"]),
+            max_length=value["max_length"],  # type: ignore[arg-type]
+            lambda_rel=value["lambda_rel"],  # type: ignore[arg-type]
+            lora_rank=value["lora_rank"],  # type: ignore[arg-type]
+            lora_alpha=value["lora_alpha"],  # type: ignore[arg-type]
+            lora_dropout=value["lora_dropout"],  # type: ignore[arg-type]
+            lora_targets=tuple(value["lora_targets"]),  # type: ignore[arg-type]
+        )
+    except (TypeError, ValueError) as error:
+        raise ArtifactExportError("training_config is not a valid DistillationConfig") from error
+
+
+def _validate_validation_report(
+    value: Mapping[str, object],
+    *,
+    dataset_commit_sha: str,
+    dataset_manifest_sha256: str,
+    dataset_readiness_sha256: str,
+) -> None:
+    if set(value) != {
+        "report_version", "dataset", "model", "pool_size", "metrics",
+        "invalid_vector_count", "norm_statistics", "examples",
+    } or value["report_version"] != 1:
+        raise ArtifactExportError("validation_report must use the closed version-1 fields")
+    dataset = value["dataset"]
+    if not isinstance(dataset, Mapping) or dict(dataset) != {
+        "repo_id": DATASET_REPO,
+        "config": DATASET_CONFIG,
+        "commit_sha": dataset_commit_sha,
+        "manifest_sha256": dataset_manifest_sha256,
+        "readiness_sha256": dataset_readiness_sha256,
+        "split": "validation",
+        "subset": "pilot",
+        "example_count": value["pool_size"],
+    }:
+        raise ArtifactExportError("validation_report dataset identity is contradictory")
+    model = value["model"]
+    if not isinstance(model, Mapping) or dict(model) != {
+        "id": MODEL_ID,
+        "revision": MODEL_REVISION,
+        "tokenizer_revision": MODEL_REVISION,
+    }:
+        raise ArtifactExportError("validation_report model identity is contradictory")
+    pool_size = value["pool_size"]
+    invalid_count = value["invalid_vector_count"]
+    if (
+        not isinstance(pool_size, int)
+        or isinstance(pool_size, bool)
+        or pool_size <= 0
+        or not isinstance(invalid_count, int)
+        or isinstance(invalid_count, bool)
+        or not 0 <= invalid_count <= pool_size
+    ):
+        raise ArtifactExportError("validation_report counts are invalid")
+    metrics = value["metrics"]
+    metric_names = {
+        "mean_paired_cosine", "recall_at_10", "recall_at_50",
+        "ndcg_at_10", "ndcg_at_50",
+    }
+    if not isinstance(metrics, Mapping) or set(metrics) != metric_names:
+        raise ArtifactExportError("validation_report metrics are incomplete")
+    if (
+        not _finite(metrics["mean_paired_cosine"])
+        or not -1 <= float(metrics["mean_paired_cosine"]) <= 1
+        or any(
+            not _finite(metrics[name]) or not 0 <= float(metrics[name]) <= 1
+            for name in metric_names - {"mean_paired_cosine"}
+        )
+    ):
+        raise ArtifactExportError("validation_report metrics must be finite and bounded")
+    norms = value["norm_statistics"]
+    norm_names = {
+        "student_min", "student_mean", "student_max",
+        "teacher_min", "teacher_mean", "teacher_max",
+    }
+    if not isinstance(norms, Mapping) or set(norms) != norm_names or any(
+        not _finite(norms[name]) or float(norms[name]) <= 0 for name in norm_names
+    ) or not (
+        float(norms["student_min"]) <= float(norms["student_mean"]) <= float(norms["student_max"])
+        and float(norms["teacher_min"]) <= float(norms["teacher_mean"]) <= float(norms["teacher_max"])
+    ):
+        raise ArtifactExportError("validation_report norm statistics are invalid")
+    examples = value["examples"]
+    if not isinstance(examples, list):
+        raise ArtifactExportError("validation_report examples must be a list")
+    seen: set[str] = set()
+    for example in examples:
+        if not isinstance(example, Mapping) or set(example) != {
+            "article_key", "student_neighbors", "teacher_neighbors"
+        }:
+            raise ArtifactExportError("validation_report example fields are invalid")
+        article_key = example["article_key"]
+        if (
+            not isinstance(article_key, str)
+            or not article_key
+            or article_key in seen
+            or any(
+                not isinstance(items, list)
+                or any(not isinstance(item, str) or not item for item in items)
+                for items in (example["student_neighbors"], example["teacher_neighbors"])
+            )
+        ):
+            raise ArtifactExportError("validation_report example identity is invalid")
+        seen.add(article_key)
 
 
 def _fsync(path: Path) -> None:
@@ -251,10 +428,8 @@ def _rename_noreplace(source: Path, destination: Path) -> None:
 class ArtifactManifest(Mapping[str, object]):
     path: Path
     document: dict[str, object]
-
-    @property
-    def artifact_id(self) -> str:
-        return str(self.document["artifact_id"])
+    artifact_id: str
+    manifest_sha256: str
 
     @property
     def model_revision(self) -> str:
@@ -324,8 +499,20 @@ def export_distilled_artifact(
         if not isinstance(value, Mapping):
             raise ArtifactExportError(f"{label} must be a mapping")
         _canonical_json(dict(value))
+    _validate_training_config(
+        training_config,
+        dataset_commit_sha=dataset_commit_sha,
+        dataset_manifest_sha256=dataset_manifest_sha256,
+        dataset_readiness_sha256=dataset_readiness_sha256,
+    )
+    _validate_validation_report(
+        validation_report,
+        dataset_commit_sha=dataset_commit_sha,
+        dataset_manifest_sha256=dataset_manifest_sha256,
+        dataset_readiness_sha256=dataset_readiness_sha256,
+    )
     _validate_projection_layout(projection)
-    _validate_adapter_layout(adapter, adapter_config)
+    _validate_adapter_layout(adapter, adapter_config, training_config)
 
     root_parent = root.parent
     root_parent.mkdir(parents=True, exist_ok=True)
@@ -375,14 +562,26 @@ def export_distilled_artifact(
         _rename_noreplace(staging, destination)
         _fsync(root)
         _fsync(root_parent)
-        return ArtifactManifest(destination, document)
+        return ArtifactManifest(
+            destination,
+            document,
+            artifact_id,
+            hashlib.sha256(manifest_bytes).hexdigest(),
+        )
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
 
 
-def _artifact_document(artifact_path: Path) -> tuple[dict[str, object], dict[str, Path]]:
-    _ensure_no_symlink_components(artifact_path)
+def _artifact_document(
+    artifact_path: Path,
+    *,
+    expected_identity: ArtifactManifest | None = None,
+) -> tuple[dict[str, object], dict[str, Path]]:
+    try:
+        _ensure_no_symlink_components(artifact_path)
+    except ArtifactExportError as error:
+        raise ArtifactPublicationError(f"artifact path is unsafe: {error}") from None
     if not artifact_path.is_dir() or artifact_path.is_symlink():
         raise ArtifactPublicationError("artifact path must be a physical directory")
     entries = list(artifact_path.iterdir())
@@ -396,8 +595,18 @@ def _artifact_document(artifact_path: Path) -> tuple[dict[str, object], dict[str
         document = json.loads(raw)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ArtifactPublicationError("artifact manifest is malformed") from error
-    if not isinstance(document, dict) or _canonical_json(document) != raw:
+    try:
+        canonical_manifest = _canonical_json(document)
+    except ArtifactExportError as error:
+        raise ArtifactPublicationError(f"artifact manifest is invalid: {error}") from None
+    if not isinstance(document, dict) or canonical_manifest != raw:
         raise ArtifactPublicationError("artifact manifest is not canonical JSON")
+    if expected_identity is not None and (
+        artifact_path != expected_identity.path
+        or hashlib.sha256(raw).hexdigest() != expected_identity.manifest_sha256
+        or document.get("artifact_id") != expected_identity.artifact_id
+    ):
+        raise ArtifactPublicationError("artifact does not match immutable export identity")
     if set(document) != {
         "artifact_id", "artifact_version", "model", "tokenizer", "dataset",
         "training_config", "validation_report", "files",
@@ -417,6 +626,19 @@ def _artifact_document(artifact_path: Path) -> tuple[dict[str, object], dict[str
         }
     ):
         raise ArtifactPublicationError("artifact model identity is invalid")
+    dataset = document["dataset"]
+    if (
+        not isinstance(dataset, Mapping)
+        or set(dataset) != {
+            "repo_id", "config", "commit_sha", "manifest_sha256", "readiness_sha256"
+        }
+        or dataset["repo_id"] != DATASET_REPO
+        or dataset["config"] != DATASET_CONFIG
+        or not _is_sha(dataset["commit_sha"], 40)
+        or not _is_sha(dataset["manifest_sha256"], 64)
+        or not _is_sha(dataset["readiness_sha256"], 64)
+    ):
+        raise ArtifactPublicationError("artifact dataset identity is invalid")
     files = document["files"]
     if not isinstance(files, Mapping) or set(files) != _PAYLOAD_NAMES:
         raise ArtifactPublicationError("artifact payload manifest is invalid")
@@ -430,6 +652,49 @@ def _artifact_document(artifact_path: Path) -> tuple[dict[str, object], dict[str
             or recorded["size"] != path.stat().st_size
         ):
             raise ArtifactPublicationError(f"artifact payload checksum mismatch: {name}")
+    try:
+        metadata: dict[str, Mapping[str, object]] = {}
+        for name in (
+            "adapter_config.json", "training_config.json", "validation_report.json"
+        ):
+            raw_metadata = paths[name].read_bytes()
+            parsed = json.loads(raw_metadata)
+            if not isinstance(parsed, dict) or _canonical_json(parsed) != raw_metadata:
+                raise ArtifactExportError(f"{name} must be canonical JSON")
+            metadata[name] = parsed
+        if metadata["training_config.json"] != document["training_config"]:
+            raise ArtifactExportError("training_config payload contradicts manifest")
+        if metadata["validation_report.json"] != document["validation_report"]:
+            raise ArtifactExportError("validation_report payload contradicts manifest")
+        training_config = metadata["training_config.json"]
+        _validate_training_config(
+            training_config,
+            dataset_commit_sha=str(dataset["commit_sha"]),
+            dataset_manifest_sha256=str(dataset["manifest_sha256"]),
+            dataset_readiness_sha256=str(dataset["readiness_sha256"]),
+        )
+        _validate_validation_report(
+            metadata["validation_report.json"],
+            dataset_commit_sha=str(dataset["commit_sha"]),
+            dataset_manifest_sha256=str(dataset["manifest_sha256"]),
+            dataset_readiness_sha256=str(dataset["readiness_sha256"]),
+        )
+        projection = _checked_tensors(
+            load_file(paths["projection.safetensors"]), kind="projection"
+        )
+        adapter = _checked_tensors(
+            load_file(paths["adapter_model.safetensors"]), kind="adapter"
+        )
+        _validate_projection_layout(projection)
+        _validate_adapter_layout(
+            adapter, metadata["adapter_config.json"], training_config
+        )
+    except ArtifactExportError as error:
+        raise ArtifactPublicationError(f"artifact semantic validation failed: {error}") from None
+    except Exception as error:
+        raise ArtifactPublicationError(
+            f"artifact payload could not be validated ({type(error).__name__})"
+        ) from None
     return document, paths
 
 
@@ -571,9 +836,12 @@ def _verify_remote(
 
 
 def _snapshot_artifact(
-    source: Path,
+    exported: ArtifactManifest,
 ) -> tuple[Path, dict[str, object], dict[str, Path]]:
-    original_document, original_paths = _artifact_document(source)
+    source = exported.path
+    original_document, original_paths = _artifact_document(
+        source, expected_identity=exported
+    )
     snapshot_root = Path(
         tempfile.mkdtemp(prefix=".babel-publication-snapshot-", dir=source.parent)
     )
@@ -627,12 +895,13 @@ def _expected_identities(
     payload = document["files"]
     assert isinstance(payload, Mapping)
     expected: dict[str, dict[str, object]] = {}
-    for remote_path, local in uploads.items():
+    for remote_path in uploads:
         name = remote_path.removeprefix(prefix)
         if name == _MANIFEST_NAME:
+            manifest_bytes = _canonical_json(dict(document))
             expected[remote_path] = {
-                "sha256": _sha256(local),
-                "size": local.stat().st_size,
+                "sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+                "size": len(manifest_bytes),
             }
         else:
             recorded = payload[name]
@@ -779,7 +1048,7 @@ def _publish_snapshot(
 
 def publish_model_artifact(
     api: object,
-    artifact_path: str | os.PathLike[str],
+    artifact: ArtifactManifest,
     token: str,
     *,
     repo_id: str = DEFAULT_MODEL_REPO,
@@ -794,8 +1063,12 @@ def publish_model_artifact(
         raise ValueError("a private-Hub token is required")
     if not isinstance(retries, int) or isinstance(retries, bool) or retries <= 0:
         raise ValueError("retries must be a positive integer")
-    path = Path(artifact_path)
-    snapshot_root, document, local_paths = _snapshot_artifact(path)
+    if not isinstance(artifact, ArtifactManifest):
+        raise ArtifactPublicationError(
+            "publication requires the immutable export identity returned by export"
+        )
+    path = artifact.path
+    snapshot_root, document, local_paths = _snapshot_artifact(artifact)
     try:
         return _publish_snapshot(
             api,

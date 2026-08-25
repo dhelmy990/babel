@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import sys
+from importlib.resources import files
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,6 +25,20 @@ from babel_training.data import (  # noqa: E402
 
 
 COMMIT = "a" * 40
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "dataset-manifest-v1.json",
+        "dataset-readiness-v1.json",
+        "provenance-v1.json",
+        "distillation-example-v1.json",
+    ],
+)
+def test_training_wheel_packages_exact_canonical_schemas(name: str) -> None:
+    packaged = files("babel_training").joinpath("schemas", name).read_bytes()
+    assert packaged == (ROOT / "schemas" / name).read_bytes()
 
 
 def test_training_package_exposes_public_data_artifact_interfaces() -> None:
@@ -254,6 +269,39 @@ def test_loader_accepts_task5_non_self_referential_readiness_and_proves_privacy(
         )
 
 
+def test_provenance_uses_json_schema_uri_format_not_http_only_policy() -> None:
+    files = metadata()
+    manifest = json.loads(files["distillation_2016/manifest.json"])
+    sources = manifest["provenance"]["document"]["sources"]
+    sources[0]["url"] = "urn:babel:teacher:2016"
+    sources[1]["url"] = "urn:babel:wikipedia:2016-10-01"
+    files["distillation_2016/manifest.json"] = canonical_json(manifest)
+    stream = load_distillation_stream(
+        revision=COMMIT, token="secret", api=FakeApi(files),
+        load_dataset_fn=lambda *a, **k: [row(1)], shuffle_buffer_size=1,
+    )
+    assert next(iter(stream))["page_id"] == 1
+
+
+@pytest.mark.parametrize(
+    ("field", "bad"),
+    [("url", "not a uri with spaces"), ("downloaded_at", "2016-99-99")],
+)
+def test_provenance_rejects_invalid_packaged_schema_formats(
+    field: str, bad: str,
+) -> None:
+    values = metadata()
+    manifest = json.loads(values["distillation_2016/manifest.json"])
+    manifest["provenance"]["document"]["sources"][0][field] = bad
+    values["distillation_2016/manifest.json"] = canonical_json(manifest)
+
+    with pytest.raises(DatasetContractError, match="schema field"):
+        load_distillation_stream(
+            revision=COMMIT, token="secret", api=FakeApi(values),
+            load_dataset_fn=lambda *a, **k: [row(1)], shuffle_buffer_size=1,
+        )
+
+
 @pytest.mark.parametrize("state", ["building", "unknown"])
 def test_loader_rejects_unready_state(state: str) -> None:
     files = metadata(state="building")
@@ -355,6 +403,46 @@ def test_state_resume_preserves_shuffle_buffer_without_duplicates_or_skips() -> 
     actual = prefix + [item["article_key"] for item in resumed]
     assert actual == expected
     assert len(actual) == len(set(actual))
+
+
+def test_unstarted_state_has_rng_and_restores_exact_start() -> None:
+    values = list({item["article_key"]: item for item in (row(i) for i in range(1, 12))}.values())
+
+    def make():
+        return load_distillation_stream(
+            revision=COMMIT, token="secret", api=FakeApi(),
+            load_dataset_fn=lambda *a, **k: copy.deepcopy(values),
+            seed=42, shuffle_buffer_size=3,
+        )
+
+    fresh = make()
+    state = fresh.state_dict()
+    assert state["cursor"]["shuffle_rng_state"] is not None
+    assert state["cursor"]["source_cursor"] == 0
+    assert state["cursor"]["shuffle_buffer"] == []
+    restored = make(); restored.load_state_dict(state)
+    assert list(restored) == list(make())
+
+
+def test_empty_stream_state_round_trip_and_epoch_boundary() -> None:
+    def make(epoch: int = 0):
+        return load_distillation_stream(
+            revision=COMMIT, token="secret", api=FakeApi(),
+            load_dataset_fn=lambda *a, **k: [], seed=4, epoch=epoch,
+            shuffle_buffer_size=2,
+        )
+
+    stream = make()
+    initial = stream.state_dict()
+    assert list(stream) == []
+    complete = stream.state_dict()
+    assert complete["cursor"]["complete"] is True
+    restored = make(); restored.load_state_dict(complete)
+    assert list(restored) == []
+    stream.set_epoch(1)
+    epoch_state = stream.state_dict()
+    assert epoch_state["identity"]["epoch"] == 1
+    assert epoch_state["cursor"]["shuffle_rng_state"] != initial["cursor"]["shuffle_rng_state"]
 
 
 def test_state_rejects_immutable_identity_mismatch() -> None:

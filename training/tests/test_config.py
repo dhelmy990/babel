@@ -161,7 +161,11 @@ def test_installed_training_wheel_imports_config_outside_repository(tmp_path: Pa
                 "from babel_training import DistillationConfig; "
                 "config = DistillationConfig(max_length=128); "
                 "assert config.max_length == 128; "
-                "assert config.teacher_dimension == 100"
+                "assert config.teacher_dimension == 100; "
+                "from importlib.resources import files; "
+                "schema = files('babel_training').joinpath('schemas', 'dataset-manifest-v1.json'); "
+                "assert schema.is_file(); "
+                "assert b'dataset_config' in schema.read_bytes()"
             ),
         ],
         cwd=outside_repository,

@@ -21,6 +21,20 @@ def test_training_runtime_pins_archived_torchdata_0_11() -> None:
     assert '"torchdata==0.11.0"' in pyproject
 
 
+def test_training_runtime_and_lock_pin_jsonschema_format_validation() -> None:
+    pyproject = (REPOSITORY_ROOT / "training" / "pyproject.toml").read_text()
+    lock = (REPOSITORY_ROOT / "training" / "requirements-colab.lock").read_text()
+
+    assert '"jsonschema[format-nongpl]==4.23.0"' in pyproject
+    assert "jsonschema[format-nongpl]==4.23.0" in lock
+    for dependency in (
+        "fqdn==", "isoduration==", "jsonpointer==", "jsonschema-specifications==",
+        "referencing==", "rfc3339-validator==", "rfc3986-validator==", "rpds-py==",
+        "uri-template==", "webcolors==",
+    ):
+        assert dependency in lock
+
+
 def test_training_lock_pins_official_torch_cu128_without_cuda_13() -> None:
     pyproject = (REPOSITORY_ROOT / "training" / "pyproject.toml").read_text()
     lock = (REPOSITORY_ROOT / "training" / "requirements-colab.lock").read_text()

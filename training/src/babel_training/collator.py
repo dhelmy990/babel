@@ -104,9 +104,8 @@ class DistillationCollator:
             teacher_norms = np.asarray(
                 [example["teacher_norm"] for example in checked], dtype=np.float32
             )
-        float32_norms = np.sqrt(
-            np.sum(teacher_vectors.astype(np.float64) ** 2, axis=1)
-        )
+        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+            float32_norms = np.linalg.norm(teacher_vectors, axis=1)
         if (
             teacher_vectors.shape != (batch_size, 100)
             or teacher_norms.shape != (batch_size,)

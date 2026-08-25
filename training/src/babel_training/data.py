@@ -9,10 +9,12 @@ import random
 import re
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from copy import deepcopy
-from datetime import date
+from functools import cache
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+
+from jsonschema import Draft202012Validator, FormatChecker, ValidationError, validators
 
 
 DEFAULT_DATASET_REPO = "dhelmy990/babel-wikipedia-experiment"
@@ -53,6 +55,47 @@ configs:
 ---
 # Babel 2016 distillation dataset
 """
+_SCHEMA_NAMES = frozenset(
+    {
+        "dataset-manifest-v1",
+        "dataset-readiness-v1",
+        "provenance-v1",
+        "distillation-example-v1",
+    }
+)
+
+
+def _is_finite_json_number(checker: object, instance: object) -> bool:
+    return _finite(instance)
+
+
+_FiniteNumberValidator = validators.extend(
+    Draft202012Validator,
+    type_checker=Draft202012Validator.TYPE_CHECKER.redefine(
+        "number", _is_finite_json_number
+    ),
+)
+
+
+@cache
+def _schema_validator(name: str) -> Draft202012Validator:
+    if name not in _SCHEMA_NAMES:
+        raise ValueError(f"unknown packaged schema: {name!r}")
+    schema_path = files("babel_training").joinpath("schemas", f"{name}.json")
+    with schema_path.open(encoding="utf-8") as source:
+        schema = json.load(source)
+    Draft202012Validator.check_schema(schema)
+    return _FiniteNumberValidator(schema, format_checker=FormatChecker())
+
+
+def _validate_schema(name: str, value: Mapping[str, object]) -> None:
+    try:
+        _schema_validator(name).validate(dict(value))
+    except ValidationError as error:
+        location = ".".join(str(item) for item in error.absolute_path) or "document"
+        raise DatasetContractError(
+            f"{name} schema field validation failed at {location}"
+        ) from None
 
 
 class InvalidDatasetRevision(ValueError):
@@ -147,6 +190,7 @@ def validate_distillation_row(
     if not isinstance(value, Mapping):
         raise DatasetContractError("stream row must be a mapping")
     document = dict(value)
+    _validate_schema("distillation-example-v1", document)
     if set(document) != _ALLOWED_ROW_FIELDS:
         raise DatasetContractError("stream row has a missing, unknown, or hidden field")
     key = document["article_key"]
@@ -205,6 +249,7 @@ def _parse_document(raw: bytes, label: str) -> dict[str, object]:
 
 def _validate_manifest(value: Mapping[str, object]) -> dict[str, object]:
     document = deepcopy(dict(value))
+    _validate_schema("dataset-manifest-v1", document)
     _require_exact_keys(
         document,
         {
@@ -308,6 +353,7 @@ def _validate_manifest(value: Mapping[str, object]) -> dict[str, object]:
     provenance_document = provenance["document"]
     if not isinstance(provenance_document, Mapping):
         raise DatasetContractError("pinned provenance document is invalid")
+    _validate_schema("provenance-v1", provenance_document)
     _require_exact_keys(
         provenance_document, {"schema_version", "sources", "artifacts", "reports"},
         "provenance document",
@@ -319,31 +365,6 @@ def _validate_manifest(value: Mapping[str, object]) -> dict[str, object]:
     reports = provenance_document["reports"]
     if not isinstance(sources, list) or not sources or not isinstance(artifacts, Mapping) or not artifacts:
         raise DatasetContractError("pinned provenance evidence is incomplete")
-    required_source = {"role", "filename", "url", "size", "md5", "downloaded_at"}
-    allowed_source = required_source | {"sha1"}
-    for source in sources:
-        if not isinstance(source, Mapping) or not required_source <= set(source) <= allowed_source:
-            raise DatasetContractError("pinned provenance source schema is invalid")
-        parsed_url = urlsplit(str(source["url"]))
-        try:
-            date.fromisoformat(str(source["downloaded_at"]))
-        except ValueError as error:
-            raise DatasetContractError("pinned provenance source date is invalid") from error
-        if (
-            source["role"] not in {"teacher", "wikipedia"}
-            or not isinstance(source["filename"], str)
-            or not source["filename"]
-            or parsed_url.scheme not in {"http", "https"}
-            or not parsed_url.netloc
-            or not _integer(source["size"], minimum=1)
-            or not isinstance(source["md5"], str)
-            or re.fullmatch(r"[a-f0-9]{32}", source["md5"]) is None
-            or ("sha1" in source and (
-                not isinstance(source["sha1"], str)
-                or re.fullmatch(r"[a-f0-9]{40}", source["sha1"]) is None
-            ))
-        ):
-            raise DatasetContractError("pinned provenance source identity is invalid")
     source_identities = {
         (str(source["role"]), str(source["filename"]), str(source["md5"]))
         for source in sources
@@ -443,6 +464,7 @@ def _validate_readiness(
     value: Mapping[str, object], manifest: Mapping[str, object], revision: str
 ) -> dict[str, object]:
     document = deepcopy(dict(value))
+    _validate_schema("dataset-readiness-v1", document)
     _require_exact_keys(
         document,
         {
@@ -602,8 +624,23 @@ class StatefulDistillationStream(Iterable[dict[str, object]]):
         self.manifest_sha256 = manifest_sha256
         self.readiness_sha256 = readiness_sha256
         self._resume: dict[str, object] | None = None
-        self._live: dict[str, object] | None = None
+        self._live: dict[str, object] = self._initial_cursor()
         self._iterating = False
+
+    def _initial_cursor(self) -> dict[str, object]:
+        derived_seed = int.from_bytes(
+            hashlib.sha256(f"{self.seed}:{self.epoch}".encode("ascii")).digest()[:16],
+            "big",
+        )
+        rng = random.Random(derived_seed)
+        return {
+            "source_cursor": 0,
+            "processed_examples": 0,
+            "shuffle_buffer": [],
+            "shuffle_rng_state": _json_state(rng.getstate()),
+            "source_exhausted": False,
+            "complete": False,
+        }
 
     def _identity(self) -> dict[str, object]:
         return {
@@ -624,19 +661,10 @@ class StatefulDistillationStream(Iterable[dict[str, object]]):
         if not _integer(epoch):
             raise ValueError("epoch must be a nonnegative integer")
         self.epoch = epoch
-        self._live = None
+        self._live = self._initial_cursor()
 
     def state_dict(self) -> dict[str, object]:
-        state = self._live or self._resume
-        if state is None:
-            state = {
-                "source_cursor": 0,
-                "processed_examples": 0,
-                "shuffle_buffer": [],
-                "shuffle_rng_state": None,
-                "source_exhausted": False,
-                "complete": False,
-            }
+        state = self._resume if self._resume is not None else self._live
         return {
             "state_version": 1,
             "identity": self._identity(),
@@ -672,8 +700,14 @@ class StatefulDistillationStream(Iterable[dict[str, object]]):
             or len(buffer) > self.shuffle_buffer_size
             or not isinstance(cursor["source_exhausted"], bool)
             or not isinstance(cursor["complete"], bool)
+            or cursor["shuffle_rng_state"] is None
         ):
             raise ValueError("stream state cursor values are invalid")
+        try:
+            verifier = random.Random()
+            verifier.setstate(_tuple_state(cursor["shuffle_rng_state"]))  # type: ignore[arg-type]
+        except (TypeError, ValueError) as error:
+            raise ValueError("stream state shuffle RNG is invalid") from error
         checked_buffer = [
             validate_distillation_row(item, expected_split=self.split) for item in buffer
         ]
@@ -691,32 +725,14 @@ class StatefulDistillationStream(Iterable[dict[str, object]]):
         self._iterating = True
         try:
             source = iter(self._dataset)
-            if self._resume is None:
-                derived_seed = int.from_bytes(
-                    hashlib.sha256(f"{self.seed}:{self.epoch}".encode("ascii")).digest()[:16],
-                    "big",
-                )
-                rng = random.Random(derived_seed)
-                live: dict[str, object] = {
-                    "source_cursor": 0,
-                    "processed_examples": 0,
-                    "shuffle_buffer": [],
-                    "shuffle_rng_state": _json_state(rng.getstate()),
-                    "source_exhausted": False,
-                    "complete": False,
-                }
-            else:
-                live = deepcopy(self._resume)
-                rng = random.Random()
-                rng_state = live["shuffle_rng_state"]
-                if rng_state is None:
-                    raise ValueError("resumable stream state lacks shuffle RNG")
-                rng.setstate(_tuple_state(rng_state))  # type: ignore[arg-type]
-                for _ in range(int(live["source_cursor"])):
-                    try:
-                        validate_distillation_row(next(source), expected_split=self.split)
-                    except StopIteration as error:
-                        raise ValueError("stream state source cursor exceeds dataset") from error
+            live = deepcopy(self._resume if self._resume is not None else self._live)
+            rng = random.Random()
+            rng.setstate(_tuple_state(live["shuffle_rng_state"]))  # type: ignore[arg-type]
+            for _ in range(int(live["source_cursor"])):
+                try:
+                    validate_distillation_row(next(source), expected_split=self.split)
+                except StopIteration as error:
+                    raise ValueError("stream state source cursor exceeds dataset") from error
             self._resume = None
             self._live = live
             buffer = live["shuffle_buffer"]
