@@ -66,11 +66,11 @@ a different purpose: they provide real source material at sufficient scale for
 storage, retrieval, concurrency, feedback, and topology experiments. They do
 not need to reproduce every article in either monthly Wikipedia.
 
-Each monthly environment contains exactly 100,000 eligible namespace-zero
-articles:
+Each monthly environment targets 10,000 eligible namespace-zero articles,
+125 times the current 80-row fixture:
 
-- an 80,000-identity shared temporal core present in both months; and
-- a 20,000-identity monthly supplement selected separately for that month.
+- an 8,000-identity shared temporal core present in both months; and
+- a 2,000-identity monthly supplement selected separately for that month.
 
 The shared core is selected deterministically from crosswalked identities. It
 first includes required dashboard seeds and their valid one-hop graph
@@ -78,21 +78,48 @@ neighborhoods, then high-traffic Clickstream identities, and finally a
 seeded-hash tail for topical variety. The monthly supplements use the same
 priority classes against each month's remaining eligible identities. When an
 identity would enter both supplements, the deterministic crosswalk and ranking
-assign it to only one supplement and backfill the other. The resulting union
-therefore contains exactly 120,000 identities when both source months provide
-sufficient eligible rows; failure to fill a quota fails publication rather
-than silently shrinking it.
+assign it to only one supplement and backfill the other. At the target size,
+the resulting union contains exactly 12,000 identities.
 
-For each selected monthly article, retain real text, canonical page identity,
-revision and content hashes, resolved redirects, real induced directed
-pagelinks, and real Clickstream transitions whose endpoints are both selected.
+Task 4 must select from indexed or range-addressable, streamable data already
+available at authenticated, commit-pinned Hugging Face revisions. It must not
+discover the selected rows by downloading or scanning complete Wikipedia XML
+or SQL dumps. Preparing or mirroring an indexed source is a prerequisite and
+is outside the construction timer; if no qualifying source is available, the
+task reports that blocker instead of falling back to a full-corpus scan or the
+artificial fixture.
+
+After a month's exact source/index pin is available, its expansion budget is
+45 minutes. On reaching the target, the builder freezes the manifest and begins
+joint finalization immediately. At 45 minutes it stops that month's expansion
+regardless of target progress. Once both monthly candidate sets are frozen, the
+builder packages the largest common June/July cohort supported by the valid
+rows collected so far. The packaged per-month row count `N` is the
+largest multiple of five no greater than 10,000 that both months can support;
+the shared core contains `4N/5` identities and each disjoint monthly supplement
+contains `N/5`. If `N` is below 5,000, publication fails. Thus the emergency
+floor is exactly 5,000 rows per month: 4,000 shared identities and 1,000
+month-specific identities, with a 6,000-identity union. Selection elapsed time
+and packaging/upload elapsed time are recorded separately.
+
+For each selected monthly article, retain only the title, lead, and first
+useful section together with canonical page identity, revision and content
+hashes, and resolved redirects. Do not store entire article bodies. Retain real
+induced directed pagelinks and real Clickstream transitions whose endpoints
+are both selected. Each monthly hidden configuration targets at least 100,000
+pagelinks and 100,000 Clickstream transitions when the induced source data
+contains that many, and hard-caps each relation at 250,000 rows. Below the
+target, retain all valid induced rows and report the shortfall. Above the cap,
+retain Clickstream rows by descending real transition count with stable
+source/target tie-breaks; retain pagelinks with Clickstream-supported edges
+first and then a seeded stable source/target ordering.
 The observable/hidden boundary remains unchanged: graph edges and behavioral
 signals never enter observable catalog configurations. All source reads use
 backend authentication at exact private-Hugging-Face commit SHAs, and the
 selection manifest records the policy version, seed, source revisions, ordered
 identity checksums, shared/supplement membership, and exclusion counts.
 
-These releases are named and documented as **100k sampled engineering
+These releases are named and documented as **10k time-boxed engineering
 snapshots**, never complete monthly Wikipedias. A complete monthly expansion is
 post-interview evidence expansion and is not a prerequisite for model
 integration or topology measurement.
