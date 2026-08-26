@@ -227,6 +227,19 @@ def test_interview_notebook_exposes_editable_source_to_current_kernel() -> None:
     )
 
 
+def test_interview_notebook_stops_before_mixed_numpy_kernel_imports() -> None:
+    kernel_check = _interview_cell("kernel-version-check")
+
+    assert "from importlib import metadata" in kernel_check
+    assert "import numpy as np" in kernel_check
+    assert "metadata.version('numpy')" in kernel_check
+    assert "np.__version__ != installed_numpy_version" in kernel_check
+    assert "Runtime > Restart session" in kernel_check
+    assert kernel_check.index("np.__version__ != installed_numpy_version") < (
+        kernel_check.index("from babel_training.config import DistillationConfig")
+    )
+
+
 def test_interview_notebook_has_secrets_drive_identity_and_preview_gates() -> None:
     secret = _interview_cell("hf-token-secret")
     drive = _interview_cell("drive-mount")
