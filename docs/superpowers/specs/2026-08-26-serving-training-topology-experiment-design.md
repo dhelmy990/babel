@@ -129,6 +129,39 @@ formal experiment still targets 10,000 distinct synthetic-created Babels and a
 creator ladder of 50, 100, and 500. Only those created Babels enter pgvector or
 the serving candidate set; the remaining source articles are creation material.
 
+## Deadline Training Scope
+
+Dataset completeness and pre-interview training size are independent. Task 3
+continues reconciling and publishing the complete 2016 distillation dataset.
+The user-launched Colab trainer consumes a deterministic subset of that
+complete pinned release:
+
+- smoke training: 1,000 examples;
+- interview training: exactly 50,000 examples;
+- validation: exactly 5,000 held-out examples;
+- test: exactly 5,000 held-out examples;
+- epochs: one; and
+- maximum sequence length: 384 tokens by default, configurable down to 256 or
+  up to 512 when measured memory permits.
+
+Sampling preserves the release's existing train, validation, and test split
+assignments. Within each split, order rows by a seeded hash of the canonical
+article identity and select the lowest required ranks. The 1,000-row smoke set
+is the first 1,000 identities of the same ordered 50,000-row training set. Save
+the seed, ordered article identities, per-split checksums, dataset commit SHA,
+and selection-policy version with every checkpoint and final model artifact.
+
+Validation uses exact search over the fixed 5,000 held-out validation vectors.
+The fixed 5,000-row test set remains untouched until the 50,000-example model
+checkpoint is complete. The pre-interview path has no 100,000- or 200,000-row
+expansion stage and does not wait for full-corpus ANN evaluation. Larger and
+complete-corpus training are post-interview experiments.
+
+The first real 50,000-example checkpoint, its fixed exact-validation report,
+and its serving-adapter manifest are the only training artifacts that unblock
+real Qwen integration. A smoke checkpoint proves mechanics but cannot satisfy
+that gate.
+
 ## Supported Topologies
 
 Every experiment condition records exactly one topology:
