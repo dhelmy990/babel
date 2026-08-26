@@ -168,6 +168,16 @@ class WikipediaPage:
 
 
 @dataclass(frozen=True, slots=True)
+class WikipediaIdentity:
+    """Identity-only namespace-zero page used by complete reconciliation."""
+
+    page_id: int
+    canonical_title: str
+    revision_id: int | None
+    redirect_target: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class RedirectResolution:
     status: str
     page: WikipediaPage | None
@@ -650,7 +660,9 @@ def _redirect_from_text(raw_text: str) -> str | None:
     return target or None
 
 
-def _raw_page(element: ET.Element) -> _RawPage | None:
+def _raw_page(
+    element: ET.Element, *, require_redirect_agreement: bool = True
+) -> _RawPage | None:
     element_namespace, _element_name = _tag_parts(element.tag)
     title_element = _singleton_child(
         element, "title", element_namespace, context="Wikipedia page"
@@ -726,7 +738,11 @@ def _raw_page(element: ET.Element) -> _RawPage | None:
     fallback = _redirect_from_text(raw_text)
     if redirect_target is None:
         redirect_target = fallback
-    elif fallback is not None and fallback != redirect_target:
+    elif (
+        require_redirect_agreement
+        and fallback is not None
+        and fallback != redirect_target
+    ):
         raise InvalidWikipediaPage(
             f"redirect metadata disagrees with wikitext for {title!r}"
         )
@@ -755,6 +771,7 @@ def _iter_raw_pages_source(
     *,
     duplicate_scope: set[str] | None = None,
     check_duplicates: bool = True,
+    require_redirect_agreement: bool = True,
 ) -> Iterator[_RawPage]:
     _rewind_source(source)
     duplicate = os.dup(source.descriptor)
@@ -824,7 +841,10 @@ def _iter_raw_pages_source(
                             if xml_depth == 1 and root is not None:
                                 root.remove(element)
                         continue
-                    page = _raw_page(element)
+                    page = _raw_page(
+                        element,
+                        require_redirect_agreement=require_redirect_agreement,
+                    )
                     inside_page = False
                     element.clear()
                     if root is not None:
@@ -1181,6 +1201,47 @@ def iter_wikipedia_pages(
                 yield _to_page(raw)
 
 
+def iter_wikipedia_identities(
+    xml_bz2_path: Path,
+) -> Iterator[WikipediaIdentity]:
+    """Stream identity metadata without rendering article wikitext."""
+    with _open_wikipedia_source(Path(xml_bz2_path)) as source:
+        for raw in _iter_raw_pages_source(
+            source,
+            check_duplicates=False,
+            require_redirect_agreement=False,
+        ):
+            yield WikipediaIdentity(
+                page_id=raw.page_id,
+                canonical_title=raw.canonical_title,
+                revision_id=raw.revision_id,
+                redirect_target=raw.redirect_target,
+            )
+
+
+def iter_wikipedia_pages_by_id(
+    xml_bz2_path: Path, page_ids: Iterable[int]
+) -> Iterator[WikipediaPage]:
+    """Render only the requested page IDs during one bounded XML pass."""
+    wanted = frozenset(page_ids)
+    if any(
+        not isinstance(page_id, int)
+        or isinstance(page_id, bool)
+        or page_id <= 0
+        or page_id > MAX_ID_VALUE
+        for page_id in wanted
+    ):
+        raise ValueError("page IDs must be positive bounded integers")
+    with _open_wikipedia_source(Path(xml_bz2_path)) as source:
+        for raw in _iter_raw_pages_source(
+            source,
+            check_duplicates=False,
+            require_redirect_agreement=False,
+        ):
+            if raw.page_id in wanted:
+                yield _to_page(raw)
+
+
 def _candidate_closure(
     source: _Source,
     candidates: set[str],
@@ -1380,11 +1441,14 @@ __all__ = [
     "InvalidWikipediaXml",
     "RedirectResolution",
     "WikipediaError",
+    "WikipediaIdentity",
     "WikipediaLimitExceeded",
     "WikipediaPage",
     "extract_lead",
     "is_non_article_title",
+    "iter_wikipedia_identities",
     "iter_wikipedia_pages",
+    "iter_wikipedia_pages_by_id",
     "normalize_title",
     "resolve_redirect",
     "wikitext_to_plain_text",

@@ -27,7 +27,14 @@ from .release import (
 from .shard import ShardInfo, ShardResult, write_complete_shards
 from .sources import SourceSpec, load_source_manifest
 from .teacher import TeacherAudit, TeacherRecord, iter_teacher
-from .wikipedia import WikipediaPage, is_non_article_title, iter_wikipedia_pages, normalize_title
+from .wikipedia import (
+    WikipediaIdentity,
+    WikipediaPage,
+    is_non_article_title,
+    iter_wikipedia_identities,
+    iter_wikipedia_pages_by_id,
+    normalize_title,
+)
 
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -313,7 +320,7 @@ def _ingest_teacher(
 def _ingest_page_identities(connection: sqlite3.Connection, path: Path) -> None:
     start = 1
     count = 0
-    for count, page in enumerate(iter_wikipedia_pages(path), 1):
+    for count, page in enumerate(iter_wikipedia_identities(path), 1):
         normalized = normalize_title(page.canonical_title)
         try:
             connection.execute(
@@ -467,13 +474,13 @@ def _resolve_teachers(connection: sqlite3.Connection) -> None:
 def _collect_selected_text(connection: sqlite3.Connection, path: Path) -> None:
     count = 0
     start = 1
-    for page in iter_wikipedia_pages(path):
-        wanted = connection.execute(
-            "SELECT 1 FROM teacher WHERE status='matched' AND page_id=? LIMIT 1",
-            (page.page_id,),
-        ).fetchone()
-        if wanted is None:
-            continue
+    wanted_ids = (
+        int(row[0])
+        for row in connection.execute(
+            "SELECT page_id FROM teacher WHERE status='matched' ORDER BY page_id"
+        )
+    )
+    for page in iter_wikipedia_pages_by_id(path, wanted_ids):
         if not page.article_text:
             connection.execute(
                 "UPDATE teacher SET status='empty_text',detail='resolved page has empty article text',"

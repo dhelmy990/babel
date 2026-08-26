@@ -19,7 +19,7 @@ from babel_data.full_2016 import (  # noqa: E402
 from babel_data.reconcile import split_for  # noqa: E402
 from babel_data.release import validate_full_release_proof  # noqa: E402
 from babel_data.teacher import TeacherRecord  # noqa: E402
-from babel_data.wikipedia import WikipediaPage  # noqa: E402
+from babel_data.wikipedia import WikipediaIdentity, WikipediaPage  # noqa: E402
 
 
 def _teacher(title: str, value: float = 1.0) -> TeacherRecord:
@@ -37,6 +37,26 @@ def _page(title: str, page_id: int) -> WikipediaPage:
         lead_text=f"{title} lead.",
         redirect_target=None,
     )
+
+
+def _patch_page_streams(
+    monkeypatch: pytest.MonkeyPatch, module: object, producer: object
+) -> None:
+    def identities(path: Path):
+        for page in producer(path):  # type: ignore[operator]
+            yield WikipediaIdentity(
+                page.page_id,
+                page.canonical_title,
+                page.revision_id,
+                page.redirect_target,
+            )
+
+    def selected(path: Path, page_ids: object):
+        wanted = set(page_ids)  # type: ignore[arg-type]
+        return (page for page in producer(path) if page.page_id in wanted)  # type: ignore[operator]
+
+    monkeypatch.setattr(module, "iter_wikipedia_identities", identities)
+    monkeypatch.setattr(module, "iter_wikipedia_pages_by_id", selected)
 
 
 def _pin() -> Full2016SourcePin:
@@ -77,7 +97,7 @@ def test_complete_builder_uses_only_pinned_hf_processing_objects(
 
     monkeypatch.setattr(full, "open_processing_source", open_pinned)
     monkeypatch.setattr(full, "iter_teacher", lambda _path, audit=None: iter([_teacher("One")]))
-    monkeypatch.setattr(full, "iter_wikipedia_pages", lambda _path: iter([_page("One", 1)]))
+    _patch_page_streams(monkeypatch, full, lambda _path: iter([_page("One", 1)]))
 
     result = build_complete_2016(
         _pin(), tmp_path / "data", tmp_path / "release", resume=True
@@ -105,7 +125,7 @@ def test_complete_builder_accounts_for_matches_and_explicit_exclusions(
         "iter_teacher",
         lambda _path, audit=None: iter([_teacher("One"), _teacher("Missing")]),
     )
-    monkeypatch.setattr(full, "iter_wikipedia_pages", lambda _path: iter([_page("One", 1)]))
+    _patch_page_streams(monkeypatch, full, lambda _path: iter([_page("One", 1)]))
 
     result = build_complete_2016(_pin(), tmp_path / "data", tmp_path / "release")
 
@@ -146,10 +166,8 @@ def test_complete_builder_explicitly_excludes_empty_selected_text(
         "iter_teacher",
         lambda _path, audit=None: iter([_teacher("One"), _teacher("Empty")]),
     )
-    monkeypatch.setattr(
-        full,
-        "iter_wikipedia_pages",
-        lambda _path: iter([_page("One", 1), empty]),
+    _patch_page_streams(
+        monkeypatch, full, lambda _path: iter([_page("One", 1), empty])
     )
 
     result = build_complete_2016(_pin(), tmp_path / "data", tmp_path / "release")
@@ -182,7 +200,7 @@ def test_resume_after_interruption_is_idempotent_and_does_not_duplicate_rows(
             raise RuntimeError("simulated interruption")
         yield from real_pages(path)
 
-    monkeypatch.setattr(full, "iter_wikipedia_pages", interrupted_pages)
+    _patch_page_streams(monkeypatch, full, interrupted_pages)
     with pytest.raises(RuntimeError, match="simulated interruption"):
         build_complete_2016(_pin(), tmp_path / "data", tmp_path / "release")
 
@@ -209,7 +227,7 @@ def test_resume_adopts_proof_valid_shards_after_receipt_interruption(
     pinned.write_bytes(b"fixture")
     monkeypatch.setattr(full, "open_processing_source", lambda *args, **kwargs: pinned)
     monkeypatch.setattr(full, "iter_teacher", lambda _path, audit=None: iter([_teacher("One")]))
-    monkeypatch.setattr(full, "iter_wikipedia_pages", lambda _path: iter([_page("One", 1)]))
+    _patch_page_streams(monkeypatch, full, lambda _path: iter([_page("One", 1)]))
     real_writer = full.write_complete_shards
     calls = 0
 
@@ -245,7 +263,7 @@ def test_complete_readiness_requires_inventory_count_digest_and_remote_proofs(
     pinned.write_bytes(b"fixture")
     monkeypatch.setattr(full, "open_processing_source", lambda *args, **kwargs: pinned)
     monkeypatch.setattr(full, "iter_teacher", lambda _path, audit=None: iter([_teacher("One")]))
-    monkeypatch.setattr(full, "iter_wikipedia_pages", lambda _path: iter([_page("One", 1)]))
+    _patch_page_streams(monkeypatch, full, lambda _path: iter([_page("One", 1)]))
 
     local = build_complete_2016(_pin(), tmp_path / "data", tmp_path / "release")
     assert local.readiness_state == "building"
@@ -282,9 +300,9 @@ def test_complete_builder_uses_all_row_spool_not_pilot_sampler(
         "iter_teacher",
         lambda _path, audit=None: iter([_teacher(f"Page {index}") for index in range(12)]),
     )
-    monkeypatch.setattr(
+    _patch_page_streams(
+        monkeypatch,
         full,
-        "iter_wikipedia_pages",
         lambda _path: iter([_page(f"Page {index}", index + 1) for index in range(12)]),
     )
     monkeypatch.setattr(

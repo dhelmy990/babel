@@ -27,9 +27,12 @@ from babel_data.wikipedia import (  # noqa: E402
     InvalidWikipediaUtf8,
     InvalidWikipediaXml,
     WikipediaLimitExceeded,
+    WikipediaIdentity,
     WikipediaPage,
     extract_lead,
+    iter_wikipedia_identities,
     iter_wikipedia_pages,
+    iter_wikipedia_pages_by_id,
     normalize_title,
     resolve_redirect,
     wikitext_to_plain_text,
@@ -104,6 +107,34 @@ def test_fixture_streams_only_usable_namespace_zero_revision_pages() -> None:
     assert all(isinstance(page, WikipediaPage) for page in pages)
     with pytest.raises(FrozenInstanceError):
         pages[0].page_id = 99
+
+
+def test_identity_stream_skips_rendering_and_selected_stream_renders_only_ids() -> None:
+    identities = list(iter_wikipedia_identities(FIXTURE))
+
+    assert all(isinstance(item, WikipediaIdentity) for item in identities)
+    assert [item.page_id for item in identities] == [10, 11, 12, 16]
+    assert identities[0].canonical_title == "Virtual memory"
+    assert identities[1].redirect_target == "Virtual memory"
+
+    selected = list(iter_wikipedia_pages_by_id(FIXTURE, {10, 16}))
+    assert [item.page_id for item in selected] == [10, 16]
+    assert selected[0].lead_text == "Virtual memory is a memory-management technique."
+
+
+def test_complete_identity_stream_prefers_dump_redirect_metadata(
+    tmp_path: Path,
+) -> None:
+    page = (
+        '<page><title>Alias</title><ns>0</ns><id>1</id><redirect title="Target A"/>'
+        '<revision><id>2</id><text>#REDIRECT [[Target B]]</text></revision></page>'
+    )
+    path = write_dump(tmp_path, page)
+
+    with pytest.raises(InvalidWikipediaPage, match="redirect metadata disagrees"):
+        list(iter_wikipedia_pages(path))
+    [identity] = iter_wikipedia_identities(path)
+    assert identity.redirect_target == "Target A"
 
 
 def test_single_dump_revision_id_is_optional(tmp_path: Path) -> None:
