@@ -6,13 +6,49 @@ import hashlib
 import json
 import os
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
-from .validation import FullValidationPlanV1
+from .validation import FullValidationPlanV1, InterviewTrainingPlanV1
+
+
+@dataclass(frozen=True, slots=True)
+class InterviewTrainingSelectionV1:
+    dataset_commit_sha: str
+    smoke_article_keys: tuple[str, ...]
+    train_article_keys: tuple[str, ...]
+    validation_article_keys: tuple[str, ...]
+    test_article_keys: tuple[str, ...]
+    seed: str = "babel-interview-2016-v1"
+    policy_version: str = "interview-training-selection-v1"
+
+    @staticmethod
+    def _selection(keys: tuple[str, ...]) -> dict[str, object]:
+        payload = json.dumps(
+            keys, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+        return {
+            "count": len(keys),
+            "article_keys": list(keys),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        }
+
+    def to_document(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "policy_version": self.policy_version,
+            "seed": self.seed,
+            "dataset_commit_sha": self.dataset_commit_sha,
+            "selections": {
+                "smoke": self._selection(self.smoke_article_keys),
+                "train": self._selection(self.train_article_keys),
+                "validation": self._selection(self.validation_article_keys),
+                "test": self._selection(self.test_article_keys),
+            },
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +87,13 @@ def _selection_digest(document: dict[str, list[str]]) -> str:
         document, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _interview_rank(seed: str, article_key: str) -> tuple[str, str]:
+    digest = hashlib.sha256(
+        seed.encode("utf-8") + b"\0" + article_key.encode("utf-8")
+    ).hexdigest()
+    return digest, article_key
 
 
 def _atomic_write(destination: Path, payload: bytes) -> None:
@@ -106,6 +149,68 @@ def persist_validation_selection(
     path = Path(destination)
     if path.exists() and path.read_bytes() != payload:
         raise ValueError("refusing to replace a different validation selection")
+    _atomic_write(path, payload)
+    return selection
+
+
+def persist_interview_training_selection(
+    rows: Iterable[Mapping[str, object]],
+    plan: InterviewTrainingPlanV1,
+    dataset_commit_sha: str,
+    destination: str | os.PathLike[str],
+) -> InterviewTrainingSelectionV1:
+    """Persist the fixed split-preserving 50k/5k/5k interview selection."""
+    if (
+        len(dataset_commit_sha) != 40
+        or any(character not in "0123456789abcdef" for character in dataset_commit_sha)
+    ):
+        raise ValueError("dataset commit SHA must be lowercase 40-character hexadecimal")
+    by_split: dict[str, list[str]] = {"train": [], "validation": [], "test": []}
+    seen: set[str] = set()
+    for row in rows:
+        article_key = row.get("article_key")
+        split = row.get("split")
+        if not isinstance(article_key, str) or not article_key:
+            raise ValueError("selection rows require nonempty article keys")
+        if split not in by_split:
+            raise ValueError("selection rows require train/validation/test splits")
+        if article_key in seen:
+            raise ValueError("selection article keys must be globally unique")
+        seen.add(article_key)
+        by_split[str(split)].append(article_key)
+    required = {
+        "train": plan.train_rows,
+        "validation": plan.validation_rows,
+        "test": plan.test_rows,
+    }
+    selected: dict[str, tuple[str, ...]] = {}
+    for split, count in required.items():
+        if len(by_split[split]) < count:
+            raise ValueError(f"insufficient {split} rows for interview selection")
+        selected[split] = tuple(
+            sorted(
+                by_split[split],
+                key=lambda key: _interview_rank(plan.seed, key),
+            )[:count]
+        )
+    selection = InterviewTrainingSelectionV1(
+        dataset_commit_sha=dataset_commit_sha,
+        smoke_article_keys=selected["train"][: plan.smoke_rows],
+        train_article_keys=selected["train"],
+        validation_article_keys=selected["validation"],
+        test_article_keys=selected["test"],
+        seed=plan.seed,
+        policy_version=plan.policy_version,
+    )
+    payload = json.dumps(
+        selection.to_document(),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8") + b"\n"
+    path = Path(destination)
+    if path.exists() and path.read_bytes() != payload:
+        raise ValueError("refusing to replace a different interview selection")
     _atomic_write(path, payload)
     return selection
 
@@ -185,9 +290,11 @@ def audit_hnsw_against_exact(
 
 
 __all__ = [
+    "InterviewTrainingSelectionV1",
     "ValidationSelectionV1",
     "audit_hnsw_against_exact",
     "build_exact_index",
     "normalized_float32",
+    "persist_interview_training_selection",
     "persist_validation_selection",
 ]

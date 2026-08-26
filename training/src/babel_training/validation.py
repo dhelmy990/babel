@@ -19,6 +19,50 @@ DEFAULT_MODEL_REVISION = "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
 
 
 @dataclass(frozen=True, slots=True)
+class InterviewTrainingPlanV1:
+    """Frozen pre-interview training and exact-validation budget."""
+
+    smoke_rows: int = 1_000
+    train_rows: int = 50_000
+    validation_rows: int = 5_000
+    test_rows: int = 5_000
+    epochs: int = 1
+    max_length: int = 384
+    exact_index: str = "faiss.IndexFlatIP"
+    validation_candidate_rows: int = 5_000
+    seed: str = "babel-interview-2016-v1"
+    policy_version: str = "interview-training-selection-v1"
+
+    def __post_init__(self) -> None:
+        counts = (
+            self.smoke_rows,
+            self.train_rows,
+            self.validation_rows,
+            self.test_rows,
+            self.validation_candidate_rows,
+        )
+        if any(
+            not isinstance(value, int) or isinstance(value, bool) or value <= 0
+            for value in counts
+        ):
+            raise ValueError("interview row counts must be positive integers")
+        if self.smoke_rows > self.train_rows:
+            raise ValueError("smoke rows must be a prefix of the selected train rows")
+        if self.validation_candidate_rows != self.validation_rows:
+            raise ValueError("exact validation candidates must equal validation rows")
+        if self.epochs != 1:
+            raise ValueError("pre-interview training is exactly one epoch")
+        if not 256 <= self.max_length <= 512:
+            raise ValueError("max_length must be in the measured-memory range 256..512")
+        if self.exact_index != "faiss.IndexFlatIP":
+            raise ValueError("pre-interview validation requires faiss.IndexFlatIP")
+        if self.seed != "babel-interview-2016-v1":
+            raise ValueError("interview selection seed is frozen")
+        if self.policy_version != "interview-training-selection-v1":
+            raise ValueError("interview selection policy version is frozen")
+
+
+@dataclass(frozen=True, slots=True)
 class FullValidationPlanV1:
     """Frozen bounded-search contract for the complete 2016 corpus."""
 
@@ -332,6 +376,7 @@ def validate_embeddings(
 
 
 __all__ = [
+    "InterviewTrainingPlanV1",
     "FullValidationPlanV1",
     "ValidationReport",
     "ndcg_at_k",

@@ -16,9 +16,104 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "training" / "src"))
 from babel_training.full_run import (  # noqa: E402
     audit_hnsw_against_exact,
     build_exact_index,
+    persist_interview_training_selection,
     persist_validation_selection,
 )
-from babel_training.validation import FullValidationPlanV1  # noqa: E402
+from babel_training.validation import (  # noqa: E402
+    FullValidationPlanV1,
+    InterviewTrainingPlanV1,
+)
+
+
+def test_interview_training_defaults() -> None:
+    plan = InterviewTrainingPlanV1()
+
+    assert (plan.smoke_rows, plan.train_rows) == (1_000, 50_000)
+    assert (plan.validation_rows, plan.test_rows) == (5_000, 5_000)
+    assert (plan.epochs, plan.max_length) == (1, 384)
+    assert plan.exact_index == "faiss.IndexFlatIP"
+    assert plan.validation_candidate_rows == 5_000
+    assert plan.seed == "babel-interview-2016-v1"
+
+
+def test_interview_selection_preserves_splits_order_and_smoke_prefix(
+    tmp_path: Path,
+) -> None:
+    plan = InterviewTrainingPlanV1(
+        smoke_rows=2,
+        train_rows=4,
+        validation_rows=2,
+        test_rows=2,
+        validation_candidate_rows=2,
+    )
+    rows = [
+        {"article_key": f"train-{index}", "split": "train"}
+        for index in range(7)
+    ] + [
+        {"article_key": f"validation-{index}", "split": "validation"}
+        for index in range(4)
+    ] + [
+        {"article_key": f"test-{index}", "split": "test"}
+        for index in range(4)
+    ]
+
+    selection = persist_interview_training_selection(
+        reversed(rows),
+        plan,
+        "a" * 40,
+        tmp_path / "interview-training-selection-v1.json",
+    )
+
+    expected_train = tuple(
+        sorted(
+            (f"train-{index}" for index in range(7)),
+            key=lambda key: (
+                hashlib.sha256(
+                    b"babel-interview-2016-v1\0" + key.encode("utf-8")
+                ).hexdigest(),
+                key,
+            ),
+        )[:4]
+    )
+    assert selection.train_article_keys == expected_train
+    assert selection.smoke_article_keys == expected_train[:2]
+    assert len(selection.validation_article_keys) == 2
+    assert len(selection.test_article_keys) == 2
+    document = json.loads(
+        (tmp_path / "interview-training-selection-v1.json").read_text()
+    )
+    assert document["policy_version"] == "interview-training-selection-v1"
+    assert document["seed"] == "babel-interview-2016-v1"
+    assert document["dataset_commit_sha"] == "a" * 40
+    for name in ("smoke", "train", "validation", "test"):
+        keys = document["selections"][name]["article_keys"]
+        payload = json.dumps(keys, separators=(",", ":")).encode()
+        assert document["selections"][name]["sha256"] == hashlib.sha256(
+            payload
+        ).hexdigest()
+
+
+def test_interview_selection_rejects_insufficient_or_duplicate_rows(
+    tmp_path: Path,
+) -> None:
+    plan = InterviewTrainingPlanV1(
+        smoke_rows=1,
+        train_rows=2,
+        validation_rows=1,
+        test_rows=1,
+        validation_candidate_rows=1,
+    )
+    rows = [
+        {"article_key": "one", "split": "train"},
+        {"article_key": "one", "split": "train"},
+        {"article_key": "validation", "split": "validation"},
+        {"article_key": "test", "split": "test"},
+    ]
+
+    with pytest.raises(ValueError, match="unique"):
+        persist_interview_training_selection(
+            rows, plan, "a" * 40, tmp_path / "selection.json"
+        )
 
 
 def test_validation_defaults_for_complete_corpus() -> None:

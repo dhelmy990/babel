@@ -22,6 +22,7 @@ _SCHEMA_NAMES = frozenset(
         "clickstream-edge-v1",
         "distillation-example-v1",
         "full-release-proof-v1",
+        "interview-training-selection-v1",
         "monthly-article-v1",
         "monthly-edge-v1",
         "provenance-v1",

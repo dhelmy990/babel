@@ -141,6 +141,12 @@ def test_schema_loader_is_independent_of_current_working_directory(
     assert schema["$id"].endswith("distillation-example-v1.json")
 
 
+def test_interview_training_selection_schema_is_versioned() -> None:
+    schema = load_schema("interview-training-selection-v1")
+
+    assert schema["$id"].endswith("interview-training-selection-v1.json")
+
+
 @pytest.mark.parametrize(
     "name",
     ["unknown-v1", "provenance", "../schemas/provenance-v1", "../../etc/passwd"],
