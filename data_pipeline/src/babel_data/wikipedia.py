@@ -661,7 +661,10 @@ def _redirect_from_text(raw_text: str) -> str | None:
 
 
 def _raw_page(
-    element: ET.Element, *, require_redirect_agreement: bool = True
+    element: ET.Element,
+    *,
+    require_redirect_agreement: bool = True,
+    skip_invalid_title: bool = False,
 ) -> _RawPage | None:
     element_namespace, _element_name = _tag_parts(element.tag)
     title_element = _singleton_child(
@@ -690,6 +693,8 @@ def _raw_page(
     if page_id is None:
         raise InvalidWikipediaPage(f"nonpositive or malformed page ID for {title!r}")
     if not _valid_title_text(title):
+        if skip_invalid_title:
+            return None
         raise InvalidWikipediaPage(f"invalid normalized title for page ID {page_id}")
     if namespace != 0:
         return None
@@ -772,6 +777,7 @@ def _iter_raw_pages_source(
     duplicate_scope: set[str] | None = None,
     check_duplicates: bool = True,
     require_redirect_agreement: bool = True,
+    skip_invalid_title: bool = False,
 ) -> Iterator[_RawPage]:
     _rewind_source(source)
     duplicate = os.dup(source.descriptor)
@@ -844,6 +850,7 @@ def _iter_raw_pages_source(
                     page = _raw_page(
                         element,
                         require_redirect_agreement=require_redirect_agreement,
+                        skip_invalid_title=skip_invalid_title,
                     )
                     inside_page = False
                     element.clear()
@@ -1210,6 +1217,7 @@ def iter_wikipedia_identities(
             source,
             check_duplicates=False,
             require_redirect_agreement=False,
+            skip_invalid_title=True,
         ):
             yield WikipediaIdentity(
                 page_id=raw.page_id,
@@ -1237,6 +1245,7 @@ def iter_wikipedia_pages_by_id(
             source,
             check_duplicates=False,
             require_redirect_agreement=False,
+            skip_invalid_title=True,
         ):
             if raw.page_id in wanted:
                 yield _to_page(raw)

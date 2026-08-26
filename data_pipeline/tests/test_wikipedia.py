@@ -137,6 +137,16 @@ def test_complete_identity_stream_prefers_dump_redirect_metadata(
     assert identity.redirect_target == "Target A"
 
 
+def test_complete_identity_stream_skips_unmatchable_invalid_titles(
+    tmp_path: Path,
+) -> None:
+    path = write_dump(tmp_path, xml_page("   ", 3))
+
+    with pytest.raises(InvalidWikipediaPage, match="invalid normalized title"):
+        list(iter_wikipedia_pages(path))
+    assert list(iter_wikipedia_identities(path)) == []
+
+
 def test_single_dump_revision_id_is_optional(tmp_path: Path) -> None:
     pages = (
         "<page><title>No revision ID</title><ns>0</ns><id>8</id>"
