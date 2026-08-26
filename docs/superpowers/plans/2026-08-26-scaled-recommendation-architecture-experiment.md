@@ -4,7 +4,7 @@
 
 **Goal:** Turn the working Friday miniature into a sufficiently large, real-Qwen recommendation architecture experiment that compares monolithic and split serving/training topologies, preserves immutable model lineage, and saves reproducible scalability evidence.
 
-**Architecture:** Preserve the implemented C++ dashboard control plane, PostgreSQL/pgvector storage, synchronous recommendation POST, Kafka feedback, online trainer, immutable model registry, and benchmark package. Replace the miniature datasets and NumPy encoder with commit-pinned Hugging Face source releases, the complete 2016 distilled Qwen artifact, real June/July environments, durable experiment edges, bounded recommendation walks, selectable same-process/same-host topologies, concurrent load, and immutable result publication.
+**Architecture:** Preserve the implemented C++ dashboard control plane, PostgreSQL/pgvector storage, synchronous recommendation POST, Kafka feedback, online trainer, immutable model registry, and benchmark package. Replace the miniature datasets and NumPy encoder with commit-pinned Hugging Face source releases, the complete 2016 distilled Qwen artifact, real 100k June/July engineering snapshots, durable experiment edges, bounded recommendation walks, selectable same-process/same-host topologies, concurrent load, and immutable result publication.
 
 **Tech Stack:** C++20/Drogon, PostgreSQL 18 with pgvector 0.8.6, Python 3.10+, PyTorch, Transformers, PEFT, Accelerate, FastAPI/Uvicorn, Hugging Face Hub/Datasets, PyArrow/Parquet, FAISS exact search, optional hnswlib, Apache Kafka 4.3.1 KRaft, psycopg 3, asyncio/httpx, psutil/pynvml, Docker Compose, Catch2/CTest, pytest, Node test runner.
 
@@ -65,7 +65,7 @@ Design authority:
 Tasks 1-3: audit, source mirror, complete 2016
     -> GATE A: STOP; user launches separate training agent
     -> user confirms real batch/backward/checkpoint healthy
-Tasks 4-5: real June/July plus serving-adapter preparation
+Tasks 4-5: real sampled June/July snapshots plus serving-adapter preparation
     -> GATE B: STOP until final trained artifact is published
 Tasks 6-13: real integration, graph, topology, dashboard, experiments
 ```
@@ -128,7 +128,7 @@ integrates in task order and supplies the next phase's pinned identities.
 - Produces: a closed `preserve|replace|new|deferred` receipt mapping every critical gap to Tasks 2-13.
 
 - [ ] Record Git/HF/data/model/run identities. Label pilot/miniature artifacts non-scale.
-- [ ] Map these exact replacements: complete 2016, real June/July, real Qwen adapter, real pgvector vectors, durable edges, walks, topology modes, concurrent load, saved trials, rolling publication.
+- [ ] Map these exact replacements: complete 2016, real 100k June/July engineering snapshots, real Qwen adapter, real pgvector vectors, durable edges, walks, topology modes, concurrent load, saved trials, rolling publication.
 - [ ] Run the preserved baseline without bulk jobs:
 
 ```bash
@@ -269,11 +269,13 @@ deterministic validation, and handoff usability only.
 
 ---
 
-### Task 4: Produce Real June and July Environments
+### Task 4: Produce Real 100k June and July Engineering Snapshots
 
 **Files:**
 - Create: `data_pipeline/src/babel_data/monthly/sources.py`
+- Create: `data_pipeline/src/babel_data/monthly/selection.py`
 - Create: `data_pipeline/src/babel_data/monthly/build.py`
+- Create: `data_pipeline/tests/monthly/test_selection.py`
 - Create: `data_pipeline/tests/monthly/test_real_build.py`
 - Modify: `data_pipeline/src/babel_data/monthly/catalog.py`
 - Modify: `data_pipeline/src/babel_data/monthly/hidden.py`
@@ -283,13 +285,15 @@ deterministic validation, and handoff usability only.
 
 **Interfaces:**
 - Consumes: Gate A approval and pinned monthly Wikipedia/Clickstream mirrors.
-- Produces: real June/July observed+hidden configurations and one connected commit.
+- Produces: real 100k June/July observed+hidden engineering-snapshot configurations and one connected commit.
 
 - [ ] Write tests rejecting demo fixtures as real releases and scanning observed schemas for hidden fields.
-- [ ] Implement one reusable builder for namespace-zero pages, redirects, pagelinks, Wikidata identity, and Clickstream from pinned HF objects. Output canonical catalog/text, directed deduplicated graph, preserved transition counts, hidden inputs, and title-independent cross-period identity.
-- [ ] Build/publish/remote-verify June first. Reclaim only explicitly enumerated verified bulk inputs.
-- [ ] Build July with identical parser version, then produce June↔July crosswalk. Reject title-only joins, duplicate keys, missing edge endpoints, invalid transitions, and schema drift.
-- [ ] Publish a connected commit containing complete 2016 plus all real monthly configurations.
+- [ ] Write selection tests proving exactly 80,000 crosswalked shared identities, exactly 20,000 disjoint monthly-supplement identities per month, exactly 100,000 rows per monthly catalog, and an exactly 120,000-identity union. Insufficient eligible rows, quota drift, nondeterministic ordering, or supplement overlap must fail publication.
+- [ ] Implement `EngineeringSnapshotPolicyV1` in `selection.py`. Select required dashboard seeds and valid one-hop neighbors first, then high-traffic Clickstream identities, then a seeded-hash tail. Resolve supplement collisions through the title-independent crosswalk, deterministically retain one month, and backfill the other. Emit policy version, seed, ordered identity checksums, membership, source pins, and exclusion counts.
+- [ ] Implement one reusable builder for namespace-zero pages, redirects, pagelinks, Wikidata identity, and Clickstream from pinned HF objects. Restrict output to the selected monthly identities and induced endpoints. Output canonical catalog/text, directed deduplicated graph, preserved transition counts, hidden inputs, and title-independent cross-period identity.
+- [ ] Build/publish/remote-verify June first as a `100k_sampled_engineering_snapshot`. Reclaim only explicitly enumerated verified bulk inputs.
+- [ ] Build July with the identical parser and policy versions, then publish the June↔July crosswalk and shared/supplement manifests. Reject title-only joins, duplicate keys, missing edge endpoints, invalid transitions, schema drift, and any claim that the snapshots are complete monthly Wikipedias.
+- [ ] Publish a connected commit containing complete 2016 plus both real sampled monthly configurations. Treat complete monthly environments as post-interview evidence expansion, not an integration prerequisite.
 - [ ] Verify dashboard seeding pins/caches this commit, emits safe paragraph HTML, preserves canonical page IDs, retries/duplicates/progress, and cannot fall back to MediaWiki.
 - [ ] Test and commit:
 
@@ -298,11 +302,13 @@ python3 -m pytest data_pipeline/tests/monthly data_pipeline/tests/test_hub.py -v
 cmake --build --preset test
 ctest --preset test -R "huggingface|seed|wikipedia_import" --output-on-failure
 git add data_pipeline/src/babel_data data_pipeline/tests docs/runbooks/monthly-environment-build.md
-git commit -m "feat: publish real June and July environments"
+git commit -m "feat: publish sampled June and July environments"
 ```
 
-**Next-phase context:** Slow real builds must not be replaced by the demo
-generator. Review schemas, counts, provenance, and leakage.
+**Next-phase context:** The 100k snapshots must use real pinned text, graph, and
+Clickstream inputs and must not be replaced by the demo generator. Review exact
+80k/20k quotas, the 120k union, deterministic selection, schemas, provenance,
+and leakage. Do not block integration on complete monthly Wikipedia expansion.
 
 ---
 
@@ -685,7 +691,7 @@ measured bottleneck.
 - [ ] Wikipedia processing uses a verified pinned private-HF mirror.
 - [ ] Complete 2016 inventory is accounted for and streams valid text plus finite 100d teacher vectors.
 - [ ] User-launched training produces a real artifact passing frozen full validation/search.
-- [ ] Real June/July observed+hidden environments publish without leakage.
+- [ ] Real 100k June/July sampled observed+hidden environments publish with exact 80k shared/20k monthly quotas, a 120k union, and no leakage.
 - [ ] Serving uses pinned real Qwen+LoRA+projection and normalized 100d vectors.
 - [ ] pgvector contains only real-model vectors for synthetic-created Babels; formal default threshold is 10,000 created/indexed.
 - [ ] Includes durably form unique directed experiment edges; relevance and 40% continuation remain separate.
