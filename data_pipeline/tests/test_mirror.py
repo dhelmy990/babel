@@ -70,6 +70,52 @@ class FakeHub:
             return content + b"corrupt"
         return content
 
+    def iter_file_bytes(self, *, path_in_repo: str, **kwargs: object) -> object:
+        self.download_calls.append({"path_in_repo": path_in_repo, **kwargs})
+        content = self.remote[path_in_repo]
+        if self.corrupt_remote:
+            content += b"corrupt"
+        return (
+            content[offset : offset + 3]
+            for offset in range(0, len(content), 3)
+        )
+
+
+class StreamingHub(FakeHub):
+    def get_file_bytes(self, **kwargs: object) -> bytes:
+        pytest.fail("whole-file byte access is forbidden for mirrored sources")
+
+    def iter_file_bytes(self, *, path_in_repo: str, **kwargs: object) -> object:
+        self.download_calls.append({"path_in_repo": path_in_repo, **kwargs})
+        content = self.remote[path_in_repo]
+        if self.corrupt_remote:
+            content += b"corrupt"
+        return (
+            content[offset : offset + 3]
+            for offset in range(0, len(content), 3)
+        )
+
+
+class PathDownloadHub(FakeHub):
+    iter_file_bytes = None
+
+    def get_file_bytes(self, **kwargs: object) -> bytes:
+        pytest.fail("whole-file byte access is forbidden for mirrored sources")
+
+    def hf_hub_download(
+        self, *, filename: str, local_dir: str, **kwargs: object
+    ) -> str:
+        self.download_calls.append(
+            {"path_in_repo": filename, "local_dir": local_dir, **kwargs}
+        )
+        destination = Path(local_dir) / filename
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        content = self.remote[filename]
+        if self.corrupt_remote:
+            content += b"corrupt"
+        destination.write_bytes(content)
+        return str(destination)
+
 
 def source_spec(payload: bytes = PAYLOAD) -> SourceSpec:
     return SourceSpec(
@@ -145,6 +191,84 @@ def test_successful_mirror_is_remote_verified_and_sha256_matches(
     saved = receipt_path(tmp_path / "hf-cache", receipt)
     assert saved.read_bytes() == receipt.to_json_bytes()
     assert "secret-token" not in saved.read_text()
+
+
+def test_mirror_and_processing_stream_to_atomic_cache_without_whole_file_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install_authoritative_download(monkeypatch)
+    api = StreamingHub()
+    receipt = mirror_source(
+        source_spec(), api, repository=DEFAULT_REPO_ID,
+        token="stream-token", data_root=tmp_path,
+    )
+    destination = tmp_path / "hf-cache" / COMMIT / receipt.path_in_repo
+    assert destination.read_bytes() == PAYLOAD
+    assert len(api.download_calls) == 1
+    assert api.download_calls[0] == {
+        "path_in_repo": receipt.path_in_repo,
+        "repo_id": DEFAULT_REPO_ID,
+        "repo_type": "dataset",
+        "revision": COMMIT,
+        "token": "stream-token",
+    }
+    assert not list(destination.parent.glob(f".{destination.name}.*"))
+
+    destination.unlink()
+    api.download_calls.clear()
+    opened = open_processing_source(
+        receipt.repository, receipt.remote_commit_sha, receipt.path_in_repo,
+        "stream-token", tmp_path / "hf-cache", api=api,
+    )
+    assert opened == destination
+    assert opened.read_bytes() == PAYLOAD
+    assert len(api.download_calls) == 1
+    assert not list(destination.parent.glob(f".{destination.name}.*"))
+
+
+def test_streamed_remote_mismatch_never_promotes_and_cleans_temporary_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install_authoritative_download(monkeypatch)
+    api = StreamingHub(corrupt_remote=True)
+    destination = (
+        tmp_path
+        / "hf-cache"
+        / COMMIT
+        / "sources"
+        / "wikipedia-multistream-index"
+        / "source.txt.bz2"
+    )
+
+    with pytest.raises(MirrorVerificationError, match="remote.*bytes"):
+        mirror_source(
+            source_spec(), api, repository=DEFAULT_REPO_ID,
+            token="stream-token", data_root=tmp_path,
+        )
+
+    assert not destination.exists()
+    assert not list(destination.parent.glob(f".{destination.name}.*"))
+
+
+def test_authenticated_path_download_is_verified_and_atomically_promoted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install_authoritative_download(monkeypatch)
+    api = PathDownloadHub()
+
+    receipt = mirror_source(
+        source_spec(), api, repository=DEFAULT_REPO_ID,
+        token="path-token", data_root=tmp_path,
+    )
+
+    destination = tmp_path / "hf-cache" / COMMIT / receipt.path_in_repo
+    assert destination.read_bytes() == PAYLOAD
+    assert len(api.download_calls) == 1
+    assert api.download_calls[0]["repo_id"] == DEFAULT_REPO_ID
+    assert api.download_calls[0]["repo_type"] == "dataset"
+    assert api.download_calls[0]["revision"] == COMMIT
+    assert api.download_calls[0]["token"] == "path-token"
+    assert not list(destination.parent.glob(f".{destination.name}.*"))
 
 
 def test_receipt_json_is_deterministic_closed_and_immutable() -> None:

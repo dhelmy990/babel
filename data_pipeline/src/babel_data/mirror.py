@@ -8,9 +8,9 @@ import os
 import re
 import shutil
 import tempfile
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Mapping
 from urllib.parse import urlsplit
 
 from .hub import DEFAULT_REPO_ID
@@ -143,48 +143,182 @@ def _write_bytes(destination: Path, value: bytes) -> None:
         raise
 
 
-def _download_remote(
+def _check_remote_identity(
+    size: int,
+    checksum: str,
+    *,
+    expected_size: int,
+    expected_sha256: str,
+) -> None:
+    if size != expected_size or not hmac.compare_digest(
+        checksum, expected_sha256
+    ):
+        raise MirrorVerificationError(
+            "remote source bytes do not match verified authoritative bytes"
+        )
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _stream_remote_to_cache(
+    chunks: Iterable[bytes],
+    destination: Path,
+    *,
+    expected_size: int,
+    expected_sha256: str,
+) -> tuple[Path, int, str]:
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{destination.name}.", suffix=".part", dir=destination.parent
+    )
+    size = 0
+    digest = hashlib.sha256()
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            for chunk in chunks:
+                if not isinstance(chunk, bytes):
+                    raise MirrorVerificationError(
+                        "remote source stream yielded a non-bytes chunk"
+                    )
+                output.write(chunk)
+                size += len(chunk)
+                digest.update(chunk)
+            output.flush()
+            os.fsync(output.fileno())
+        checksum = digest.hexdigest()
+        _check_remote_identity(
+            size,
+            checksum,
+            expected_size=expected_size,
+            expected_sha256=expected_sha256,
+        )
+        os.replace(temporary, destination)
+        _fsync_directory(destination.parent)
+        return destination, size, checksum
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _download_path_to_cache(
+    downloader: Callable[..., str | os.PathLike[str]],
+    repository: str,
+    revision: str,
+    path_in_repo: str,
+    token: str,
+    destination: Path,
+    *,
+    expected_size: int,
+    expected_sha256: str,
+) -> tuple[Path, int, str]:
+    download_root = Path(
+        tempfile.mkdtemp(
+            prefix=f".{destination.name}.download-", dir=destination.parent
+        )
+    )
+    try:
+        downloaded = Path(
+            downloader(
+                repo_id=repository,
+                filename=path_in_repo,
+                repo_type="dataset",
+                revision=revision,
+                token=token,
+                local_dir=str(download_root),
+                force_download=True,
+            )
+        )
+        try:
+            downloaded.resolve().relative_to(download_root.resolve())
+        except ValueError:
+            with downloaded.open("rb") as source:
+                return _stream_remote_to_cache(
+                    iter(lambda: source.read(8 * 1024 * 1024), b""),
+                    destination,
+                    expected_size=expected_size,
+                    expected_sha256=expected_sha256,
+                )
+        size, checksum = _file_identity(downloaded)
+        _check_remote_identity(
+            size,
+            checksum,
+            expected_size=expected_size,
+            expected_sha256=expected_sha256,
+        )
+        os.replace(downloaded, destination)
+        _fsync_directory(destination.parent)
+        return destination, size, checksum
+    finally:
+        shutil.rmtree(download_root)
+
+
+def _download_remote_to_cache(
     api: object,
     repository: str,
     revision: str,
     path_in_repo: str,
     token: str,
     destination: Path,
-) -> Path:
-    getter = getattr(api, "get_file_bytes", None)
-    if callable(getter):
-        value = getter(
+    *,
+    expected_size: int,
+    expected_sha256: str,
+) -> tuple[Path, int, str]:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    streamer = getattr(api, "iter_file_bytes", None)
+    if callable(streamer):
+        chunks = streamer(
             repo_id=repository,
             path_in_repo=path_in_repo,
             repo_type="dataset",
             revision=revision,
             token=token,
         )
-        if not isinstance(value, bytes):
-            raise MirrorVerificationError("remote source reader returned non-bytes")
-        _write_bytes(destination, value)
-        return destination
+        return _stream_remote_to_cache(
+            chunks,
+            destination,
+            expected_size=expected_size,
+            expected_sha256=expected_sha256,
+        )
 
     downloader = getattr(api, "hf_hub_download", None)
-    if not callable(downloader):
-        from huggingface_hub import hf_hub_download
-
-        downloader = hf_hub_download
-    downloaded = Path(
-        downloader(
-            repo_id=repository,
-            filename=path_in_repo,
-            repo_type="dataset",
-            revision=revision,
-            token=token,
-            local_dir=str(destination.parents[len(PurePosixPath(path_in_repo).parts) - 1]),
-            force_download=True,
+    if callable(downloader):
+        return _download_path_to_cache(
+            downloader,
+            repository,
+            revision,
+            path_in_repo,
+            token,
+            destination,
+            expected_size=expected_size,
+            expected_sha256=expected_sha256,
         )
+    if (
+        callable(getattr(api, "get_file_bytes", None))
+        and not type(api).__module__.startswith("huggingface_hub")
+    ):
+        raise MirrorVerificationError(
+            "custom remote source access requires a streaming or path downloader"
+        )
+    from huggingface_hub import hf_hub_download
+
+    return _download_path_to_cache(
+        hf_hub_download,
+        repository,
+        revision,
+        path_in_repo,
+        token,
+        destination,
+        expected_size=expected_size,
+        expected_sha256=expected_sha256,
     )
-    if downloaded != destination:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(downloaded, destination)
-    return destination
 
 
 def receipt_path(
@@ -282,16 +416,16 @@ def mirror_source(
     revision = _returned_commit(result)
     _resolve_private_revision(api, repository, revision, effective_token)
     remote = effective_root / "hf-cache" / revision / path_in_repo
-    _download_remote(
-        api, repository, revision, path_in_repo, effective_token, remote
+    _, remote_size, remote_sha256 = _download_remote_to_cache(
+        api,
+        repository,
+        revision,
+        path_in_repo,
+        effective_token,
+        remote,
+        expected_size=local_size,
+        expected_sha256=local_sha256,
     )
-    remote_size, remote_sha256 = _file_identity(remote)
-    if remote_size != local_size or not hmac.compare_digest(
-        remote_sha256, local_sha256
-    ):
-        raise MirrorVerificationError(
-            "remote source bytes do not match verified authoritative bytes"
-        )
     receipt = SourceMirrorReceiptV1(
         source_id=identifier,
         authoritative_url=source.url,
@@ -356,7 +490,16 @@ def open_processing_source(
         raise SourcePolicyError("source mirror receipt does not match the pinned source")
     destination = checked_cache_root / revision / path
     if not destination.exists():
-        _download_remote(client, repository, revision, path, token, destination)
+        _download_remote_to_cache(
+            client,
+            repository,
+            revision,
+            path,
+            token,
+            destination,
+            expected_size=receipt.bytes,
+            expected_sha256=receipt.remote_sha256,
+        )
     size, checksum = _file_identity(destination)
     if size != receipt.bytes:
         raise MirrorVerificationError(
