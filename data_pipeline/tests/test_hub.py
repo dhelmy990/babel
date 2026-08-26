@@ -19,6 +19,7 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "data_pipeline" / "src"))
 
 from babel_data.hub import (  # noqa: E402
     RemoteVerificationError,
+    publish_interview_configuration,
     publish_verified_shards,
     stage_versioned_release_shards,
     verify_remote,
@@ -30,6 +31,7 @@ from babel_data.release import (  # noqa: E402
     EMPTY_TEST_PATH,
     canonical_json,
     identity_rows_sha256,
+    render_dataset_card,
     validate_manifest_extension,
 )
 from babel_data.shard import (  # noqa: E402
@@ -38,6 +40,16 @@ from babel_data.shard import (  # noqa: E402
     write_shards,
 )
 from data_pipeline.tests.test_shard import provenance_document  # noqa: E402
+from data_pipeline.tests.test_interview_export import (  # noqa: E402
+    SMALL_COUNTS,
+    _create_database,
+)
+from babel_data.interview_export import (  # noqa: E402
+    INTERVIEW_CONFIG,
+    freeze_frontier,
+    select_interview_ids,
+    write_interview_release,
+)
 
 
 COMMIT = "a" * 40
@@ -156,6 +168,180 @@ def prepare(tmp_path: Path):
     ])
     datasets = {split: [next(value for value in values if value["split"] == split)] for split in ("train", "validation", "test")}
     return result, files, datasets
+
+
+def prepare_interview(tmp_path: Path):
+    database = tmp_path / "reconcile.sqlite3"
+    _create_database(database)
+    frontier = freeze_frontier(database)
+    selection = select_interview_ids(
+        database,
+        frontier,
+        required_counts=SMALL_COUNTS,
+        smoke_size=3,
+    )
+    result = write_interview_release(
+        database,
+        frontier,
+        selection,
+        tmp_path / "interview",
+        source_sha256={"teacher": "a" * 64, "wikipedia": "b" * 64},
+        code_commit="c" * 40,
+    )
+    datasets = {
+        shard.split: pq.read_table(result.output_root / shard.path).to_pylist()
+        for shard in result.shards
+    }
+    return result, datasets
+
+
+def test_publish_interview_is_atomic_append_and_exact_revision_streamed(
+    tmp_path: Path,
+) -> None:
+    result, datasets = prepare_interview(tmp_path)
+    api = FakeApi(current_sha=PARENT)
+    complete_manifest = b'{"active_release_root":null,"existing":"unchanged"}\n'
+    api.remote["distillation_2016/manifest.json"] = complete_manifest
+    api.remote["README.md"] = b"""---
+configs:
+- config_name: distillation_2016
+  data_files:
+  - split: train
+    path: distillation_2016/train/*.parquet
+  - split: validation
+    path: distillation_2016/validation/*.parquet
+  - split: test
+    path: distillation_2016/test/*.parquet
+---
+# Babel 2016 distillation dataset
+"""
+    load_calls: list[dict[str, object]] = []
+
+    def load(repo_id: str, **kwargs: object) -> object:
+        load_calls.append({"repo_id": repo_id, **kwargs})
+        return datasets[str(kwargs["split"])]
+
+    revision = publish_interview_configuration(
+        api,
+        "dhelmy990/babel-wikipedia-experiment",
+        result.output_root,
+        "token",
+        load_dataset_fn=load,
+        expected_counts=SMALL_COUNTS,
+        retries=1,
+        sleep=lambda _: None,
+    )
+
+    assert revision == COMMIT
+    expected_config_paths = {
+        *(shard.path for shard in result.shards),
+        f"{INTERVIEW_CONFIG}/manifest.json",
+        f"{INTERVIEW_CONFIG}/readiness.json",
+    }
+    assert set(api.operations) == expected_config_paths | {"README.md"}
+    assert "distillation_2016/manifest.json" not in api.operations
+    assert api.remote["distillation_2016/manifest.json"] == complete_manifest
+    assert api.commit_calls == [
+        {
+            "repo_id": "dhelmy990/babel-wikipedia-experiment",
+            "repo_type": "dataset",
+            "revision": "main",
+            "parent_commit": PARENT,
+            "commit_message": "Publish frozen 2016 interview configuration",
+            "token": "token",
+        }
+    ]
+    assert {call["split"] for call in load_calls} == {"train", "validation", "test"}
+    assert all(call["name"] == INTERVIEW_CONFIG for call in load_calls)
+    assert all(call["revision"] == COMMIT for call in load_calls)
+    assert all(call["streaming"] is True and call["token"] == "token" for call in load_calls)
+
+
+def test_publish_interview_rejects_nonidentical_existing_config_path(
+    tmp_path: Path,
+) -> None:
+    result, datasets = prepare_interview(tmp_path)
+    api = FakeApi(current_sha=PARENT)
+    api.remote["distillation_2016/manifest.json"] = b'{"active_release_root":null}\n'
+    api.remote[result.shards[0].path] = b"different"
+
+    with pytest.raises(ValueError, match="refusing to overwrite"):
+        publish_interview_configuration(
+            api,
+            "dhelmy990/babel-wikipedia-experiment",
+            result.output_root,
+            "token",
+            load_dataset_fn=lambda *args, **kwargs: datasets[str(kwargs["split"])],
+            expected_counts=SMALL_COUNTS,
+            retries=1,
+            sleep=lambda _: None,
+        )
+    assert api.operations == []
+
+
+def test_interview_card_survives_complete_release_activation() -> None:
+    active_root = "distillation_2016/releases/" + "d" * 64
+    card = render_dataset_card(active_root)
+
+    assert b"config_name: distillation_2016\n" in card
+    assert b"config_name: distillation_2016_interview\n" in card
+    assert f"path: {active_root}/train/*.parquet".encode() in card
+    assert b"path: distillation_2016_interview/train/*.parquet" in card
+
+
+def test_complete_publication_upgrades_legacy_local_card_without_dropping_interview(
+    tmp_path: Path,
+) -> None:
+    values = rows_for_all_splits()
+    pilot = write_shards(
+        values,
+        tmp_path / "pilot",
+        pilot_size=len(values),
+        provenance=provenance_document(),
+    )
+    api = FakeApi(current_sha=PARENT)
+    api.remote["distillation_2016/manifest.json"] = pilot.manifest_path.read_bytes()
+    api.remote["README.md"] = render_dataset_card()
+    complete = write_complete_shards(
+        values,
+        tmp_path / "complete",
+        spool_database=tmp_path / "complete.sqlite3",
+        provenance=provenance_document(),
+        release_id="f" * 64,
+        supersedes_commit_sha=PARENT,
+    )
+    complete.readme_path.write_bytes(
+        render_dataset_card(
+            "distillation_2016/releases/" + "f" * 64,
+            include_interview=False,
+        )
+    )
+    readiness = json.loads(complete.readiness_path.read_text())
+    readiness["state"] = "complete"
+    complete.readiness_path.write_bytes(canonical_json(readiness))
+    manifest = json.loads(complete.manifest_path.read_text())
+    files = [complete.output_root / item["path"] for item in manifest["shards"]] + [
+        complete.readiness_path,
+        complete.readme_path,
+        complete.output_root / EMPTY_TEST_PATH,
+        complete.manifest_path,
+    ]
+    datasets = {
+        split: [next(row for row in values if row["split"] == split)]
+        for split in ("train", "validation", "test")
+    }
+
+    assert publish_verified_shards(
+        api,
+        "dhelmy990/babel-wikipedia-experiment",
+        files,
+        "token",
+        root=complete.output_root,
+        load_dataset_fn=lambda *args, **kwargs: datasets,
+        retries=1,
+        sleep=lambda _: None,
+    ) == COMMIT
+    assert b"config_name: distillation_2016_interview" in api.remote["README.md"]
 
 
 def rolling_extension(result: object, destination: Path) -> tuple[Path, list[Path]]:

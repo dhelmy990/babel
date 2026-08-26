@@ -12,10 +12,18 @@ from typing import Iterator, Sequence
 
 from .hub import (
     DEFAULT_REPO_ID,
+    publish_interview_configuration,
     publish_verified_shards,
     stage_versioned_release_shards,
     verify_remote,
     write_revision_file,
+)
+from .interview_export import (
+    DEFAULT_SOURCE_REVISIONS,
+    DEFAULT_SOURCE_SHA256,
+    freeze_frontier,
+    select_interview_ids,
+    write_interview_release,
 )
 from .full_2016 import (
     Full2016SourcePin,
@@ -35,6 +43,14 @@ from .sources import load_source_manifest
 
 
 DEFAULT_DATA_ROOT = Path("/home/dhelmy990/Data/babel-data")
+INTERVIEW_ENV_FILE = Path("/home/dhelmy990/Code/babel/.env")
+INTERVIEW_DATABASE = Path(
+    "/home/dhelmy990/Data/babel-data/full-2016-work/"
+    "1a319328641844e29537/reconcile.sqlite3"
+)
+INTERVIEW_OUTPUT_ROOT = Path(
+    "/home/dhelmy990/Data/babel-data/prepared/2016-interview-50k"
+)
 DEFAULT_SOURCE_MANIFEST = (
     Path(__file__).resolve().parents[2] / "manifests" / "2016-sources.json"
 )
@@ -62,6 +78,26 @@ def _token(arguments: argparse.Namespace) -> str:
         raise ValueError("a private-Hub token is required via --token or HF_TOKEN")
     _REGISTERED_SECRETS.add(token)
     return token
+
+
+def _interview_token() -> str:
+    try:
+        lines = INTERVIEW_ENV_FILE.read_text(encoding="utf-8").splitlines()
+    except (FileNotFoundError, OSError) as error:
+        raise ValueError(f"private-Hub token file is unavailable: {INTERVIEW_ENV_FILE}") from error
+    for raw_line in lines:
+        line = raw_line.strip()
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        name, separator, raw_value = line.partition("=")
+        if separator and name.strip() == "HF_TOKEN":
+            value = raw_value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+                value = value[1:-1]
+            if value:
+                _REGISTERED_SECRETS.add(value)
+                return value
+    raise ValueError(f"HF_TOKEN is missing from {INTERVIEW_ENV_FILE}")
 
 
 def _sanitized_message(error: BaseException) -> str:
@@ -233,6 +269,55 @@ def _verify(arguments: argparse.Namespace) -> dict[str, object]:
     }
 
 
+def _export_interview(arguments: argparse.Namespace) -> dict[str, object]:
+    database = Path(arguments.database)
+    frontier = freeze_frontier(database)
+    selection = select_interview_ids(database, frontier)
+    result = write_interview_release(
+        database,
+        frontier,
+        selection,
+        Path(arguments.output_root),
+        source_sha256={
+            "teacher": arguments.teacher_sha256,
+            "wikipedia": arguments.wikipedia_sha256,
+        },
+        source_revisions={
+            "teacher": arguments.teacher_revision,
+            "wikipedia": arguments.wikipedia_revision,
+        },
+        code_commit=arguments.code_commit,
+    )
+    return {
+        "status": "ok",
+        "command": "export-interview-2016",
+        "counts": dict(selection.counts),
+        "ordered_sha256": dict(selection.ordered_sha256),
+        "frontier": frontier.to_document(),
+        "manifest": str(result.manifest_path),
+        "readiness": str(result.readiness_path),
+    }
+
+
+def _publish_interview(arguments: argparse.Namespace) -> dict[str, object]:
+    token = _interview_token()
+    revision = publish_interview_configuration(
+        _api(),
+        arguments.repo,
+        Path(arguments.input_root),
+        token,
+    )
+    if arguments.revision_out:
+        write_revision_file(arguments.revision_out, revision)
+    return {
+        "status": "ok",
+        "command": "publish-interview-2016",
+        "configuration": "distillation_2016_interview",
+        "revision": revision,
+        "input_root": str(Path(arguments.input_root)),
+    }
+
+
 def _mirror(arguments: argparse.Namespace) -> dict[str, object]:
     root = validate_data_root(arguments.data_root or os.environ.get("BABEL_DATA_ROOT"))
     sources = load_source_manifest(Path(arguments.manifest))
@@ -344,6 +429,30 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--token")
     verify.add_argument("--revision-out")
     verify.set_defaults(handler=_verify)
+
+    interview_export = commands.add_parser("export-interview-2016")
+    interview_export.add_argument("--database", default=str(INTERVIEW_DATABASE))
+    interview_export.add_argument("--output-root", default=str(INTERVIEW_OUTPUT_ROOT))
+    interview_export.add_argument("--code-commit", required=True)
+    interview_export.add_argument(
+        "--teacher-sha256", default=DEFAULT_SOURCE_SHA256["teacher"]
+    )
+    interview_export.add_argument(
+        "--wikipedia-sha256", default=DEFAULT_SOURCE_SHA256["wikipedia"]
+    )
+    interview_export.add_argument(
+        "--teacher-revision", default=DEFAULT_SOURCE_REVISIONS["teacher"]
+    )
+    interview_export.add_argument(
+        "--wikipedia-revision", default=DEFAULT_SOURCE_REVISIONS["wikipedia"]
+    )
+    interview_export.set_defaults(handler=_export_interview)
+
+    interview_publish = commands.add_parser("publish-interview-2016")
+    interview_publish.add_argument("--repo", default=DEFAULT_REPO_ID)
+    interview_publish.add_argument("--input-root", default=str(INTERVIEW_OUTPUT_ROOT))
+    interview_publish.add_argument("--revision-out")
+    interview_publish.set_defaults(handler=_publish_interview)
 
     mirror = commands.add_parser("mirror-source")
     mirror.add_argument("--source-id", required=True)

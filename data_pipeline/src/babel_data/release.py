@@ -51,6 +51,14 @@ configs:
     path: distillation_2016/validation/*.parquet
   - split: test
     path: distillation_2016/test/*.parquet
+- config_name: distillation_2016_interview
+  data_files:
+  - split: train
+    path: distillation_2016_interview/train/*.parquet
+  - split: validation
+    path: distillation_2016_interview/validation/*.parquet
+  - split: test
+    path: distillation_2016_interview/test/*.parquet
 ---
 # Babel 2016 distillation dataset
 """.encode("utf-8")
@@ -316,22 +324,36 @@ def validate_manifest_extension(
         raise ValueError("manifest extension changed prior provenance artifact")
 
 
-def render_dataset_card(active_release_root: str | None = None) -> bytes:
-    if active_release_root is None:
-        return DATASET_CARD
-    if not re.fullmatch(r"distillation_2016/releases/[a-f0-9]{64}", active_release_root):
+def render_dataset_card(
+    active_release_root: str | None = None, *, include_interview: bool = True
+) -> bytes:
+    if active_release_root is not None and not re.fullmatch(
+        r"distillation_2016/releases/[a-f0-9]{64}", active_release_root
+    ):
         raise ValueError("active release root is malformed")
+    complete_root = active_release_root or "distillation_2016"
+    interview_config = ""
+    if include_interview:
+        interview_config = """- config_name: distillation_2016_interview
+  data_files:
+  - split: train
+    path: distillation_2016_interview/train/*.parquet
+  - split: validation
+    path: distillation_2016_interview/validation/*.parquet
+  - split: test
+    path: distillation_2016_interview/test/*.parquet
+"""
     return f"""---
 configs:
 - config_name: distillation_2016
   data_files:
   - split: train
-    path: {active_release_root}/train/*.parquet
+    path: {complete_root}/train/*.parquet
   - split: validation
-    path: {active_release_root}/validation/*.parquet
+    path: {complete_root}/validation/*.parquet
   - split: test
-    path: {active_release_root}/test/*.parquet
----
+    path: {complete_root}/test/*.parquet
+{interview_config}---
 # Babel 2016 distillation dataset
 """.encode("utf-8")
 

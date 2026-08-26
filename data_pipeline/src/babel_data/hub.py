@@ -17,12 +17,19 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from .interview_export import (
+    INTERVIEW_CONFIG,
+    INTERVIEW_COUNTS,
+    INTERVIEW_SEED,
+    _rank_identity,
+)
 from .release import (
     EMPTY_TEST_PATH,
     MANIFEST_PATH,
     METADATA_PATHS,
     README_PATH,
     READINESS_PATH,
+    canonical_json,
     identity_rows_sha256,
     render_dataset_card,
     validate_manifest_bytes as _validate_manifest_bytes,
@@ -423,7 +430,10 @@ def _relative_uploads(
 
 
 def _validate_local_uploads(
-    uploads: Sequence[tuple[str, Path]], config_name: str
+    uploads: Sequence[tuple[str, Path]],
+    config_name: str,
+    *,
+    allow_legacy_card: bool = False,
 ) -> None:
     by_remote_path = dict(uploads)
     manifest_path = by_remote_path[f"{config_name}/manifest.json"]
@@ -566,9 +576,18 @@ def _validate_local_uploads(
     if not isinstance(readiness, dict):
         raise ValueError("local readiness is malformed")
     validate_readiness_alignment(readiness, manifest)
-    if by_remote_path[README_PATH].read_bytes() != render_dataset_card(
+    expected_card = render_dataset_card(
         manifest.get("active_release_root")  # type: ignore[arg-type]
-    ):
+    )
+    accepted_cards = {expected_card}
+    if allow_legacy_card:
+        accepted_cards.add(
+            render_dataset_card(
+                manifest.get("active_release_root"),  # type: ignore[arg-type]
+                include_interview=False,
+            )
+        )
+    if by_remote_path[README_PATH].read_bytes() not in accepted_cards:
         raise ValueError("local README does not match the fixed dataset card")
 
 
@@ -772,7 +791,7 @@ def publish_verified_shards(
     if retries <= 0:
         raise ValueError("retries must be positive")
     uploads = _relative_uploads(files, Path(root) if root is not None else None)
-    _validate_local_uploads(uploads, config_name)
+    _validate_local_uploads(uploads, config_name, allow_legacy_card=True)
     _retry(
         lambda: api.create_repo(
             repo_id=repo_id,
@@ -790,6 +809,15 @@ def publish_verified_shards(
     for publication_attempt in range(retries):
         with tempfile.TemporaryDirectory(prefix="babel-upload-snapshot-") as temporary:
             attempt_uploads = _snapshot_uploads(uploads, Path(temporary))
+            attempt_by_path = dict(attempt_uploads)
+            snapshot_manifest = _manifest_document(
+                attempt_by_path[manifest_remote_path].read_bytes(), label="local"
+            )
+            attempt_by_path[README_PATH].write_bytes(
+                render_dataset_card(
+                    snapshot_manifest.get("active_release_root")  # type: ignore[arg-type]
+                )
+            )
             _validate_local_uploads(attempt_uploads, config_name)
             by_remote_path = dict(attempt_uploads)
             local_manifest_bytes = by_remote_path[manifest_remote_path].read_bytes()
@@ -948,6 +976,240 @@ def publish_verified_shards(
             )
             return returned_sha
     raise RemoteVerificationError("atomic Hub commit retries were exhausted")
+
+
+def _interview_local_uploads(
+    root: Path, expected_counts: Mapping[str, int]
+) -> tuple[list[tuple[str, Path]], dict[str, object]]:
+    config_root = root / INTERVIEW_CONFIG
+    manifest_path = config_root / "manifest.json"
+    readiness_path = config_root / "readiness.json"
+    try:
+        manifest = json.loads(manifest_path.read_bytes())
+        readiness = json.loads(readiness_path.read_bytes())
+    except (FileNotFoundError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("interview manifest/readiness is missing or malformed") from error
+    if not isinstance(manifest, dict) or not isinstance(readiness, dict):
+        raise ValueError("interview manifest/readiness must be JSON objects")
+    counts = {split: int(expected_counts[split]) for split in ("train", "validation", "test")}
+    expected_total = sum(counts.values())
+    if manifest.get("dataset_config") != INTERVIEW_CONFIG:
+        raise ValueError("interview manifest has the wrong configuration")
+    if manifest.get("schema") != "distillation-example-v1":
+        raise ValueError("interview manifest has the wrong example schema")
+    if manifest.get("counts") != {"total": expected_total, **counts}:
+        raise ValueError("interview manifest counts are not exact")
+    selection = manifest.get("selection")
+    if not isinstance(selection, dict) or selection.get("seed") != INTERVIEW_SEED:
+        raise ValueError("interview manifest selection seed is not exact")
+    ordered = selection.get("ordered_identities")
+    ordered_checksums = selection.get("ordered_identity_sha256")
+    if not isinstance(ordered, dict) or not isinstance(ordered_checksums, dict):
+        raise ValueError("interview manifest ordered selection is missing")
+    shards = manifest.get("shards")
+    if not isinstance(shards, list) or len(shards) != 3:
+        raise ValueError("interview manifest must contain one shard per split")
+    uploads: list[tuple[str, Path]] = [
+        (f"{INTERVIEW_CONFIG}/manifest.json", manifest_path),
+        (f"{INTERVIEW_CONFIG}/readiness.json", readiness_path),
+    ]
+    seen_keys: set[str] = set()
+    for split in ("train", "validation", "test"):
+        matching = [item for item in shards if isinstance(item, dict) and item.get("split") == split]
+        if len(matching) != 1:
+            raise ValueError(f"interview manifest must contain one {split} shard")
+        item = matching[0]
+        remote_path = str(item.get("path"))
+        if not remote_path.startswith(f"{INTERVIEW_CONFIG}/{split}/") or not remote_path.endswith(".parquet"):
+            raise ValueError(f"interview {split} shard path is not config-local")
+        local = root / remote_path
+        if not local.is_file():
+            raise ValueError(f"interview shard is missing: {remote_path}")
+        if local.stat().st_size != int(item.get("bytes", -1)) or _file_sha256(local) != item.get("sha256"):
+            raise ValueError(f"interview shard checksum disagrees: {remote_path}")
+        parquet = pq.ParquetFile(local)
+        if not parquet.schema_arrow.equals(PARQUET_SCHEMA, check_metadata=True):
+            raise ValueError(f"interview shard physical schema disagrees: {remote_path}")
+        identities: list[dict[str, object]] = []
+        prior: tuple[str, str] | None = None
+        for batch in parquet.iter_batches(batch_size=4096):
+            for raw in batch.to_pylist():
+                row = validate_distillation_row(raw)
+                if row["split"] != split:
+                    raise ValueError(f"interview {split} shard contains split drift")
+                key = str(row["article_key"])
+                rank = _rank_identity(key)
+                current = (rank, key)
+                if prior is not None and current <= prior:
+                    raise ValueError(f"interview {split} rows are not rank ordered")
+                if key in seen_keys:
+                    raise ValueError("interview shards contain duplicate article_key")
+                prior = current
+                seen_keys.add(key)
+                identities.append(
+                    {"rank_sha256": rank, "article_key": key, "page_id": int(row["page_id"])}
+                )
+        if len(identities) != counts[split] or int(item.get("rows", -1)) != counts[split]:
+            raise ValueError(f"interview {split} row count is not exact")
+        digest = identity_rows_sha256(identities)
+        if digest != item.get("rows_sha256") or digest != ordered_checksums.get(split):
+            raise ValueError(f"interview {split} ordered checksum disagrees")
+        if identities != ordered.get(split):
+            raise ValueError(f"interview {split} identities disagree with manifest order")
+        uploads.append((remote_path, local))
+    aggregate = hashlib.sha256(canonical_json(shards)).hexdigest()
+    if manifest.get("aggregate_sha256") != aggregate:
+        raise ValueError("interview manifest aggregate checksum disagrees")
+    if readiness.get("dataset_config") != INTERVIEW_CONFIG or readiness.get("counts") != {"total": expected_total, **counts}:
+        raise ValueError("interview readiness counts/configuration disagree")
+    if readiness.get("manifest_sha256") != hashlib.sha256(manifest_path.read_bytes()).hexdigest():
+        raise ValueError("interview readiness manifest checksum disagrees")
+    return sorted(uploads), manifest
+
+
+def publish_interview_configuration(
+    api: object,
+    repo_id: str,
+    input_root: str | os.PathLike[str],
+    token: str,
+    *,
+    load_dataset_fn: Callable[..., object] | None = None,
+    expected_counts: Mapping[str, int] = INTERVIEW_COUNTS,
+    retries: int = 4,
+    backoff_seconds: float = 0.5,
+    sleep: Callable[[float], None] = time.sleep,
+) -> str:
+    """Atomically append and remotely prove the frozen interview configuration."""
+    if not token:
+        raise ValueError("a private-Hub token is required")
+    if retries <= 0:
+        raise ValueError("retries must be positive")
+    root = Path(input_root).resolve(strict=True)
+    uploads, _ = _interview_local_uploads(root, expected_counts)
+    _retry(
+        lambda: api.create_repo(
+            repo_id=repo_id,
+            repo_type="dataset",
+            private=True,
+            exist_ok=True,
+            token=token,
+        ),
+        retries=retries,
+        backoff_seconds=backoff_seconds,
+        sleep=sleep,
+        label="private interview dataset repository creation",
+    )
+    loader = load_dataset_fn or _dataset_loader()
+    for publication_attempt in range(retries):
+        info = _private_info(
+            _retry(
+                lambda: api.dataset_info(repo_id, revision="main", token=token),
+                retries=retries,
+                backoff_seconds=backoff_seconds,
+                sleep=sleep,
+                label="interview main revision resolution",
+            )
+        )
+        parent = _checked_sha(getattr(info, "sha", None), label="main dataset info SHA")
+        complete_manifest_path = f"{DEFAULT_CONFIG}/manifest.json"
+        complete_manifest = _remote_bytes(api, repo_id, complete_manifest_path, parent, token)
+        try:
+            complete_document = json.loads(complete_manifest)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RemoteVerificationError("existing complete manifest is malformed") from error
+        if not isinstance(complete_document, dict):
+            raise RemoteVerificationError("existing complete manifest is malformed")
+        active_root = complete_document.get("active_release_root")
+        if active_root is not None and not isinstance(active_root, str):
+            raise RemoteVerificationError("existing complete manifest release root is malformed")
+        expected_card = render_dataset_card(active_root)
+        legacy_card = render_dataset_card(active_root, include_interview=False)
+        remote_card = _remote_or_missing(
+            api,
+            repo_id,
+            README_PATH,
+            parent,
+            token,
+            retries=retries,
+            backoff_seconds=backoff_seconds,
+            sleep=sleep,
+        )
+        if remote_card not in {None, legacy_card, expected_card}:
+            raise ValueError("refusing to replace an unrecognized dataset card")
+        with tempfile.TemporaryDirectory(prefix="babel-interview-upload-") as temporary:
+            snapshot_root = Path(temporary)
+            snapshot_uploads = _snapshot_uploads(uploads, snapshot_root)
+            card_path = snapshot_root / README_PATH
+            card_path.write_bytes(expected_card)
+            snapshot_uploads.append((README_PATH, card_path))
+            _interview_local_uploads(snapshot_root, expected_counts)
+            pending: list[tuple[str, Path]] = []
+            for remote_path, local in snapshot_uploads:
+                existing = remote_card if remote_path == README_PATH else _remote_or_missing(
+                    api,
+                    repo_id,
+                    remote_path,
+                    parent,
+                    token,
+                    retries=retries,
+                    backoff_seconds=backoff_seconds,
+                    sleep=sleep,
+                )
+                local_bytes = local.read_bytes()
+                if existing is None:
+                    pending.append((remote_path, local))
+                elif existing != local_bytes:
+                    if remote_path == README_PATH:
+                        pending.append((remote_path, local))
+                    else:
+                        raise ValueError(
+                            "refusing to overwrite nonidentical interview path: " + remote_path
+                        )
+            returned = parent
+            if pending:
+                try:
+                    result = api.create_commit(
+                        repo_id=repo_id,
+                        repo_type="dataset",
+                        revision="main",
+                        parent_commit=parent,
+                        operations=[_add_operation(api, path, local) for path, local in pending],
+                        commit_message="Publish frozen 2016 interview configuration",
+                        token=token,
+                    )
+                    returned = _commit_sha(result)
+                except BaseException as error:
+                    if (_is_parent_conflict(error) or _is_transient(error)) and publication_attempt + 1 < retries:
+                        sleep(backoff_seconds * (2**publication_attempt))
+                        continue
+                    raise RemoteVerificationError(
+                        f"atomic interview commit failed ({type(error).__name__})"
+                    ) from None
+            published = _private_info(api.dataset_info(repo_id, revision=returned, token=token))
+            if _checked_sha(getattr(published, "sha", None)) != returned:
+                raise RemoteVerificationError("interview commit identity disagrees")
+            if _remote_bytes(api, repo_id, complete_manifest_path, returned, token) != complete_manifest:
+                raise RemoteVerificationError("existing complete manifest changed during interview publication")
+            for remote_path, local in snapshot_uploads:
+                if _remote_bytes(api, repo_id, remote_path, returned, token) != local.read_bytes():
+                    raise RemoteVerificationError(f"remote interview bytes disagree: {remote_path}")
+            for split in ("train", "validation", "test"):
+                streamed = loader(
+                    repo_id,
+                    name=INTERVIEW_CONFIG,
+                    split=split,
+                    revision=returned,
+                    streaming=True,
+                    token=token,
+                )
+                try:
+                    checked = validate_distillation_row(next(iter(streamed)))
+                except StopIteration as error:
+                    raise RemoteVerificationError(f"remote interview {split} split is empty") from error
+                if checked["split"] != split:
+                    raise RemoteVerificationError(f"remote interview {split} split drifted")
+            return returned
+    raise RemoteVerificationError("atomic interview publication retries were exhausted")
 
 
 def stage_versioned_release_shards(
