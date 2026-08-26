@@ -12,6 +12,7 @@ import shutil
 import tempfile
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,7 +23,9 @@ from .interview_export import (
     INTERVIEW_CONFIG,
     INTERVIEW_COUNTS,
     INTERVIEW_SEED,
+    PROVENANCE_CORRECTION_REASON,
     _rank_identity,
+    canonical_git_commit,
 )
 from .release import (
     EMPTY_TEST_PATH,
@@ -1238,6 +1241,138 @@ def publish_interview_configuration(
                 gc.collect()
             return returned
     raise RemoteVerificationError("atomic interview publication retries were exhausted")
+
+
+def publish_interview_provenance_correction(
+    api: object,
+    repo_id: str,
+    input_root: str | os.PathLike[str],
+    token: str,
+    *,
+    expected_prior_commit: str,
+    load_dataset_fn: Callable[..., object] | None = None,
+    expected_counts: Mapping[str, int] = INTERVIEW_COUNTS,
+) -> str:
+    """Replace only invalid producer-SHA metadata at one exact prior Hub commit."""
+    if not token:
+        raise ValueError("a private-Hub token is required")
+    prior = _checked_sha(expected_prior_commit, label="prior interview Hub commit")
+    root = Path(input_root).resolve(strict=True)
+    uploads, local_manifest = _interview_local_uploads(root, expected_counts)
+    local_by_path = dict(uploads)
+    manifest_path = f"{INTERVIEW_CONFIG}/manifest.json"
+    readiness_path = f"{INTERVIEW_CONFIG}/readiness.json"
+    local_manifest_bytes = local_by_path[manifest_path].read_bytes()
+    local_readiness_bytes = local_by_path[readiness_path].read_bytes()
+    info = _private_info(api.dataset_info(repo_id, revision="main", token=token))
+    parent = _checked_sha(getattr(info, "sha", None), label="main dataset info SHA")
+    if parent != prior:
+        raise ValueError("provenance correction prior commit is not current main")
+    remote_manifest_bytes = _remote_bytes(api, repo_id, manifest_path, prior, token)
+    remote_readiness_bytes = _remote_bytes(api, repo_id, readiness_path, prior, token)
+    try:
+        remote_manifest = json.loads(remote_manifest_bytes)
+        remote_readiness = json.loads(remote_readiness_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("remote interview correction metadata is malformed") from error
+    if not isinstance(remote_manifest, dict) or not isinstance(remote_readiness, dict):
+        raise ValueError("remote interview correction metadata must be objects")
+    correction = local_manifest.get("provenance_correction")
+    if not isinstance(correction, dict) or correction != {
+        "schema_version": 1,
+        "prior_hf_commit": prior,
+        "reason": PROVENANCE_CORRECTION_REASON,
+        "superseded_code_commit": remote_manifest.get("code_commit"),
+        "corrected_code_commit": local_manifest.get("code_commit"),
+    }:
+        raise ValueError("local provenance correction binding is not exact")
+    superseded = str(remote_manifest.get("code_commit"))
+    try:
+        canonical_git_commit(superseded)
+    except ValueError:
+        pass
+    else:
+        raise ValueError("remote producer commit resolves and cannot be corrected")
+    corrected = canonical_git_commit(str(local_manifest.get("code_commit")))
+    if corrected != local_manifest.get("code_commit"):
+        raise ValueError("corrected producer commit is not canonical")
+    expected_manifest = deepcopy(remote_manifest)
+    expected_manifest["code_commit"] = corrected
+    expected_manifest["provenance_correction"] = correction
+    if expected_manifest != local_manifest:
+        raise ValueError("provenance correction changes non-provenance manifest fields")
+    expected_readiness = deepcopy(remote_readiness)
+    expected_readiness["manifest_sha256"] = hashlib.sha256(local_manifest_bytes).hexdigest()
+    expected_readiness["provenance_correction"] = correction
+    try:
+        local_readiness = json.loads(local_readiness_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("local corrected readiness is malformed") from error
+    if expected_readiness != local_readiness:
+        raise ValueError("provenance correction changes non-provenance readiness fields")
+    complete_path = f"{DEFAULT_CONFIG}/manifest.json"
+    complete_manifest = _remote_bytes(api, repo_id, complete_path, prior, token)
+    card = _remote_bytes(api, repo_id, README_PATH, prior, token)
+    shard_bytes: dict[str, bytes] = {}
+    for item in local_manifest["shards"]:  # type: ignore[index]
+        path = str(item["path"])
+        remote = _remote_bytes(api, repo_id, path, prior, token)
+        if remote != (root / path).read_bytes():
+            raise ValueError("remote shard differs before provenance correction")
+        shard_bytes[path] = remote
+    with tempfile.TemporaryDirectory(prefix="babel-provenance-correction-") as temporary:
+        snapshot = _snapshot_uploads(
+            [(manifest_path, local_by_path[manifest_path]), (readiness_path, local_by_path[readiness_path])],
+            Path(temporary),
+        )
+        result = api.create_commit(
+            repo_id=repo_id,
+            repo_type="dataset",
+            revision="main",
+            parent_commit=prior,
+            operations=[_add_operation(api, path, local) for path, local in snapshot],
+            commit_message="Correct interview exporter provenance",
+            token=token,
+        )
+        revision = _commit_sha(result)
+        published = _private_info(api.dataset_info(repo_id, revision=revision, token=token))
+        if _checked_sha(getattr(published, "sha", None)) != revision:
+            raise RemoteVerificationError("provenance correction commit identity disagrees")
+        if _remote_bytes(api, repo_id, manifest_path, revision, token) != local_manifest_bytes:
+            raise RemoteVerificationError("corrected remote manifest bytes disagree")
+        if _remote_bytes(api, repo_id, readiness_path, revision, token) != local_readiness_bytes:
+            raise RemoteVerificationError("corrected remote readiness bytes disagree")
+        if _remote_bytes(api, repo_id, complete_path, revision, token) != complete_manifest:
+            raise RemoteVerificationError("complete manifest changed during provenance correction")
+        if _remote_bytes(api, repo_id, README_PATH, revision, token) != card:
+            raise RemoteVerificationError("dataset card changed during provenance correction")
+        for path, payload in shard_bytes.items():
+            if _remote_bytes(api, repo_id, path, revision, token) != payload:
+                raise RemoteVerificationError("shard changed during provenance correction")
+    loader = load_dataset_fn or _dataset_loader()
+    for split in ("train", "validation", "test"):
+        streamed = loader(
+            repo_id,
+            name=INTERVIEW_CONFIG,
+            split=split,
+            revision=revision,
+            streaming=True,
+            token=token,
+        )
+        iterator = iter(streamed)
+        try:
+            checked = validate_distillation_row(next(iterator))
+        except StopIteration as error:
+            raise RemoteVerificationError(f"corrected remote {split} split is empty") from error
+        finally:
+            close = getattr(iterator, "close", None)
+            if callable(close):
+                close()
+        if checked["split"] != split:
+            raise RemoteVerificationError(f"corrected remote {split} split drifted")
+        del checked, iterator, streamed
+        gc.collect()
+    return revision
 
 
 def stage_versioned_release_shards(

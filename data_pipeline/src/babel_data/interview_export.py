@@ -10,9 +10,11 @@ import os
 import re
 import shutil
 import sqlite3
+import subprocess
 import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +33,9 @@ INTERVIEW_CONFIG = "distillation_2016_interview"
 INTERVIEW_SEED = "babel-interview-2016-v1"
 INTERVIEW_COUNTS = {"train": 50_000, "validation": 5_000, "test": 5_000}
 INTERVIEW_SMOKE_ROWS = 1_000
+PROVENANCE_CORRECTION_REASON = (
+    "Correct nonexistent producer commit SHA recorded during export"
+)
 MAX_SQLITE_BATCH_ROWS = 5_000
 DEFAULT_SOURCE_SHA256 = {
     "teacher": "5508a20088e0c5a2af4128f9aa80c675230c43b4538d42f89fb79ec324caaf56",
@@ -42,8 +47,45 @@ DEFAULT_SOURCE_REVISIONS = {
 }
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
+_COMMITISH = re.compile(r"^[0-9a-f]{7,40}$")
 _SPLITS = ("train", "validation", "test")
 _T = TypeVar("_T")
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _resolve_git_commit(value: str, repository_root: Path) -> str | None:
+    if not isinstance(value, str) or _COMMITISH.fullmatch(value) is None:
+        return None
+    completed = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository_root),
+            "rev-parse",
+            "--verify",
+            f"{value}^{{commit}}",
+        ],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    canonical = completed.stdout.strip()
+    if completed.returncode != 0 or _COMMIT.fullmatch(canonical) is None:
+        return None
+    return canonical
+
+
+def canonical_git_commit(
+    value: str, *, repository_root: str | os.PathLike[str] = _REPOSITORY_ROOT
+) -> str:
+    """Resolve a hexadecimal commitish to an existing full commit in this repository."""
+    if not isinstance(value, str) or _COMMITISH.fullmatch(value) is None:
+        raise ValueError("code commit must be 7-40 lowercase hexadecimal characters")
+    canonical = _resolve_git_commit(value, Path(repository_root).resolve(strict=True))
+    if canonical is None:
+        raise ValueError("code commit does not resolve to an actual repository commit")
+    return canonical
 
 
 @dataclass(frozen=True, slots=True)
@@ -368,6 +410,108 @@ def _write_table(rows: list[dict[str, object]], path: Path) -> None:
     )
 
 
+def _atomic_replace(path: Path, payload: bytes) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as destination:
+            destination.write(payload)
+            destination.flush()
+            os.fsync(destination.fileno())
+        os.replace(temporary_name, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        try:
+            os.unlink(temporary_name)
+        except FileNotFoundError:
+            pass
+
+
+def correct_interview_provenance(
+    output_root: str | os.PathLike[str],
+    *,
+    superseded_code_commit: str,
+    corrected_code_commit: str,
+    prior_hf_commit: str,
+    reason: str = PROVENANCE_CORRECTION_REASON,
+    repository_root: str | os.PathLike[str] = _REPOSITORY_ROOT,
+) -> dict[str, object]:
+    """Correct only a nonexistent producer SHA and bind the prior Hub commit."""
+    root = Path(output_root).resolve(strict=True)
+    manifest_path = root / INTERVIEW_CONFIG / "manifest.json"
+    readiness_path = root / INTERVIEW_CONFIG / "readiness.json"
+    old_manifest_bytes = manifest_path.read_bytes()
+    old_readiness_bytes = readiness_path.read_bytes()
+    try:
+        old_manifest = json.loads(old_manifest_bytes)
+        old_readiness = json.loads(old_readiness_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("interview correction metadata is malformed") from error
+    if not isinstance(old_manifest, dict) or not isinstance(old_readiness, dict):
+        raise ValueError("interview correction metadata must be JSON objects")
+    repository = Path(repository_root).resolve(strict=True)
+    if _COMMIT.fullmatch(superseded_code_commit) is None:
+        raise ValueError("superseded code commit must be an exact SHA")
+    if _resolve_git_commit(superseded_code_commit, repository) is not None:
+        raise ValueError("superseded code commit resolves and cannot be provenance-corrected")
+    corrected = canonical_git_commit(
+        corrected_code_commit, repository_root=repository
+    )
+    if _COMMIT.fullmatch(prior_hf_commit) is None:
+        raise ValueError("prior Hub commit must be an exact SHA")
+    if reason != PROVENANCE_CORRECTION_REASON:
+        raise ValueError("provenance correction reason is fixed")
+    correction: dict[str, object] = {
+        "schema_version": 1,
+        "prior_hf_commit": prior_hf_commit,
+        "reason": reason,
+        "superseded_code_commit": superseded_code_commit,
+        "corrected_code_commit": corrected,
+    }
+    if old_manifest.get("code_commit") == corrected:
+        if old_manifest.get("provenance_correction") != correction:
+            raise ValueError("existing provenance correction is nonidentical")
+        return correction
+    if old_manifest.get("code_commit") != superseded_code_commit:
+        raise ValueError("local manifest does not contain the superseded code commit")
+    if "provenance_correction" in old_manifest or "provenance_correction" in old_readiness:
+        raise ValueError("interview provenance was already corrected")
+    if old_readiness.get("manifest_sha256") != hashlib.sha256(old_manifest_bytes).hexdigest():
+        raise ValueError("interview readiness does not bind the pre-correction manifest")
+    shards = old_manifest.get("shards")
+    if not isinstance(shards, list) or len(shards) != 3:
+        raise ValueError("interview manifest shards are malformed")
+    for item in shards:
+        if not isinstance(item, dict):
+            raise ValueError("interview manifest shard is malformed")
+        path = root / str(item.get("path"))
+        if (
+            not path.is_file()
+            or path.stat().st_size != int(item.get("bytes", -1))
+            or _file_sha256(path) != item.get("sha256")
+        ):
+            raise ValueError("interview shard changed before provenance correction")
+    new_manifest = deepcopy(old_manifest)
+    new_manifest["code_commit"] = corrected
+    new_manifest["provenance_correction"] = correction
+    new_manifest_bytes = canonical_json(new_manifest)
+    new_readiness = deepcopy(old_readiness)
+    new_readiness["manifest_sha256"] = hashlib.sha256(new_manifest_bytes).hexdigest()
+    new_readiness["provenance_correction"] = correction
+    new_readiness_bytes = canonical_json(new_readiness)
+    try:
+        _atomic_replace(manifest_path, new_manifest_bytes)
+        _atomic_replace(readiness_path, new_readiness_bytes)
+    except BaseException:
+        _atomic_replace(manifest_path, old_manifest_bytes)
+        _atomic_replace(readiness_path, old_readiness_bytes)
+        raise
+    return correction
+
+
 def _selected_rows(
     path: Path,
     identities: Sequence[SelectedIdentity],
@@ -467,8 +611,7 @@ def write_interview_release(
         for value in source_revisions.values()
     ):
         raise ValueError("teacher and wikipedia source revision SHAs are required")
-    if _COMMIT.fullmatch(code_commit) is None:
-        raise ValueError("code_commit must be an exact lowercase Git commit SHA")
+    code_commit = canonical_git_commit(code_commit)
     path = Path(database_path).resolve(strict=True)
     _validate_frontier_identity(path, frontier)
     _recount_frontier(path, frontier)
@@ -573,10 +716,13 @@ __all__ = [
     "INTERVIEW_COUNTS",
     "INTERVIEW_SEED",
     "INTERVIEW_SMOKE_ROWS",
+    "PROVENANCE_CORRECTION_REASON",
     "InterviewReleaseResult",
     "InterviewSelectionV1",
     "InterviewShard",
     "SelectedIdentity",
+    "canonical_git_commit",
+    "correct_interview_provenance",
     "freeze_frontier",
     "select_interview_ids",
     "write_interview_release",

@@ -20,6 +20,7 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "data_pipeline" / "src"))
 from babel_data.hub import (  # noqa: E402
     RemoteVerificationError,
     publish_interview_configuration,
+    publish_interview_provenance_correction,
     publish_verified_shards,
     stage_versioned_release_shards,
     verify_remote,
@@ -41,11 +42,13 @@ from babel_data.shard import (  # noqa: E402
 )
 from data_pipeline.tests.test_shard import provenance_document  # noqa: E402
 from data_pipeline.tests.test_interview_export import (  # noqa: E402
+    PRODUCER_COMMIT,
     SMALL_COUNTS,
     _create_database,
 )
 from babel_data.interview_export import (  # noqa: E402
     INTERVIEW_CONFIG,
+    correct_interview_provenance,
     freeze_frontier,
     select_interview_ids,
     write_interview_release,
@@ -186,7 +189,7 @@ def prepare_interview(tmp_path: Path):
         selection,
         tmp_path / "interview",
         source_sha256={"teacher": "a" * 64, "wikipedia": "b" * 64},
-        code_commit="c" * 40,
+        code_commit=PRODUCER_COMMIT,
     )
     datasets = {
         shard.split: pq.read_table(result.output_root / shard.path).to_pylist()
@@ -301,6 +304,76 @@ def test_publish_interview_rejects_nonidentical_existing_config_path(
             sleep=lambda _: None,
         )
     assert api.operations == []
+
+
+def test_publish_provenance_correction_replaces_only_config_metadata(
+    tmp_path: Path,
+) -> None:
+    result, datasets = prepare_interview(tmp_path)
+    invalid = "436f171649c0d8d917e0d29216673b798c883a54"
+    manifest = json.loads(result.manifest_path.read_text())
+    manifest["code_commit"] = invalid
+    result.manifest_path.write_bytes(canonical_json(manifest))
+    readiness = json.loads(result.readiness_path.read_text())
+    readiness["manifest_sha256"] = hashlib.sha256(
+        result.manifest_path.read_bytes()
+    ).hexdigest()
+    result.readiness_path.write_bytes(canonical_json(readiness))
+    api = FakeApi(current_sha=PARENT)
+    complete_manifest = b'{"existing":"complete-manifest"}\n'
+    existing_card = render_dataset_card().replace(
+        b"---\n# Babel 2016 distillation dataset",
+        b"- config_name: demo_catalog_2026_06\n"
+        b"  data_files:\n"
+        b"  - split: train\n"
+        b"    path: demo_catalog_2026_06/train/*.parquet\n"
+        b"---\n# Babel 2016 distillation dataset",
+    )
+    api.remote["distillation_2016/manifest.json"] = complete_manifest
+    api.remote["README.md"] = existing_card
+    api.remote[f"{INTERVIEW_CONFIG}/manifest.json"] = result.manifest_path.read_bytes()
+    api.remote[f"{INTERVIEW_CONFIG}/readiness.json"] = result.readiness_path.read_bytes()
+    prior_shards = {}
+    for shard in result.shards:
+        payload = (result.output_root / shard.path).read_bytes()
+        prior_shards[shard.path] = payload
+        api.remote[shard.path] = payload
+    correction = correct_interview_provenance(
+        result.output_root,
+        superseded_code_commit=invalid,
+        corrected_code_commit="436f171",
+        prior_hf_commit=PARENT,
+    )
+    load_calls: list[dict[str, object]] = []
+
+    def load(*args: object, **kwargs: object) -> object:
+        load_calls.append(dict(kwargs))
+        return datasets[str(kwargs["split"])]
+
+    revision = publish_interview_provenance_correction(
+        api,
+        "dhelmy990/babel-wikipedia-experiment",
+        result.output_root,
+        "token",
+        expected_prior_commit=PARENT,
+        expected_counts=SMALL_COUNTS,
+        load_dataset_fn=load,
+    )
+
+    assert revision == COMMIT
+    assert api.operations == [
+        f"{INTERVIEW_CONFIG}/manifest.json",
+        f"{INTERVIEW_CONFIG}/readiness.json",
+    ]
+    assert api.commit_calls[-1]["parent_commit"] == PARENT
+    assert api.remote["distillation_2016/manifest.json"] == complete_manifest
+    assert api.remote["README.md"] == existing_card
+    assert all(api.remote[path] == payload for path, payload in prior_shards.items())
+    corrected = json.loads(api.remote[f"{INTERVIEW_CONFIG}/manifest.json"])
+    assert corrected["code_commit"] == PRODUCER_COMMIT
+    assert corrected["provenance_correction"] == correction
+    assert {call["split"] for call in load_calls} == {"train", "validation", "test"}
+    assert all(call["revision"] == COMMIT for call in load_calls)
 
 
 def test_interview_card_survives_complete_release_activation() -> None:

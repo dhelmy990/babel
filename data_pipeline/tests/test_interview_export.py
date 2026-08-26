@@ -19,6 +19,8 @@ from babel_data.interview_export import (  # noqa: E402
     INTERVIEW_CONFIG,
     InterviewSelectionV1,
     SelectedIdentity,
+    canonical_git_commit,
+    correct_interview_provenance,
     freeze_frontier,
     select_interview_ids,
     write_interview_release,
@@ -29,6 +31,7 @@ from babel_data.cli import main  # noqa: E402
 
 
 SMALL_COUNTS = {"train": 8, "validation": 2, "test": 2}
+PRODUCER_COMMIT = "436f1714a4034a11544bbc16cf94072bb56feff0"
 
 
 def _article_key(page_id: int) -> str:
@@ -253,7 +256,7 @@ def test_write_release_is_deterministic_and_discloses_partial_frontier(
         tmp_path / "prepared",
         source_sha256={"teacher": "a" * 64, "wikipedia": "b" * 64},
         source_revisions={"teacher": "d" * 40, "wikipedia": "e" * 40},
-        code_commit="c" * 40,
+        code_commit=PRODUCER_COMMIT,
     )
 
     manifest = json.loads(result.manifest_path.read_text())
@@ -286,7 +289,7 @@ def test_write_release_is_deterministic_and_discloses_partial_frontier(
             selection,
             tmp_path / "prepared",
             source_sha256={"teacher": "a" * 64, "wikipedia": "b" * 64},
-            code_commit="c" * 40,
+            code_commit=PRODUCER_COMMIT,
         )
 
 
@@ -320,7 +323,7 @@ def test_write_release_rejects_invalid_selected_rows(
             selection,
             tmp_path / corruption,
             source_sha256={"teacher": "a" * 64, "wikipedia": "b" * 64},
-            code_commit="c" * 40,
+            code_commit=PRODUCER_COMMIT,
         )
 
 
@@ -350,7 +353,7 @@ def test_write_release_rejects_duplicate_article_keys(
             duplicate,
             tmp_path / "duplicate",
             source_sha256={"teacher": "a" * 64, "wikipedia": "b" * 64},
-            code_commit="c" * 40,
+            code_commit=PRODUCER_COMMIT,
         )
 
 
@@ -368,6 +371,76 @@ def test_selection_requires_sufficient_committed_rows(reconciliation_db: Path) -
 def test_selected_identity_rejects_rank_or_article_key_drift() -> None:
     with pytest.raises(ValueError, match="rank"):
         SelectedIdentity("0" * 64, _article_key(1), 1)
+
+
+def test_code_commit_must_resolve_to_a_real_commit_in_the_current_repository() -> None:
+    actual = canonical_git_commit("436f171")
+    assert actual == "436f1714a4034a11544bbc16cf94072bb56feff0"
+
+    with pytest.raises(ValueError, match="does not resolve"):
+        canonical_git_commit("436f171649c0d8d917e0d29216673b798c883a54")
+
+
+def test_provenance_correction_changes_only_the_invalid_code_metadata(
+    reconciliation_db: Path, tmp_path: Path
+) -> None:
+    frontier = freeze_frontier(reconciliation_db)
+    selection = select_interview_ids(
+        reconciliation_db,
+        frontier,
+        required_counts=SMALL_COUNTS,
+        smoke_size=3,
+    )
+    result = write_interview_release(
+        reconciliation_db,
+        frontier,
+        selection,
+        tmp_path / "correction",
+        source_sha256={"teacher": "a" * 64, "wikipedia": "b" * 64},
+        source_revisions={"teacher": "d" * 40, "wikipedia": "e" * 40},
+        code_commit=PRODUCER_COMMIT,
+    )
+    invalid = "436f171649c0d8d917e0d29216673b798c883a54"
+    prior_hf = "3eb87a0a8cf4a1feb73e3a326fb7d619048f69f1"
+    before = json.loads(result.manifest_path.read_text())
+    before["code_commit"] = invalid
+    result.manifest_path.write_bytes(
+        (json.dumps(before, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    )
+    readiness = json.loads(result.readiness_path.read_text())
+    readiness["manifest_sha256"] = hashlib.sha256(
+        result.manifest_path.read_bytes()
+    ).hexdigest()
+    result.readiness_path.write_bytes(
+        (json.dumps(readiness, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    )
+    shard_bytes = {
+        shard.path: (result.output_root / shard.path).read_bytes()
+        for shard in result.shards
+    }
+
+    correction = correct_interview_provenance(
+        result.output_root,
+        superseded_code_commit=invalid,
+        corrected_code_commit="436f171",
+        prior_hf_commit=prior_hf,
+        reason="Correct nonexistent producer commit SHA recorded during export",
+    )
+
+    corrected = json.loads(result.manifest_path.read_text())
+    expected = dict(before)
+    expected["code_commit"] = PRODUCER_COMMIT
+    expected["provenance_correction"] = correction
+    assert corrected == expected
+    assert all(
+        (result.output_root / path).read_bytes() == payload
+        for path, payload in shard_bytes.items()
+    )
+    corrected_readiness = json.loads(result.readiness_path.read_text())
+    assert corrected_readiness["provenance_correction"] == correction
+    assert corrected_readiness["manifest_sha256"] == hashlib.sha256(
+        result.manifest_path.read_bytes()
+    ).hexdigest()
 
 
 def test_export_interview_cli_emits_only_safe_frontier_and_checksums(
