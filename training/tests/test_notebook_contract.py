@@ -216,6 +216,17 @@ def test_interview_notebook_pins_handoff_identity_and_protocol() -> None:
     assert not re.search(r"dataset_(?:ref|revision)\s*=\s*[\"']main[\"']", all_source)
 
 
+def test_interview_notebook_exposes_editable_source_to_current_kernel() -> None:
+    kernel_check = _interview_cell("kernel-version-check")
+
+    assert "'/content/babel/training/src'" in kernel_check
+    assert "sys.path.insert(0, training_source_root)" in kernel_check
+    assert "importlib.invalidate_caches()" in kernel_check
+    assert kernel_check.index("sys.path.insert") < kernel_check.index(
+        "from babel_training.config import DistillationConfig"
+    )
+
+
 def test_interview_notebook_has_secrets_drive_identity_and_preview_gates() -> None:
     secret = _interview_cell("hf-token-secret")
     drive = _interview_cell("drive-mount")
