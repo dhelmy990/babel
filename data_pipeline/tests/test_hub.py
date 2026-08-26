@@ -212,6 +212,10 @@ configs:
     path: distillation_2016/validation/*.parquet
   - split: test
     path: distillation_2016/test/*.parquet
+- config_name: demo_catalog_2026_06
+  data_files:
+  - split: train
+    path: demo_catalog_2026_06/train/*.parquet
 ---
 # Babel 2016 distillation dataset
 """
@@ -241,6 +245,7 @@ configs:
     assert set(api.operations) == expected_config_paths | {"README.md"}
     assert "distillation_2016/manifest.json" not in api.operations
     assert api.remote["distillation_2016/manifest.json"] == complete_manifest
+    assert b"config_name: demo_catalog_2026_06" in api.remote["README.md"]
     assert api.commit_calls == [
         {
             "repo_id": "dhelmy990/babel-wikipedia-experiment",
@@ -301,7 +306,14 @@ def test_complete_publication_upgrades_legacy_local_card_without_dropping_interv
     )
     api = FakeApi(current_sha=PARENT)
     api.remote["distillation_2016/manifest.json"] = pilot.manifest_path.read_bytes()
-    api.remote["README.md"] = render_dataset_card()
+    api.remote["README.md"] = render_dataset_card().replace(
+        b"---\n# Babel 2016 distillation dataset",
+        b"- config_name: demo_catalog_2026_06\n"
+        b"  data_files:\n"
+        b"  - split: train\n"
+        b"    path: demo_catalog_2026_06/train/*.parquet\n"
+        b"---\n# Babel 2016 distillation dataset",
+    )
     complete = write_complete_shards(
         values,
         tmp_path / "complete",
@@ -342,6 +354,7 @@ def test_complete_publication_upgrades_legacy_local_card_without_dropping_interv
         sleep=lambda _: None,
     ) == COMMIT
     assert b"config_name: distillation_2016_interview" in api.remote["README.md"]
+    assert b"config_name: demo_catalog_2026_06" in api.remote["README.md"]
 
 
 def rolling_extension(result: object, destination: Path) -> tuple[Path, list[Path]]:

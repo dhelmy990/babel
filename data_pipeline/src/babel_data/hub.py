@@ -31,6 +31,7 @@ from .release import (
     READINESS_PATH,
     canonical_json,
     identity_rows_sha256,
+    merge_dataset_card,
     render_dataset_card,
     validate_manifest_bytes as _validate_manifest_bytes,
     validate_manifest_extension as _validate_release_extension,
@@ -576,18 +577,13 @@ def _validate_local_uploads(
     if not isinstance(readiness, dict):
         raise ValueError("local readiness is malformed")
     validate_readiness_alignment(readiness, manifest)
-    expected_card = render_dataset_card(
-        manifest.get("active_release_root")  # type: ignore[arg-type]
+    active_root = manifest.get("active_release_root")  # type: ignore[assignment]
+    card = by_remote_path[README_PATH].read_bytes()
+    merged_card = merge_dataset_card(card, active_root)  # type: ignore[arg-type]
+    legacy_card = render_dataset_card(
+        active_root, include_interview=False  # type: ignore[arg-type]
     )
-    accepted_cards = {expected_card}
-    if allow_legacy_card:
-        accepted_cards.add(
-            render_dataset_card(
-                manifest.get("active_release_root"),  # type: ignore[arg-type]
-                include_interview=False,
-            )
-        )
-    if by_remote_path[README_PATH].read_bytes() not in accepted_cards:
+    if card != merged_card and not (allow_legacy_card and card == legacy_card):
         raise ValueError("local README does not match the fixed dataset card")
 
 
@@ -638,10 +634,8 @@ def verify_remote(
     if not isinstance(local_readiness, dict):
         raise ValueError("local readiness is malformed")
     validate_readiness_alignment(local_readiness, manifest)
-    expected_card = render_dataset_card(
-        manifest.get("active_release_root")  # type: ignore[arg-type]
-    )
-    if local_readme_bytes != expected_card:
+    active_root = manifest.get("active_release_root")  # type: ignore[assignment]
+    if merge_dataset_card(local_readme_bytes, active_root) != local_readme_bytes:  # type: ignore[arg-type]
         raise ValueError("local README does not match the fixed dataset card")
     try:
         shards = manifest["shards"]
@@ -699,7 +693,7 @@ def verify_remote(
             validate_readiness_alignment(
                 readiness_document, remote_manifest_document
             )
-            if remote_readme != local_readme_bytes or remote_readme != expected_card:
+            if remote_readme != local_readme_bytes:
                 raise RemoteVerificationError(
                     "remote README bytes do not match the fixed dataset card"
                 )
@@ -814,8 +808,9 @@ def publish_verified_shards(
                 attempt_by_path[manifest_remote_path].read_bytes(), label="local"
             )
             attempt_by_path[README_PATH].write_bytes(
-                render_dataset_card(
-                    snapshot_manifest.get("active_release_root")  # type: ignore[arg-type]
+                merge_dataset_card(
+                    attempt_by_path[README_PATH].read_bytes(),
+                    snapshot_manifest.get("active_release_root"),  # type: ignore[arg-type]
                 )
             )
             _validate_local_uploads(attempt_uploads, config_name)
@@ -860,11 +855,31 @@ def publish_verified_shards(
                     local_manifest_bytes,
                     expected_predecessor_sha=parent_sha,
                 )
+            remote_readme = _remote_or_missing(
+                api,
+                repo_id,
+                README_PATH,
+                parent_sha,
+                token,
+                retries=retries,
+                backoff_seconds=backoff_seconds,
+                sleep=sleep,
+            )
+            if remote_readme is not None:
+                by_remote_path[README_PATH].write_bytes(
+                    merge_dataset_card(
+                        remote_readme,
+                        local_manifest.get("active_release_root"),  # type: ignore[arg-type]
+                    )
+                )
+                _validate_local_uploads(attempt_uploads, config_name)
             pending: list[tuple[str, Path]] = []
             for path_in_repo, local in attempt_uploads:
                 existing = (
                     remote_manifest_bytes
                     if path_in_repo == manifest_remote_path
+                    else remote_readme
+                    if path_in_repo == README_PATH
                     else _remote_or_missing(
                         api,
                         repo_id,
@@ -1122,8 +1137,6 @@ def publish_interview_configuration(
         active_root = complete_document.get("active_release_root")
         if active_root is not None and not isinstance(active_root, str):
             raise RemoteVerificationError("existing complete manifest release root is malformed")
-        expected_card = render_dataset_card(active_root)
-        legacy_card = render_dataset_card(active_root, include_interview=False)
         remote_card = _remote_or_missing(
             api,
             repo_id,
@@ -1134,8 +1147,11 @@ def publish_interview_configuration(
             backoff_seconds=backoff_seconds,
             sleep=sleep,
         )
-        if remote_card not in {None, legacy_card, expected_card}:
-            raise ValueError("refusing to replace an unrecognized dataset card")
+        expected_card = (
+            render_dataset_card(active_root)
+            if remote_card is None
+            else merge_dataset_card(remote_card, active_root)
+        )
         with tempfile.TemporaryDirectory(prefix="babel-interview-upload-") as temporary:
             snapshot_root = Path(temporary)
             snapshot_uploads = _snapshot_uploads(uploads, snapshot_root)

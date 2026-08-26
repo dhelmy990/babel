@@ -358,6 +358,73 @@ configs:
 """.encode("utf-8")
 
 
+def merge_dataset_card(
+    existing: bytes, active_release_root: str | None = None
+) -> bytes:
+    """Preserve unrelated card configs/body while fixing both distillation configs."""
+    if active_release_root is not None and not re.fullmatch(
+        r"distillation_2016/releases/[a-f0-9]{64}", active_release_root
+    ):
+        raise ValueError("active release root is malformed")
+    try:
+        text = existing.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError("dataset card is not UTF-8") from error
+    if not text.startswith("---\n"):
+        raise ValueError("dataset card is missing YAML frontmatter")
+    closing = text.find("\n---\n", 4)
+    if closing < 0:
+        raise ValueError("dataset card has unterminated YAML frontmatter")
+    frontmatter = text[4:closing]
+    body = text[closing + 5 :]
+    matches = list(
+        re.finditer(r"(?m)^- config_name: ([A-Za-z0-9_.-]+)\n", frontmatter)
+    )
+    if not matches or frontmatter[: matches[0].start()] != "configs:\n":
+        raise ValueError("dataset card configs frontmatter is not mergeable")
+    blocks: list[tuple[str, str]] = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(frontmatter)
+        block = frontmatter[match.start() : end]
+        blocks.append((match.group(1), block if block.endswith("\n") else block + "\n"))
+    names = [name for name, _ in blocks]
+    if len(set(names)) != len(names) or "distillation_2016" not in names:
+        raise ValueError("dataset card has missing or duplicate configuration names")
+    complete_root = active_release_root or "distillation_2016"
+    complete = f"""- config_name: distillation_2016
+  data_files:
+  - split: train
+    path: {complete_root}/train/*.parquet
+  - split: validation
+    path: {complete_root}/validation/*.parquet
+  - split: test
+    path: {complete_root}/test/*.parquet
+"""
+    interview = """- config_name: distillation_2016_interview
+  data_files:
+  - split: train
+    path: distillation_2016_interview/train/*.parquet
+  - split: validation
+    path: distillation_2016_interview/validation/*.parquet
+  - split: test
+    path: distillation_2016_interview/test/*.parquet
+"""
+    existing_interview = next(
+        (block for name, block in blocks if name == "distillation_2016_interview"),
+        None,
+    )
+    if existing_interview is not None and existing_interview != interview:
+        raise ValueError("existing interview dataset-card config is nonidentical")
+    unrelated = "".join(
+        block
+        for name, block in blocks
+        if name not in {"distillation_2016", "distillation_2016_interview"}
+    )
+    return ("---\nconfigs:\n" + complete + interview + unrelated + "---\n" + body).encode(
+        "utf-8"
+    )
+
+
 def validate_readiness_alignment(
     readiness: Mapping[str, object], manifest: Mapping[str, object]
 ) -> None:
