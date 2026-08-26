@@ -4,6 +4,7 @@ import ctypes
 import errno
 import hashlib
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from babel_data.shard import (  # noqa: E402
     PARQUET_SCHEMA,
     build_readiness,
     load_readiness,
+    write_complete_shards,
     write_shards,
 )
 
@@ -87,6 +89,29 @@ def row(article_key: str, page_id: int) -> dict[str, object]:
         "split": split_for(article_key),
         "reconciliation_status": "matched",
     }
+
+
+def test_complete_row_spool_compresses_repetitive_text_for_bounded_disk(
+    tmp_path: Path,
+) -> None:
+    value = row("enwiki:2016-10-01:1", 1)
+    value["article_text"] = "bounded repetitive article text " * 20_000
+    database = tmp_path / "complete.sqlite3"
+
+    write_complete_shards(
+        [value],
+        tmp_path / "prepared",
+        spool_database=database,
+        provenance=provenance_document(),
+        release_id="b" * 64,
+        supersedes_commit_sha="c" * 40,
+    )
+
+    with sqlite3.connect(database) as connection:
+        stored_bytes = connection.execute(
+            "SELECT length(document) FROM complete_rows"
+        ).fetchone()[0]
+    assert stored_bytes < len(canonical_json(value)) // 4
 
 
 def test_pilot_sample_is_smallest_hash_rank_not_input_order(tmp_path: Path) -> None:

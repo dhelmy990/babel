@@ -19,6 +19,7 @@ import re
 import shutil
 import sqlite3
 import tempfile
+import zlib
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
@@ -1051,7 +1052,7 @@ def write_complete_shards(
                 article_key = str(document["article_key"])
                 page_id = int(document["page_id"])
                 rank = hashlib.sha256(article_key.encode("utf-8")).hexdigest()
-                payload = _canonical_json(document)
+                payload = zlib.compress(_canonical_json(document), level=1)
                 try:
                     connection.execute(
                         "INSERT INTO complete_rows VALUES (?,?,?,?,?)",
@@ -1146,8 +1147,12 @@ def write_complete_shards(
                     (split,),
                 )
                 for (payload,) in cursor:
-                    document = json.loads(bytes(payload))
-                    estimated = len(payload)
+                    try:
+                        raw_document = zlib.decompress(bytes(payload))
+                    except zlib.error as error:
+                        raise ValueError("complete row spool payload is malformed") from error
+                    document = json.loads(raw_document)
+                    estimated = len(raw_document)
                     if chunk and chunk_bytes + estimated > target_shard_bytes:
                         flush()
                     chunk.append(document)
@@ -1166,7 +1171,7 @@ def write_complete_shards(
                 raise ValueError("complete spool count does not match emitted shards")
             aggregate_sha256 = hashlib.sha256(_canonical_json(shard_documents)).hexdigest()
             rows_sha256 = identity_rows_sha256(
-                json.loads(bytes(payload))
+                json.loads(zlib.decompress(bytes(payload)))
                 for (payload,) in connection.execute(
                     "SELECT document FROM complete_rows ORDER BY rank,article_key"
                 )

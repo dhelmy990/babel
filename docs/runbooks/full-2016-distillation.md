@@ -99,8 +99,9 @@ PYTHONPATH=data_pipeline/src data_pipeline/.venv/bin/python -m babel_data.cli \
 ```
 
 The builder holds text/vector batches only to the configured Parquet target,
-spills global identities and hash ordering to SQLite, and retains its range
-journal under `$BABEL_DATA_ROOT/full-2016-work/`. It opens both sources through
+spills global identities and hash ordering to a compressed durable SQLite row
+spool, and retains its range journal under
+`$BABEL_DATA_ROOT/full-2016-work/`. It opens both sources through
 `open_processing_source`, then independently checks the pinned SHA-256 values.
 
 Acceptance before publication:
