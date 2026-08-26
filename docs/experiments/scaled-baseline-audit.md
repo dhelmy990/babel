@@ -100,22 +100,26 @@ the environment must be repaired before the next baseline test claim.
 ## Backlog reconciliation
 
 The following historical hardening items are promoted by annotation in
-`docs/backlog/post-interview-hardening.md`: data truth (Tasks 3--4), validation
-and measurement evidence (Tasks 3, 11--12), normal checkpoint resume and
-artifact compatibility (Tasks 5, 12--13), and graph correctness (Task 8).
-The original backlog wording remains as history. Malicious-artifact,
-multi-writer, distributed, credential/governance, and production-operation
-items remain deferred.
+`docs/backlog/post-interview-hardening.md`: data truth (Tasks 3--4), bounded
+validation storage/search (Task 3), concurrent engineering measurement
+validity (Tasks 11--12), normal checkpoint resume and artifact compatibility
+(Tasks 5, 12--13), and graph correctness (Task 8). The original backlog
+wording remains as history. Automated Colab image compatibility, confidence
+intervals/segment/drift/historical analytics, query-level metric evidence,
+hardware tuning, and formal model-quality thresholds remain deferred with the
+other malicious-artifact, multi-writer, distributed,
+credential/governance, and production-operation items.
 
 ## Self-review receipt
 
-- The receipt names every canonical Task 2--13 and assigns each scale-critical
-  gap exactly once as its primary owner.
+- The receipt names every canonical Task 2--13 and assigns each
+  vision/engineering-critical replacement exactly once as its primary owner;
+  deferred hardening enhancements are not represented as executable task work.
 - The miniature limitations are repeated at the point of use: 80 rows,
   synthetic June/July, deterministic NumPy stand-in, 51 candidates, and
   sequential client load.
 - No credential value is recorded. References to `HF_TOKEN` are variable names
   only; no `.env` value was read or printed.
 - Documentation changes are limited to this audit and the historical hardening
-  backlog annotations. A final `git diff --check` and secret-pattern scan are
-  required before the commit.
+  backlog annotations. `git diff --check` and the credential-pattern scan were
+  performed for the committed receipt.
