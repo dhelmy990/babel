@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
+from dataclasses import asdict, dataclass
+from pathlib import PurePosixPath
 from typing import Any
+from urllib.parse import urlsplit
 
 from .contracts import validate_document
 
@@ -20,6 +24,22 @@ METADATA_PATHS = frozenset(
     {MANIFEST_PATH, READINESS_PATH, README_PATH, EMPTY_TEST_PATH}
 )
 SPLITS = ("train", "validation", "test")
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+_SOURCE_ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_SOURCE_MIRROR_FIELDS = frozenset(
+    {
+        "source_id",
+        "authoritative_url",
+        "expected_sha256",
+        "bytes",
+        "repository",
+        "path_in_repo",
+        "remote_commit_sha",
+        "remote_sha256",
+        "state",
+    }
+)
 
 DATASET_CARD = """---
 configs:
@@ -41,6 +61,102 @@ def canonical_json(value: object) -> bytes:
         json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         + "\n"
     ).encode("utf-8")
+
+
+@dataclass(frozen=True, slots=True)
+class SourceMirrorReceiptV1:
+    """Closed proof that one authoritative source was verified at a Hub commit."""
+
+    source_id: str
+    authoritative_url: str
+    expected_sha256: str
+    bytes: int
+    repository: str
+    path_in_repo: str
+    remote_commit_sha: str
+    remote_sha256: str
+    state: str = "remote_verified"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source_id, str) or _SOURCE_ID_PATTERN.fullmatch(
+            self.source_id
+        ) is None:
+            raise ValueError("source_id must be a lowercase hyphenated identifier")
+        try:
+            parsed = urlsplit(self.authoritative_url)
+        except (TypeError, ValueError) as error:
+            raise ValueError("authoritative_url must be an HTTP(S) URL") from error
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("authoritative_url must be an HTTP(S) URL")
+        if (
+            not isinstance(self.expected_sha256, str)
+            or _SHA256_PATTERN.fullmatch(self.expected_sha256) is None
+        ):
+            raise ValueError(
+                "expected_sha256 must be 64 lowercase hexadecimal characters"
+            )
+        if (
+            isinstance(self.bytes, bool)
+            or not isinstance(self.bytes, int)
+            or self.bytes <= 0
+        ):
+            raise ValueError("bytes must be a positive integer")
+        if (
+            not isinstance(self.repository, str)
+            or self.repository.count("/") != 1
+            or any(not part for part in self.repository.split("/"))
+        ):
+            raise ValueError("repository must be an owner/name identity")
+        if not isinstance(self.path_in_repo, str):
+            raise ValueError("path_in_repo must be beneath sources/{source_id}/")
+        path = PurePosixPath(self.path_in_repo)
+        if (
+            path.is_absolute()
+            or path.as_posix() != self.path_in_repo
+            or ".." in path.parts
+            or len(path.parts) < 3
+            or path.parts[:2] != ("sources", self.source_id)
+        ):
+            raise ValueError("path_in_repo must be beneath sources/{source_id}/")
+        if (
+            not isinstance(self.remote_commit_sha, str)
+            or _COMMIT_PATTERN.fullmatch(self.remote_commit_sha) is None
+        ):
+            raise ValueError(
+                "remote_commit_sha must be a 40-character lowercase hexadecimal value"
+            )
+        if (
+            not isinstance(self.remote_sha256, str)
+            or _SHA256_PATTERN.fullmatch(self.remote_sha256) is None
+        ):
+            raise ValueError(
+                "remote_sha256 must be 64 lowercase hexadecimal characters"
+            )
+        if self.remote_sha256 != self.expected_sha256:
+            raise ValueError("remote_sha256 must match expected_sha256")
+        if self.state != "remote_verified":
+            raise ValueError("state must be remote_verified")
+
+    @property
+    def local_sha256(self) -> str:
+        """Compatibility name for the verified local SHA-256."""
+
+        return self.expected_sha256
+
+    def to_json_bytes(self) -> bytes:
+        return canonical_json(asdict(self))
+
+    @classmethod
+    def from_json_bytes(cls, value: bytes) -> "SourceMirrorReceiptV1":
+        try:
+            document = json.loads(value)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError("source mirror receipt is malformed") from error
+        if not isinstance(document, dict) or set(document) != _SOURCE_MIRROR_FIELDS:
+            raise ValueError(
+                "source mirror receipt must contain exactly the v1 fields"
+            )
+        return cls(**document)
 
 
 def identity_rows_sha256(rows: Iterable[Mapping[str, object]]) -> str:

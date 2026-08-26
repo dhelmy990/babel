@@ -16,6 +16,7 @@ from .hub import (
     verify_remote,
     write_revision_file,
 )
+from .mirror import mirror_source, persist_receipt, validate_data_root
 from .release import (
     EMPTY_TEST_PATH,
     README_PATH,
@@ -24,9 +25,13 @@ from .release import (
     validate_manifest_bytes,
 )
 from .shard import load_readiness, write_shards
+from .sources import load_source_manifest
 
 
 DEFAULT_DATA_ROOT = Path("/home/dhelmy990/Data/babel-data")
+DEFAULT_SOURCE_MANIFEST = (
+    Path(__file__).resolve().parents[2] / "manifests" / "2016-sources.json"
+)
 _REGISTERED_SECRETS: set[str] = set()
 
 
@@ -210,6 +215,46 @@ def _verify(arguments: argparse.Namespace) -> dict[str, object]:
     }
 
 
+def _mirror(arguments: argparse.Namespace) -> dict[str, object]:
+    root = validate_data_root(arguments.data_root or os.environ.get("BABEL_DATA_ROOT"))
+    sources = load_source_manifest(Path(arguments.manifest))
+    try:
+        source = sources[arguments.source_id]
+    except KeyError as error:
+        raise ValueError(
+            f"unknown source ID {arguments.source_id}; choose one of: "
+            + ", ".join(sorted(sources))
+        ) from error
+    token = _token(arguments)
+    receipt = mirror_source(
+        source,
+        _api(),
+        repository=arguments.repo,
+        token=token,
+        data_root=root,
+        source_identifier=arguments.source_id,
+    )
+    persisted = persist_receipt(root / "hf-cache", receipt)
+    if arguments.receipt_out:
+        requested = Path(arguments.receipt_out)
+        if not requested.is_absolute():
+            raise ValueError("receipt output must be an absolute path")
+        requested.parent.mkdir(parents=True, exist_ok=True)
+        content = receipt.to_json_bytes()
+        if requested.exists() and requested.read_bytes() != content:
+            raise ValueError("refusing to replace a different source mirror receipt")
+        requested.write_bytes(content)
+        persisted = requested
+    return {
+        "status": "ok",
+        "command": "mirror-source",
+        "source_id": receipt.source_id,
+        "revision": receipt.remote_commit_sha,
+        "state": receipt.state,
+        "receipt": str(persisted),
+    }
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = _ArgumentParser(prog="babel-data")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -242,6 +287,15 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--token")
     verify.add_argument("--revision-out")
     verify.set_defaults(handler=_verify)
+
+    mirror = commands.add_parser("mirror-source")
+    mirror.add_argument("--source-id", required=True)
+    mirror.add_argument("--manifest", default=str(DEFAULT_SOURCE_MANIFEST))
+    mirror.add_argument("--repo", default=DEFAULT_REPO_ID)
+    mirror.add_argument("--data-root")
+    mirror.add_argument("--token")
+    mirror.add_argument("--receipt-out")
+    mirror.set_defaults(handler=_mirror)
     return parser
 
 

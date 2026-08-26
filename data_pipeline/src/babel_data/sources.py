@@ -16,6 +16,7 @@ import hashlib
 import hmac
 import http.client
 import ipaddress
+import json
 import os
 import re
 import stat
@@ -98,6 +99,10 @@ class ExistingFileInvalid(SourceError):
 
 class DownloadError(SourceError):
     """Raised when a source cannot be downloaded safely."""
+
+
+class SourcePolicyError(SourceError):
+    """Raised when semantic processing bypasses the pinned private mirror."""
 
 
 class _RangeBodyMismatch(SourceError):
@@ -766,6 +771,39 @@ def download_source(
     return result
 
 
+def source_id(spec: SourceSpec) -> str:
+    """Return the stable manifest identity used for a mirrored source."""
+
+    value = re.sub(r"[^a-z0-9]+", "-", spec.name.lower()).strip("-")
+    if not value:
+        raise InvalidSourceSpec("source name cannot produce a stable source ID")
+    return value
+
+
+def load_source_manifest(path: Path) -> dict[str, SourceSpec]:
+    """Load the existing source manifest keyed by stable source ID."""
+
+    try:
+        document = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise InvalidSourceSpec("source manifest is malformed") from error
+    if not isinstance(document, list):
+        raise InvalidSourceSpec("source manifest must be a JSON array")
+    result: dict[str, SourceSpec] = {}
+    for entry in document:
+        if not isinstance(entry, dict):
+            raise InvalidSourceSpec("source manifest entries must be objects")
+        try:
+            spec = SourceSpec(**entry)
+        except TypeError as error:
+            raise InvalidSourceSpec("source manifest entry fields are invalid") from error
+        identifier = source_id(spec)
+        if identifier in result:
+            raise InvalidSourceSpec(f"duplicate source ID in manifest: {identifier}")
+        result[identifier] = spec
+    return result
+
+
 __all__ = [
     "ChecksumMismatch",
     "DownloadError",
@@ -773,9 +811,12 @@ __all__ = [
     "InvalidSourceSpec",
     "SizeMismatch",
     "SourceError",
+    "SourcePolicyError",
     "SourceSpec",
     "UnsafeSourcePath",
     "VerificationError",
     "download_source",
+    "load_source_manifest",
+    "source_id",
     "verify_file",
 ]
