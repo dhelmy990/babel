@@ -220,10 +220,28 @@ configs:
 # Babel 2016 distillation dataset
 """
     load_calls: list[dict[str, object]] = []
+    closed_splits: list[str] = []
+
+    class Stream:
+        def __init__(self, split: str) -> None:
+            self.split = split
+            self.emitted = False
+
+        def __iter__(self) -> "Stream":
+            return self
+
+        def __next__(self) -> dict[str, object]:
+            if self.emitted:
+                raise StopIteration
+            self.emitted = True
+            return datasets[self.split][0]
+
+        def close(self) -> None:
+            closed_splits.append(self.split)
 
     def load(repo_id: str, **kwargs: object) -> object:
         load_calls.append({"repo_id": repo_id, **kwargs})
-        return datasets[str(kwargs["split"])]
+        return Stream(str(kwargs["split"]))
 
     revision = publish_interview_configuration(
         api,
@@ -260,6 +278,7 @@ configs:
     assert all(call["name"] == INTERVIEW_CONFIG for call in load_calls)
     assert all(call["revision"] == COMMIT for call in load_calls)
     assert all(call["streaming"] is True and call["token"] == "token" for call in load_calls)
+    assert closed_splits == ["train", "validation", "test"]
 
 
 def test_publish_interview_rejects_nonidentical_existing_config_path(

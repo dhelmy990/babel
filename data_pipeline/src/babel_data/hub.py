@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import heapq
 import json
@@ -1218,12 +1219,23 @@ def publish_interview_configuration(
                     streaming=True,
                     token=token,
                 )
+                iterator = iter(streamed)
                 try:
-                    checked = validate_distillation_row(next(iter(streamed)))
+                    checked = validate_distillation_row(next(iterator))
                 except StopIteration as error:
                     raise RemoteVerificationError(f"remote interview {split} split is empty") from error
+                finally:
+                    close_iterator = getattr(iterator, "close", None)
+                    if callable(close_iterator):
+                        close_iterator()
+                    if streamed is not iterator:
+                        close_stream = getattr(streamed, "close", None)
+                        if callable(close_stream):
+                            close_stream()
                 if checked["split"] != split:
                     raise RemoteVerificationError(f"remote interview {split} split drifted")
+                del checked, iterator, streamed
+                gc.collect()
             return returned
     raise RemoteVerificationError("atomic interview publication retries were exhausted")
 
