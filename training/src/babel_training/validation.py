@@ -18,6 +18,53 @@ DEFAULT_MODEL_ID = "Qwen/Qwen3-Embedding-0.6B"
 DEFAULT_MODEL_REVISION = "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
 
 
+@dataclass(frozen=True, slots=True)
+class FullValidationPlanV1:
+    """Frozen bounded-search contract for the complete 2016 corpus."""
+
+    corpus_rows: int
+    monitor_query_count: int
+    monitor_candidate_count: int
+    final_query_count: int
+    final_candidate_count: int
+    exact_index: str = "faiss.IndexFlatIP"
+    exact_dtype: str = "normalized_float32"
+    metrics: tuple[str, ...] = (
+        "recall_at_10",
+        "recall_at_50",
+        "ndcg_at_10",
+        "ndcg_at_50",
+        "mean_paired_cosine",
+        "invalid_vector_count",
+        "norm_statistics",
+        "examples",
+    )
+    hnsw_index_scope: str = "full_corpus"
+    hnsw_exact_audit_queries: int = 2_000
+
+    @classmethod
+    def for_corpus(cls, corpus_rows: int) -> "FullValidationPlanV1":
+        if (
+            not isinstance(corpus_rows, int)
+            or isinstance(corpus_rows, bool)
+            or corpus_rows <= 0
+        ):
+            raise ValueError("corpus_rows must be a positive integer")
+        final_five_percent = int(corpus_rows * 0.05)
+        final_queries = min(
+            corpus_rows,
+            max(10_000, min(50_000, final_five_percent)),
+        )
+        return cls(
+            corpus_rows=corpus_rows,
+            monitor_query_count=min(2_000, corpus_rows),
+            monitor_candidate_count=min(50_000, corpus_rows),
+            final_query_count=final_queries,
+            final_candidate_count=min(100_000, corpus_rows),
+            hnsw_exact_audit_queries=min(2_000, corpus_rows),
+        )
+
+
 def recall_at_k(
     student_neighbors: Sequence[object],
     teacher_neighbors: Sequence[object],
@@ -284,4 +331,10 @@ def validate_embeddings(
     )
 
 
-__all__ = ["ValidationReport", "ndcg_at_k", "recall_at_k", "validate_embeddings"]
+__all__ = [
+    "FullValidationPlanV1",
+    "ValidationReport",
+    "ndcg_at_k",
+    "recall_at_k",
+    "validate_embeddings",
+]

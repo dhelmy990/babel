@@ -20,6 +20,7 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "data_pipeline" / "src"))
 from babel_data.hub import (  # noqa: E402
     RemoteVerificationError,
     publish_verified_shards,
+    stage_versioned_release_shards,
     verify_remote,
     write_revision_file,
 )
@@ -31,7 +32,11 @@ from babel_data.release import (  # noqa: E402
     identity_rows_sha256,
     validate_manifest_extension,
 )
-from babel_data.shard import load_readiness, write_shards  # noqa: E402
+from babel_data.shard import (  # noqa: E402
+    load_readiness,
+    write_complete_shards,
+    write_shards,
+)
 from data_pipeline.tests.test_shard import provenance_document  # noqa: E402
 
 
@@ -404,6 +409,106 @@ def test_publish_is_private_batched_ordered_and_verified_at_returned_sha(tmp_pat
         "streaming": True,
         "token": "super-secret",
     }]
+
+
+def test_publish_one_time_supersession_excludes_historical_pilot_paths(
+    tmp_path: Path,
+) -> None:
+    old, old_files, datasets = prepare(tmp_path / "old")
+    old_readiness = json.loads(old.readiness_path.read_text())
+    old_readiness["state"] = "pilot_ready"
+    old.readiness_path.write_text(
+        json.dumps(old_readiness, sort_keys=True, separators=(",", ":")) + "\n"
+    )
+    api = FakeApi(current_sha=PARENT)
+    for path in old_files:
+        api.remote[path.relative_to(old.output_root).as_posix()] = path.read_bytes()
+
+    values = rows_for_all_splits()
+    complete = write_complete_shards(
+        values,
+        tmp_path / "complete",
+        spool_database=tmp_path / "complete-spool.sqlite3",
+        provenance=provenance_document(),
+        release_id="b" * 64,
+        supersedes_commit_sha=PARENT,
+    )
+    readiness = json.loads(complete.readiness_path.read_text())
+    readiness["state"] = "complete"
+    complete.readiness_path.write_text(
+        json.dumps(readiness, sort_keys=True, separators=(",", ":")) + "\n"
+    )
+    manifest = json.loads(complete.manifest_path.read_text())
+    files = [complete.output_root / item["path"] for item in manifest["shards"]]
+    files += [
+        complete.readiness_path,
+        complete.readme_path,
+        complete.output_root / EMPTY_TEST_PATH,
+        complete.manifest_path,
+    ]
+
+    revision = publish_verified_shards(
+        api,
+        "dhelmy990/babel-wikipedia-experiment",
+        files,
+        "token",
+        root=complete.output_root,
+        load_dataset_fn=lambda *args, **kwargs: datasets,
+        retries=1,
+        sleep=lambda _: None,
+    )
+
+    assert revision == COMMIT
+    assert all("/releases/" in item["path"] for item in manifest["shards"])
+    assert b"distillation_2016/train/*.parquet" not in api.remote["README.md"]
+    assert old.shards[0].path in api.remote
+
+    second = copy.deepcopy(manifest)
+    second["supersedes_commit_sha"] = COMMIT
+    with pytest.raises(ValueError, match="one-time|already active"):
+        validate_manifest_extension(
+            canonical_json(manifest),
+            canonical_json(second),
+            expected_predecessor_sha=COMMIT,
+        )
+
+
+def test_stage_versioned_release_uploads_and_streams_each_shard(
+    tmp_path: Path,
+) -> None:
+    values = rows_for_all_splits()
+    result = write_complete_shards(
+        values,
+        tmp_path / "complete",
+        spool_database=tmp_path / "complete-spool.sqlite3",
+        provenance=provenance_document(),
+        release_id="b" * 64,
+        supersedes_commit_sha=PARENT,
+    )
+    api = FakeApi(current_sha=PARENT)
+    load_calls: list[dict[str, object]] = []
+
+    def load(*args: object, **kwargs: object) -> object:
+        load_calls.append(kwargs)
+        split = str(kwargs["split"])
+        return [next(value for value in values if value["split"] == split)]
+
+    commits = stage_versioned_release_shards(
+        api,
+        "dhelmy990/babel-wikipedia-experiment",
+        result.manifest_path,
+        "token",
+        load_dataset_fn=load,
+    )
+
+    manifest = json.loads(result.manifest_path.read_text())
+    paths = [item["path"] for item in manifest["shards"]]
+    assert commits == (COMMIT,) * len(paths)
+    assert api.operations == paths
+    assert [call["data_files"] for call in load_calls] == [
+        {item["split"]: item["path"]} for item in manifest["shards"]
+    ]
+    assert all(call["revision"] == COMMIT for call in load_calls)
 
 
 def test_publish_semantic_preflight_streams_parquet_batches(
@@ -1232,7 +1337,7 @@ def test_prepare_cli_rejects_provenance_not_bound_to_input(
 
 
 def complete_release(
-    tmp_path: Path, *, pilot_size: int = 3
+    tmp_path: Path, *, pilot_size: int = 3, versioned: bool = False
 ) -> tuple[object, Path]:
     provenance = provenance_document()
     provenance["artifacts"]["reconciliation_report"] = {  # type: ignore[index]
@@ -1255,12 +1360,22 @@ def complete_release(
         "sha1": "e" * 40,
         "downloaded_at": "2016-10-01",
     })
-    result = write_shards(
-        rows_for_all_splits(),
-        tmp_path / "full-release",
-        pilot_size=pilot_size,
-        provenance=provenance,
-    )
+    if versioned:
+        result = write_complete_shards(
+            rows_for_all_splits(),
+            tmp_path / "full-release",
+            spool_database=tmp_path / "complete-spool.sqlite3",
+            provenance=provenance,
+            release_id="b" * 64,
+            supersedes_commit_sha=PARENT,
+        )
+    else:
+        result = write_shards(
+            rows_for_all_splits(),
+            tmp_path / "full-release",
+            pilot_size=pilot_size,
+            provenance=provenance,
+        )
     published_provenance = json.loads(result.manifest_path.read_text())["provenance"][
         "document"
     ]
@@ -1477,6 +1592,49 @@ def test_publish_cli_complete_accepts_bound_full_release_proof(
     restored = load_readiness(readiness_path, result.manifest_path)
     assert restored.remote_verified is True
     assert restored.remote_commit_sha == COMMIT
+
+
+def test_publish_cli_stages_versioned_shards_then_binds_final_predecessor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import babel_data.cli as cli
+
+    result, proof_path = complete_release(tmp_path, versioned=True)
+    interrupted_readiness = json.loads(result.readiness_path.read_text())
+    interrupted_readiness["state"] = "complete"
+    result.readiness_path.write_text(
+        json.dumps(interrupted_readiness, sort_keys=True, separators=(",", ":")) + "\n"
+    )
+    staged_commit = "d" * 40
+    calls: list[str] = []
+
+    def stage(*args: object, **kwargs: object) -> tuple[str, ...]:
+        calls.append("stage")
+        return (staged_commit,)
+
+    def publish(*args: object, **kwargs: object) -> str:
+        calls.append("publish")
+        manifest = json.loads(result.manifest_path.read_text())
+        readiness = json.loads(result.readiness_path.read_text())
+        assert manifest["supersedes_commit_sha"] == staged_commit
+        assert readiness["supersedes_commit_sha"] == staged_commit
+        assert readiness["state"] == "complete"
+        return COMMIT
+
+    monkeypatch.setattr(cli, "_api", object)
+    monkeypatch.setattr(cli, "stage_versioned_release_shards", stage, raising=False)
+    monkeypatch.setattr(cli, "publish_verified_shards", publish)
+
+    assert main([
+        "publish-2016", "--input-root", str(result.output_root),
+        "--state", "complete", "--full-release-proof", str(proof_path),
+        "--token", "token",
+    ]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert calls == ["stage", "publish"]
+    assert output["publication_commits"] == [staged_commit, COMMIT]
 
 
 def test_cli_failure_is_structured_and_does_not_echo_token(

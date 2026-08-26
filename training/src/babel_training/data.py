@@ -71,6 +71,28 @@ configs:
 ---
 # Babel 2016 distillation dataset
 """
+
+
+def _dataset_card(active_release_root: str | None = None) -> bytes:
+    if active_release_root is None:
+        return _DATASET_CARD
+    if re.fullmatch(
+        r"distillation_2016/releases/[a-f0-9]{64}", active_release_root
+    ) is None:
+        raise DatasetContractError("pinned active release root is malformed")
+    return f"""---
+configs:
+- config_name: distillation_2016
+  data_files:
+  - split: train
+    path: {active_release_root}/train/*.parquet
+  - split: validation
+    path: {active_release_root}/validation/*.parquet
+  - split: test
+    path: {active_release_root}/test/*.parquet
+---
+# Babel 2016 distillation dataset
+""".encode("utf-8")
 _SCHEMA_NAMES = frozenset(
     {
         "dataset-manifest-v1",
@@ -331,15 +353,14 @@ def _parse_document(raw: bytes, label: str) -> dict[str, object]:
 def _validate_manifest(value: Mapping[str, object]) -> dict[str, object]:
     document = deepcopy(dict(value))
     _validate_schema("dataset-manifest-v1", document)
-    _require_exact_keys(
-        document,
-        {
+    expected_manifest_keys = {
             "manifest_version", "schema_version", "state", "schema",
             "dataset_config", "pilot_article_keys", "counts", "shards",
             "aggregate_sha256", "rows_sha256", "provenance",
-        },
-        "pinned manifest",
-    )
+    }
+    if "active_release_root" in document or "supersedes_commit_sha" in document:
+        expected_manifest_keys |= {"active_release_root", "supersedes_commit_sha"}
+    _require_exact_keys(document, expected_manifest_keys, "pinned manifest")
     if (
         document["manifest_version"] != 1
         or document["schema_version"] != 1
@@ -359,6 +380,15 @@ def _validate_manifest(value: Mapping[str, object]) -> dict[str, object]:
     shards = document["shards"]
     if not isinstance(shards, list) or not shards:
         raise DatasetContractError("pinned manifest shards are invalid")
+    active_release_root = document.get("active_release_root")
+    if active_release_root is not None and any(
+        not str(item.get("path", "")).startswith(
+            f"{active_release_root}/{item.get('split')}/"
+        )
+        for item in shards
+        if isinstance(item, Mapping)
+    ):
+        raise DatasetContractError("pinned shard is outside the active release root")
     expected_shard_keys = {
         "path", "split", "rows", "bytes", "sha256", "rows_sha256", "schema",
         "version", "min_article_key", "max_article_key", "min_rank", "max_rank",
@@ -546,14 +576,16 @@ def _validate_readiness(
 ) -> dict[str, object]:
     document = deepcopy(dict(value))
     _validate_schema("dataset-readiness-v1", document)
-    _require_exact_keys(
-        document,
-        {
+    expected_readiness_keys = {
             "state", "schema_version", "teacher_dimension", "available_examples",
             "verified_shards", "source_checksums", "remote_verified", "remote_commit_sha",
-        },
-        "pinned readiness",
-    )
+    }
+    if "active_release_root" in document or "supersedes_commit_sha" in document:
+        expected_readiness_keys |= {"active_release_root", "supersedes_commit_sha"}
+    _require_exact_keys(document, expected_readiness_keys, "pinned readiness")
+    for field in ("active_release_root", "supersedes_commit_sha"):
+        if document.get(field) != manifest.get(field):
+            raise DatasetContractError(f"pinned readiness {field} mismatches manifest")
     remote_pair_is_valid = (
         document["remote_verified"] is False
         and document["remote_commit_sha"] is None
@@ -642,7 +674,7 @@ def _validate_metadata(
     readme_bytes = _remote_bytes(api, repo_id, README_PATH, revision, token)
     manifest = _validate_manifest(_parse_document(manifest_bytes, "manifest"))
     _validate_readiness(_parse_document(readiness_bytes, "readiness"), manifest, revision)
-    if readme_bytes != _DATASET_CARD:
+    if readme_bytes != _dataset_card(manifest.get("active_release_root")):  # type: ignore[arg-type]
         raise DatasetContractError(
             "pinned README does not advertise exactly the approved dataset configuration"
         )

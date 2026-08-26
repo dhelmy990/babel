@@ -20,7 +20,9 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "data_pipeline" / "src"))
 from babel_data.contracts import UnknownSchema, load_schema, validate_document  # noqa: E402
 from babel_data.release import (  # noqa: E402
     canonical_json,
+    render_dataset_card,
     validate_manifest_document,
+    validate_manifest_extension,
     validate_readiness_alignment,
 )
 from test_support.wheel_build import create_offline_build_environment  # noqa: E402
@@ -322,6 +324,74 @@ def test_manifest_rejects_duplicate_blob_identity_and_overlapping_rank_evidence(
 
     with pytest.raises(ValueError, match="duplicate|overlap"):
         validate_manifest_document(manifest, label="test")
+
+
+def superseding_manifest(predecessor: str = "a" * 40) -> dict[str, object]:
+    manifest = manifest_document()
+    release_id = "b" * 64
+    manifest["supersedes_commit_sha"] = predecessor
+    manifest["active_release_root"] = f"distillation_2016/releases/{release_id}"
+    shard = manifest["shards"][0]  # type: ignore[index]
+    shard["path"] = (
+        f"distillation_2016/releases/{release_id}/train/part-00000.parquet"
+    )
+    manifest["aggregate_sha256"] = hashlib.sha256(
+        canonical_json(manifest["shards"])
+    ).hexdigest()
+    reports = manifest["provenance"]["document"]["reports"]  # type: ignore[index]
+    reports["dataset_aggregate_sha256"] = manifest["aggregate_sha256"]
+    return manifest
+
+
+def test_one_time_pilot_supersession_uses_only_versioned_active_paths() -> None:
+    old = manifest_document()
+    new = superseding_manifest()
+
+    checked = validate_manifest_document(new)
+    validate_manifest_extension(
+        canonical_json(old),
+        canonical_json(new),
+        expected_predecessor_sha="a" * 40,
+    )
+
+    active_root = checked["active_release_root"]
+    assert all(
+        item["path"].startswith(f"{active_root}/{item['split']}/")
+        for item in checked["shards"]
+    )
+    card = render_dataset_card(str(active_root))
+    assert b"distillation_2016/train/*.parquet" not in card
+    assert f"{active_root}/train/*.parquet".encode() in card
+
+
+def test_false_or_second_pilot_supersession_is_rejected() -> None:
+    old = manifest_document()
+    new = superseding_manifest(predecessor="c" * 40)
+    with pytest.raises(ValueError, match="predecessor"):
+        validate_manifest_extension(
+            canonical_json(old),
+            canonical_json(new),
+            expected_predecessor_sha="a" * 40,
+        )
+
+    prior_complete = superseding_manifest(predecessor="a" * 40)
+    second = superseding_manifest(predecessor="d" * 40)
+    second["active_release_root"] = "distillation_2016/releases/" + "e" * 64
+    second["shards"][0]["path"] = (  # type: ignore[index]
+        str(second["active_release_root"]) + "/train/part-00000.parquet"
+    )
+    second["aggregate_sha256"] = hashlib.sha256(
+        canonical_json(second["shards"])
+    ).hexdigest()
+    second["provenance"]["document"]["reports"][  # type: ignore[index]
+        "dataset_aggregate_sha256"
+    ] = second["aggregate_sha256"]
+    with pytest.raises(ValueError, match="one-time|already active"):
+        validate_manifest_extension(
+            canonical_json(prior_complete),
+            canonical_json(second),
+            expected_predecessor_sha="d" * 40,
+        )
 
 
 def test_readiness_requires_provenance_bound_accepted_input() -> None:

@@ -185,6 +185,10 @@ def validate_manifest_document(
 ) -> dict[str, object]:
     document = deepcopy(dict(value))
     validate_document("dataset-manifest-v1", document)
+    active_root = document.get("active_release_root")
+    supersedes = document.get("supersedes_commit_sha")
+    if (active_root is None) != (supersedes is None):
+        raise _manifest_error(label, "has incomplete supersession identity")
     provenance = document["provenance"]
     validate_document("provenance-v1", provenance["document"])  # type: ignore[index]
     shards = document["shards"]
@@ -199,6 +203,10 @@ def validate_manifest_document(
         assert isinstance(shard, dict)
         path = str(shard["path"])
         split = str(shard["split"])
+        if active_root is not None and not path.startswith(
+            f"{active_root}/{split}/"
+        ):
+            raise _manifest_error(label, f"shard is outside active release root: {path}")
         if f"/{split}/" not in path:
             raise _manifest_error(label, f"shard path/split mismatch: {path}")
         if shard["min_article_key"] > shard["max_article_key"]:
@@ -247,12 +255,30 @@ def validate_manifest_bytes(value: bytes, *, label: str = "dataset") -> dict[str
     return validate_manifest_document(document, label=label)
 
 
-def validate_manifest_extension(old_bytes: bytes, new_bytes: bytes) -> None:
+def validate_manifest_extension(
+    old_bytes: bytes,
+    new_bytes: bytes,
+    *,
+    expected_predecessor_sha: str | None = None,
+) -> None:
     old = validate_manifest_bytes(old_bytes, label="remote")
     new = validate_manifest_bytes(new_bytes, label="local")
     for field in ("manifest_version", "schema_version", "state", "schema", "dataset_config"):
         if old[field] != new[field]:
             raise ValueError(f"manifest extension is not monotonic: changed {field}")
+    new_predecessor = new.get("supersedes_commit_sha")
+    if new_predecessor is not None:
+        if old.get("active_release_root") is not None:
+            raise ValueError("one-time supersession rejected: a release is already active")
+        if expected_predecessor_sha is None or new_predecessor != expected_predecessor_sha:
+            raise ValueError("supersession predecessor does not match exact remote main")
+        active_root = str(new["active_release_root"])
+        if any(
+            not str(item["path"]).startswith(f"{active_root}/{item['split']}/")
+            for item in new["shards"]  # type: ignore[union-attr]
+        ):
+            raise ValueError("supersession shard is outside the active release root")
+        return
     old_shards = old["shards"]
     new_shards = new["shards"]
     assert isinstance(old_shards, list) and isinstance(new_shards, list)
@@ -290,8 +316,24 @@ def validate_manifest_extension(old_bytes: bytes, new_bytes: bytes) -> None:
         raise ValueError("manifest extension changed prior provenance artifact")
 
 
-def render_dataset_card() -> bytes:
-    return DATASET_CARD
+def render_dataset_card(active_release_root: str | None = None) -> bytes:
+    if active_release_root is None:
+        return DATASET_CARD
+    if not re.fullmatch(r"distillation_2016/releases/[a-f0-9]{64}", active_release_root):
+        raise ValueError("active release root is malformed")
+    return f"""---
+configs:
+- config_name: distillation_2016
+  data_files:
+  - split: train
+    path: {active_release_root}/train/*.parquet
+  - split: validation
+    path: {active_release_root}/validation/*.parquet
+  - split: test
+    path: {active_release_root}/test/*.parquet
+---
+# Babel 2016 distillation dataset
+""".encode("utf-8")
 
 
 def validate_readiness_alignment(
@@ -299,6 +341,9 @@ def validate_readiness_alignment(
 ) -> None:
     validate_document("dataset-readiness-v1", readiness)
     checked_manifest = validate_manifest_document(manifest)
+    for field in ("supersedes_commit_sha", "active_release_root"):
+        if readiness.get(field) != checked_manifest.get(field):
+            raise ValueError(f"readiness {field} does not match manifest")
     if readiness["available_examples"] != checked_manifest["counts"]["total"]:  # type: ignore[index]
         raise ValueError("readiness example count does not match manifest")
     readiness_items = readiness["verified_shards"]
@@ -346,6 +391,12 @@ def validate_readiness_extension(
         raise ValueError("readiness extension is malformed")
     validate_readiness_alignment(old, old_manifest)
     validate_readiness_alignment(new, new_manifest)
+    if new_manifest.get("supersedes_commit_sha") is not None:
+        if old_manifest.get("active_release_root") is not None:
+            raise ValueError("one-time supersession rejected: a release is already active")
+        if old.get("state") != "pilot_ready" or new.get("state") != "complete":
+            raise ValueError("pilot supersession requires pilot_ready -> complete")
+        return
     order = {"building": 0, "pilot_ready": 1, "complete": 2}
     if order[str(new["state"])] < order[str(old["state"])]:
         raise ValueError("readiness extension cannot regress state")

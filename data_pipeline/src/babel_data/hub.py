@@ -365,8 +365,17 @@ def _manifest_document(value: bytes, *, label: str) -> dict[str, object]:
     return _validate_manifest_bytes(value, label=label)
 
 
-def _validate_manifest_extension(old_bytes: bytes, new_bytes: bytes) -> None:
-    _validate_release_extension(old_bytes, new_bytes)
+def _validate_manifest_extension(
+    old_bytes: bytes,
+    new_bytes: bytes,
+    *,
+    expected_predecessor_sha: str | None = None,
+) -> None:
+    _validate_release_extension(
+        old_bytes,
+        new_bytes,
+        expected_predecessor_sha=expected_predecessor_sha,
+    )
 
 
 def _relative_uploads(
@@ -520,14 +529,17 @@ def _validate_local_uploads(
             heapq.heappush(heap, (rank, key, page_id, index))
         pilot_keys = manifest["pilot_article_keys"]
         emitted = 0
+        pilot_matched = 0
         prior_identity: tuple[str, int] | None = None
         while heap:
             rank, key, page_id, index = heapq.heappop(heap)
             identity = (key, page_id)
             if identity == prior_identity:
                 raise ValueError("local shards contain an overlapping row identity")
-            if emitted >= len(pilot_keys) or pilot_keys[emitted] != key:
-                raise ValueError("local pilot article keys do not match manifest rows")
+            if pilot_matched < len(pilot_keys):
+                if pilot_keys[pilot_matched] != key:
+                    raise ValueError("local pilot article keys do not match manifest rows")
+                pilot_matched += 1
             emitted += 1
             prior_identity = identity
             yield {"article_key": key, "page_id": page_id}
@@ -538,7 +550,7 @@ def _validate_local_uploads(
             heapq.heappush(
                 heap, (next_rank, next_key, next_page_id, index)
             )
-        if emitted != len(pilot_keys):
+        if pilot_matched != len(pilot_keys):
             raise ValueError("local pilot article keys do not match manifest rows")
 
     if identity_rows_sha256(merged_identities()) != manifest["rows_sha256"]:
@@ -554,7 +566,9 @@ def _validate_local_uploads(
     if not isinstance(readiness, dict):
         raise ValueError("local readiness is malformed")
     validate_readiness_alignment(readiness, manifest)
-    if by_remote_path[README_PATH].read_bytes() != render_dataset_card():
+    if by_remote_path[README_PATH].read_bytes() != render_dataset_card(
+        manifest.get("active_release_root")  # type: ignore[arg-type]
+    ):
         raise ValueError("local README does not match the fixed dataset card")
 
 
@@ -605,7 +619,10 @@ def verify_remote(
     if not isinstance(local_readiness, dict):
         raise ValueError("local readiness is malformed")
     validate_readiness_alignment(local_readiness, manifest)
-    if local_readme_bytes != render_dataset_card():
+    expected_card = render_dataset_card(
+        manifest.get("active_release_root")  # type: ignore[arg-type]
+    )
+    if local_readme_bytes != expected_card:
         raise ValueError("local README does not match the fixed dataset card")
     try:
         shards = manifest["shards"]
@@ -663,7 +680,7 @@ def verify_remote(
             validate_readiness_alignment(
                 readiness_document, remote_manifest_document
             )
-            if remote_readme != local_readme_bytes or remote_readme != render_dataset_card():
+            if remote_readme != local_readme_bytes or remote_readme != expected_card:
                 raise RemoteVerificationError(
                     "remote README bytes do not match the fixed dataset card"
                 )
@@ -811,7 +828,9 @@ def publish_verified_shards(
                 and remote_manifest_bytes != local_manifest_bytes
             ):
                 _validate_manifest_extension(
-                    remote_manifest_bytes, local_manifest_bytes
+                    remote_manifest_bytes,
+                    local_manifest_bytes,
+                    expected_predecessor_sha=parent_sha,
                 )
             pending: list[tuple[str, Path]] = []
             for path_in_repo, local in attempt_uploads:
@@ -848,6 +867,14 @@ def publish_verified_shards(
                             remote_manifest,
                             local_manifest,
                         )
+                        pending.append((path_in_repo, local))
+                        continue
+                    if (
+                        path_in_repo == README_PATH
+                        and local_manifest.get("supersedes_commit_sha") == parent_sha
+                        and remote_manifest is not None
+                        and remote_manifest.get("active_release_root") is None
+                    ):
                         pending.append((path_in_repo, local))
                         continue
                     raise ValueError(
@@ -921,6 +948,108 @@ def publish_verified_shards(
             )
             return returned_sha
     raise RemoteVerificationError("atomic Hub commit retries were exhausted")
+
+
+def stage_versioned_release_shards(
+    api: object,
+    repo_id: str,
+    manifest_path: str | os.PathLike[str],
+    token: str,
+    *,
+    load_dataset_fn: Callable[..., object] | None = None,
+) -> tuple[str, ...]:
+    """Append and prove one inactive versioned shard per main commit."""
+    if not token:
+        raise ValueError("a private-Hub token is required")
+    local_manifest_path = Path(manifest_path)
+    manifest = _manifest_document(local_manifest_path.read_bytes(), label="local")
+    active_root = manifest.get("active_release_root")
+    predecessor = manifest.get("supersedes_commit_sha")
+    if not isinstance(active_root, str) or not isinstance(predecessor, str):
+        raise ValueError("rolling staging requires a versioned superseding release")
+    artifact_root = local_manifest_path.parent.parent
+    loader = load_dataset_fn or _dataset_loader()
+    info = _private_info(
+        api.dataset_info(repo_id, revision="main", token=token)
+    )
+    parent = _checked_sha(getattr(info, "sha", None), label="main dataset info SHA")
+    if parent != predecessor:
+        predecessor_manifest = _remote_bytes(
+            api,
+            repo_id,
+            f"{DEFAULT_CONFIG}/manifest.json",
+            predecessor,
+            token,
+        )
+        current_manifest = _remote_bytes(
+            api,
+            repo_id,
+            f"{DEFAULT_CONFIG}/manifest.json",
+            parent,
+            token,
+        )
+        if predecessor_manifest != current_manifest:
+            raise ValueError("rolling staging predecessor does not match remote main")
+        current_document = _manifest_document(current_manifest, label="remote")
+        if current_document.get("active_release_root") is not None:
+            raise ValueError("rolling staging cannot replace an active release")
+    commits: list[str] = []
+    for item in manifest["shards"]:
+        path = str(item["path"])
+        if not path.startswith(f"{active_root}/{item['split']}/"):
+            raise ValueError("rolling shard is outside the active release root")
+        local = artifact_root / path
+        existing = _remote_or_missing(
+            api,
+            repo_id,
+            path,
+            parent,
+            token,
+            retries=4,
+            backoff_seconds=0.5,
+            sleep=time.sleep,
+        )
+        if existing is not None:
+            if existing != local.read_bytes():
+                raise ValueError("inactive release shard path already has different bytes")
+            commit_sha = parent
+        else:
+            result = api.create_commit(
+                repo_id=repo_id,
+                repo_type="dataset",
+                revision="main",
+                parent_commit=parent,
+                operations=[_add_operation(api, path, local)],
+                commit_message=f"Stage complete 2016 shard {Path(path).name}",
+                token=token,
+            )
+            commit_sha = _commit_sha(result)
+            published = _private_info(
+                api.dataset_info(repo_id, revision=commit_sha, token=token)
+            )
+            if _checked_sha(getattr(published, "sha", None)) != commit_sha:
+                raise RemoteVerificationError("staged shard commit identity disagrees")
+        if _remote_bytes(api, repo_id, path, commit_sha, token) != local.read_bytes():
+            raise RemoteVerificationError("staged shard remote bytes disagree")
+        streamed = loader(
+            repo_id,
+            name=DEFAULT_CONFIG,
+            data_files={str(item["split"]): path},
+            split=str(item["split"]),
+            revision=commit_sha,
+            streaming=True,
+            token=token,
+        )
+        try:
+            row = next(iter(streamed))
+        except StopIteration as error:
+            raise RemoteVerificationError("staged shard remote stream is empty") from error
+        checked = validate_distillation_row(row)
+        if checked["split"] != item["split"]:
+            raise RemoteVerificationError("staged shard remote stream has wrong split")
+        commits.append(commit_sha)
+        parent = commit_sha
+    return tuple(commits)
 
 
 def write_revision_file(path: str | os.PathLike[str], revision: str) -> None:

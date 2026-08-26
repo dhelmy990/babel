@@ -199,6 +199,15 @@ def _valid_teacher(record: object) -> tuple[bool, str, float]:
     return True, "", norm
 
 
+def validate_teacher_record(record: object) -> tuple[str, float]:
+    """Return the normalized title and stable norm for one valid teacher row."""
+    valid, detail, norm = _valid_teacher(record)
+    if not valid:
+        raise ValueError(detail)
+    assert isinstance(record, TeacherRecord)
+    return normalize_title(record.title), norm
+
+
 def _exclude(
     result: ReconciliationResult,
     record: object,
@@ -412,4 +421,5 @@ __all__ = [
     "ReconciliationResult",
     "reconcile",
     "split_for",
+    "validate_teacher_record",
 ]

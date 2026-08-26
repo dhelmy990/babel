@@ -37,7 +37,13 @@
       "additionalProperties": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
     },
     "remote_verified": {"type": "boolean"},
-    "remote_commit_sha": {"type": ["string", "null"], "pattern": "^[a-f0-9]{40}$"}
+    "remote_commit_sha": {"type": ["string", "null"], "pattern": "^[a-f0-9]{40}$"},
+    "supersedes_commit_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "active_release_root": {"type": "string", "pattern": "^distillation_2016/releases/[a-f0-9]{64}$"}
+  },
+  "dependentRequired": {
+    "supersedes_commit_sha": ["active_release_root"],
+    "active_release_root": ["supersedes_commit_sha"]
   },
   "allOf": [{
     "if": {"properties": {"remote_verified": {"const": true}}},

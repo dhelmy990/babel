@@ -44,7 +44,7 @@
           "min_rank", "max_rank"
         ],
         "properties": {
-          "path": {"type": "string", "pattern": "^distillation_2016/(train|validation|test)/part-[0-9]{5}\\.parquet$"},
+          "path": {"type": "string", "pattern": "^distillation_2016/(?:(?:train|validation|test)/part-[0-9]{5}|releases/[a-f0-9]{64}/(?:train|validation|test)/part-[0-9]{5})\\.parquet$"},
           "split": {"enum": ["train", "validation", "test"]},
           "rows": {"type": "integer", "minimum": 1},
           "bytes": {"type": "integer", "minimum": 1},
@@ -61,6 +61,8 @@
     },
     "aggregate_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
     "rows_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "supersedes_commit_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "active_release_root": {"type": "string", "pattern": "^distillation_2016/releases/[a-f0-9]{64}$"},
     "provenance": {
       "type": "object",
       "additionalProperties": false,
@@ -81,5 +83,9 @@
         "document": {"type": "object"}
       }
     }
+  },
+  "dependentRequired": {
+    "supersedes_commit_sha": ["active_release_root"],
+    "active_release_root": ["supersedes_commit_sha"]
   }
 }

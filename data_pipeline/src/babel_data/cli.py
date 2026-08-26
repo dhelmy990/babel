@@ -13,8 +13,14 @@ from typing import Iterator, Sequence
 from .hub import (
     DEFAULT_REPO_ID,
     publish_verified_shards,
+    stage_versioned_release_shards,
     verify_remote,
     write_revision_file,
+)
+from .full_2016 import (
+    Full2016SourcePin,
+    build_complete_2016,
+    rebind_supersession_predecessor,
 )
 from .mirror import mirror_source, persist_receipt, validate_data_root
 from .release import (
@@ -170,13 +176,24 @@ def _publish(arguments: argparse.Namespace) -> dict[str, object]:
             validate_full_release_proof(proof, manifest)
         except Exception as error:
             raise ValueError(f"full release proof is invalid: {error}") from error
+    token = _token(arguments)
+    api = _api()
+    staging_commits: tuple[str, ...] = ()
+    if arguments.state == "complete" and manifest.get("active_release_root") is not None:
+        staging_commits = stage_versioned_release_shards(
+            api, arguments.repo, manifest_path, token
+        )
+        if not staging_commits:
+            raise ValueError("versioned complete release has no staged shard commits")
+        rebind_supersession_predecessor(root, staging_commits[-1])
+        manifest = validate_manifest_bytes(manifest_path.read_bytes(), label="local")
+        validate_full_release_proof(proof, manifest)
     readiness_path = root / READINESS_PATH
     readiness = load_readiness(readiness_path, manifest_path)
     readiness.stage_publication(arguments.state)
     readiness.save(readiness_path)
-    token = _token(arguments)
     revision = publish_verified_shards(
-        _api(), arguments.repo, _manifest_files(manifest_path), token, root=root
+        api, arguments.repo, _manifest_files(manifest_path), token, root=root
     )
     readiness.mark_remote_verified(revision)
     readiness.save_verification_evidence(readiness_path)
@@ -187,6 +204,7 @@ def _publish(arguments: argparse.Namespace) -> dict[str, object]:
         "command": "publish-2016",
         "revision": revision,
         "state": readiness.state,
+        "publication_commits": [*staging_commits, revision],
     }
 
 
@@ -255,6 +273,45 @@ def _mirror(arguments: argparse.Namespace) -> dict[str, object]:
     }
 
 
+def _build_complete(arguments: argparse.Namespace) -> dict[str, object]:
+    root = validate_data_root(arguments.data_root or os.environ.get("BABEL_DATA_ROOT"))
+    output = (
+        Path(arguments.output_root)
+        if arguments.output_root
+        else root / "prepared" / "2016-complete"
+    )
+    pin = Full2016SourcePin(
+        repository=arguments.repo,
+        teacher_revision=arguments.teacher_revision,
+        teacher_path=arguments.teacher_path,
+        teacher_sha256=arguments.teacher_sha256,
+        wikipedia_revision=arguments.wikipedia_revision,
+        wikipedia_path=arguments.wikipedia_path,
+        wikipedia_sha256=arguments.wikipedia_sha256,
+        token=_token(arguments),
+    )
+    result = build_complete_2016(
+        pin,
+        root,
+        output,
+        resume=not arguments.no_resume,
+    )
+    return {
+        "status": "ok",
+        "command": "build-complete-2016",
+        "teacher_total": result.teacher_total,
+        "matched": result.matched,
+        "excluded": result.excluded,
+        "rows_written": result.rows_written,
+        "readiness_state": result.readiness_state,
+        "manifest": str(result.manifest_path),
+        "range_journal": str(result.range_journal),
+        "full_release_proof": str(result.full_release_proof),
+        "active_release_root": result.active_release_root,
+        "supersedes_commit_sha": result.supersedes_commit_sha,
+    }
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = _ArgumentParser(prog="babel-data")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -296,6 +353,29 @@ def _parser() -> argparse.ArgumentParser:
     mirror.add_argument("--token")
     mirror.add_argument("--receipt-out")
     mirror.set_defaults(handler=_mirror)
+
+    complete = commands.add_parser("build-complete-2016")
+    complete.add_argument("--repo", default=DEFAULT_REPO_ID)
+    complete.add_argument("--data-root")
+    complete.add_argument("--output-root")
+    complete.add_argument("--teacher-revision", required=True)
+    complete.add_argument(
+        "--teacher-path",
+        default="sources/teacher-zip/2016-09-01_2016-09-30_en_100.zip",
+    )
+    complete.add_argument("--teacher-sha256", required=True)
+    complete.add_argument("--wikipedia-revision", required=True)
+    complete.add_argument(
+        "--wikipedia-path",
+        default=(
+            "sources/wikipedia-xml/"
+            "enwiki-20161001-pages-articles-multistream.xml.bz2"
+        ),
+    )
+    complete.add_argument("--wikipedia-sha256", required=True)
+    complete.add_argument("--token")
+    complete.add_argument("--no-resume", action="store_true")
+    complete.set_defaults(handler=_build_complete)
     return parser
 
 

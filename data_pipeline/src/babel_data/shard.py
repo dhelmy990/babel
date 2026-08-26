@@ -15,6 +15,7 @@ import heapq
 import json
 import math
 import os
+import re
 import shutil
 import sqlite3
 import tempfile
@@ -142,6 +143,8 @@ class Readiness:
     source_checksums: dict[str, str]
     remote_verified: bool = False
     remote_commit_sha: str | None = None
+    supersedes_commit_sha: str | None = None
+    active_release_root: str | None = None
     _manifest_sha256: str | None = None
     _verified_manifest_sha256: str | None = None
     _local_paths: frozenset[str] = frozenset()
@@ -162,6 +165,9 @@ class Readiness:
             "remote_verified": self.remote_verified,
             "remote_commit_sha": self.remote_commit_sha,
         }
+        if self.supersedes_commit_sha is not None:
+            document["supersedes_commit_sha"] = self.supersedes_commit_sha
+            document["active_release_root"] = self.active_release_root
         validate_document("dataset-readiness-v1", document)
         return document
 
@@ -220,7 +226,9 @@ class Readiness:
             ):
                 return False
             artifact_root = self._artifact_root.resolve()
-            if (artifact_root / README_PATH).read_bytes() != render_dataset_card():
+            if (artifact_root / README_PATH).read_bytes() != render_dataset_card(
+                self.active_release_root
+            ):
                 return False
             for shard_path, (checksum, _) in manifest_identities.items():
                 local = (artifact_root / shard_path).resolve(strict=True)
@@ -394,9 +402,13 @@ def build_readiness(
     if isinstance(shards, ShardResult):
         infos = shards.shards
         manifest_sha256 = shards.manifest_sha256
+        manifest_document = validate_manifest_bytes(
+            shards.manifest_path.read_bytes(), label="local"
+        )
     else:
         infos = tuple(shards)
         manifest_sha256 = None
+        manifest_document = {}
     verified = [
         {"path": item.path, "sha256": item.sha256, "examples": item.rows}
         for item in infos
@@ -406,6 +418,8 @@ def build_readiness(
         available_examples=sum(item.rows for item in infos),
         verified_shards=verified,
         source_checksums=checked_sources,
+        supersedes_commit_sha=manifest_document.get("supersedes_commit_sha"),  # type: ignore[arg-type]
+        active_release_root=manifest_document.get("active_release_root"),  # type: ignore[arg-type]
         _manifest_sha256=manifest_sha256,
         _local_paths=frozenset(item.path for item in infos) | METADATA_PATHS,
         _manifest_path=shards.manifest_path if isinstance(shards, ShardResult) else None,
@@ -503,6 +517,8 @@ def load_readiness(
         source_checksums=dict(document["source_checksums"]),
         remote_verified=remote_verified,
         remote_commit_sha=remote_commit_sha,
+        supersedes_commit_sha=document.get("supersedes_commit_sha"),
+        active_release_root=document.get("active_release_root"),
         _manifest_sha256=manifest_sha,
         _verified_manifest_sha256=verified_manifest_sha,
         _local_paths=local_paths,
@@ -965,5 +981,280 @@ def write_shards(
         shards=tuple(shard_infos),
         pilot_article_keys=pilot_keys,
         row_count=len(selected),
+        manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+    )
+
+
+def write_complete_shards(
+    rows: Iterable[object],
+    output_root: str | os.PathLike[str],
+    *,
+    spool_database: str | os.PathLike[str],
+    provenance: Mapping[str, object],
+    pilot_size: int = DEFAULT_PILOT_SIZE,
+    target_shard_bytes: int = DEFAULT_TARGET_SHARD_BYTES,
+    release_id: str | None = None,
+    supersedes_commit_sha: str | None = None,
+) -> ShardResult:
+    """Spill, hash-sort, and materialize every valid row with bounded memory.
+
+    The durable SQLite spool is deliberately retained so an interrupted normal
+    run can replay inserts idempotently and resume publication without holding
+    the complete corpus in RAM.
+    """
+    if (
+        isinstance(pilot_size, bool)
+        or not isinstance(pilot_size, int)
+        or pilot_size <= 0
+    ):
+        raise ValueError("pilot_size must be a positive integer")
+    if (
+        isinstance(target_shard_bytes, bool)
+        or not isinstance(target_shard_bytes, int)
+        or target_shard_bytes <= 0
+    ):
+        raise ValueError("target_shard_bytes must be a positive integer")
+    validate_document("provenance-v1", provenance)
+    if release_id is None or not re.fullmatch(r"[a-f0-9]{64}", release_id):
+        raise ValueError("complete release_id must be a lowercase SHA-256")
+    if supersedes_commit_sha is None or not re.fullmatch(
+        r"[a-f0-9]{40}", supersedes_commit_sha
+    ):
+        raise ValueError("complete release must pin the superseded commit SHA")
+    active_release_root = f"{DATASET_CONFIG}/releases/{release_id}"
+    checked_provenance = deepcopy(dict(provenance))
+    database_path = Path(spool_database)
+    if not database_path.is_absolute():
+        raise ValueError("spool_database must be absolute")
+    database_path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(database_path)
+    manifest_bytes = b""
+    try:
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA synchronous=FULL")
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS complete_rows ("
+            "article_key TEXT PRIMARY KEY, page_id INTEGER UNIQUE NOT NULL, "
+            "split TEXT NOT NULL, rank TEXT NOT NULL UNIQUE, document BLOB NOT NULL)"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS complete_metadata "
+            "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        ingested = connection.execute(
+            "SELECT value FROM complete_metadata WHERE key='ingested'"
+        ).fetchone()
+        if ingested is None:
+            inserted = 0
+            for value in rows:
+                document = validate_distillation_row(value)
+                article_key = str(document["article_key"])
+                page_id = int(document["page_id"])
+                rank = hashlib.sha256(article_key.encode("utf-8")).hexdigest()
+                payload = _canonical_json(document)
+                try:
+                    connection.execute(
+                        "INSERT INTO complete_rows VALUES (?,?,?,?,?)",
+                        (article_key, page_id, document["split"], rank, payload),
+                    )
+                except sqlite3.IntegrityError as error:
+                    existing = connection.execute(
+                        "SELECT page_id,document FROM complete_rows WHERE article_key=?",
+                        (article_key,),
+                    ).fetchone()
+                    if existing == (page_id, payload):
+                        continue
+                    raise ValueError(
+                        f"duplicate complete-row identity: {article_key}/{page_id}"
+                    ) from error
+                inserted += 1
+                if inserted % 10_000 == 0:
+                    connection.commit()
+            connection.execute(
+                "INSERT OR REPLACE INTO complete_metadata VALUES ('ingested','true')"
+            )
+            connection.commit()
+
+        accepted_rows = int(
+            connection.execute("SELECT COUNT(*) FROM complete_rows").fetchone()[0]
+        )
+        if accepted_rows <= 0:
+            raise ValueError("complete shard release must contain at least one row")
+        selected_pilot_size = min(pilot_size, accepted_rows)
+        pilot_keys = tuple(
+            str(row[0])
+            for row in connection.execute(
+                "SELECT article_key FROM complete_rows ORDER BY rank,article_key LIMIT ?",
+                (selected_pilot_size,),
+            )
+        )
+
+        destination = Path(output_root)
+        if destination.exists() or destination.is_symlink():
+            raise FileExistsError(f"output already exists: {destination}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        staging = Path(
+            tempfile.mkdtemp(
+                prefix=f".{destination.name}.staging-", dir=destination.parent
+            )
+        )
+        shard_infos: list[ShardInfo] = []
+        try:
+            for split in ("train", "validation", "test"):
+                chunk: list[dict[str, object]] = []
+                chunk_bytes = 0
+                shard_index = 0
+
+                def flush() -> None:
+                    nonlocal chunk, chunk_bytes, shard_index
+                    if not chunk:
+                        return
+                    relative = (
+                        Path(active_release_root)
+                        / split
+                        / f"part-{shard_index:05d}.parquet"
+                    )
+                    shard_path = staging / relative
+                    shard_path.parent.mkdir(parents=True, exist_ok=True)
+                    _write_table(chunk, shard_path)
+                    _fsync_path(shard_path)
+                    keys = [str(item["article_key"]) for item in chunk]
+                    ranks = [hashlib.sha256(key.encode("utf-8")).hexdigest() for key in keys]
+                    shard_infos.append(
+                        ShardInfo(
+                            path=relative.as_posix(),
+                            split=split,
+                            rows=len(chunk),
+                            bytes=shard_path.stat().st_size,
+                            sha256=_sha256(shard_path),
+                            rows_sha256=identity_rows_sha256(chunk),
+                            schema="distillation-example-v1",
+                            version=1,
+                            min_article_key=min(keys),
+                            max_article_key=max(keys),
+                            min_rank=min(ranks),
+                            max_rank=max(ranks),
+                        )
+                    )
+                    shard_index += 1
+                    chunk = []
+                    chunk_bytes = 0
+
+                cursor = connection.execute(
+                    "SELECT document FROM complete_rows WHERE split=? "
+                    "ORDER BY rank,article_key",
+                    (split,),
+                )
+                for (payload,) in cursor:
+                    document = json.loads(bytes(payload))
+                    estimated = len(payload)
+                    if chunk and chunk_bytes + estimated > target_shard_bytes:
+                        flush()
+                    chunk.append(document)
+                    chunk_bytes += estimated
+                flush()
+
+            shard_documents = [item.to_document() for item in shard_infos]
+            counts = {
+                "total": accepted_rows,
+                **{
+                    split: sum(item.rows for item in shard_infos if item.split == split)
+                    for split in ("train", "validation", "test")
+                },
+            }
+            if counts["total"] != sum(counts[split] for split in ("train", "validation", "test")):
+                raise ValueError("complete spool count does not match emitted shards")
+            aggregate_sha256 = hashlib.sha256(_canonical_json(shard_documents)).hexdigest()
+            rows_sha256 = identity_rows_sha256(
+                json.loads(bytes(payload))
+                for (payload,) in connection.execute(
+                    "SELECT document FROM complete_rows ORDER BY rank,article_key"
+                )
+            )
+            reports = checked_provenance["reports"]
+            assert isinstance(reports, dict)
+            reports.update(
+                {
+                    "dataset_aggregate_sha256": aggregate_sha256,
+                    "dataset_rows_sha256": rows_sha256,
+                    "dataset_counts": counts,
+                }
+            )
+            manifest: dict[str, Any] = {
+                "manifest_version": MANIFEST_VERSION,
+                "schema_version": 1,
+                "state": "prepared",
+                "schema": "distillation-example-v1",
+                "dataset_config": DATASET_CONFIG,
+                "pilot_article_keys": list(pilot_keys),
+                "counts": counts,
+                "shards": shard_documents,
+                "aggregate_sha256": aggregate_sha256,
+                "rows_sha256": rows_sha256,
+                "supersedes_commit_sha": supersedes_commit_sha,
+                "active_release_root": active_release_root,
+                "provenance": {
+                    "schema": "provenance-v1",
+                    "identifiers": {
+                        "dataset_config": DATASET_CONFIG,
+                        "example_schema": "distillation-example-v1",
+                        "snapshot_date": "2016-10-01",
+                        "teacher_dimension": 100,
+                    },
+                    "document": checked_provenance,
+                },
+            }
+            validate_manifest_document(manifest, label="generated")
+            manifest_path = staging / DATASET_CONFIG / "manifest.json"
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            manifest_bytes = _canonical_json(manifest)
+            manifest_path.write_bytes(manifest_bytes)
+            _fsync_path(manifest_path)
+            artifact = checked_provenance.get("artifacts", {}).get("accepted_jsonl")
+            if not isinstance(artifact, dict) or not isinstance(artifact.get("sha256"), str):
+                raise ValueError("provenance accepted_jsonl artifact is required")
+            readiness_document: dict[str, object] = {
+                "state": "building",
+                "schema_version": 1,
+                "teacher_dimension": 100,
+                "available_examples": accepted_rows,
+                "verified_shards": [
+                    {"path": item.path, "sha256": item.sha256, "examples": item.rows}
+                    for item in shard_infos
+                ],
+                "source_checksums": {"accepted_jsonl": artifact["sha256"]},
+                "remote_verified": False,
+                "remote_commit_sha": None,
+                "supersedes_commit_sha": supersedes_commit_sha,
+                "active_release_root": active_release_root,
+            }
+            validate_readiness_alignment(readiness_document, manifest)
+            readiness_path = staging / READINESS_PATH
+            readiness_path.write_bytes(_canonical_json(readiness_document))
+            _fsync_path(readiness_path)
+            readme_path = staging / README_PATH
+            readme_path.write_bytes(render_dataset_card(active_release_root))
+            _fsync_path(readme_path)
+            empty_test_path = staging / EMPTY_TEST_PATH
+            empty_test_path.parent.mkdir(parents=True, exist_ok=True)
+            _write_table([], empty_test_path)
+            _fsync_path(empty_test_path)
+            _fsync_staging_directories(staging)
+            _rename_noreplace(staging, destination)
+        except BaseException:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+    finally:
+        connection.close()
+
+    final_manifest = destination / DATASET_CONFIG / "manifest.json"
+    return ShardResult(
+        output_root=destination,
+        manifest_path=final_manifest,
+        readiness_path=destination / READINESS_PATH,
+        readme_path=destination / README_PATH,
+        shards=tuple(shard_infos),
+        pilot_article_keys=pilot_keys,
+        row_count=accepted_rows,
         manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
     )
