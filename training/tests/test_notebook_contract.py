@@ -4,6 +4,9 @@ import ast
 import json
 from pathlib import Path
 import re
+from types import SimpleNamespace
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -70,6 +73,20 @@ def _source(cell: dict[str, object]) -> str:
 def _interview_cell(tag: str) -> str:
     cells = _interview_notebook()["cells"]
     return _source(cells[INTERVIEW_EXPECTED_TAGS.index(tag)])
+
+
+def _exec_interview_definitions(
+    tag: str, names: set[str], namespace: dict[str, object]
+) -> dict[str, object]:
+    tree = ast.parse(_interview_cell(tag))
+    definitions = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name in names
+    ]
+    assert {node.name for node in definitions} == names
+    exec(compile(ast.Module(body=definitions, type_ignores=[]), "<notebook>", "exec"), namespace)
+    return namespace
 
 
 def test_notebook_has_ordered_single_purpose_handoff_cells() -> None:
@@ -213,6 +230,9 @@ def test_interview_notebook_has_secrets_drive_identity_and_preview_gates() -> No
     assert "dataset_revision == DATASET_REVISION" in identity
     assert "manifest_sha256 == MANIFEST_SHA256" in identity
     assert "manifest['counts'] == EXPECTED_COUNTS" in identity
+    assert "list_repo_tree(" in identity
+    assert "remote_file.lfs.sha256 == shard['sha256']" in identity
+    assert "remote_file.lfs.size == shard['bytes']" in identity
     assert "TRAIN_ORDERED_SHA256" in identity
     assert "VALIDATION_ORDERED_SHA256" in identity
     assert "TEST_ORDERED_SHA256" in identity
@@ -221,6 +241,7 @@ def test_interview_notebook_has_secrets_drive_identity_and_preview_gates() -> No
 
 
 def test_interview_notebook_runs_gate_smoke_then_rebuilds_all_production_state() -> None:
+    config = _interview_cell("runtime-configuration")
     model = _interview_cell("model-construction")
     gate = _interview_cell("one-batch-gate")
     smoke = _interview_cell("smoke")
@@ -235,6 +256,9 @@ def test_interview_notebook_runs_gate_smoke_then_rebuilds_all_production_state()
     assert "one_batch_gate()" in gate
     assert "math.isfinite" in gate
     assert "SMOKE_ROWS" in smoke and "islice" in smoke
+    assert "smoke_gradient_accumulation_steps = 4" in config
+    assert "gradient_accumulation_steps=smoke_gradient_accumulation_steps" in model
+    assert "smoke_microbatches % smoke_gradient_accumulation_steps == 0" in smoke
     assert "smoke_trainer.train(" in smoke
     assert "SMOKE CHECKPOINT" in smoke
     for reset_marker in (
@@ -282,6 +306,27 @@ def test_interview_notebook_defaults_to_restartable_one_step_quick_test() -> Non
     assert "production-checkpoints" in train
 
 
+def test_interview_notebook_can_resume_an_interrupted_production_run() -> None:
+    config = _interview_cell("runtime-configuration")
+    reset = _interview_cell("production-reinitialization")
+    resume = _interview_cell("isolated-resume-verification")
+
+    assert "RESUME_CHECKPOINT_DIR = None" in config
+    assert "if RESUME_CHECKPOINT_DIR is not None:" in reset
+    assert "NOTEBOOK_CHECKPOINT_COMPLETE" in reset
+    assert "production_trainer.reload(" in reset
+    assert "notebook_restart_metadata.json" in reset
+    assert "weights_only=False" not in reset
+    assert "restored_checkpoint_manifest['training_config'] != training_config" in reset
+    assert "production_trainer.global_step != restored_restart_state['global_step']" in reset
+    assert "production_train_stream.next_ordered_row != restored_restart_state['next_ordered_row']" in reset
+    assert "if RESUME_CHECKPOINT_DIR is not None:" in resume
+    assert "resume_candidates.append(Path(RESUME_CHECKPOINT_DIR))" in resume
+    assert "def candidate_global_step(path):" in resume
+    assert "candidate_global_step(path) < production_optimizer_steps" in resume
+    assert ".name.removeprefix('step-')" not in resume
+
+
 def test_interview_notebook_validates_saves_reloads_and_resumes_in_isolation() -> None:
     validation = _interview_cell("validation")
     final_save = _interview_cell("final-save")
@@ -319,6 +364,11 @@ def test_interview_notebook_exports_truthful_hashes_and_publishes_privately() ->
     assert "model_info(" in publish
     assert "hub_commit_sha" in publish
     assert "HF_TOKEN" in publish
+    assert "hf_hub_download(" in publish
+    assert "remote_artifact_hashes" in publish
+    assert "existing_artifact_paths == expected_complete_paths" in publish
+    assert "existing_artifact_paths == payload_path_set" in publish
+    assert "Remote artifact prefix is partial or conflicting" in publish
 
 
 def test_interview_notebook_never_opens_or_iterates_test_examples() -> None:
@@ -336,3 +386,177 @@ def test_interview_notebook_never_opens_or_iterates_test_examples() -> None:
     )
     for pattern in forbidden:
         assert not re.search(pattern, all_source, re.IGNORECASE | re.DOTALL)
+
+
+def test_interview_notebook_fail_closed_gates_survive_optimized_python() -> None:
+    for cell in _interview_notebook()["cells"]:
+        python_source = "\n".join(
+            line for line in _source(cell).splitlines() if not line.startswith("!")
+        )
+        tree = ast.parse(python_source)
+        assert not any(isinstance(node, ast.Assert) for node in ast.walk(tree)), (
+            cell["metadata"]["tags"],
+            "use an explicit exception instead of optimization-removable assert",
+        )
+
+
+def test_interview_ordered_stream_runtime_resumes_without_repeat_or_test_calls() -> None:
+    calls: list[dict[str, object]] = []
+    rows = [
+        {"article_key": f"key-{index}", "split": "train"}
+        for index in range(6)
+    ]
+
+    class FakeDataset(list[dict[str, object]]):
+        def skip(self, count: int) -> "FakeDataset":
+            return FakeDataset(self[count:])
+
+    def fake_load_dataset(*args: object, **kwargs: object) -> FakeDataset:
+        calls.append({"args": args, **kwargs})
+        return FakeDataset(rows)
+
+    def fake_validate(row: object, *, expected_split: str) -> object:
+        assert isinstance(row, dict) and row["split"] == expected_split
+        return row
+
+    def fake_require(condition: object, message: str) -> None:
+        if not condition:
+            raise RuntimeError(message)
+
+    namespace = _exec_interview_definitions(
+        "ordered-stream",
+        {"OrderedInterviewStream"},
+        {
+            "DATASET_REPO_ID": "repo",
+            "DATASET_CONFIG": "distillation_2016_interview",
+            "dataset_revision": "a" * 40,
+            "HF_TOKEN": "secret",
+            "load_dataset": fake_load_dataset,
+            "islice": __import__("itertools").islice,
+            "validate_training_row": fake_validate,
+            "require": fake_require,
+        },
+    )
+    stream_type = namespace["OrderedInterviewStream"]
+    first = stream_type("train", 6)
+    iterator = iter(first)
+    consumed = [next(iterator), next(iterator)]
+    checkpoint = first.state_dict()
+    iterator.close()
+    resumed = stream_type("train", 6)
+    resumed.load_state_dict(checkpoint)
+    consumed.extend(list(resumed))
+
+    assert [row["article_key"] for row in consumed] == [f"key-{index}" for index in range(6)]
+    assert all(call["split"] == "train" for call in calls)
+    assert all(call["streaming"] is True for call in calls)
+    before = len(calls)
+    with pytest.raises(ValueError, match="train or validation"):
+        stream_type("test", 1)
+    assert len(calls) == before
+
+
+def test_interview_quick_cell_runtime_takes_one_step_saves_and_breaks(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    train_calls: list[int] = []
+
+    class FakeTrainer:
+        global_step = 0
+        epoch = 0
+
+        def train(self, *, max_steps: int) -> list[float]:
+            train_calls.append(max_steps)
+            self.global_step = max_steps
+            stream.next_ordered_row = 16
+            return [0.25]
+
+        def save(self, path: str, *, metrics: object) -> SimpleNamespace:
+            Path(path).mkdir(parents=True)
+            return SimpleNamespace(global_step=self.global_step)
+
+    stream = SimpleNamespace(next_ordered_row=0)
+
+    def complete(path: str, trainer: object, stream_value: object, scaler: object, manifest: object) -> object:
+        del trainer, scaler
+        Path(path, "notebook_restart_metadata.json").write_text(
+            json.dumps(
+                {
+                    "components": ["optimizer", "scheduler", "scaler", "rng"],
+                    "global_step": 1,
+                    "next_ordered_row": stream_value.next_ordered_row,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return manifest
+
+    def fake_require(condition: object, message: str) -> None:
+        if not condition:
+            raise RuntimeError(message)
+
+    namespace = {
+        "QUICK_TEST_MODE": True,
+        "production_trainer": FakeTrainer(),
+        "production_train_stream": stream,
+        "production_scaler": None,
+        "run_root": str(tmp_path),
+        "complete_restartable_checkpoint": complete,
+        "os": __import__("os"),
+        "json": json,
+        "Path": Path,
+        "require": fake_require,
+    }
+    exec(compile(_interview_cell("ordered-production-train"), "<quick-cell>", "exec"), namespace)
+
+    assert train_calls == [1]
+    assert namespace["production_trainer"].global_step == 1
+    assert Path(tmp_path, "quick-test", "notebook_restart_metadata.json").is_file()
+    assert "QUICK TEST ONLY" in capsys.readouterr().out
+
+
+def test_interview_publication_helpers_recover_and_verify_remote_bytes(tmp_path: Path) -> None:
+    namespace = _exec_interview_definitions(
+        "private-hub-publish",
+        {"classify_publication_state", "verify_remote_artifact_hashes"},
+        {"Path": Path, "hashlib": __import__("hashlib")},
+    )
+    classify = namespace["classify_publication_state"]
+    verify = namespace["verify_remote_artifact_hashes"]
+    payload = {"artifacts/id/a.bin", "artifacts/id/b.json"}
+    manifest_path = "artifacts/id/artifact_manifest.json"
+
+    assert classify(set(), payload, manifest_path) == "new"
+    assert classify(payload, payload, manifest_path) == "payload_only"
+    assert classify(payload | {manifest_path}, payload, manifest_path) == "complete"
+    with pytest.raises(RuntimeError, match="partial or conflicting"):
+        classify({"artifacts/id/a.bin"}, payload, manifest_path)
+
+    remote_root = tmp_path / "remote"
+    remote_root.mkdir()
+    remote_files: dict[str, Path] = {}
+    for repo_path, raw in {"artifacts/id/a.bin": b"abc", "artifacts/id/b.json": b"{}"}.items():
+        path = remote_root / Path(repo_path).name
+        path.write_bytes(raw)
+        remote_files[repo_path] = path
+    download_calls: list[str] = []
+
+    def fake_download(repo_id: str, *, filename: str, **kwargs: object) -> str:
+        del repo_id, kwargs
+        download_calls.append(filename)
+        return str(remote_files[filename])
+
+    hashlib_module = __import__("hashlib")
+    expected_hashes = {
+        repo_path: hashlib_module.sha256(path.read_bytes()).hexdigest()
+        for repo_path, path in remote_files.items()
+    }
+    expected_sizes = {repo_path: path.stat().st_size for repo_path, path in remote_files.items()}
+    verified = verify(
+        "repo", "b" * 40, expected_hashes, expected_sizes, "secret", fake_download
+    )
+    assert set(verified) == set(remote_files)
+    assert download_calls == sorted(remote_files)
+    remote_files["artifacts/id/a.bin"].write_bytes(b"corrupt")
+    with pytest.raises(RuntimeError, match="[Rr]emote artifact byte mismatch"):
+        verify("repo", "b" * 40, expected_hashes, expected_sizes, "secret", fake_download)
