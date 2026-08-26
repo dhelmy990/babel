@@ -7,7 +7,7 @@ Use the private Hugging Face dataset exactly as pinned below. Do not substitute
 
 - Repository: `dhelmy990/babel-wikipedia-experiment`
 - Configuration: `distillation_2016_interview`
-- Revision: `3eb87a0a8cf4a1feb73e3a326fb7d619048f69f1`
+- Revision: `b440e98b04ab77afed7caf0455eca3189235fc3b`
 - Example schema: `distillation-example-v1`
 - Selection seed: `babel-interview-2016-v1`
 - Train: 50,000 rows
@@ -16,7 +16,7 @@ Use the private Hugging Face dataset exactly as pinned below. Do not substitute
 - Smoke: first 1,000 rows of the ordered train selection
 
 The revision is recorded with mode `0600` at
-`/home/dhelmy990/Data/babel-data/receipts/interview-2016-revision.txt`.
+`/home/dhelmy990/Data/babel-data/receipts/interview-2016-corrected-revision.txt`.
 Authenticated streaming validation at that exact revision produced one valid,
 finite 100-dimensional row from each split:
 
@@ -29,6 +29,15 @@ avoids a PyArrow 17/Python 3.12 native garbage-collection teardown abort seen
 only after validating several remote streams in one process; validation itself
 completed before that teardown.
 
+Revision `3eb87a0a8cf4a1feb73e3a326fb7d619048f69f1` and its preserved
+`interview-2016-revision.txt` receipt are superseded because their manifest
+recorded the nonexistent producer SHA
+`436f171649c0d8d917e0d29216673b798c883a54`. Do not train from that revision.
+The correction commit changes only the interview manifest and readiness
+provenance metadata; all Parquet bytes, counts, frontier evidence, selection
+identities and checksums, the dataset card, the complete configuration
+manifest, and prior Hub history remain unchanged.
+
 ## Frozen partial frontier disclosure
 
 This is a deterministic sample of an incomplete extraction frontier, not a
@@ -40,7 +49,7 @@ sample chosen after the complete corpus was known.
 - Maximum selected-text journal row: 1,310,000
 - Database identity SHA-256:
   `8bb8fe046ec962aa8bf4b58ee99ed7cc8eee3d1a50723181df3e400e6a3f9c85`
-- Exporter code commit: `436f171649c0d8d917e0d29216673b798c883a54`
+- Exporter code commit: `436f1714a4034a11544bbc16cf94072bb56feff0`
 - Teacher source revision: `ee01785fc4cf3d7f25c90917f41e3962f93e9370`
 - Teacher SHA-256:
   `5508a20088e0c5a2af4128f9aa80c675230c43b4538d42f89fb79ec324caaf56`
@@ -65,7 +74,7 @@ Parquet SHA-256:
 - validation: `a925eb795f253635f3a80a76994a7139a0f81f4e784beb61dfc93f8b662dc8f0`
 - test: `103f22b38b048973f8ab6ba52efca41f667f37c305b5dfea8b752dc492d7ac03`
 - config manifest:
-  `d6696ee5336ac31eb3511908bec6f7596ea390ecc9d2cf69f98b26e73b52fab3`
+  `33c65554da38af5888e5aae75350ae8ee7889d6047c9f8339d97781e4326de09`
 
 ## Training protocol
 
