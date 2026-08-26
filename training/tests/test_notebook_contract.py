@@ -364,7 +364,7 @@ def test_interview_notebook_exports_truthful_hashes_and_publishes_privately() ->
     assert "model_info(" in publish
     assert "hub_commit_sha" in publish
     assert "HF_TOKEN" in publish
-    assert "hf_hub_download(" in publish
+    assert "hf_hub_download," in publish
     assert "remote_artifact_hashes" in publish
     assert "existing_artifact_paths == expected_complete_paths" in publish
     assert "existing_artifact_paths == payload_path_set" in publish
@@ -560,3 +560,161 @@ def test_interview_publication_helpers_recover_and_verify_remote_bytes(tmp_path:
     remote_files["artifacts/id/a.bin"].write_bytes(b"corrupt")
     with pytest.raises(RuntimeError, match="[Rr]emote artifact byte mismatch"):
         verify("repo", "b" * 40, expected_hashes, expected_sizes, "secret", fake_download)
+
+
+def test_interview_publication_state_machine_runtime_recovers_and_rejects_conflicts(
+    tmp_path: Path,
+) -> None:
+    namespace = _exec_interview_definitions(
+        "private-hub-publish",
+        {
+            "classify_publication_state",
+            "verify_remote_artifact_hashes",
+            "publish_private_artifact",
+        },
+        {"Path": Path, "hashlib": __import__("hashlib"), "json": json, "re": re},
+    )
+    publish = namespace["publish_private_artifact"]
+
+    class FakeAdd:
+        def __init__(self, *, path_in_repo: str, path_or_fileobj: str) -> None:
+            self.path_in_repo = path_in_repo
+            self.path_or_fileobj = path_or_fileobj
+
+    class FakeHub:
+        def __init__(self) -> None:
+            self.head = "0" * 40
+            self.commits: dict[str, dict[str, bytes]] = {self.head: {}}
+            self.counter = 0
+            self.fail_manifest_once = True
+
+        def create_repo(self, **kwargs: object) -> None:
+            assert kwargs["private"] is True
+
+        def model_info(self, repo_id: str, *, revision: str, token: str) -> SimpleNamespace:
+            del repo_id, token
+            sha = self.head if revision == "main" else revision
+            return SimpleNamespace(
+                private=True,
+                sha=sha,
+                siblings=[SimpleNamespace(rfilename=path) for path in self.commits[sha]],
+            )
+
+        def create_commit(self, **kwargs: object) -> SimpleNamespace:
+            parent = kwargs["parent_commit"]
+            assert parent == self.head
+            operations = kwargs["operations"]
+            if self.fail_manifest_once and any(
+                operation.path_in_repo.endswith("artifact_manifest.json")
+                for operation in operations
+            ):
+                self.fail_manifest_once = False
+                raise RuntimeError("injected manifest commit failure")
+            snapshot = dict(self.commits[parent])
+            for operation in operations:
+                snapshot[operation.path_in_repo] = Path(operation.path_or_fileobj).read_bytes()
+            self.counter += 1
+            self.head = f"{self.counter:040x}"
+            self.commits[self.head] = snapshot
+            return SimpleNamespace(oid=self.head)
+
+        def download(self, repo_id: str, *, filename: str, revision: str, **kwargs: object) -> str:
+            del repo_id, kwargs
+            raw = self.commits[revision][filename]
+            destination = tmp_path / f"download-{revision}-{Path(filename).name}"
+            destination.write_bytes(raw)
+            return str(destination)
+
+    artifact_dir = tmp_path / "artifact"
+    artifact_dir.mkdir()
+    (artifact_dir / "a.bin").write_bytes(b"abc")
+    (artifact_dir / "b.json").write_bytes(b"{}")
+    artifact_hashes = {
+        path.name: __import__("hashlib").sha256(path.read_bytes()).hexdigest()
+        for path in artifact_dir.iterdir()
+    }
+    manifest_path = artifact_dir / "artifact_manifest.json"
+
+    def fresh_manifest() -> dict[str, object]:
+        value = {
+            "artifact_id": "id",
+            "identity": {"dataset_config": "distillation_2016_interview"},
+            "artifact_hashes": artifact_hashes,
+            "publication": {
+                "repo_id": "owner/model",
+                "private": True,
+                "artifact_payload_commit_sha": None,
+            },
+        }
+        manifest_path.write_bytes(
+            (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        )
+        return value
+
+    def canonical(value: object) -> bytes:
+        return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+    hub = FakeHub()
+    with pytest.raises(RuntimeError, match="injected manifest commit failure"):
+        publish(
+            hub,
+            "owner/model",
+            "id",
+            artifact_dir,
+            fresh_manifest(),
+            manifest_path,
+            artifact_hashes,
+            "secret",
+            FakeAdd,
+            hub.download,
+            canonical,
+        )
+    assert set(hub.commits[hub.head]) == {"artifacts/id/a.bin", "artifacts/id/b.json"}
+
+    recovered = publish(
+        hub,
+        "owner/model",
+        "id",
+        artifact_dir,
+        fresh_manifest(),
+        manifest_path,
+        artifact_hashes,
+        "secret",
+        FakeAdd,
+        hub.download,
+        canonical,
+    )
+    assert recovered["publication_state"] == "payload_only"
+    complete = publish(
+        hub,
+        "owner/model",
+        "id",
+        artifact_dir,
+        fresh_manifest(),
+        manifest_path,
+        artifact_hashes,
+        "secret",
+        FakeAdd,
+        hub.download,
+        canonical,
+    )
+    assert complete["publication_state"] == "complete"
+
+    manifest_repo_path = "artifacts/id/artifact_manifest.json"
+    valid_snapshot = dict(hub.commits[hub.head])
+    contradictory = json.loads(valid_snapshot[manifest_repo_path])
+    contradictory["publication"]["private"] = False
+    hub.commits[hub.head][manifest_repo_path] = canonical(contradictory)
+    with pytest.raises(RuntimeError, match="manifest identity conflicts"):
+        publish(
+            hub, "owner/model", "id", artifact_dir, fresh_manifest(), manifest_path,
+            artifact_hashes, "secret", FakeAdd, hub.download, canonical,
+        )
+    hub.commits[hub.head] = valid_snapshot
+    payload_commit = complete["artifact_payload_commit_sha"]
+    hub.commits[payload_commit]["artifacts/id/a.bin"] = b"corrupt"
+    with pytest.raises(RuntimeError, match="[Rr]emote artifact byte mismatch"):
+        publish(
+            hub, "owner/model", "id", artifact_dir, fresh_manifest(), manifest_path,
+            artifact_hashes, "secret", FakeAdd, hub.download, canonical,
+        )
