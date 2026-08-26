@@ -44,8 +44,9 @@ Work proceeds in this order:
    verify its pinned release remotely.
 3. Stop. The user prepares and launches a separate training agent. No other
    agent silently assumes ownership of the full training run.
-4. After the user confirms that training is healthy, produce the real June and
-   July environments.
+4. After the user confirms that training is healthy, produce the real,
+   deterministically sampled June and July engineering environments defined
+   below.
 5. Prepare the serving adapter against the training artifact contract. A
    structurally correct fixture may test parsing, but it cannot satisfy real
    integration acceptance.
@@ -56,6 +57,50 @@ Work proceeds in this order:
 8. Execute topology, retrieval, failure-isolation, and scaling experiments.
 9. Publish accepted datasets, models, interactions, raw measurements, and
    reports through simple rolling Hugging Face uploads.
+
+## June and July Engineering Snapshot Scale
+
+The complete 2016 distillation release remains complete because it determines
+the Qwen student's training coverage. The June and July 2026 environments have
+a different purpose: they provide real source material at sufficient scale for
+storage, retrieval, concurrency, feedback, and topology experiments. They do
+not need to reproduce every article in either monthly Wikipedia.
+
+Each monthly environment contains exactly 100,000 eligible namespace-zero
+articles:
+
+- an 80,000-identity shared temporal core present in both months; and
+- a 20,000-identity monthly supplement selected separately for that month.
+
+The shared core is selected deterministically from crosswalked identities. It
+first includes required dashboard seeds and their valid one-hop graph
+neighborhoods, then high-traffic Clickstream identities, and finally a
+seeded-hash tail for topical variety. The monthly supplements use the same
+priority classes against each month's remaining eligible identities. When an
+identity would enter both supplements, the deterministic crosswalk and ranking
+assign it to only one supplement and backfill the other. The resulting union
+therefore contains exactly 120,000 identities when both source months provide
+sufficient eligible rows; failure to fill a quota fails publication rather
+than silently shrinking it.
+
+For each selected monthly article, retain real text, canonical page identity,
+revision and content hashes, resolved redirects, real induced directed
+pagelinks, and real Clickstream transitions whose endpoints are both selected.
+The observable/hidden boundary remains unchanged: graph edges and behavioral
+signals never enter observable catalog configurations. All source reads use
+backend authentication at exact private-Hugging-Face commit SHAs, and the
+selection manifest records the policy version, seed, source revisions, ordered
+identity checksums, shared/supplement membership, and exclusion counts.
+
+These releases are named and documented as **100k sampled engineering
+snapshots**, never complete monthly Wikipedias. A complete monthly expansion is
+post-interview evidence expansion and is not a prerequisite for model
+integration or topology measurement.
+
+The source snapshots and runtime population are separate quantities. The
+formal experiment still targets 10,000 distinct synthetic-created Babels and a
+creator ladder of 50, 100, and 500. Only those created Babels enter pgvector or
+the serving candidate set; the remaining source articles are creation material.
 
 ## Supported Topologies
 
