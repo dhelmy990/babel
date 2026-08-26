@@ -486,6 +486,13 @@ def test_stage_versioned_release_uploads_and_streams_each_shard(
         supersedes_commit_sha=PARENT,
     )
     api = FakeApi(current_sha=PARENT)
+    pilot = write_shards(
+        values,
+        tmp_path / "pilot",
+        pilot_size=len(values),
+        provenance=provenance_document(),
+    )
+    api.remote["distillation_2016/manifest.json"] = pilot.manifest_path.read_bytes()
     load_calls: list[dict[str, object]] = []
 
     def load(*args: object, **kwargs: object) -> object:
@@ -509,6 +516,29 @@ def test_stage_versioned_release_uploads_and_streams_each_shard(
         {item["split"]: item["path"]} for item in manifest["shards"]
     ]
     assert all(call["revision"] == COMMIT for call in load_calls)
+    journal = [
+        json.loads(line)
+        for line in (result.output_root / "publication-commits.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    assert [item["path"] for item in journal] == paths
+    assert [item["commit_sha"] for item in journal] == list(commits)
+    assert all(item["remote_stream_verified"] is True for item in journal)
+    operations = list(api.operations)
+    journal_bytes = (result.output_root / "publication-commits.jsonl").read_bytes()
+
+    resumed = stage_versioned_release_shards(
+        api,
+        "dhelmy990/babel-wikipedia-experiment",
+        result.manifest_path,
+        "token",
+        load_dataset_fn=load,
+    )
+
+    assert resumed == commits
+    assert api.operations == operations
+    assert (result.output_root / "publication-commits.jsonl").read_bytes() == journal_bytes
 
 
 def test_publish_semantic_preflight_streams_parquet_batches(

@@ -153,6 +153,9 @@ manifest inventory, counts, shard SHA-256 values, aggregate row digest,
 readiness bytes, and streamed row proofs agree. Remotely load at least one row
 from every newly uploaded shard at its returned commit. Preserve the JSON CLI
 output because its `publication_commits` sequence is the rolling upload audit.
+The same per-shard evidence is durably appended to
+`publication-commits.jsonl` in the prepared output root, including the shard
+checksum and successful exact-commit stream proof; preserve that journal.
 
 ## Training boundary
 

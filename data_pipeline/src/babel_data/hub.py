@@ -968,6 +968,26 @@ def stage_versioned_release_shards(
     if not isinstance(active_root, str) or not isinstance(predecessor, str):
         raise ValueError("rolling staging requires a versioned superseding release")
     artifact_root = local_manifest_path.parent.parent
+    journal_path = artifact_root / "publication-commits.jsonl"
+    journal: dict[str, dict[str, object]] = {}
+    if journal_path.exists():
+        with journal_path.open(encoding="utf-8") as source:
+            for line_number, line in enumerate(source, 1):
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError as error:
+                    raise ValueError("rolling publication journal is malformed") from error
+                if not isinstance(entry, dict) or set(entry) != {
+                    "path", "sha256", "commit_sha", "remote_stream_verified"
+                }:
+                    raise ValueError("rolling publication journal has invalid fields")
+                path = str(entry["path"])
+                if path in journal or entry["remote_stream_verified"] is not True:
+                    raise ValueError(
+                        f"rolling publication journal entry {line_number} is invalid"
+                    )
+                _checked_sha(entry["commit_sha"], label="journal commit SHA")
+                journal[path] = entry
     loader = load_dataset_fn or _dataset_loader()
     info = _private_info(
         api.dataset_info(repo_id, revision="main", token=token)
@@ -1009,10 +1029,15 @@ def stage_versioned_release_shards(
             backoff_seconds=0.5,
             sleep=time.sleep,
         )
+        recorded = journal.get(path)
+        if recorded is not None and recorded.get("sha256") != item["sha256"]:
+            raise ValueError("rolling publication journal shard checksum disagrees")
         if existing is not None:
             if existing != local.read_bytes():
                 raise ValueError("inactive release shard path already has different bytes")
-            commit_sha = parent
+            commit_sha = (
+                str(recorded["commit_sha"]) if recorded is not None else parent
+            )
         else:
             result = api.create_commit(
                 repo_id=repo_id,
@@ -1029,7 +1054,9 @@ def stage_versioned_release_shards(
             )
             if _checked_sha(getattr(published, "sha", None)) != commit_sha:
                 raise RemoteVerificationError("staged shard commit identity disagrees")
-        if _remote_bytes(api, repo_id, path, commit_sha, token) != local.read_bytes():
+        if path not in _verify_remote_shards(
+            api, repo_id, commit_sha, token, [item]
+        ):
             raise RemoteVerificationError("staged shard remote bytes disagree")
         streamed = loader(
             repo_id,
@@ -1047,8 +1074,24 @@ def stage_versioned_release_shards(
         checked = validate_distillation_row(row)
         if checked["split"] != item["split"]:
             raise RemoteVerificationError("staged shard remote stream has wrong split")
+        if recorded is None:
+            entry = {
+                "path": path,
+                "sha256": item["sha256"],
+                "commit_sha": commit_sha,
+                "remote_stream_verified": True,
+            }
+            payload = json.dumps(
+                entry, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8") + b"\n"
+            with journal_path.open("ab") as destination:
+                destination.write(payload)
+                destination.flush()
+                os.fsync(destination.fileno())
+            journal[path] = entry
         commits.append(commit_sha)
-        parent = commit_sha
+        if existing is None:
+            parent = commit_sha
     return tuple(commits)
 
 
