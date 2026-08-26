@@ -146,8 +146,11 @@ def audit_hnsw_against_exact(
     """Audit a full-corpus HNSW index against the exact IP oracle."""
     candidates = normalized_float32(candidate_vectors)
     queries = normalized_float32(query_vectors)
-    if queries.shape[0] > 2_000:
-        raise ValueError("HNSW exact audit is bounded to 2,000 queries")
+    required_queries = min(2_000, candidates.shape[0])
+    if queries.shape[0] != required_queries:
+        raise ValueError(
+            f"HNSW exact audit requires exactly {required_queries} queries"
+        )
     get_count = getattr(hnsw_index, "get_current_count", None)
     if not callable(get_count) or int(get_count()) != candidates.shape[0]:
         raise ValueError("HNSW audit requires an index over the full corpus")

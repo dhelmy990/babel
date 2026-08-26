@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -103,14 +104,14 @@ def test_exact_index_receives_normalized_contiguous_float32(
 
 
 def test_hnsw_audit_requires_full_index_and_uses_exact_queries(monkeypatch) -> None:
-    exact_labels = np.tile(np.arange(50), (2, 1))
+    exact_labels = np.tile(np.arange(50), (60, 1))
 
     class Exact:
         def add(self, values: np.ndarray) -> None:
             assert values.shape == (60, 2)
 
         def search(self, queries: np.ndarray, k: int):
-            assert queries.shape == (2, 2)
+            assert queries.shape == (60, 2)
             assert k == 50
             return np.ones((2, 50), dtype=np.float32), exact_labels
 
@@ -128,8 +129,20 @@ def test_hnsw_audit_requires_full_index_and_uses_exact_queries(monkeypatch) -> N
             return exact_labels.copy(), np.zeros((2, k), dtype=np.float32)
 
     candidates = np.column_stack((np.ones(60), np.arange(1, 61)))
-    queries = np.asarray([[1.0, 2.0], [2.0, 1.0]])
+    queries = np.column_stack((np.ones(60), np.arange(1, 61)))
 
     report = audit_hnsw_against_exact(Hnsw(), candidates, queries)
 
-    assert report == {"audit_queries": 2, "recall_at_10": 1.0, "recall_at_50": 1.0}
+    assert report == {"audit_queries": 60, "recall_at_10": 1.0, "recall_at_50": 1.0}
+
+
+def test_hnsw_audit_rejects_fewer_than_the_frozen_exact_query_count() -> None:
+    class Hnsw:
+        def get_current_count(self) -> int:
+            return 60
+
+    candidates = np.column_stack((np.ones(60), np.arange(1, 61)))
+    queries = np.asarray([[1.0, 2.0], [2.0, 1.0]])
+
+    with pytest.raises(ValueError, match="exactly 60"):
+        audit_hnsw_against_exact(Hnsw(), candidates, queries)
