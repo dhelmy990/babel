@@ -27,8 +27,10 @@ necessarily separate physical machines.
 - **Model-state distributor:** validates and registers immutable model states
   and instructs serving to activate one. It is not a distributed parameter
   server and does not send weights through Kafka.
-- **Original model:** the immutable complete 2016 distilled Qwen-based
-  recommender selected as the parent of an online run.
+- **Original model:** the immutable Qwen-based recommender distilled on the
+  fixed 50,000-example 2016 interview subset and selected as the parent of an
+  online run. The dataset release remains complete even though this model's
+  pre-interview training subset is not.
 - **Child model:** an immutable post-run model descended from the original or
   another explicitly selected parent. Creating or activating a child never
   overwrites its parent.
@@ -145,11 +147,13 @@ complete pinned release:
   up to 512 when measured memory permits.
 
 Sampling preserves the release's existing train, validation, and test split
-assignments. Within each split, order rows by a seeded hash of the canonical
-article identity and select the lowest required ranks. The 1,000-row smoke set
-is the first 1,000 identities of the same ordered 50,000-row training set. Save
-the seed, ordered article identities, per-split checksums, dataset commit SHA,
-and selection-policy version with every checkpoint and final model artifact.
+assignments. Within each split, order rows by
+`SHA-256("babel-interview-2016-v1" + NUL + article_key)` and select the lowest
+required ranks. The 1,000-row smoke set is the first 1,000 identities of the
+same ordered 50,000-row training set. Save the seed
+`babel-interview-2016-v1`, ordered article identities, per-split checksums,
+dataset commit SHA, and selection-policy version with the dataset handoff,
+every checkpoint, and final model artifact.
 
 Validation uses exact search over the fixed 5,000 held-out validation vectors.
 The fixed 5,000-row test set remains untouched until the 50,000-example model

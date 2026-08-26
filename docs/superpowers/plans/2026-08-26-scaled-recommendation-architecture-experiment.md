@@ -4,7 +4,7 @@
 
 **Goal:** Turn the working Friday miniature into a sufficiently large, real-Qwen recommendation architecture experiment that compares monolithic and split serving/training topologies, preserves immutable model lineage, and saves reproducible scalability evidence.
 
-**Architecture:** Preserve the implemented C++ dashboard control plane, PostgreSQL/pgvector storage, synchronous recommendation POST, Kafka feedback, online trainer, immutable model registry, and benchmark package. Replace the miniature datasets and NumPy encoder with commit-pinned Hugging Face source releases, the complete 2016 distilled Qwen artifact, real 100k June/July engineering snapshots, durable experiment edges, bounded recommendation walks, selectable same-process/same-host topologies, concurrent load, and immutable result publication.
+**Architecture:** Preserve the implemented C++ dashboard control plane, PostgreSQL/pgvector storage, synchronous recommendation POST, Kafka feedback, online trainer, immutable model registry, and benchmark package. Replace the miniature datasets and NumPy encoder with a complete commit-pinned 2016 Hugging Face release, the real Qwen artifact trained on its deterministic 50k interview subset, real time-boxed 10k June/July engineering snapshots, durable experiment edges, bounded recommendation walks, selectable same-process/same-host topologies, concurrent load, and immutable result publication.
 
 **Tech Stack:** C++20/Drogon, PostgreSQL 18 with pgvector 0.8.6, Python 3.10+, PyTorch, Transformers, PEFT, Accelerate, FastAPI/Uvicorn, Hugging Face Hub/Datasets, PyArrow/Parquet, FAISS exact search, optional hnswlib, Apache Kafka 4.3.1 KRaft, psycopg 3, asyncio/httpx, psutil/pynvml, Docker Compose, Catch2/CTest, pytest, Node test runner.
 
@@ -41,9 +41,11 @@ Design authority:
 - Only synthetic-created Babels may enter the candidate index. A creator cannot create the same source article twice in a run.
 - Include creates one durable directed edge from current source Babel to recommended Babel; exclude/ignore create none.
 - Recommendation-walk probability is 0.40 and independent of hidden relevance decisions. Depth is two graph hops: request root and depth-one nodes, record but do not expand depth-two nodes. Cap each session at ten requests.
-- Complete 2016 distilled Qwen is the immutable original; online runs create immutable children and never overwrite parents.
+- Publish the complete 2016 dataset, but train the pre-interview immutable original on exactly 50,000 deterministic training rows for one epoch. Use 1,000 rows for smoke, 5,000 fixed validation rows, 5,000 untouched test rows, and max length 384 by default (configurable 256..512). No 100k/200k expansion precedes integration.
+- The 50k-distilled Qwen is the immutable original; online runs create immutable children and never overwrite parents.
 - Kafka carries feedback and identity, never model weights.
-- A separate, user-launched training agent owns full Qwen training. Both human gates below are non-bypassable.
+- A separate, user-launched training agent owns Qwen training. Both human gates below are non-bypassable.
+- Monthly snapshot selection reads only indexed/range-addressable, streamable objects at exact authenticated HF commits; it never performs a full XML/SQL discovery scan and never falls back to the 80-row fixture.
 - Automated 3×3 validation uses the tiny fixture only. Full matrices are explicit operator experiments.
 - Persist raw evidence before summaries, including dataset/model/vector/request/feedback/code/topology/placement/resource/hardware identity.
 - Read `HF_TOKEN` from `/home/dhelmy990/Code/babel/.env` without printing, logging, committing, or embedding it.
@@ -65,7 +67,7 @@ Design authority:
 Tasks 1-3: audit, source mirror, complete 2016
     -> GATE A: STOP; user launches separate training agent
     -> user confirms real batch/backward/checkpoint healthy
-Tasks 4-5: real sampled June/July snapshots plus serving-adapter preparation
+Tasks 4-5: real time-boxed 10k June/July snapshots plus serving-adapter preparation
     -> GATE B: STOP until final trained artifact is published
 Tasks 6-13: real integration, graph, topology, dashboard, experiments
 ```
@@ -84,7 +86,7 @@ Wave 0: Orchestrator -> Task 1 baseline
 Wave 1 before Gate A:
   Agent A -> Task 2 source mirror
   Agent B -> Task 3 full-2016 builder
-  Agent C -> Task 3 validation/handoff lane
+  Agent C -> Task 3 deterministic 50k selection/validation/handoff lane
   Orchestrator integrates -> GATE A -> STOP
 
 Wave 2 after user reports training healthy:
@@ -128,7 +130,7 @@ integrates in task order and supplies the next phase's pinned identities.
 - Produces: a closed `preserve|replace|new|deferred` receipt mapping every critical gap to Tasks 2-13.
 
 - [ ] Record Git/HF/data/model/run identities. Label pilot/miniature artifacts non-scale.
-- [ ] Map these exact replacements: complete 2016, real 100k June/July engineering snapshots, real Qwen adapter, real pgvector vectors, durable edges, walks, topology modes, concurrent load, saved trials, rolling publication.
+- [ ] Map these exact replacements: complete 2016 dataset, deterministic 50k Qwen training, real time-boxed 10k June/July engineering snapshots, real Qwen adapter, real pgvector vectors, durable edges, walks, topology modes, concurrent load, saved trials, rolling publication.
 - [ ] Run the preserved baseline without bulk jobs:
 
 ```bash
@@ -199,7 +201,7 @@ multi-writer or filesystem attack scenarios.
 
 ---
 
-### Task 3: Build and Publish Complete 2016 plus Training Handoff
+### Task 3: Publish Complete 2016 plus the Fixed 50k Training Handoff
 
 **Files:**
 - Create: `data_pipeline/src/babel_data/full_2016.py`
@@ -207,15 +209,16 @@ multi-writer or filesystem attack scenarios.
 - Modify: `data_pipeline/src/babel_data/reconcile.py`
 - Modify: `data_pipeline/src/babel_data/shard.py`
 - Modify: `data_pipeline/src/babel_data/cli.py`
+- Create: `data_pipeline/src/babel_data/schemas/interview-training-selection-v1.json`
 - Modify: `training/src/babel_training/validation.py`
-- Create: `training/src/babel_training/full_run.py`
-- Create: `training/tests/test_full_run.py`
+- Modify: `training/src/babel_training/full_run.py`
+- Modify: `training/tests/test_full_run.py`
 - Create: `prompts/full-2016-training-handoff.md`
 - Create: `docs/runbooks/full-2016-distillation.md`
 
 **Interfaces:**
 - Consumes: Task 2 pins; existing teacher/XML parsers, release contracts, Hub publisher, training package.
-- Produces: complete `distillation_2016`, final commit, `FullValidationPlanV1`, Gate A handoff.
+- Produces: complete `distillation_2016`, final commit, `InterviewTrainingPlanV1`, deterministic selection contract, and Gate A handoff.
 
 - [ ] Write failing accounting and validation-plan tests:
 
@@ -225,30 +228,33 @@ def test_every_teacher_row_is_accounted(result):
     assert result.rows_written == result.matched
     assert result.duplicate_article_keys == result.invalid_vector_count == 0
 
-def test_validation_defaults():
-    plan = FullValidationPlanV1.for_corpus(400_000)
-    assert (plan.monitor_query_count, plan.monitor_candidate_count) == (2_000, 50_000)
-    assert (plan.final_query_count, plan.final_candidate_count) == (20_000, 100_000)
+def test_interview_training_defaults():
+    plan = InterviewTrainingPlanV1()
+    assert (plan.smoke_rows, plan.train_rows) == (1_000, 50_000)
+    assert (plan.validation_rows, plan.test_rows) == (5_000, 5_000)
+    assert (plan.epochs, plan.max_length) == (1, 384)
     assert plan.exact_index == "faiss.IndexFlatIP"
-    assert plan.hnsw_exact_audit_queries == 2_000
+    assert plan.validation_candidate_rows == 5_000
 ```
 
-- [ ] Run focused tests and confirm `full_2016`/`FullValidationPlanV1` are absent.
+- [ ] Run focused tests and confirm the fixed interview training/selection contract is absent.
 - [ ] Implement `build_complete_2016(source_pin, data_root, output_root, resume=True)`: read only HF-pinned sources, stream bounded batches, preserve page/revision/title/text, require finite 100d vectors, deterministic split, range journal, and explicit exclusion reasons.
 - [ ] Emit rolling Parquet shards beneath `distillation_2016/{split}/`; after each upload record commit and remotely load one row. Promote readiness to `complete` only after inventory, counts, digests, and proof agree.
-- [ ] Freeze validation/search:
+- [ ] Implement `InterviewTrainingPlanV1` and deterministic selection. Preserve the release's train/validation/test assignments; within each split rank by `SHA-256("babel-interview-2016-v1" + NUL + article_key)`. Select the first 50,000 train, first 5,000 validation, and first 5,000 test identities; the smoke set is the first 1,000 selected train identities. Emit and remotely verify `interview-training-selection-v1.json` with the complete dataset release. Persist the seed, ordered IDs, policy version, per-split checksums, and dataset commit in checkpoints and the final artifact.
+- [ ] Freeze deadline training and validation:
 
 ```text
-monitor: 2,000 deterministic queries vs 50,000 candidates
-final queries: deterministic 5%, clamped 10,000..50,000 and to available rows
-final candidates: min(100,000, complete corpus), whole corpus when smaller
+smoke: first 1,000 IDs of the selected training order
+interview train: exactly 50,000 IDs, one epoch, no pre-interview expansion
+validation: fixed 5,000 held-out IDs against exactly those 5,000 candidates
+test: fixed 5,000 IDs, untouched until the 50k checkpoint is complete
 exact oracle: normalized float32 faiss.IndexFlatIP
 metrics: Recall/NDCG@10/50, paired cosine, NaNs, norms, examples
-HNSW audit: full index with 2,000 exact-oracle audit queries
+HNSW/full-corpus ANN audit: post-interview
+max length: 384 default; operator may choose 256..512 based on measured memory
 ```
 
-- [ ] Persist selected article keys/checksum. Monitoring may reuse the fixed subset; final artifact acceptance uses the final subset.
-- [ ] Write `prompts/full-2016-training-handoff.md` with pinned non-secret dataset/model/source SHAs, exact Colab commands, full settings, checkpoint/resume, validation, and publication instructions. Require the training agent to report first successful backward/checkpoint and final model/validation commits.
+- [ ] Write `prompts/full-2016-training-handoff.md` with pinned non-secret dataset/model/source SHAs, exact 1k smoke and 50k interview settings, one epoch, max length 384, checkpoint/resume, fixed 5k exact validation, untouched 5k test, and publication instructions. Require the training agent to report first successful backward/checkpoint and the final 50k model/validation commits.
 - [ ] Execute the real build and remote acceptance. Do not launch training.
 - [ ] Commit:
 
@@ -265,11 +271,12 @@ explicitly confirms that the separate training agent loaded the exact release,
 completed real forward/backward work, and saved its first normal checkpoint.
 
 **Next-phase context:** Review completeness, remote loading, finite vectors,
-deterministic validation, and handoff usability only.
+deterministic 50k/5k/5k selection, exact 5k validation, and handoff usability
+only. Do not require full-corpus training or ANN validation.
 
 ---
 
-### Task 4: Produce Real 100k June and July Engineering Snapshots
+### Task 4: Produce Real Time-Boxed 10k June and July Engineering Snapshots
 
 **Files:**
 - Create: `data_pipeline/src/babel_data/monthly/sources.py`
@@ -284,15 +291,16 @@ deterministic validation, and handoff usability only.
 - Create: `docs/runbooks/monthly-environment-build.md`
 
 **Interfaces:**
-- Consumes: Gate A approval and pinned monthly Wikipedia/Clickstream mirrors.
-- Produces: real 100k June/July observed+hidden engineering-snapshot configurations and one connected commit.
+- Consumes: Gate A approval and exact indexed/streamable Hugging Face source identifiers for both monthly Wikipedia and Clickstream inputs. Task 4 mirrors the selected source objects into the private repository and pins them before either construction timer starts.
+- Produces: real 10k-target June/July observed+hidden engineering-snapshot configurations and one connected commit.
 
-- [ ] Write tests rejecting demo fixtures as real releases and scanning observed schemas for hidden fields.
-- [ ] Write selection tests proving exactly 80,000 crosswalked shared identities, exactly 20,000 disjoint monthly-supplement identities per month, exactly 100,000 rows per monthly catalog, and an exactly 120,000-identity union. Insufficient eligible rows, quota drift, nondeterministic ordering, or supplement overlap must fail publication.
-- [ ] Implement `EngineeringSnapshotPolicyV1` in `selection.py`. Select required dashboard seeds and valid one-hop neighbors first, then high-traffic Clickstream identities, then a seeded-hash tail. Resolve supplement collisions through the title-independent crosswalk, deterministically retain one month, and backfill the other. Emit policy version, seed, ordered identity checksums, membership, source pins, and exclusion counts.
-- [ ] Implement one reusable builder for namespace-zero pages, redirects, pagelinks, Wikidata identity, and Clickstream from pinned HF objects. Restrict output to the selected monthly identities and induced endpoints. Output canonical catalog/text, directed deduplicated graph, preserved transition counts, hidden inputs, and title-independent cross-period identity.
-- [ ] Build/publish/remote-verify June first as a `100k_sampled_engineering_snapshot`. Reclaim only explicitly enumerated verified bulk inputs.
-- [ ] Build July with the identical parser and policy versions, then publish the June↔July crosswalk and shared/supplement manifests. Reject title-only joins, duplicate keys, missing edge endpoints, invalid transitions, schema drift, and any claim that the snapshots are complete monthly Wikipedias.
+- [ ] Write tests rejecting demo fixtures, raw XML/SQL discovery scans, unpinned/non-indexed sources, and observed schemas containing hidden fields.
+- [ ] Write target tests proving exactly 8,000 crosswalked shared identities, exactly 2,000 disjoint monthly supplements, exactly 10,000 rows per catalog, and a 12,000-identity union. Use an injected monotonic clock to prove each month freezes at 45 minutes.
+- [ ] Write cutoff tests proving the builder packages the largest shared feasible `N` divisible by five, with `4N/5` shared and `N/5` per supplement; exactly 5,000 rows (4,000+1,000) is accepted, while either month below 5,000 fails without fixture fallback.
+- [ ] Implement `EngineeringSnapshotPolicyV1` in `selection.py`. Consume only indexed/range-addressable streaming objects at exact authenticated HF commits. Select required dashboard seeds and valid one-hop neighbors first, then high-traffic Clickstream identities, then a seeded-hash tail. Resolve supplement collisions through the title-independent crosswalk and emit policy version, seed, ordered identity checksums, membership, source pins, counts, and expansion/packaging/upload durations.
+- [ ] Implement one reusable builder for namespace-zero pages, redirects, pagelinks, Wikidata identity, and Clickstream from the pinned indexed objects. Store only title, lead, and first useful section. Restrict hidden output to induced endpoints. Target at least 100,000 real pagelinks and Clickstream transitions when available; retain all below target and report shortfall; deterministically cap each at 250,000.
+- [ ] Resolve and privately mirror both months' indexed source pins, then freeze the joint shared/supplement selection under the independent 45-minute monthly timers. Only after both candidate sets are frozen, build/publish/remote-verify June first as a `10k_timeboxed_engineering_snapshot` and reclaim only explicitly enumerated verified bulk inputs.
+- [ ] Package July from the frozen joint selection with identical parser and policy versions, then publish the June↔July crosswalk and shared/supplement manifests. Reject title-only joins, duplicate keys, missing endpoints, invalid transitions, schema drift, full-month completeness claims, and full-dump scanning.
 - [ ] Publish a connected commit containing complete 2016 plus both real sampled monthly configurations. Treat complete monthly environments as post-interview evidence expansion, not an integration prerequisite.
 - [ ] Verify dashboard seeding pins/caches this commit, emits safe paragraph HTML, preserves canonical page IDs, retries/duplicates/progress, and cannot fall back to MediaWiki.
 - [ ] Test and commit:
@@ -305,10 +313,12 @@ git add data_pipeline/src/babel_data data_pipeline/tests docs/runbooks/monthly-e
 git commit -m "feat: publish sampled June and July environments"
 ```
 
-**Next-phase context:** The 100k snapshots must use real pinned text, graph, and
-Clickstream inputs and must not be replaced by the demo generator. Review exact
-80k/20k quotas, the 120k union, deterministic selection, schemas, provenance,
-and leakage. Do not block integration on complete monthly Wikipedia expansion.
+**Next-phase context:** The time-boxed snapshots must use real indexed pinned
+text, graph, and Clickstream inputs and must not be replaced by the demo
+generator or built through full-dump discovery scans. Review 10k target,
+proportional 5k floor, independent 45-minute timers, deterministic selection,
+250k relation caps, schemas, provenance, and leakage. Do not block integration
+on complete monthly Wikipedia expansion.
 
 ---
 
@@ -342,8 +352,9 @@ git commit -m "feat: define distilled Qwen serving adapter"
 ## GATE B — STOP FOR FINAL TRAINED ARTIFACT
 
 Continue only when the user confirms the final private model commit containing
-complete-run adapter, projection, manifest, validation report, and checksums. A
-pilot, first checkpoint, mock, or handwritten manifest does not pass.
+the real 50k-run adapter, projection, manifest, fixed 5k exact-validation
+report, selection checksums, and artifact checksums. A smoke checkpoint, mock,
+or handwritten manifest does not pass.
 
 **Next-phase context:** Contract compatibility may pass; real integration may
 not be declared before Gate B.
@@ -690,8 +701,8 @@ measured bottleneck.
 
 - [ ] Wikipedia processing uses a verified pinned private-HF mirror.
 - [ ] Complete 2016 inventory is accounted for and streams valid text plus finite 100d teacher vectors.
-- [ ] User-launched training produces a real artifact passing frozen full validation/search.
-- [ ] Real 100k June/July sampled observed+hidden environments publish with exact 80k shared/20k monthly quotas, a 120k union, and no leakage.
+- [ ] User-launched training produces the real fixed-50k artifact with one epoch, exact 5k validation, untouched 5k test, and recorded deterministic selection checksums.
+- [ ] Real June/July sampled observed+hidden environments publish at the 10k target or proportional 5k emergency floor, from indexed pinned sources, within recorded time boxes, and without leakage.
 - [ ] Serving uses pinned real Qwen+LoRA+projection and normalized 100d vectors.
 - [ ] pgvector contains only real-model vectors for synthetic-created Babels; formal default threshold is 10,000 created/indexed.
 - [ ] Includes durably form unique directed experiment edges; relevance and 40% continuation remain separate.
