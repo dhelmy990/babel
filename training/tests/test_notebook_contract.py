@@ -403,7 +403,15 @@ def test_interview_notebook_fail_closed_gates_survive_optimized_python() -> None
 def test_interview_ordered_stream_runtime_resumes_without_repeat_or_test_calls() -> None:
     calls: list[dict[str, object]] = []
     rows = [
-        {"article_key": f"key-{index}", "split": "train"}
+        {
+            "article_key": f"key-{index}",
+            "page_id": index + 1,
+            "canonical_title": f"title-{index}",
+            "lead_text": f"lead-{index}",
+            "teacher_vector": [0.1] * 100,
+            "teacher_norm": 1.0,
+            "split": "train",
+        }
         for index in range(6)
     ]
 
@@ -433,7 +441,7 @@ def test_interview_ordered_stream_runtime_resumes_without_repeat_or_test_calls()
             "HF_TOKEN": "secret",
             "load_dataset": fake_load_dataset,
             "islice": __import__("itertools").islice,
-            "validate_training_row": fake_validate,
+            "validate_distillation_row": fake_validate,
             "require": fake_require,
         },
     )
@@ -454,6 +462,77 @@ def test_interview_ordered_stream_runtime_resumes_without_repeat_or_test_calls()
     with pytest.raises(ValueError, match="train or validation"):
         stream_type("test", 1)
     assert len(calls) == before
+
+
+def test_interview_ordered_stream_accepts_valid_long_rows_then_projects_fields() -> None:
+    raw_row = {
+        "article_key": "enwiki:2016-10-01:12964030",
+        "page_id": 12964030,
+        "canonical_title": "Long article",
+        "lead_text": "x" * 33_205,
+        "article_text": "hidden full article",
+        "teacher_vector": [0.1] * 100,
+        "teacher_norm": 1.0,
+        "split": "train",
+        "wikidata_id": None,
+        "source_revision_id": None,
+        "snapshot_date": "2016-10-01",
+        "reconciliation_status": "matched",
+    }
+    calls: list[tuple[object, str]] = []
+
+    class FakeDataset(list[dict[str, object]]):
+        def skip(self, count: int) -> "FakeDataset":
+            return FakeDataset(self[count:])
+
+    def fake_load_dataset(*args: object, **kwargs: object) -> FakeDataset:
+        del args, kwargs
+        return FakeDataset([raw_row])
+
+    def fake_validate_distillation_row(
+        row: object, *, expected_split: str
+    ) -> dict[str, object]:
+        calls.append((row, expected_split))
+        assert row is raw_row
+        return dict(raw_row)
+
+    def fake_require(condition: object, message: str) -> None:
+        if not condition:
+            raise RuntimeError(message)
+
+    namespace = _exec_interview_definitions(
+        "ordered-stream",
+        {"OrderedInterviewStream"},
+        {
+            "DATASET_REPO_ID": "repo",
+            "DATASET_CONFIG": "distillation_2016_interview",
+            "dataset_revision": "a" * 40,
+            "HF_TOKEN": "secret",
+            "load_dataset": fake_load_dataset,
+            "islice": __import__("itertools").islice,
+            "validate_distillation_row": fake_validate_distillation_row,
+            "require": fake_require,
+        },
+    )
+    result = list(namespace["OrderedInterviewStream"]("train", 1))
+
+    assert calls == [(raw_row, "train")]
+    assert result == [
+        {
+            name: raw_row[name]
+            for name in (
+                "article_key",
+                "page_id",
+                "canonical_title",
+                "lead_text",
+                "teacher_vector",
+                "teacher_norm",
+                "split",
+            )
+        }
+    ]
+    assert len(str(result[0]["lead_text"]).encode("utf-8")) > 16 * 1024
+    assert "article_text" not in result[0]
 
 
 def test_interview_quick_cell_runtime_takes_one_step_saves_and_breaks(
