@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -174,6 +175,49 @@ def test_complete_builder_explicitly_excludes_empty_selected_text(
 
     assert result.teacher_total == result.matched + result.excluded == 2
     assert result.exclusion_counts == {"empty_text": 1}
+
+
+def test_selected_text_pass_detaches_page_ids_from_sqlite_reader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import babel_data.full_2016 as full
+
+    connection = sqlite3.connect(tmp_path / "reconcile.sqlite3")
+    connection.executescript(
+        """
+        CREATE TABLE teacher (
+          position INTEGER PRIMARY KEY,
+          status TEXT,
+          page_id INTEGER
+        );
+        CREATE TABLE selected_text (
+          page_id INTEGER PRIMARY KEY,
+          canonical_title TEXT NOT NULL,
+          revision_id INTEGER,
+          lead_text TEXT NOT NULL,
+          article_text TEXT NOT NULL
+        );
+        CREATE TABLE journal (
+          range_id TEXT PRIMARY KEY,
+          phase TEXT NOT NULL,
+          start_row INTEGER NOT NULL,
+          end_row INTEGER NOT NULL,
+          row_count INTEGER NOT NULL
+        );
+        INSERT INTO teacher(position,status,page_id) VALUES (1,'matched',1);
+        """
+    )
+
+    def selected(_path: Path, page_ids: object):
+        assert page_ids == frozenset({1})
+        assert isinstance(page_ids, frozenset)
+        yield _page("One", 1)
+
+    monkeypatch.setattr(full, "iter_wikipedia_pages_by_id", selected)
+    full._collect_selected_text(connection, tmp_path / "enwiki.xml.bz2")
+
+    assert connection.execute("SELECT COUNT(*) FROM selected_text").fetchone() == (1,)
+    connection.close()
 
 
 def test_resume_after_interruption_is_idempotent_and_does_not_duplicate_rows(

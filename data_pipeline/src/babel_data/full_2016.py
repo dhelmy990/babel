@@ -474,7 +474,7 @@ def _resolve_teachers(connection: sqlite3.Connection) -> None:
 def _collect_selected_text(connection: sqlite3.Connection, path: Path) -> None:
     count = 0
     start = 1
-    wanted_ids = (
+    wanted_ids = frozenset(
         int(row[0])
         for row in connection.execute(
             "SELECT page_id FROM teacher WHERE status='matched' ORDER BY page_id"
