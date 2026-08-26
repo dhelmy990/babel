@@ -118,6 +118,57 @@ Only Babels actually created by synthetic creators are eligible candidates.
 Unused source-catalog articles may supply creation material but must not enter
 the serving index.
 
+## Creator Recommendation Walks
+
+Recommendation browsing is a workload setting, not a topology. It is enabled
+by default and held checksum-identical across topology comparisons.
+
+One configurable `recommendation_walk_probability`, defaulting to 40%, is used
+for independent session-start and continuation rolls. After creating a Babel,
+the creator receives a session-start roll. A successful roll requests
+recommendations for that new Babel. The
+existing hidden relevance and creator-preference calculation independently
+assigns `include`, `exclude`, or `ignore` to every returned candidate. The walk
+roll does not replace or modify those decisions.
+
+Every included candidate forms a directed edge:
+
+```text
+current source Babel -> included recommended Babel
+```
+
+After the edge is recorded, the creator receives a separate 40% continuation
+roll for that included Babel. A successful roll adds the included Babel to the
+current session's breadth-first recommendation queue. This repeats for newly
+included Babels subject to all of the following defaults:
+
+- recommendation-walk probability: 40%;
+- maximum traversal depth: two graph hops;
+- maximum recommendation requests per creator session: 10;
+- a Babel is requested at most once within one session; and
+- an existing run/source/target edge is never duplicated.
+
+The root Babel is depth zero. Recommendation requests are made for the root and
+for successful continuations at depth one. Included nodes at depth two receive
+edges but are not expanded, so “depth two” cannot be interpreted as two full
+additional branching generations. The request cap remains an independent hard
+limit.
+
+All session-start and continuation draws are deterministic over their applicable
+run, creator, session, source Babel, candidate Babel, and candidate-rank
+identities. Reports record the root, parent request, depth, draw outcome, request
+count, and cache hit/miss fields so the same traversal can be replayed and its
+cache-recency effect can be measured.
+
+An include edge is durable experiment state, not merely an activity-log count.
+Because recommendations intentionally cross creator ownership, the core
+personal `edges` table cannot represent them: that table requires both endpoints
+to have the same owner. A separate `experiment_edges` relation records at least
+the run, source Babel, target Babel, acting creator, request, feedback event, and
+creation timestamp, with uniqueness on `(run_id, source_babel_id,
+target_babel_id)`. `exclude` and `ignore` never create edges. Experiment exports
+include these edge rows and their provenance.
+
 ## Population and Measurement Gate
 
 Runs have a population phase before their measured phase. Synthetic creators
@@ -150,9 +201,24 @@ For each of `same_process`, `same_host_split`, and `same_host_isolated`, run:
 3. serving plus online training with synchronization and activation enabled.
 
 This separates ordinary training contention from model-activation pauses. Each
-topology receives its own serving-only baseline. Primary interference is
-reported as the topology's training-condition p95 divided by its own baseline
-p95.
+topology receives its own serving-only baseline. The dashboard and reports show
+all three calculations explicitly, as ratios and percentage increases:
+
+```text
+Itraining =
+  p95(serving + training, activation disabled)
+  / p95(serving only)
+
+Ifull =
+  p95(serving + training + activation)
+  / p95(serving only)
+
+IActivationIncrement =
+  p95(serving + training + activation)
+  / p95(serving + training, activation disabled)
+```
+
+For any displayed ratio `I`, percentage increase is `(I - 1) * 100`.
 
 The experimental matrix remains bounded:
 
@@ -164,14 +230,25 @@ The experimental matrix remains bounded:
 - cross-host execution is approved only after same-host evidence justifies its
   additional setup and cost.
 
+Automated validation executes the full three-topology by three-condition matrix
+only as a bounded smoke test over the existing tiny fixture-sized article and
+Babel population. It verifies orchestration, counters, edge formation,
+measurement persistence, and cleanup, but its timings are never presented as
+performance conclusions. Large 3-by-3 runs are operator-initiated experiments,
+not a test-suite or implementation gate.
+
 ## Scalability Dashboard
 
 The dashboard separates ordinary online runs from saved scalability
 experiments. It provides:
 
 - topology, parent model, dataset revision, retrieval backend, creator cohort,
-  concurrent clients, target request rate, population threshold, trainer batch
-  size, synchronization interval, resource limits, warmup, and duration;
+  concurrent clients, target request rate, population threshold, recommendation
+  session-start/continuation probability, traversal limits, trainer batch size,
+  synchronization interval, resource limits, warmup, and duration;
+- paired slider and numeric-input controls for seeded source articles, target
+  created Babels, and concurrent simulated users; sliders cover safe defaults
+  while numeric inputs allow an explicitly submitted custom value;
 - start, graceful stop, and explicit approval to advance the scale ladder;
 - live service health and placement, including serving, trainer, Kafka,
   PostgreSQL, and model-state distributor;
@@ -184,6 +261,14 @@ experiments. It provides:
 - per-service CPU, RSS, host memory, disk, and available GPU telemetry; and
 - links to immutable raw artifacts, summaries, model children, and Hugging Face
   commits.
+
+A separate read-only trial-progress component consumes persisted progress data
+through the dashboard status API. It does not import or directly control Kafka,
+the trainer, serving, or benchmark implementation. It shows the current phase
+and condition, condition number, configured totals, seeded/created/indexed/
+requested/completed counts, elapsed time, recent rate, estimated time remaining,
+and graceful-stop/draining state. Failure of this presentation component cannot
+stop or mutate an experiment.
 
 Saved experiments are immutable after acceptance. A rerun receives a new
 experiment/condition identifier rather than replacing prior evidence.
@@ -199,6 +284,8 @@ Raw observations are persisted before summaries. Every condition records:
 - dataset commit, model artifact, vector snapshot, configuration, and code
   revisions;
 - request traces and server-stage timings;
+- recommendation-session roots, parent requests, traversal depths, deterministic
+  draw outcomes, accepted edges, and cache hit/miss observations;
 - trainer steps, Kafka offsets/lag, checkpoint and activation ledgers;
 - resource samples, faults, restarts, safety stops, and invalid conditions; and
 - raw-artifact checksums, summary/report checksums, and final Hugging Face
@@ -236,7 +323,12 @@ The split architecture is accepted when:
   retained immutable model;
 - the recommendation index contains only synthetic-created Babels embedded by
   the real trained encoder;
+- include actions durably form unique directed experiment edges and recursive
+  browsing uses separate relevance and continuation decisions;
+- the tiny 3-by-3 smoke matrix completes without becoming a prerequisite for a
+  long-running full-scale matrix;
+- all three interference ratios and independent trial progress are visible and
+  saved;
 - comparisons use sufficiently large, checksum-identical inputs and concurrent
   request schedules; and
 - cross-host claims are made only for actual cross-host execution.
-
