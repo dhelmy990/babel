@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from babel_online.model.population import (
+    PopulationActivationEvidence,
     PopulationIdentity,
     PopulationIntegrityError,
     PopulationSource,
@@ -92,6 +93,7 @@ class FakePopulationDatabase:
                 }
             }
         ]
+        self.fail_activation_evidence = False
 
     def population_sources(self, run_id, *, after_babel_id, limit):
         assert run_id == RUN
@@ -121,13 +123,14 @@ class FakePopulationDatabase:
         return sorted(rows, key=lambda row: str(row.babel.babelId))[:limit]
 
     def activate_population(self, expected, *, snapshot_sha256):
+        if self.fail_activation_evidence:
+            raise RuntimeError("EXPLAIN evidence failed before transaction commit")
         self.activations.append((expected, snapshot_sha256))
-
-    def population_storage_bytes(self):
-        return {"table_bytes": 1234, "index_bytes": 5678}
-
-    def explain_population_query(self, expected):
-        return self.explain_plan
+        return PopulationActivationEvidence(
+            table_bytes=1234,
+            index_bytes=5678,
+            explain_plan=self.explain_plan,
+        )
 
 
 def run_population(tmp_path: Path, count: int, **kwargs):
@@ -298,3 +301,83 @@ def test_database_batch_is_committed_before_atomic_journal_advances(tmp_path) ->
     assert journal["committed_count"] == 1
     assert len(journal["committed_prefix_sha256"]) == 64
     assert journal["complete"] is True
+
+
+def test_transient_failed_attempt_can_resume_cleanly_and_activate(tmp_path) -> None:
+    database = FakePopulationDatabase([source(1), source(2)])
+
+    class FailsOnce(FakeQwen):
+        def encode(self, texts):
+            raise RuntimeError("temporary encoder failure")
+
+    with pytest.raises(RuntimeError, match="temporary"):
+        populate_created_babel_vectors(
+            database=database,
+            encoder=FailsOnce(),
+            identity=identity(),
+            state_root=tmp_path,
+            batch_size=1,
+        )
+    failed = json.loads(
+        (tmp_path / str(RUN) / "population/journal.json").read_text()
+    )
+    assert failed["unresolved_failure_count"] == 1
+
+    receipt = populate_created_babel_vectors(
+        database=database,
+        encoder=FakeQwen(),
+        identity=identity(),
+        state_root=tmp_path,
+        batch_size=1,
+    )
+
+    assert receipt.complete is True
+    assert receipt.failure_count == 0
+    assert len(database.activations) == 1
+    recovered = json.loads(
+        (tmp_path / str(RUN) / "population/journal.json").read_text()
+    )
+    assert recovered["failure_attempt_count"] == 1
+    assert recovered["unresolved_failure_count"] == 0
+
+
+def test_formal_threshold_cannot_be_lowered_below_ten_thousand(tmp_path) -> None:
+    database = FakePopulationDatabase([source(1)])
+
+    with pytest.raises(ValueError, match="10,000"):
+        populate_created_babel_vectors(
+            database=database,
+            encoder=FakeQwen(),
+            identity=identity(),
+            state_root=tmp_path,
+            formal_minimum=1,
+        )
+    assert database.activations == []
+
+
+def test_evidence_failure_rolls_back_activation_and_clean_resume_commits(tmp_path) -> None:
+    database = FakePopulationDatabase([source(1), source(2)])
+    database.fail_activation_evidence = True
+
+    with pytest.raises(RuntimeError, match="EXPLAIN evidence"):
+        populate_created_babel_vectors(
+            database=database,
+            encoder=FakeQwen(),
+            identity=identity(),
+            state_root=tmp_path,
+            batch_size=1,
+        )
+    assert database.activations == []
+
+    database.fail_activation_evidence = False
+    receipt = populate_created_babel_vectors(
+        database=database,
+        encoder=FakeQwen(),
+        identity=identity(),
+        state_root=tmp_path,
+        batch_size=1,
+    )
+
+    assert receipt.complete is True
+    assert receipt.failure_count == 0
+    assert len(database.activations) == 1

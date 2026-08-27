@@ -23,6 +23,7 @@ from .distilled_artifact import (
 )
 from .qwen_encoder import Qwen100Encoder, format_article_input
 from .population import (
+    PopulationActivationEvidence,
     PopulationIdentity,
     PopulationIntegrityError,
     PopulationReceipt,
@@ -53,6 +54,7 @@ __all__ = [
     "LoadedArtifact",
     "ModelRegistry",
     "PopulationIdentity",
+    "PopulationActivationEvidence",
     "PopulationIntegrityError",
     "PopulationReceipt",
     "PopulationSource",

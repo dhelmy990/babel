@@ -14,6 +14,7 @@ from uuid import UUID
 from ..contracts import ActivityLogV1, ModelManifestV1, RunConfigV1
 from ..model.artifact import LoadedArtifact, load_artifact
 from ..model.population import (
+    PopulationActivationEvidence,
     PopulationIdentity,
     PopulationIntegrityError,
     PopulationSource,
@@ -591,8 +592,8 @@ class RuntimeDatabase:
         expected: PopulationIdentity,
         *,
         snapshot_sha256: str,
-    ) -> None:
-        """Activate only a transactionally exact created/indexed identity set."""
+    ) -> PopulationActivationEvidence:
+        """Validate, activate, and gather evidence in one commit boundary."""
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -652,6 +653,68 @@ class RuntimeDatabase:
                     snapshot_sha256,
                 ),
             )
+            evidence = self._population_evidence_in_transaction(cursor, expected)
+        return evidence
+
+    def _population_evidence_in_transaction(
+        self, cursor: Any, expected: PopulationIdentity
+    ) -> PopulationActivationEvidence:
+        """Gather required evidence before the activation transaction commits."""
+        from ..model.pgvector_index import PGVECTOR_CREATED_BABEL_QUERY
+
+        cursor.execute(
+            "SELECT pg_table_size('babel_embeddings'), "
+            "pg_indexes_size('babel_embeddings')"
+        )
+        table_bytes, index_bytes = cursor.fetchone()
+        cursor.execute(
+            """
+            SELECT eb.embedding::text, rs.pgvector_snapshot_sha256
+            FROM run_embedding_states AS rs
+            JOIN babel_embeddings AS eb
+              ON eb.run_id=rs.run_id
+             AND eb.serving_model_id=rs.active_model_id
+             AND eb.materialized_model_version=rs.active_model_version
+             AND eb.embedding_space_id=rs.embedding_space_id
+            WHERE rs.run_id=%s AND rs.active_model_id=%s
+              AND rs.active_model_version=%s AND rs.embedding_space_id=%s
+            ORDER BY eb.babel_id LIMIT 1
+            """,
+            (
+                expected.run_id,
+                expected.model_id,
+                expected.model_version,
+                expected.embedding_space_id,
+            ),
+        )
+        row = cursor.fetchone()
+        plan: object | None = None
+        if row is not None:
+            parameters = {
+                "query": row[0],
+                "run_id": expected.run_id,
+                "model_id": expected.model_id,
+                "model_version": expected.model_version,
+                "embedding_space_id": expected.embedding_space_id,
+                "snapshot_sha256": row[1],
+                "exclude_creator_id": UUID(int=0),
+                "limit": 10,
+            }
+            cursor.execute("SET LOCAL hnsw.ef_search = 100")
+            cursor.execute("SET LOCAL hnsw.iterative_scan = strict_order")
+            cursor.execute(
+                "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "
+                + PGVECTOR_CREATED_BABEL_QUERY,
+                parameters,
+            )
+            plan = cursor.fetchone()[0]
+            if isinstance(plan, str):
+                plan = json.loads(plan)
+        return PopulationActivationEvidence(
+            table_bytes=int(table_bytes),
+            index_bytes=int(index_bytes),
+            explain_plan=plan,
+        )
 
     def load_active_source_vector(self, key: VectorCacheKey):
         """Load one exact active pgvector row without normalization or conversion."""

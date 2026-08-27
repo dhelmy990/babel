@@ -117,6 +117,13 @@ class PopulationIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class PopulationActivationEvidence:
+    table_bytes: int
+    index_bytes: int
+    explain_plan: object | None
+
+
+@dataclass(frozen=True, slots=True)
 class PopulationReceipt:
     complete: bool
     created_count: int
@@ -152,11 +159,7 @@ class PopulationDatabase(Protocol):
 
     def activate_population(
         self, expected: PopulationIdentity, *, snapshot_sha256: str
-    ) -> None: ...
-
-    def population_storage_bytes(self) -> Mapping[str, int]: ...
-
-    def explain_population_query(self, expected: PopulationIdentity) -> object: ...
+    ) -> PopulationActivationEvidence: ...
 
 
 def _json_line(value: Mapping[str, object]) -> bytes:
@@ -344,8 +347,10 @@ def populate_created_babel_vectors(
         raise PopulationIntegrityError(
             "Qwen encoder contract differs from population model/artifact identity"
         )
-    if batch_size <= 0 or formal_minimum <= 0:
-        raise ValueError("population batch size and formal minimum must be positive")
+    if batch_size <= 0:
+        raise ValueError("population batch size must be positive")
+    if formal_minimum < 10_000:
+        raise ValueError("formal population minimum cannot be lower than 10,000")
     started = time.monotonic()
     created_count, manifest_sha = _scan_sources(database, identity.run_id, batch_size)
     journal_path = Path(state_root) / str(identity.run_id) / "population" / "journal.json"
@@ -364,8 +369,21 @@ def populate_created_babel_vectors(
         "committed_count": 0,
         "committed_prefix_sha256": hashlib.sha256().hexdigest(),
         "failure_count": 0,
+        "failure_attempt_count": 0,
+        "unresolved_failure_count": 0,
         "complete": False,
     }
+    # Historical failures remain telemetry, while a new attempt begins clean.
+    journal.setdefault("failure_attempt_count", int(journal.get("failure_count", 0)))
+    journal["failure_count"] = 0
+    journal["unresolved_failure_count"] = 0
+    _atomic_json(journal_path, journal)
+
+    def record_current_failure() -> None:
+        journal["failure_attempt_count"] = int(journal["failure_attempt_count"]) + 1
+        journal["failure_count"] = 1
+        journal["unresolved_failure_count"] = 1
+        _atomic_json(journal_path, journal)
 
     committed_id = (
         UUID(str(journal["last_committed_babel_id"]))
@@ -377,28 +395,34 @@ def populate_created_babel_vectors(
     # writer must compare an existing row byte-for-byte instead of ignoring it.
     verify_after: UUID | None = None
     verified = 0
-    while committed_id is not None and (
-        verify_after is None or str(verify_after) < str(committed_id)
-    ):
-        rows = list(
-            database.population_sources(
-                identity.run_id, after_babel_id=verify_after, limit=batch_size
+    try:
+        while committed_id is not None and (
+            verify_after is None or str(verify_after) < str(committed_id)
+        ):
+            rows = list(
+                database.population_sources(
+                    identity.run_id, after_babel_id=verify_after, limit=batch_size
+                )
             )
-        )
-        rows = [row for row in rows if str(row.babel.babelId) <= str(committed_id)]
-        if not rows:
-            break
-        records = _records(rows, encoder, identity)
-        database.write_population_batch(records, identity)
-        for record in records:
-            prefix.update(_snapshot_line(record))
-        verified += len(records)
-        verify_after = rows[-1].babel.babelId
-    if committed_id is not None and (
-        verified != int(journal["committed_count"])
-        or prefix.hexdigest() != journal["committed_prefix_sha256"]
-    ):
-        raise PopulationIntegrityError("existing vector committed prefix differs")
+            rows = [
+                row for row in rows if str(row.babel.babelId) <= str(committed_id)
+            ]
+            if not rows:
+                break
+            records = _records(rows, encoder, identity)
+            database.write_population_batch(records, identity)
+            for record in records:
+                prefix.update(_snapshot_line(record))
+            verified += len(records)
+            verify_after = rows[-1].babel.babelId
+        if committed_id is not None and (
+            verified != int(journal["committed_count"])
+            or prefix.hexdigest() != journal["committed_prefix_sha256"]
+        ):
+            raise PopulationIntegrityError("existing vector committed prefix differs")
+    except Exception:
+        record_current_failure()
+        raise
 
     after = committed_id
     batches = 0
@@ -444,8 +468,7 @@ def populate_created_babel_vectors(
                     hnsw_used=False,
                 )
     except Exception:
-        journal["failure_count"] = int(journal["failure_count"]) + 1
-        _atomic_json(journal_path, journal)
+        record_current_failure()
         raise
 
     try:
@@ -454,16 +477,20 @@ def populate_created_babel_vectors(
         )
         if exact_created != created_count or indexed_count != created_count:
             raise PopulationIntegrityError("created and indexed IDs are not exactly equal")
-        if int(journal["failure_count"]) != 0:
+        if int(journal["unresolved_failure_count"]) != 0:
             raise PopulationIntegrityError(
-                "population has recorded failures; activation withheld"
+                "population has unresolved failures; activation withheld"
             )
-        database.activate_population(identity, snapshot_sha256=snapshot_sha)
-        plan = database.explain_population_query(identity)
-        sizes = database.population_storage_bytes()
+        evidence = database.activate_population(
+            identity, snapshot_sha256=snapshot_sha
+        )
+        plan = evidence.explain_plan
+        sizes = {
+            "table_bytes": evidence.table_bytes,
+            "index_bytes": evidence.index_bytes,
+        }
     except Exception:
-        journal["failure_count"] = int(journal["failure_count"]) + 1
-        _atomic_json(journal_path, journal)
+        record_current_failure()
         raise
     duration = time.monotonic() - started
     journal.update(
@@ -506,6 +533,7 @@ def populate_created_babel_vectors(
 
 
 __all__ = [
+    "PopulationActivationEvidence",
     "PopulationDatabase",
     "PopulationIdentity",
     "PopulationIntegrityError",
