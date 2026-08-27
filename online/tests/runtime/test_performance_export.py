@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 from types import SimpleNamespace
@@ -137,6 +138,22 @@ def test_completed_trial_export_replays_exact_ranges_and_matches_database_edges(
     assert result.publication_files() == {
         "feedback.parquet": result.parquet_path,
         "edges.parquet": result.edge_parquet_path,
+    }
+    manifest = json.loads(result.manifest_path.read_text())
+    assert manifest["experimentId"] == str(trial.id)
+    assert manifest["conditions"] == [
+        {"conditionId": str(row.id), "runId": str(row.run_id)}
+        for row in trial.conditions
+    ]
+    assert manifest["feedbackParquet"] == {
+        "path": "feedback.parquet",
+        "rows": 9,
+        "sha256": hashlib.sha256(result.parquet_path.read_bytes()).hexdigest(),
+    }
+    assert manifest["edgesParquet"] == {
+        "path": "edges.parquet",
+        "rows": 9,
+        "sha256": hashlib.sha256(result.edge_parquet_path.read_bytes()).hexdigest(),
     }
 
 

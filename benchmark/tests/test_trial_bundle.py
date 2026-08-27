@@ -26,9 +26,8 @@ DATASET_REVISION = "0d1ab2c7f0e2295682288fcf10077d2d776bf559"
 WORKLOAD = tuple(character * 64 for character in "abcdef")
 
 
-def _parquet(path: Path, kind: str) -> Path:
-    pq.write_table(pa.Table.from_pylist([{"kind": kind}]), path)
-    return path
+def _sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _measurement(run_id: UUID, condition_id: str, index: int) -> dict[str, object]:
@@ -194,6 +193,94 @@ def _population(tmp_path: Path) -> Path:
     return path
 
 
+def _feedback_export(
+    tmp_path: Path,
+    evidence_paths: list[Path],
+    *,
+    wrong_run: bool = False,
+    extra_feedback_column: bool = False,
+) -> tuple[Path, Path, Path]:
+    conditions = []
+    feedback_rows = []
+    for index, evidence_path in enumerate(evidence_paths):
+        document = json.loads(evidence_path.read_text())
+        run_id = document["runId"]
+        conditions.append(
+            {"conditionId": document["conditionId"], "runId": run_id}
+        )
+        if wrong_run and index == 0:
+            run_id = str(UUID("ffffffff-ffff-5fff-8fff-ffffffffffff"))
+        row = {
+                "topic": "babel.feedback.v1",
+                "partition": 0,
+                "offset": index,
+                "key": str(uuid5(TRIAL_ID, f"creator:{index}")),
+                "schemaVersion": 2,
+                "eventId": str(uuid5(TRIAL_ID, f"event:{index}")),
+                "runId": run_id,
+                "requestId": str(uuid5(TRIAL_ID, f"request:{index}")),
+                "creatorId": str(uuid5(TRIAL_ID, f"creator:{index}")),
+                "sourceBabelId": str(uuid5(TRIAL_ID, f"source:{index}")),
+                "sourceArticleKey": f"enwiki:{index + 1}",
+                "traversalSessionId": str(uuid5(TRIAL_ID, f"session:{index}")),
+                "parentRequestId": None,
+                "traversalDepth": 0,
+                "modelId": str(ORIGINAL_ID),
+                "modelVersion": 0,
+                "embeddingSpaceId": str(EMBEDDING_ID),
+                "retrievalBackend": "pgvector",
+                "sourceVectorOrigin": "cache_hit",
+                "candidateActions": [],
+                "occurredAtNs": index + 1,
+            }
+        if extra_feedback_column:
+            row["unbound"] = "not-formal"
+        feedback_rows.append(row)
+    feedback = tmp_path / "feedback.parquet"
+    pq.write_table(pa.Table.from_pylist(feedback_rows), feedback)
+    first = feedback_rows[0]
+    edge = tmp_path / "edges.parquet"
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "runId": first["runId"],
+                    "sourceBabelId": first["sourceBabelId"],
+                    "targetBabelId": str(uuid5(TRIAL_ID, "target:0")),
+                    "actingCreatorId": first["creatorId"],
+                    "requestId": first["requestId"],
+                    "feedbackEventId": first["eventId"],
+                    "feedbackOccurredAtNs": 1,
+                    "traversalSessionId": str(uuid5(TRIAL_ID, "session:0")),
+                    "traversalDepth": 1,
+                }
+            ]
+        ),
+        edge,
+    )
+    manifest = tmp_path / "feedback-export-manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "experimentId": str(TRIAL_ID),
+                "conditions": conditions,
+                "feedbackParquet": {
+                    "path": "feedback.parquet",
+                    "rows": len(feedback_rows),
+                    "sha256": _sha(feedback),
+                },
+                "edgesParquet": {
+                    "path": "edges.parquet",
+                    "rows": 1,
+                    "sha256": _sha(edge),
+                },
+            }
+        )
+    )
+    return feedback, edge, manifest
+
+
 def _model_artifact(tmp_path: Path, selected: dict[str, object]) -> tuple[Path, Path]:
     child = {
         "schemaVersion": 2,
@@ -230,13 +317,15 @@ def _build(tmp_path: Path, *, mutate=None):
     selected_path = tmp_path / "selected-child.json"
     selected_path.write_text(json.dumps(selected))
     model_manifest, model_root = _model_artifact(tmp_path, selected)
+    feedback, edges, feedback_manifest = _feedback_export(tmp_path, evidence)
     return build_formal_trial_bundle(
         tmp_path / "accepted",
         trial_id=TRIAL_ID,
         evidence_paths=evidence,
         population_manifest_path=_population(tmp_path),
-        feedback_parquet=_parquet(tmp_path / "feedback.parquet", "feedback"),
-        edges_parquet=_parquet(tmp_path / "edges.parquet", "edge"),
+        feedback_parquet=feedback,
+        edges_parquet=edges,
+        feedback_export_manifest_path=feedback_manifest,
         model_manifest=model_manifest,
         model_artifact_root=model_root,
         selected_child_path=selected_path,
@@ -257,6 +346,7 @@ def test_formal_trial_bundle_exports_exact_aggregate_matrix(tmp_path: Path) -> N
     assert evidence["workloadIdentity"] == list(WORKLOAD)
     assert evidence["zeroErrors"] is True
     assert evidence["selectedChild"]["modelId"] == str(CHILD_ID)
+    assert evidence["feedbackExport"]["experimentId"] == str(TRIAL_ID)
     assert len(evidence["conditions"]) == 9
     assert pq.read_table(bundle.root / "requests.parquet").num_rows == 9
     assert pq.read_table(bundle.root / "resources.parquet").num_rows == 9
@@ -314,16 +404,68 @@ def test_formal_trial_bundle_rejects_workload_or_pin_drift(tmp_path: Path) -> No
     second_model = tmp_path / "second-model"
     second_model.mkdir()
     model_manifest, model_root = _model_artifact(second_model, selected)
+    feedback, edges, feedback_manifest = _feedback_export(tmp_path / "second", evidence)
     with pytest.raises(ValueError, match="immutable model pin"):
         build_formal_trial_bundle(
             tmp_path / "accepted-two",
             trial_id=TRIAL_ID,
             evidence_paths=evidence,
             population_manifest_path=_population(tmp_path),
-            feedback_parquet=_parquet(tmp_path / "feedback-two.parquet", "feedback"),
-            edges_parquet=_parquet(tmp_path / "edges-two.parquet", "edge"),
+            feedback_parquet=feedback,
+            edges_parquet=edges,
+            feedback_export_manifest_path=feedback_manifest,
             model_manifest=model_manifest,
             model_artifact_root=model_root,
             selected_child_path=selected_path,
             pins=FormalPins("wrong/repository", MODEL_REVISION, DATASET_REPO, DATASET_REVISION),
+        )
+
+
+def test_formal_trial_bundle_rejects_feedback_from_another_run(tmp_path: Path) -> None:
+    evidence, selected = _evidence_files(tmp_path)
+    selected_path = tmp_path / "selected-child.json"
+    selected_path.write_text(json.dumps(selected))
+    model_manifest, model_root = _model_artifact(tmp_path, selected)
+    feedback, edges, feedback_manifest = _feedback_export(
+        tmp_path, evidence, wrong_run=True
+    )
+
+    with pytest.raises(ValueError, match="feedback run identities differ"):
+        build_formal_trial_bundle(
+            tmp_path / "accepted",
+            trial_id=TRIAL_ID,
+            evidence_paths=evidence,
+            population_manifest_path=_population(tmp_path),
+            feedback_parquet=feedback,
+            edges_parquet=edges,
+            feedback_export_manifest_path=feedback_manifest,
+            model_manifest=model_manifest,
+            model_artifact_root=model_root,
+            selected_child_path=selected_path,
+            pins=FormalPins(MODEL_REPO, MODEL_REVISION, DATASET_REPO, DATASET_REVISION),
+        )
+
+
+def test_formal_trial_bundle_rejects_feedback_schema_drift(tmp_path: Path) -> None:
+    evidence, selected = _evidence_files(tmp_path)
+    selected_path = tmp_path / "selected-child.json"
+    selected_path.write_text(json.dumps(selected))
+    model_manifest, model_root = _model_artifact(tmp_path, selected)
+    feedback, edges, feedback_manifest = _feedback_export(
+        tmp_path, evidence, extra_feedback_column=True
+    )
+
+    with pytest.raises(ValueError, match="schema differs"):
+        build_formal_trial_bundle(
+            tmp_path / "accepted",
+            trial_id=TRIAL_ID,
+            evidence_paths=evidence,
+            population_manifest_path=_population(tmp_path),
+            feedback_parquet=feedback,
+            edges_parquet=edges,
+            feedback_export_manifest_path=feedback_manifest,
+            model_manifest=model_manifest,
+            model_artifact_root=model_root,
+            selected_child_path=selected_path,
+            pins=FormalPins(MODEL_REPO, MODEL_REVISION, DATASET_REPO, DATASET_REVISION),
         )

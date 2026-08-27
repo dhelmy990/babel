@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -64,6 +66,14 @@ class _VerifiedFeedbackSource:
             raise ValueError("Kafka replay did not cover every acknowledged feedback event")
         self.seen.update(returned_offsets)
         return records
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _range_documents_for_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -234,6 +244,32 @@ def export_completed_performance_trial(
     )
     if verified.seen != set(expected):
         raise ValueError("Kafka replay did not cover every acknowledged feedback event")
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    manifest.update(
+        {
+            "experimentId": str(experiment_id),
+            "conditions": [
+                {"conditionId": str(row.id), "runId": str(row.run_id)}
+                for row in conditions
+            ],
+            "feedbackParquet": {
+                "path": result.parquet_path.name,
+                "rows": len(result.records),
+                "sha256": _sha256(result.parquet_path),
+            },
+            "edgesParquet": {
+                "path": result.edge_parquet_path.name,
+                "rows": len(expected_edges),
+                "sha256": _sha256(result.edge_parquet_path),
+            },
+        }
+    )
+    result.manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    with result.manifest_path.open("rb") as source:
+        os.fsync(source.fileno())
     return result
 
 

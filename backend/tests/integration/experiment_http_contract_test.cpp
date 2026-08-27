@@ -453,6 +453,19 @@ TEST_CASE("completed performance trial attaches one verified remote artifact rec
   CHECK_FALSE(repository.attached_receipt.has_value());
 
   repository.performance.status = PerformanceExperimentStatus::completed;
+  auto wrong_trial_receipt = receipt;
+  wrong_trial_receipt["remoteHfBundlePath"] =
+      "runs/99999999-9999-5999-8999-999999999999";
+  auto wrong_trial_request = request(drogon::Post, wrong_trial_receipt.dump());
+  wrong_trial_request->addHeader("x-babel-admin-nonce", "nonce");
+  const auto wrong_trial = invoke([&](auto callback) {
+    controller.attachPerformanceArtifact(
+        wrong_trial_request, repository.performance.experiment_id,
+        std::move(callback));
+  });
+  CHECK(wrong_trial->getStatusCode() == drogon::k400BadRequest);
+  CHECK_FALSE(repository.attached_receipt.has_value());
+
   const auto attached = invoke([&](auto callback) {
     controller.attachPerformanceArtifact(
         authorized, repository.performance.experiment_id, std::move(callback));

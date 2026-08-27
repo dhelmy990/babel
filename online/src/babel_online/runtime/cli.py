@@ -559,6 +559,7 @@ def _performance_export(argv: list[str]) -> None:
                 "canonicalEdges": int(manifest["canonicalEdges"]),
                 "feedbackParquet": str(result.parquet_path.resolve()),
                 "edgesParquet": str(result.edge_parquet_path.resolve()),
+                "feedbackExportManifest": str(result.manifest_path.resolve()),
             },
             sort_keys=True,
         )

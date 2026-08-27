@@ -94,6 +94,7 @@ def _parser() -> argparse.ArgumentParser:
     trial.add_argument("--population-manifest", required=True, type=Path)
     trial.add_argument("--feedback-parquet", required=True, type=Path)
     trial.add_argument("--edges-parquet", required=True, type=Path)
+    trial.add_argument("--feedback-export-manifest", required=True, type=Path)
     trial.add_argument("--model-manifest", required=True, type=Path)
     trial.add_argument("--model-artifact-root", required=True, type=Path)
     trial.add_argument("--selected-child", required=True, type=Path)
@@ -164,6 +165,8 @@ def _attach_backend_artifact_receipt(
         for field in required
     ):
         raise ValueError("backend artifact receipt fields differ")
+    if receipt["remoteHfBundlePath"] != f"runs/{trial_id}":
+        raise ValueError("remote bundle path differs from trial")
     if transport is None:
         import httpx
 
@@ -223,6 +226,7 @@ def main(argv: list[str] | None = None) -> int:
             population_manifest_path=args.population_manifest,
             feedback_parquet=args.feedback_parquet,
             edges_parquet=args.edges_parquet,
+            feedback_export_manifest_path=args.feedback_export_manifest,
             model_manifest=args.model_manifest,
             model_artifact_root=args.model_artifact_root,
             selected_child_path=args.selected_child,

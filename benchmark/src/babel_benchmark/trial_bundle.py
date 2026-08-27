@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -83,6 +84,14 @@ def _object(path: str | Path, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{label} must be a JSON object")
     return value
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _nearest_p95(values: Sequence[int]) -> int:
@@ -203,6 +212,126 @@ def _validate_matrix(rows: Sequence[_ConditionEvidence]) -> tuple[str, ...]:
     if len(workloads) != 1:
         raise ValueError("formal trial must reuse one frozen workload")
     return next(iter(workloads))
+
+
+def _feedback_export_binding(
+    manifest_path: str | Path,
+    feedback_path: str | Path,
+    edges_path: str | Path,
+    *,
+    trial_id: UUID,
+    conditions: Sequence[_ConditionEvidence],
+) -> dict[str, Any]:
+    manifest_file = Path(manifest_path)
+    document = _object(manifest_file, "feedback export manifest")
+    if document.get("schemaVersion") != 1 or document.get("experimentId") != str(
+        trial_id
+    ):
+        raise ValueError("feedback export belongs to another trial")
+    expected_pairs = {
+        (str(row.condition_id), str(row.run_id)) for row in conditions
+    }
+    condition_rows = document.get("conditions")
+    if not isinstance(condition_rows, list) or len(condition_rows) != 9:
+        raise ValueError("feedback export condition binding differs")
+    try:
+        actual_pairs = {
+            (str(UUID(str(row["conditionId"]))), str(UUID(str(row["runId"]))))
+            for row in condition_rows
+            if isinstance(row, dict) and set(row) == {"conditionId", "runId"}
+        }
+    except (KeyError, ValueError) as error:
+        raise ValueError("feedback export condition binding differs") from error
+    if len(actual_pairs) != 9 or actual_pairs != expected_pairs:
+        raise ValueError("feedback export condition binding differs")
+
+    import pyarrow.parquet as pq
+
+    paths = {
+        "feedbackParquet": Path(feedback_path),
+        "edgesParquet": Path(edges_path),
+    }
+    required_columns = {
+        "feedbackParquet": {
+            "topic",
+            "partition",
+            "offset",
+            "key",
+            "schemaVersion",
+            "eventId",
+            "runId",
+            "requestId",
+            "creatorId",
+            "sourceBabelId",
+            "sourceArticleKey",
+            "traversalSessionId",
+            "parentRequestId",
+            "traversalDepth",
+            "modelId",
+            "modelVersion",
+            "embeddingSpaceId",
+            "retrievalBackend",
+            "sourceVectorOrigin",
+            "candidateActions",
+            "occurredAtNs",
+        },
+        "edgesParquet": {
+            "runId",
+            "sourceBabelId",
+            "targetBabelId",
+            "actingCreatorId",
+            "requestId",
+            "feedbackEventId",
+            "feedbackOccurredAtNs",
+            "traversalSessionId",
+            "traversalDepth",
+        },
+    }
+    verified: dict[str, Any] = {}
+    for key, path in paths.items():
+        descriptor = document.get(key)
+        if not isinstance(descriptor, dict) or set(descriptor) != {
+            "path",
+            "rows",
+            "sha256",
+        }:
+            raise ValueError(f"{key} binding differs")
+        parquet = pq.ParquetFile(path)
+        rows = parquet.metadata.num_rows
+        if (
+            descriptor["path"] != path.name
+            or int(descriptor["rows"]) != rows
+            or rows <= 0
+            or descriptor["sha256"] != _sha256(path)
+            or required_columns[key] != set(parquet.schema_arrow.names)
+        ):
+            raise ValueError(f"{key} checksum, row count, or schema differs")
+        verified[key] = descriptor
+
+    feedback_run_ids = {
+        str(UUID(str(value)))
+        for value in pq.read_table(paths["feedbackParquet"], columns=["runId"])
+        .column("runId")
+        .to_pylist()
+    }
+    expected_run_ids = {str(row.run_id) for row in conditions}
+    if feedback_run_ids != expected_run_ids:
+        raise ValueError("feedback run identities differ from formal conditions")
+    edge_run_ids = {
+        str(UUID(str(value)))
+        for value in pq.read_table(paths["edgesParquet"], columns=["runId"])
+        .column("runId")
+        .to_pylist()
+    }
+    if not edge_run_ids.issubset(expected_run_ids):
+        raise ValueError("edge run identities differ from formal conditions")
+    return {
+        "schemaVersion": 1,
+        "experimentId": str(trial_id),
+        "conditions": condition_rows,
+        **verified,
+        "manifestSha256": _sha256(manifest_file),
+    }
 
 
 def _population_evidence(
@@ -390,6 +519,7 @@ def build_formal_trial_bundle(
     population_manifest_path: str | Path,
     feedback_parquet: str | Path,
     edges_parquet: str | Path,
+    feedback_export_manifest_path: str | Path,
     model_manifest: str | Path,
     model_artifact_root: str | Path,
     selected_child_path: str | Path,
@@ -401,6 +531,13 @@ def build_formal_trial_bundle(
         key=lambda row: row.identity.stable_key,
     )
     workload = _validate_matrix(rows)
+    feedback_export = _feedback_export_binding(
+        feedback_export_manifest_path,
+        feedback_parquet,
+        edges_parquet,
+        trial_id=trial_id,
+        conditions=rows,
+    )
     population = _population_evidence(
         population_manifest_path, trial_id=trial_id, pins=pins
     )
@@ -448,6 +585,7 @@ def build_formal_trial_bundle(
         "pins": pins.as_document(),
         "population": population,
         "selectedChild": selected,
+        "feedbackExport": feedback_export,
         "conditions": condition_evidence,
     }
     placements = {

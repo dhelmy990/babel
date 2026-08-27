@@ -7,6 +7,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from uuid import UUID
 
+import pytest
+
 from babel_benchmark.cli import (
     _attach_backend_artifact_receipt,
     _parser,
@@ -162,6 +164,8 @@ def test_trial_bundle_cli_closes_build_and_publish_inputs() -> None:
             "feedback.parquet",
             "--edges-parquet",
             "edges.parquet",
+            "--feedback-export-manifest",
+            "feedback-export-manifest.json",
             "--model-manifest",
             "model-manifest.json",
             "--model-artifact-root",
@@ -190,6 +194,7 @@ def test_trial_bundle_cli_closes_build_and_publish_inputs() -> None:
 
     assert build.command == "trial-bundle-build"
     assert len(build.evidence) == 9
+    assert build.feedback_export_manifest == Path("feedback-export-manifest.json")
     assert publish.command == "trial-bundle-publish"
     assert publish.token_env == "HF_TOKEN"
 
@@ -267,6 +272,20 @@ def test_trial_bundle_attach_posts_backend_payload_with_loopback_admin_headers()
         "json": payload,
         "timeout": 10.0,
     }
+
+
+def test_trial_bundle_attach_rejects_receipt_for_another_trial() -> None:
+    with pytest.raises(ValueError, match="bundle path differs from trial"):
+        _attach_backend_artifact_receipt(
+            base_url="http://127.0.0.1:8787",
+            trial_id=UUID("00000000-0000-5000-8000-000000000130"),
+            receipt={
+                "artifactSha256": "a" * 64,
+                "remoteHfCommitSha": "b" * 40,
+                "remoteHfBundlePath": "runs/00000000-0000-5000-8000-000000000999",
+            },
+            admin_nonce="nonce",
+        )
 
 
 def test_trial_bundle_attach_parser_requires_saved_receipt_and_trial_identity() -> None:

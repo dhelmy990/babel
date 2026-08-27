@@ -357,7 +357,7 @@ Result<PerformanceExperimentDto> ExperimentService::attachPerformanceArtifact(
   }
   if (!validDigest(std::optional<std::string>{receipt.artifact_sha256}) ||
       !validRevision(receipt.remote_hf_commit_sha) ||
-      receipt.remote_hf_bundle_path.empty()) {
+      receipt.remote_hf_bundle_path != "runs/" + std::string(experiment_id)) {
     return invalidArgument("verified remote artifact receipt is incomplete");
   }
   return repository_.attachPerformanceArtifact(experiment_id, receipt);
