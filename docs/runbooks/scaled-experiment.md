@@ -346,23 +346,37 @@ remotely verified at dataset commit
 `representative-runs/0367346d-98f9-4419-b2db-9194c4c868f7/08fcd65c2e723760e95e93dea0c48fb827de3b0702a5befece7ae9b0dc1786b1/`.
 It remains `formalPerformanceClaim=false`.
 
-### Publish the optimized representative
+### Optimized representative publication — complete
 
 Optimized trial `72e35d2e-f04e-405d-af9a-25f873e44d5b` completed the same
 frozen 2×3 workload with 450/450 successful requests, complete training-offset
 coverage, and zero final lag. Its export contains 450 feedback rows and 2,682
-accepted edges. Before publication, confirm the declared SHA-256 values are:
+accepted edges with these verified SHA-256 values:
 
 ```text
 feedback: adfea5b3b939aabe4a6478fc9c560ec71e6081b8eff5ef468ea59c97a31400fc
 edges:    3004a3d1ab53a80be0e349d3d38d1ac5b08f883fee44750212e3ec6d8b13d069
 ```
 
-Build and publish it through the same representative-only contract, using new
-empty output/receipt paths:
+The optimized publication completed with 17 remotely verified files and
+artifact SHA-256
+`53c3835487a07a1241d4b12664c05477decc4293e1f3bd496d30a74acb44585c`.
+The immutable private dataset pin is
+`dhelmy990/babel-wikipedia-experiment@0076949251709c6eec71f231dc096eb0589f2f6b`,
+path
+`representative-runs/72e35d2e-f04e-405d-af9a-25f873e44d5b/53c3835487a07a1241d4b12664c05477decc4293e1f3bd496d30a74acb44585c/`.
+The verified manifest remains `formalPerformanceClaim=false`. Do not attach
+this receipt to the formal saved-trial route. This immutable path is complete:
+do not rerun the representative builder or publisher for this trial or path.
+
+### Representative publication template for a future new trial
+
+Use this workflow only for a newly completed representative trial with a fresh
+trial ID and a not-yet-published content-addressed path. Never substitute
+`72e35d2e-f04e-405d-af9a-25f873e44d5b` or its existing immutable path.
 
 ```bash
-TRIAL_ID='72e35d2e-f04e-405d-af9a-25f873e44d5b'
+TRIAL_ID='<new-representative-trial-id>'
 RUN_ROOT="/home/dhelmy990/Data/babel-data/runs/$TRIAL_ID"
 PERF_ROOT='/home/dhelmy990/Data/babel-data/state/performance'
 REPRESENTATIVE_ROOT="$RUN_ROOT/representative-accepted"
@@ -385,16 +399,6 @@ babel-friday-benchmark representative-run-publish \
   --revision main \
   > "$RUN_ROOT/representative-publication-receipt.json"
 ```
-
-The optimized publication completed with 17 remotely verified files and
-artifact SHA-256
-`53c3835487a07a1241d4b12664c05477decc4293e1f3bd496d30a74acb44585c`.
-The immutable private dataset pin is
-`dhelmy990/babel-wikipedia-experiment@0076949251709c6eec71f231dc096eb0589f2f6b`,
-path
-`representative-runs/72e35d2e-f04e-405d-af9a-25f873e44d5b/53c3835487a07a1241d4b12664c05477decc4293e1f3bd496d30a74acb44585c/`.
-The verified manifest remains `formalPerformanceClaim=false`. Do not attach
-this receipt to the formal saved-trial route.
 
 ### Build the formal accepted bundle
 

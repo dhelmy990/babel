@@ -102,15 +102,23 @@ creators/concurrent users, 75 requests per condition, and 2.5 target RPS. All
 450 requests succeeded; every training condition had complete Kafka offset
 coverage and final lag zero.
 
-The split serving, training-only, and full p95 values were 4,920.49, 4,940.91,
-and 84,288.69 ms. Version-10 activation attributed about 29.85 seconds to
-preparation and about 41 milliseconds to the atomic switch. The activated
-serving child is `79db828b-c2ed-53fa-9f7c-555d6cf5610e`; final trainer version
-17 child `c22c42b7-2cf5-5600-8c25-4d73df5f036c` remains registered/selectable
-but unactivated. The same-process rows are cold-cache/order distorted, and
-split full p95 was only about 0.66% below the prior successful trial, so this is
-an attribution result rather than a material end-to-end speedup or stable
-topology claim.
+| Topology | Serving p95 | Training p95 | Full p95 | `Itraining` | `Ifull` | `IActivationIncrement` |
+|---|---:|---:|---:|---:|---:|---:|
+| `same_process` | 83,786.707889 ms | 13,552.654297 ms | 85,161.014859 ms | 0.1617518415 | 1.0164024462 | 6.2837148349 |
+| `same_host_split` | 4,920.490575 ms | 4,940.905643 ms | 84,288.686762 ms | 1.0041489904 | 17.1301388504 | 17.0593597312 |
+
+The same-process rows are cold-cache/order distorted and cannot support a
+stable topology conclusion. Split full p95 was only about 0.66% below the prior
+successful trial, so this is not a material end-to-end speedup claim.
+Version-10 activation instead attributes about 29.85 seconds to preparation and
+about 41 milliseconds to the atomic switch. The activated serving child is
+`79db828b-c2ed-53fa-9f7c-555d6cf5610e`; final trainer version 17 child
+`c22c42b7-2cf5-5600-8c25-4d73df5f036c` remains registered/selectable but
+unactivated.
+
+Next, move, throttle, or batch preparation at the trainer/distributor resource
+boundary, then repeat the comparison in reverse or counterbalanced order. The
+already-small atomic switch is not the next optimization target.
 
 The optimized export contains 450 feedback rows and 2,682 accepted edges with
 SHA-256 values
