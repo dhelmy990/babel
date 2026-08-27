@@ -152,6 +152,19 @@ def _parser() -> argparse.ArgumentParser:
     faults.add_argument("--recovery-timeout-seconds", type=float, default=30)
     faults.add_argument("--fault-hold-seconds", type=float, default=1)
     faults.add_argument("--poll-interval-seconds", type=float, default=0.1)
+
+    fault_publish = commands.add_parser(
+        "fault-evidence-publish",
+        help="validate, publish, and remotely verify one fault-only campaign",
+    )
+    fault_publish.add_argument("--receipt", required=True, type=Path)
+    fault_publish.add_argument("--receipt-sha256", required=True)
+    fault_publish.add_argument("--trial-id", required=True, type=UUID)
+    fault_publish.add_argument("--model-manifest", required=True, type=Path)
+    fault_publish.add_argument("--output-root", required=True, type=Path)
+    fault_publish.add_argument("--repo-id", required=True)
+    fault_publish.add_argument("--revision", default="main")
+    fault_publish.add_argument("--token-env", default="HF_TOKEN")
     return parser
 
 
@@ -230,6 +243,48 @@ def _attach_backend_artifact_receipt(
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.command == "fault-evidence-publish":
+        from huggingface_hub import HfApi
+
+        from .fault_publication import (
+            build_fault_evidence_bundle,
+            publish_fault_evidence_bundle,
+        )
+
+        token = os.environ.get(args.token_env)
+        if not token:
+            raise ValueError(f"publication token environment is unset: {args.token_env}")
+        bundle = build_fault_evidence_bundle(
+            args.output_root,
+            receipt_path=args.receipt,
+            expected_receipt_sha256=args.receipt_sha256,
+            trial_id=args.trial_id,
+            model_manifest_path=args.model_manifest,
+        )
+        receipt = publish_fault_evidence_bundle(
+            HfApi(),
+            bundle,
+            repo_id=args.repo_id,
+            token=token,
+            revision=args.revision,
+        )
+        print(
+            json.dumps(
+                {
+                    "repository": receipt.repository,
+                    "commitSha": receipt.commit_sha,
+                    "bundlePath": receipt.bundle_path,
+                    "artifactSha256": receipt.artifact_sha256,
+                    "receiptSha256": receipt.receipt_sha256,
+                    "campaignId": receipt.campaign_id,
+                    "trialId": str(receipt.trial_id),
+                    "modelId": str(receipt.model_id),
+                    "verifiedFiles": receipt.verified_files,
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
     if args.command == "fault-campaign":
         from .fault_operator import build_same_host_fault_operator
         from .faults import (

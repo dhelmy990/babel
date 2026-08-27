@@ -410,6 +410,42 @@ and any failed fault. The CLI prints the receipt SHA-256. Treat the artifact as
 `evidenceUse=fault_only_not_topology_performance`; it must not be mixed into the
 six- or nine-condition latency ratios.
 
+### Publish the completed fault evidence separately
+
+Only publish a campaign whose CLI returned `status=completed`. Copy the printed
+receipt SHA-256 exactly and use condition 6's immutable child model manifest:
+
+```bash
+FAULT_RECEIPT_SHA256='<sha256 printed by fault-campaign>'
+FAULT_MODEL_MANIFEST="$RUN_ROOT/handoff/model-manifest.json"
+FAULT_ACCEPTED_ROOT="$RUN_ROOT/fault-accepted"
+
+babel-friday-benchmark fault-evidence-publish \
+  --receipt "$RUN_ROOT/faults/fault-campaign.json" \
+  --receipt-sha256 "$FAULT_RECEIPT_SHA256" \
+  --trial-id "$TRIAL_ID" \
+  --model-manifest "$FAULT_MODEL_MANIFEST" \
+  --output-root "$FAULT_ACCEPTED_ROOT" \
+  --repo-id 'dhelmy990/babel-wikipedia-experiment' \
+  > "$RUN_ROOT/faults/publication-receipt.json"
+```
+
+The command validates the exact receipt SHA, schema and fault-only labels,
+formal cohort, condition 6 run, completed four-fault order, cleanup, and the
+immutable model manifest whose `producingRunId` matches the fault run. It builds
+four small files: `fault-receipt.json`, `manifest.json`, `report.md`, and
+`checksums.json`.
+
+The campaign ID is the receipt SHA-256. Local and remote artifacts therefore
+live at `fault-runs/<TRIAL_ID>/<CAMPAIGN_ID>/`, never beneath the accepted formal
+`runs/<TRIAL_ID>/` directory. Publication refuses an existing campaign path,
+scans every candidate file for credential markers, uploads in one operator
+commit, then reloads and checksum-verifies every file at the returned immutable
+commit. Its printed publication receipt contains paths, IDs, checksums, and the
+remote commit only; it never contains `HF_TOKEN`. Do not send this receipt to
+the formal dashboard artifact-attachment endpoint—the topology bundle and its
+dashboard attachment remain unchanged.
+
 ## Shutdown and recovery boundary
 
 Use **Graceful stop** to stop new work and retain evidence and the last valid

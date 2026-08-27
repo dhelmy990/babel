@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from uuid import UUID
 
 import babel_benchmark.faults as faults
+import babel_benchmark.fault_publication as fault_publication
 import babel_benchmark.trial_bundle as trial_bundle
 import pytest
 
@@ -334,6 +335,86 @@ def test_fault_campaign_cli_writes_receipt_without_embedding_control_secrets(
         == __import__("hashlib").sha256(receipt.read_bytes()).hexdigest()
     )
     assert "HF_TOKEN" not in receipt.read_text()
+
+
+def test_fault_evidence_publish_cli_builds_and_emits_secret_free_remote_receipt(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    trial_id = UUID("00000000-0000-5000-8000-000000000130")
+    model_id = UUID("00000000-0000-5000-8000-000000000132")
+    receipt_sha = "a" * 64
+    token = "private-token-must-not-appear"
+    monkeypatch.setenv("FAULT_HF_TOKEN", token)
+    api = object()
+    monkeypatch.setattr("huggingface_hub.HfApi", lambda: api)
+    calls: dict[str, object] = {}
+    bundle = SimpleNamespace(root=tmp_path / "fault-bundle")
+
+    def build(output_root, **kwargs):
+        calls["build"] = (output_root, kwargs)
+        return bundle
+
+    def publish(given_api, given_bundle, **kwargs):
+        calls["publish"] = (given_api, given_bundle, kwargs)
+        return SimpleNamespace(
+            repository="dhelmy990/babel-wikipedia-experiment",
+            commit_sha="b" * 40,
+            bundle_path=f"fault-runs/{trial_id}/{receipt_sha}",
+            artifact_sha256="c" * 64,
+            receipt_sha256=receipt_sha,
+            campaign_id=receipt_sha,
+            trial_id=trial_id,
+            model_id=model_id,
+            verified_files={"fault-receipt.json": receipt_sha},
+        )
+
+    monkeypatch.setattr(fault_publication, "build_fault_evidence_bundle", build)
+    monkeypatch.setattr(fault_publication, "publish_fault_evidence_bundle", publish)
+
+    assert main(
+        [
+            "fault-evidence-publish",
+            "--receipt",
+            str(tmp_path / "fault-campaign.json"),
+            "--receipt-sha256",
+            receipt_sha,
+            "--trial-id",
+            str(trial_id),
+            "--model-manifest",
+            str(tmp_path / "model-manifest.json"),
+            "--output-root",
+            str(tmp_path / "accepted"),
+            "--repo-id",
+            "dhelmy990/babel-wikipedia-experiment",
+            "--token-env",
+            "FAULT_HF_TOKEN",
+        ]
+    ) == 0
+
+    assert calls["build"] == (
+        tmp_path / "accepted",
+        {
+            "receipt_path": tmp_path / "fault-campaign.json",
+            "expected_receipt_sha256": receipt_sha,
+            "trial_id": trial_id,
+            "model_manifest_path": tmp_path / "model-manifest.json",
+        },
+    )
+    assert calls["publish"] == (
+        api,
+        bundle,
+        {
+            "repo_id": "dhelmy990/babel-wikipedia-experiment",
+            "token": token,
+            "revision": "main",
+        },
+    )
+    output = capsys.readouterr().out
+    document = json.loads(output)
+    assert document["bundlePath"] == f"fault-runs/{trial_id}/{receipt_sha}"
+    assert document["trialId"] == str(trial_id)
+    assert document["modelId"] == str(model_id)
+    assert token not in output
 
 
 def test_trial_bundle_cli_closes_build_and_publish_inputs() -> None:
