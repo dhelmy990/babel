@@ -31,12 +31,19 @@ request per condition (nine total) against the current fixture. Every condition
 made a real loopback HTTP recommendation request, published acknowledged
 feedback through the local Kafka broker, observed an accepted edge, and wrote
 raw evidence. Training conditions consumed the event with the real
-`OnlineTrainer` and saved a checkpoint. Activation conditions advanced serving
-health from model version 0 to 1. Split conditions used independent serving and
-trainer processes; isolated conditions additionally verified distinct CPU
-affinities. Killing the trainer left serving healthy, and no role process
-remained after cleanup. The receipt is
-`state/live-smoke-actual/receipt.json`.
+`OnlineTrainer` and saved a checkpoint. Activation conditions applied three
+changed trainer-derived vectors before serving advanced from model version 0 to
+1; the before/after vector-state checksums are recorded. Split conditions used
+independent serving and trainer processes; isolated conditions additionally
+verified distinct CPU affinities. In the four split training conditions, an
+actually running trainer was killed and serving remained healthy. Trainer
+failure isolation is explicitly `not_applicable` for serving-only and
+same-process rows. No role process remained after cleanup. The schema-v2 receipt
+is `state/live-smoke-actual-v5/receipt.json`.
+
+The receipt calculates the three requested ratios from observed client p95 for
+each topology: `Itraining`, `Ifull`, and `IActivationIncrement`. With only one
+request per condition these are wiring checks, not stable performance estimates.
 
 This is live systems-wiring evidence, but it remains deliberately non-formal:
 the input is the small deterministic fixture, the encoder is the fixture item
@@ -135,7 +142,7 @@ No formal values have been collected yet. Populate this section only after the
 
 | Evidence | Status | Artifact |
 |---|---|---|
-| Tiny 3×3 smoke | Live passed; 9 requests; non-formal | `state/live-smoke-actual/receipt.json` |
+| Tiny 3×3 smoke | Live passed; 9 requests; non-formal | `state/live-smoke-actual-v5/receipt.json` |
 | Frozen 10,000-Babel population | Pending | — |
 | Cohort-50 topology matrix | Pending | — |
 | pgvector/HNSW comparison | Pending | — |

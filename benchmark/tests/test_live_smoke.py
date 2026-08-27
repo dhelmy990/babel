@@ -9,7 +9,28 @@ from babel_benchmark.live_smoke import (
     FixtureLiveSmoke,
     LiveSmokeSettings,
     build_live_smoke_plan,
+    main,
+    _record_activation,
 )
+
+
+def test_activation_evidence_uses_verified_receipt_version_once(tmp_path) -> None:
+    path = tmp_path / "evidence.jsonl"
+    _record_activation(
+        path,
+        health={"modelVersion": 1},
+        activation={
+            "schemaVersion": 2,
+            "modelVersion": 1,
+            "changedVectorCount": 2,
+            "beforeVectorStateSha256": "a" * 64,
+            "afterVectorStateSha256": "b" * 64,
+        },
+    )
+
+    row = json.loads(path.read_text(encoding="utf-8"))
+    assert row["modelVersion"] == 1
+    assert row["changedVectorCount"] == 2
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -67,8 +88,9 @@ def test_same_process_fixture_condition_runs_real_http_feedback_and_training(tmp
     assert result.request_count == 2
     assert result.edges_observed >= 2
     assert result.startup_verified and result.cleanup_verified
-    assert result.progress_observed and result.ratios_observed
-    assert result.trainer_failure_serving_available
+    assert result.progress_observed
+    assert result.client_p95_ms > 0
+    assert result.trainer_failure_status == "not_applicable"
     assert {row["kind"] for row in evidence} >= {
         "recommendation",
         "feedback",
@@ -77,6 +99,9 @@ def test_same_process_fixture_condition_runs_real_http_feedback_and_training(tmp
         "topology",
     }
     assert all(row["formalPerformanceClaim"] is False for row in evidence)
+    activation = next(row for row in evidence if row["kind"] == "activation")
+    assert activation["changedVectorCount"] > 0
+    assert activation["beforeVectorStateSha256"] != activation["afterVectorStateSha256"]
 
 
 class _NeverCancelled:
@@ -103,3 +128,27 @@ def test_split_fixture_condition_refuses_to_fake_kafka_with_memory_transport(tmp
 
     with pytest.raises(RuntimeError, match="real Kafka"):
         FixtureLiveSmoke(settings).execute(condition, 1, 20, _NeverCancelled())
+
+
+def test_failed_cli_rerun_removes_stale_success_receipt(tmp_path, monkeypatch) -> None:
+    receipt = tmp_path / "receipt.json"
+    receipt.write_text('{"stale":true}\n', encoding="utf-8")
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("condition failed")
+
+    monkeypatch.setattr("babel_benchmark.matrix.run_tiny_smoke", fail)
+    with pytest.raises(RuntimeError, match="condition failed"):
+        main(
+            [
+                "--fixture-root",
+                str(ROOT / "fixtures/online/tiny"),
+                "--state-root",
+                str(tmp_path / "state"),
+                "--receipt",
+                str(receipt),
+            ]
+        )
+
+    assert not receipt.exists()
+    assert not receipt.with_suffix(".json.running").exists()

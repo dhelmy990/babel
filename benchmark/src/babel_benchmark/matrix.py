@@ -57,31 +57,49 @@ class TinySmokePlan:
 class SmokeConditionResult:
     condition_id: str
     request_count: int
+    client_p95_ms: float
     startup_verified: bool
     cleanup_verified: bool
     edges_observed: int
     progress_observed: bool
     raw_results_path: str
-    ratios_observed: bool
-    trainer_failure_serving_available: bool
+    trainer_failure_status: Literal["verified", "not_applicable"]
 
     def __post_init__(self) -> None:
         if not self.condition_id or not self.raw_results_path:
             raise ValueError("smoke condition evidence paths and identity are required")
         if not 0 <= self.request_count <= 20:
             raise ValueError("smoke result exceeds its 20-request bound")
+        if self.client_p95_ms <= 0:
+            raise ValueError("smoke condition p95 must be positive")
         if self.edges_observed < 0:
             raise ValueError("observed edge count cannot be negative")
 
 
 @dataclass(frozen=True, slots=True)
+class SmokeTopologyRatios:
+    topology: Topology
+    Itraining: float
+    Ifull: float
+    IActivationIncrement: float
+
+    def __post_init__(self) -> None:
+        if any(
+            not isinstance(value, (int, float)) or value <= 0
+            for value in (self.Itraining, self.Ifull, self.IActivationIncrement)
+        ):
+            raise ValueError("smoke interference ratios must be positive")
+
+
+@dataclass(frozen=True, slots=True)
 class TinySmokeReceipt:
-    schema_version: Literal[1]
+    schema_version: Literal[2]
     fixture: Literal["current_fixture"]
     timeout_seconds: float
     started_at_monotonic_ns: int
     completed_at_monotonic_ns: int
     conditions: tuple[SmokeConditionResult, ...]
+    interference_ratios: tuple[SmokeTopologyRatios, ...]
     formal_performance_claim: Literal[False]
 
     @property
@@ -106,11 +124,20 @@ class TinySmokeReceipt:
 
     @property
     def ratios_observed(self) -> bool:
-        return all(row.ratios_observed for row in self.conditions)
+        return len(self.interference_ratios) == 3
 
     @property
     def trainer_failure_availability_verified(self) -> bool:
-        return all(row.trainer_failure_serving_available for row in self.conditions)
+        for row in self.conditions:
+            topology, load_mode, _backend = row.condition_id.split(".")
+            expected = (
+                "verified"
+                if topology != "same_process" and load_mode != "serving_only"
+                else "not_applicable"
+            )
+            if row.trainer_failure_status != expected:
+                return False
+        return True
 
     def as_document(self) -> dict[str, object]:
         document = asdict(self)
@@ -310,8 +337,7 @@ def _validate_success_evidence(result: SmokeConditionResult) -> None:
         and result.startup_verified
         and result.cleanup_verified
         and result.progress_observed
-        and result.ratios_observed
-        and result.trainer_failure_serving_available
+        and result.trainer_failure_status in {"verified", "not_applicable"}
     )
     raw_path = Path(result.raw_results_path)
     raw_complete = raw_path.is_file() and raw_path.stat().st_size > 0
@@ -347,17 +373,40 @@ def run_tiny_smoke(
             raise TimeoutError("tiny smoke exceeded its strict suite timeout")
         _validate_success_evidence(result)
         results.append(result)
+    by_topology = {
+        topology: {
+            row.condition_id.split(".")[1]: row
+            for row in results
+            if row.condition_id.split(".")[0] == topology
+        }
+        for topology in ("same_process", "same_host_split", "same_host_isolated")
+    }
+    ratios = tuple(
+        SmokeTopologyRatios(
+            topology=topology,
+            Itraining=values["training_no_activation"].client_p95_ms
+            / values["serving_only"].client_p95_ms,
+            Ifull=values["training_and_activation"].client_p95_ms
+            / values["serving_only"].client_p95_ms,
+            IActivationIncrement=values["training_and_activation"].client_p95_ms
+            / values["training_no_activation"].client_p95_ms,
+        )
+        for topology, values in by_topology.items()
+    )
     receipt = TinySmokeReceipt(
-        schema_version=1,
+        schema_version=2,
         fixture=plan.fixture,
         timeout_seconds=plan.timeout_seconds,
         started_at_monotonic_ns=started_ns,
         completed_at_monotonic_ns=monotonic_ns(),
         conditions=tuple(results),
+        interference_ratios=ratios,
         formal_performance_claim=False,
     )
     if len(receipt.conditions) != 9 or receipt.total_requests > 180:
         raise RuntimeError("tiny smoke receipt escaped its fixed execution bound")
+    if not receipt.trainer_failure_availability_verified:
+        raise RuntimeError("tiny smoke trainer-failure applicability is untruthful")
     _persist_receipt(Path(receipt_path), receipt)
     return receipt
 
@@ -499,6 +548,7 @@ __all__ = [
     "DashboardPerformanceHttpClient",
     "SmokeCondition",
     "SmokeConditionResult",
+    "SmokeTopologyRatios",
     "TinySmokePlan",
     "TinySmokeReceipt",
     "run_lifecycle_tiny_smoke",

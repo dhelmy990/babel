@@ -21,6 +21,68 @@ from babel_benchmark.matrix import (
 )
 
 
+def test_receipt_computes_named_interference_ratios_and_accepts_not_applicable_failure(
+    tmp_path,
+) -> None:
+    plan = tiny_smoke_plan(timeout_seconds=30)
+    latencies = {
+        "serving_only": 10.0,
+        "training_no_activation": 15.0,
+        "training_and_activation": 18.0,
+    }
+
+    def execute(condition, _limit, _timeout, _cancel):
+        raw = tmp_path / f"{condition.condition_id}.jsonl"
+        raw.write_text("{}\n", encoding="utf-8")
+        applicable = condition.topology != "same_process" and condition.load_mode != "serving_only"
+        return SmokeConditionResult(
+            condition_id=condition.condition_id,
+            request_count=1,
+            client_p95_ms=latencies[condition.load_mode],
+            startup_verified=True,
+            cleanup_verified=True,
+            edges_observed=1,
+            progress_observed=True,
+            raw_results_path=str(raw),
+            trainer_failure_status="verified" if applicable else "not_applicable",
+        )
+
+    receipt = run_tiny_smoke(plan, execute, receipt_path=tmp_path / "receipt.json")
+
+    assert len(receipt.interference_ratios) == 3
+    for row in receipt.interference_ratios:
+        assert row.Itraining == 1.5
+        assert row.Ifull == 1.8
+        assert row.IActivationIncrement == 1.2
+    assert receipt.ratios_observed
+    assert receipt.trainer_failure_availability_verified
+    assert json.loads((tmp_path / "receipt.json").read_text())["schema_version"] == 2
+
+
+def test_receipt_rejects_claimed_trainer_failure_where_no_trainer_can_be_killed(
+    tmp_path,
+) -> None:
+    plan = tiny_smoke_plan(timeout_seconds=30)
+
+    def execute(condition, _limit, _timeout, _cancel):
+        raw = tmp_path / f"{condition.condition_id}.jsonl"
+        raw.write_text("{}\n", encoding="utf-8")
+        return SmokeConditionResult(
+            condition_id=condition.condition_id,
+            request_count=1,
+            client_p95_ms=10.0,
+            startup_verified=True,
+            cleanup_verified=True,
+            edges_observed=1,
+            progress_observed=True,
+            raw_results_path=str(raw),
+            trainer_failure_status="verified",
+        )
+
+    with pytest.raises(RuntimeError, match="trainer-failure applicability"):
+        run_tiny_smoke(plan, execute, receipt_path=tmp_path / "receipt.json")
+
+
 def test_tiny_smoke_plan_is_exactly_bounded_three_by_three() -> None:
     plan = tiny_smoke_plan(timeout_seconds=30.0)
 
@@ -55,13 +117,18 @@ def test_tiny_smoke_persists_complete_nonformal_receipt(tmp_path) -> None:
         return SmokeConditionResult(
             condition_id=condition.condition_id,
             request_count=request_limit,
+            client_p95_ms=10.0,
             startup_verified=True,
             cleanup_verified=True,
             edges_observed=2,
             progress_observed=True,
             raw_results_path=str(raw_path),
-            ratios_observed=True,
-            trainer_failure_serving_available=True,
+            trainer_failure_status=(
+                "verified"
+                if condition.topology != "same_process"
+                and condition.load_mode != "serving_only"
+                else "not_applicable"
+            ),
         )
 
     receipt = run_tiny_smoke(plan, execute, receipt_path=receipt_path)
@@ -89,13 +156,13 @@ def test_tiny_smoke_fails_closed_when_strict_suite_timeout_expires(tmp_path) -> 
             lambda condition, _limit, _timeout, _cancel: SmokeConditionResult(
                 condition_id=condition.condition_id,
                 request_count=1,
+                client_p95_ms=10.0,
                 startup_verified=True,
                 cleanup_verified=True,
                 edges_observed=1,
                 progress_observed=True,
                 raw_results_path="raw.jsonl",
-                ratios_observed=True,
-                trainer_failure_serving_available=True,
+                trainer_failure_status="not_applicable",
             ),
             receipt_path=receipt_path,
             monotonic=lambda: next(ticks),
@@ -298,8 +365,6 @@ def test_timeout_recovers_late_process_group_handshake(
         ({"startup_verified": False}, "valid"),
         ({"cleanup_verified": False}, "valid"),
         ({"progress_observed": False}, "valid"),
-        ({"ratios_observed": False}, "valid"),
-        ({"trainer_failure_serving_available": False}, "valid"),
         ({}, "missing"),
         ({}, "empty"),
     ],
@@ -316,13 +381,13 @@ def test_tiny_smoke_rejects_incomplete_success_evidence(
     valid = SmokeConditionResult(
         condition_id=plan.conditions[0].condition_id,
         request_count=1,
+        client_p95_ms=10.0,
         startup_verified=True,
         cleanup_verified=True,
         edges_observed=1,
         progress_observed=True,
         raw_results_path=str(raw_path),
-        ratios_observed=True,
-        trainer_failure_serving_available=True,
+        trainer_failure_status="not_applicable",
     )
 
     with pytest.raises(ValueError, match="successful smoke condition"):
@@ -352,13 +417,18 @@ def test_lifecycle_smoke_starts_once_runs_nine_conditions_and_stops(tmp_path) ->
             SmokeConditionResult(
                 condition_id=condition.condition_id,
                 request_count=limit,
+                client_p95_ms=10.0,
                 startup_verified=True,
                 cleanup_verified=True,
                 edges_observed=1,
                 progress_observed=True,
                 raw_results_path=str(tmp_path / f"{condition.condition_id}.jsonl"),
-                ratios_observed=True,
-                trainer_failure_serving_available=True,
+                trainer_failure_status=(
+                    "verified"
+                    if condition.topology != "same_process"
+                    and condition.load_mode != "serving_only"
+                    else "not_applicable"
+                ),
             ),
         )[2],
         stop_suite=lambda handle: events.append(("stop", handle)),

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import signal
 import socket
@@ -101,6 +102,14 @@ def _append_evidence(path: Path, *, kind: str, **values: object) -> None:
         )
 
 
+def _record_activation(
+    path: Path, *, health: dict[str, object], activation: dict[str, object]
+) -> None:
+    if int(activation["modelVersion"]) != int(health["modelVersion"]):
+        raise RuntimeError("activation receipt and serving health versions differ")
+    _append_evidence(path, kind="activation", **activation)
+
+
 def _fixture_state(fixture_root: Path):
     from babel_online.contracts import ModelManifestV1, RecommendationRequestV1
     from babel_online.model import InMemoryCreatedBabelIndex, MaterializedServingState
@@ -154,6 +163,50 @@ def _fixture_state(fixture_root: Path):
         (fixture_root / "observable/request.json").read_text(encoding="utf-8")
     )
     return create_app(state), state, index, model, records, request
+
+
+def _vector_state_sha(vectors: dict[UUID, np.ndarray]) -> str:
+    payload = b"".join(
+        item_id.bytes + np.asarray(vectors[item_id], dtype="<f4").tobytes()
+        for item_id in sorted(vectors, key=lambda value: value.hex)
+    )
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _materialize_trainer_records(records, vectors, *, version: int):
+    from babel_online.observable import VectorRecord
+
+    expected = {row.babel.babelId for row in records}
+    if set(vectors) != expected:
+        raise ValueError("trainer vector identities differ from serving population")
+    before = {
+        row.babel.babelId: np.asarray(row.vector, dtype="<f4") for row in records
+    }
+    checked = {
+        item_id: np.asarray(vectors[item_id], dtype="<f4").reshape(-1)
+        for item_id in expected
+    }
+    if any(value.shape != (100,) or not np.isfinite(value).all() for value in checked.values()):
+        raise ValueError("trainer activation vectors must be finite 100d values")
+    changed = sum(not np.array_equal(before[item_id], checked[item_id]) for item_id in expected)
+    if changed <= 0:
+        raise RuntimeError("trainer activation did not change any serving vector")
+    updated = [
+        VectorRecord(
+            babel=row.babel,
+            catalogContentHash=row.catalogContentHash,
+            embeddingSpaceId=row.embeddingSpaceId,
+            servingModelId=row.servingModelId,
+            materializedModelVersion=version,
+            vector=tuple(float(value) for value in checked[row.babel.babelId]),
+        )
+        for row in records
+    ]
+    return updated, {
+        "beforeVectorStateSha256": _vector_state_sha(before),
+        "afterVectorStateSha256": _vector_state_sha(checked),
+        "changedVectorCount": changed,
+    }
 
 
 class FixtureLiveSmoke:
@@ -224,7 +277,7 @@ class FixtureLiveSmoke:
             trainerPid=None,
         )
         try:
-            edges = self._issue_requests(
+            edges, latencies_ns = self._issue_requests(
                 condition,
                 request_limit,
                 request,
@@ -245,20 +298,35 @@ class FixtureLiveSmoke:
                     checkpointPath=str(checkpoint),
                 )
                 if activation_enabled:
-                    version = trainer.training_version
+                    captured = trainer.capture_sync_state()
+                    version = captured.version
+                    updated, activation = _materialize_trainer_records(
+                        records, captured.materialized_vectors, version=version
+                    )
+                    from babel_online.model import InMemoryCreatedBabelIndex
+
+                    updated_index = InMemoryCreatedBabelIndex(updated)
                     materialized = replace(
-                        state.snapshot().materialized_state, model_version=version
+                        state.snapshot().materialized_state,
+                        model_version=version,
+                        pgvector_snapshot_sha256=activation[
+                            "afterVectorStateSha256"
+                        ],
+                        backend_snapshot_sha256=activation[
+                            "afterVectorStateSha256"
+                        ],
                     )
                     state.apply_sync(
                         selected_model_id=model.modelId,
                         materialized_state=materialized,
-                        candidate_index=index,
-                        vector_records=records,
+                        candidate_index=updated_index,
+                        vector_records=updated,
                     )
                     _append_evidence(
                         evidence_path,
                         kind="activation",
                         modelVersion=version,
+                        **activation,
                     )
             else:
                 _append_evidence(
@@ -271,7 +339,9 @@ class FixtureLiveSmoke:
             trainer_stop.set()
             if thread.is_alive():
                 thread.join(timeout=2)
-            trainer_failure_available = self._health(scope.port)["status"] == "ok"
+            serving_after_trainer_stop = self._health(scope.port)["status"] == "ok"
+            if not serving_after_trainer_stop:
+                raise RuntimeError("serving failed after trainer shutdown")
         finally:
             trainer_stop.set()
             if thread.is_alive():
@@ -285,13 +355,13 @@ class FixtureLiveSmoke:
         return SmokeConditionResult(
             condition_id=condition.condition_id,
             request_count=request_limit,
+            client_p95_ms=self._p95_ms(latencies_ns),
             startup_verified=startup_verified,
             cleanup_verified=cleanup_verified,
             edges_observed=edges,
             progress_observed=request_limit > 0,
             raw_results_path=str(evidence_path),
-            ratios_observed=True,
-            trainer_failure_serving_available=trainer_failure_available,
+            trainer_failure_status="not_applicable",
         )
 
     def _execute_split(self, condition, request_limit, timeout_seconds, cancel):
@@ -361,12 +431,13 @@ class FixtureLiveSmoke:
         evidence_path,
         deadline,
         cancel,
-    ) -> int:
+    ) -> tuple[int, list[int]]:
         from babel_online.contracts import CandidateActionV1, FeedbackEventV1
         from babel_online.simulation.client import RecommendationClient
 
         client = RecommendationClient(f"http://127.0.0.1:{port}")
         edges = 0
+        latencies_ns: list[int] = []
         try:
             for sequence in range(request_limit):
                 if cancel.is_set() or time.monotonic() >= deadline:
@@ -379,6 +450,7 @@ class FixtureLiveSmoke:
                 started = time.perf_counter_ns()
                 response = client.recommend(request)
                 client_ns = time.perf_counter_ns() - started
+                latencies_ns.append(client_ns)
                 actions = [
                     CandidateActionV1(
                         babelId=row.babelId,
@@ -426,7 +498,15 @@ class FixtureLiveSmoke:
                 )
         finally:
             client.close()
-        return edges
+        return edges, latencies_ns
+
+    @staticmethod
+    def _p95_ms(values: list[int]) -> float:
+        if not values:
+            raise RuntimeError("live smoke did not measure client latency")
+        ordered = sorted(values)
+        index = max(0, math.ceil(0.95 * len(ordered)) - 1)
+        return ordered[index] / 1_000_000.0
 
     def _execute_independent_roles(self, condition, request_limit, timeout_seconds, cancel):
         if self.settings.kafka_bootstrap_servers == "memory://":
@@ -449,7 +529,7 @@ class FixtureLiveSmoke:
         for path in (ready_path, status_path):
             path.unlink(missing_ok=True)
         activation_dir.mkdir(parents=True, exist_ok=True)
-        for path in activation_dir.glob("receipt-v*.json"):
+        for path in activation_dir.glob("*.json"):
             path.unlink()
 
         common = (
@@ -493,8 +573,10 @@ class FixtureLiveSmoke:
         resources = None
         if condition.topology == "same_host_isolated":
             available = sorted(os.sched_getaffinity(0))
+            if len(available) < 2:
+                raise RuntimeError("isolated live smoke requires two available CPUs")
             serving_cpu = available[0]
-            trainer_cpu = available[1] if len(available) > 1 else available[0]
+            trainer_cpu = available[1]
             resources = {
                 "serving": ResourceRequest(cpuAffinity=(serving_cpu,)),
                 "trainer": ResourceRequest(cpuAffinity=(trainer_cpu,)),
@@ -528,7 +610,7 @@ class FixtureLiveSmoke:
             _app, _state, _index, _model, _records, request = _fixture_state(
                 self.settings.fixture_root
             )
-            edges = self._issue_requests(
+            edges, latencies_ns = self._issue_requests(
                 condition,
                 request_limit,
                 request,
@@ -542,11 +624,11 @@ class FixtureLiveSmoke:
                 status = self._wait_for_status(status_path, request_limit, deadline, cancel)
                 _append_evidence(evidence_path, kind="training", **status)
                 if condition.load_mode == "training_and_activation":
-                    health = self._wait_for_activation(scope.port, deadline, cancel)
-                    _append_evidence(
-                        evidence_path,
-                        kind="activation",
-                        modelVersion=health["modelVersion"],
+                    health, activation = self._wait_for_activation(
+                        scope.port, activation_dir, deadline, cancel
+                    )
+                    _record_activation(
+                        evidence_path, health=health, activation=activation
                     )
             else:
                 _append_evidence(
@@ -556,8 +638,15 @@ class FixtureLiveSmoke:
                     optimizerSteps=0,
                     disabled=True,
                 )
-            running.kill_trainer()
-            trainer_failure_available = running.serving_status() == 200
+            if condition.load_mode != "serving_only":
+                if not running.process_alive("trainer"):
+                    raise RuntimeError("trainer was not alive before failure injection")
+                running.kill_trainer()
+                if running.serving_status() != 200:
+                    raise RuntimeError("serving failed after trainer kill")
+                trainer_failure_status = "verified"
+            else:
+                trainer_failure_status = "not_applicable"
         finally:
             producer.close()
             running.stop()
@@ -567,13 +656,13 @@ class FixtureLiveSmoke:
         return SmokeConditionResult(
             condition_id=condition.condition_id,
             request_count=request_limit,
+            client_p95_ms=self._p95_ms(latencies_ns),
             startup_verified=startup_verified,
             cleanup_verified=cleanup_verified,
             edges_observed=edges,
             progress_observed=request_limit > 0,
             raw_results_path=str(evidence_path),
-            ratios_observed=True,
-            trainer_failure_serving_available=trainer_failure_available,
+            trainer_failure_status=trainer_failure_status,
         )
 
     @staticmethod
@@ -606,12 +695,20 @@ class FixtureLiveSmoke:
             time.sleep(0.02)
 
     @staticmethod
-    def _wait_for_activation(port, deadline, cancel):
+    def _wait_for_activation(port, activation_dir, deadline, cancel):
         while True:
             try:
                 response = httpx.get(f"http://127.0.0.1:{port}/health", timeout=0.25)
                 if response.status_code == 200 and response.json()["modelVersion"] > 0:
-                    return response.json()
+                    receipts = sorted(activation_dir.glob("receipt-v*.json"))
+                    if receipts:
+                        activation = json.loads(receipts[-1].read_text(encoding="utf-8"))
+                        if (
+                            activation.get("changedVectorCount", 0) > 0
+                            and activation.get("beforeVectorStateSha256")
+                            != activation.get("afterVectorStateSha256")
+                        ):
+                            return response.json(), activation
             except httpx.HTTPError:
                 pass
             if cancel.is_set() or time.monotonic() >= deadline:
@@ -662,23 +759,45 @@ def _serve_role(args: argparse.Namespace) -> int:
         current = 0
         activation_dir = args.state_root / "activation"
         while not stop.wait(0.02):
-            receipts = sorted(activation_dir.glob("receipt-v*.json"))
-            if not receipts:
+            updates = sorted(activation_dir.glob("update-v*.json"))
+            if not updates:
                 continue
             try:
-                document = json.loads(receipts[-1].read_text(encoding="utf-8"))
+                document = json.loads(updates[-1].read_text(encoding="utf-8"))
                 version = int(document["modelVersion"])
             except (OSError, ValueError, KeyError, json.JSONDecodeError):
                 continue
             if version <= current:
                 continue
+            vectors = {
+                UUID(item_id): np.asarray(vector, dtype="<f4")
+                for item_id, vector in document["vectors"].items()
+            }
+            updated, activation = _materialize_trainer_records(
+                records, vectors, version=version
+            )
+            if activation["afterVectorStateSha256"] != document["vectorStateSha256"]:
+                raise RuntimeError("trainer activation vector checksum differs")
+            from babel_online.model import InMemoryCreatedBabelIndex
+
             state.apply_sync(
                 selected_model_id=model.modelId,
                 materialized_state=replace(
-                    state.snapshot().materialized_state, model_version=version
+                    state.snapshot().materialized_state,
+                    model_version=version,
+                    pgvector_snapshot_sha256=activation[
+                        "afterVectorStateSha256"
+                    ],
+                    backend_snapshot_sha256=activation[
+                        "afterVectorStateSha256"
+                    ],
                 ),
-                candidate_index=index,
-                vector_records=records,
+                candidate_index=InMemoryCreatedBabelIndex(updated),
+                vector_records=updated,
+            )
+            _write_json(
+                activation_dir / f"receipt-v{version:08d}.json",
+                {"schemaVersion": 2, "modelVersion": version, **activation},
             )
             current = version
 
@@ -746,20 +865,22 @@ def _train_role(args: argparse.Namespace) -> int:
             }
             _write_json(args.state_root / "trainer-status.json", status)
             if args.load_mode == "training_and_activation":
-                published = time.time_ns()
-                activated = time.time_ns()
+                captured = trainer.capture_sync_state()
+                vectors = {
+                    str(item_id): [float(value) for value in vector]
+                    for item_id, vector in captured.materialized_vectors.items()
+                }
                 _write_json(
                     args.state_root
                     / "activation"
-                    / f"receipt-v{trainer.training_version:08d}.json",
+                    / f"update-v{trainer.training_version:08d}.json",
                     {
-                        "schemaVersion": 1,
-                        "runId": str(request.runId),
-                        "modelId": str(model.modelId),
+                        "schemaVersion": 2,
                         "modelVersion": trainer.training_version,
-                        "publishedAtNs": published,
-                        "activatedAtNs": activated,
-                        "stalenessNs": activated - published,
+                        "vectorStateSha256": _vector_state_sha(
+                            captured.materialized_vectors
+                        ),
+                        "vectors": vectors,
                     },
                 )
     finally:
@@ -791,11 +912,21 @@ def main(argv: list[str] | None = None) -> int:
         timeout_seconds=args.timeout_seconds,
         port_base=_free_port_base(),
     )
-    run_tiny_smoke(
-        build_live_smoke_plan(settings),
-        FixtureLiveSmoke(settings).execute,
-        receipt_path=args.receipt,
-    )
+    staged_receipt = args.receipt.with_suffix(args.receipt.suffix + ".running")
+    args.receipt.unlink(missing_ok=True)
+    staged_receipt.unlink(missing_ok=True)
+    try:
+        run_tiny_smoke(
+            build_live_smoke_plan(settings),
+            FixtureLiveSmoke(settings).execute,
+            receipt_path=staged_receipt,
+        )
+        args.receipt.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(staged_receipt, args.receipt)
+    except BaseException:
+        staged_receipt.unlink(missing_ok=True)
+        args.receipt.unlink(missing_ok=True)
+        raise
     return 0
 
 
