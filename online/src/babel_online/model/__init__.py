@@ -4,6 +4,7 @@ from .context_tower import CreatorContextTower
 from .artifact import (
     ArtifactIntegrityError,
     LoadedArtifact,
+    LoadedRealArtifact,
     build_real_original_manifest,
     load_artifact,
     model_manifest_sha256,
@@ -52,6 +53,7 @@ __all__ = [
     "InMemoryCreatedBabelIndex",
     "MaterializedServingState",
     "LoadedArtifact",
+    "LoadedRealArtifact",
     "ModelRegistry",
     "PopulationIdentity",
     "PopulationActivationEvidence",

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
+from threading import RLock
 from typing import Literal
 from uuid import UUID
 
@@ -62,6 +63,7 @@ class SourceVectorResolver:
         self._load_active = load_active
         self._capacity = capacity
         self._cache: OrderedDict[VectorCacheKey, NDArray[np.float32]] = OrderedDict()
+        self._cache_lock = RLock()
 
     def _remember(
         self, key: VectorCacheKey, vector: NDArray[np.float32]
@@ -69,10 +71,11 @@ class SourceVectorResolver:
         source = _exact_float32(vector)
         exact = np.array(source, dtype=np.float32, order="C", copy=True)
         exact.setflags(write=False)
-        self._cache[key] = exact
-        self._cache.move_to_end(key)
-        while len(self._cache) > self._capacity:
-            self._cache.popitem(last=False)
+        with self._cache_lock:
+            self._cache[key] = exact
+            self._cache.move_to_end(key)
+            while len(self._cache) > self._capacity:
+                self._cache.popitem(last=False)
         return exact
 
     def resolve_new_root(
@@ -90,10 +93,12 @@ class SourceVectorResolver:
         return ResolvedSourceVector(vector=vector, origin="qwen_encode")
 
     def resolve_existing(self, key: VectorCacheKey) -> ResolvedSourceVector:
-        cached = self._cache.get(key)
-        if cached is not None:
-            self._cache.move_to_end(key)
-            return ResolvedSourceVector(vector=cached, origin="cache_hit")
+        with self._cache_lock:
+            cached = self._cache.get(key)
+            if cached is not None:
+                self._cache.move_to_end(key)
+                return ResolvedSourceVector(vector=cached, origin="cache_hit")
+        # Keep database I/O outside the cache lock; only mutation is atomic.
         vector = self._remember(key, self._load_active(key))
         return ResolvedSourceVector(vector=vector, origin="pgvector_load")
 

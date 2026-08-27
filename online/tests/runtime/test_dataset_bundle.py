@@ -10,9 +10,13 @@ from babel_online.runtime.dataset_bundle import (
     DEMO_DATASET_CONFIG,
     DEMO_DATASET_REPOSITORY,
     DEMO_DATASET_REVISION,
+    SCALE_DATASET_CONFIG,
+    SCALE_DATASET_REVISION,
+    SCALE_REQUIRED_CONFIGS,
     DatasetBundleIntegrityError,
     acquire_pinned_bundle,
     load_demo_dataset_bundle,
+    load_scale_dataset_bundle,
 )
 
 
@@ -138,3 +142,52 @@ def test_loader_accepts_checksum_pinned_hub_cache_symlinks(tmp_path) -> None:
     )
 
     assert set(loaded.configs) == set(configs)
+
+
+def test_scale_acquisition_and_loader_select_exact_real_monthly_release(tmp_path) -> None:
+    configs = {}
+    for name in sorted(SCALE_REQUIRED_CONFIGS):
+        relative = Path(name) / "train" / "part-00000.parquet"
+        payload = name.encode()
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True)
+        path.write_bytes(payload)
+        configs[name] = {
+            "path": str(relative),
+            "rows": 1,
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        }
+    manifest = tmp_path / "monthly-engineering-snapshots/release-manifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "release_scope": "timeboxed_engineering_snapshot",
+                "configs": configs,
+            }
+        )
+    )
+    calls = []
+
+    acquired = acquire_pinned_bundle(
+        repo_id=DEMO_DATASET_REPOSITORY,
+        revision=SCALE_DATASET_REVISION,
+        token="secret",
+        cache_dir=tmp_path / "cache",
+        snapshot_download=lambda **values: calls.append(values) or str(tmp_path),
+    )
+    loaded = load_scale_dataset_bundle(
+        acquired,
+        dataset_repository=DEMO_DATASET_REPOSITORY,
+        dataset_config=SCALE_DATASET_CONFIG,
+        dataset_revision=SCALE_DATASET_REVISION,
+        read_parquet=lambda path: [{"path": str(path)}],
+    )
+
+    assert set(loaded.configs) == SCALE_REQUIRED_CONFIGS
+    assert loaded.release_scope == "timeboxed_engineering_snapshot"
+    assert calls[0]["revision"] == SCALE_DATASET_REVISION
+    assert "monthly-engineering-snapshots/release-manifest.json" in calls[0][
+        "allow_patterns"
+    ]

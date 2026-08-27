@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from ..contracts import ActivityLogV1, ModelManifestV1, RunConfigV1
+from ..contracts import ActivityLogV1, ModelManifestV1, ModelManifestV2, RunConfigV1
 from ..model.artifact import LoadedArtifact, load_artifact
 from ..model.population import (
     PopulationActivationEvidence,
@@ -135,6 +135,67 @@ class RuntimeDatabase:
             if row is None or row[0] != model.checkpointSha256 or row[1] != model.datasetRevision:
                 raise ArtifactConfigurationError(
                     "registered model identity differs from configured artifact"
+                )
+
+    def bootstrap_real_model(
+        self, model: ModelManifestV2, *, artifact_manifest_path: Path
+    ) -> None:
+        """Register the accepted V2 original in the existing generic model table."""
+        if not isinstance(model, ModelManifestV2):
+            raise TypeError("real model bootstrap requires ModelManifestV2")
+        resolved = artifact_manifest_path.resolve()
+        if not resolved.is_file() or hashlib.sha256(resolved.read_bytes()).hexdigest() != (
+            model.artifactManifestSha256
+        ):
+            raise ArtifactConfigurationError(
+                "real model artifact manifest path or checksum differs"
+            )
+        embedding = model.embeddingSpace.model_dump(mode="json")
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO recommender_models(
+                  id, label, parent_model_id, producing_run_id, encoder_repo,
+                  encoder_revision, dataset_repo, dataset_revision,
+                  environment_sequence, training_examples, checkpoint_path,
+                  checkpoint_sha256, embedding_space, immutable
+                ) VALUES (%s,%s,NULL,NULL,%s,%s,%s,%s,'[]'::jsonb,%s,%s,%s,%s::jsonb,true)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                (
+                    model.modelId,
+                    model.label,
+                    model.encoderRepo,
+                    model.encoderRevision,
+                    model.datasetRepo,
+                    model.datasetRevision,
+                    model.trainingExamples,
+                    str(resolved),
+                    model.artifactManifestSha256,
+                    json.dumps(embedding, sort_keys=True, separators=(",", ":")),
+                ),
+            )
+            cursor.execute(
+                """
+                SELECT encoder_repo, encoder_revision, dataset_revision,
+                       checkpoint_sha256, embedding_space
+                FROM recommender_models WHERE id=%s
+                """,
+                (model.modelId,),
+            )
+            row = cursor.fetchone()
+            registered_embedding = (
+                row[4] if row is not None and isinstance(row[4], Mapping) else None
+            )
+            if row is None or (
+                str(row[0]) != model.encoderRepo
+                or str(row[1]) != model.encoderRevision
+                or str(row[2]) != model.datasetRevision
+                or str(row[3]) != model.artifactManifestSha256
+                or registered_embedding != embedding
+            ):
+                raise ArtifactConfigurationError(
+                    "registered real model identity differs from accepted artifact"
                 )
 
     def register_child(self, model: ModelManifestV1, checkpoint_path: Path) -> None:

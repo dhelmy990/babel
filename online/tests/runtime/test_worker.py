@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 from pathlib import Path
+import json
 
 import pytest
 
@@ -17,6 +18,10 @@ from babel_online.runtime.dataset_bundle import (
 )
 from babel_online.config import default_run_config
 from babel_online.contracts import FeedbackEventV1
+from babel_online.contracts import ModelManifestV1
+from babel_online.model.candidate_index import MaterializedServingState
+from babel_online.model.item_tower import QwenItemTower
+from babel_online.model.pgvector_index import PgvectorCandidateIndex
 from babel_online.training.consumer import SyncTrainingState
 import numpy as np
 import threading
@@ -186,6 +191,162 @@ def test_worker_sync_uses_one_locked_training_capture_for_version_vectors_and_st
     assert version == 11
     np.testing.assert_array_equal(vectors[babel_id], vector)
     assert model_state == {"captured": 11}
+
+
+def test_v2_runtime_requires_qwen_and_selects_real_monthly_bundle(
+    real_model_manifest, accepted_qwen_factory
+) -> None:
+    run_id = uuid4()
+    model = real_model_manifest
+    bundle = SimpleNamespace(
+        configs={
+            "catalog_2026_06": ({"article_key": "enwiki:1"},),
+            "catalog_2026_07": ({"article_key": "enwiki:2"},),
+            "simulator_2026_06_hidden": (
+                {
+                    "record_type": "pagelink",
+                    "payload_json": json.dumps(
+                        {
+                            "source_article_key": "enwiki:1",
+                            "target_article_key": "enwiki:2",
+                        }
+                    ),
+                },
+            ),
+            "simulator_2026_07_hidden": (),
+            "crosswalk_2026_06_07": (),
+        }
+    )
+    arguments = dict(
+        config=SimpleNamespace(runId=run_id),
+        database=SimpleNamespace(),
+        bundle=bundle,
+        model_lineage=[SimpleNamespace(manifest=model)],
+        kafka_bootstrap_servers="unused",
+        recommendation_port=8791,
+        stop_event=threading.Event(),
+    )
+
+    with pytest.raises(ValueError, match="Qwen100Encoder"):
+        FridayDemoRuntime(**arguments)
+    wrong_encoder = accepted_qwen_factory()
+    wrong_encoder.contract = wrong_encoder.contract.model_copy(
+        update={"artifactRevision": "0" * 40}
+    )
+    with pytest.raises(ValueError, match="identity"):
+        FridayDemoRuntime(**arguments, qwen_encoder=wrong_encoder)
+    encoder = accepted_qwen_factory()
+    runtime = FridayDemoRuntime(**arguments, qwen_encoder=encoder)
+
+    assert runtime.scale_run is True
+    assert runtime._catalogs() == {
+        "2026-06": [{"article_key": "enwiki:1"}],
+        "2026-07": [{"article_key": "enwiki:2"}],
+    }
+    assert runtime._hidden_edges()["2026-06"] == {("enwiki:1", "enwiki:2")}
+
+
+def test_v2_plan_vectors_and_serving_use_same_injected_qwen(
+    real_model_manifest, accepted_qwen_factory
+) -> None:
+    run_id = uuid4()
+    model = real_model_manifest
+    encoder = accepted_qwen_factory()
+    runtime = FridayDemoRuntime(
+        config=SimpleNamespace(runId=run_id),
+        database=SimpleNamespace(),
+        bundle=SimpleNamespace(configs={}),
+        model_lineage=[SimpleNamespace(manifest=model)],
+        kafka_bootstrap_servers="unused",
+        recommendation_port=8791,
+        stop_event=threading.Event(),
+        qwen_encoder=encoder,
+    )
+    babel_id = uuid4()
+    article = {
+        "canonical_title": "Real article",
+        "lead_text": "Real prepared lead.",
+        "article_text": "Real prepared lead.\n\nFirst section.",
+    }
+
+    frozen = runtime._encode_plan_vectors(
+        [("2026-06", uuid4(), article, babel_id)], batch_size=1
+    )
+
+    expected = encoder.encode(["Real article\n\nReal prepared lead."])[0]
+    np.testing.assert_array_equal(frozen[babel_id], expected)
+    assert encoder.calls == 2
+    runtime.registry = __import__(
+        "babel_online.model.registry", fromlist=["ModelRegistry"]
+    ).ModelRegistry()
+    runtime.registry.register_real_original(model)
+    runtime.index = PgvectorCandidateIndex(lambda *_args: [])
+    state = MaterializedServingState(
+        run_id=run_id,
+        model_id=model.modelId,
+        model_version=0,
+        embedding_space_id=model.embeddingSpace.embeddingSpaceId,
+        pgvector_snapshot_sha256="a" * 64,
+        backend_snapshot_sha256="a" * 64,
+    )
+
+    serving = runtime._create_serving_state(state, [])
+
+    assert isinstance(serving.snapshot().item_tower, QwenItemTower)
+    assert serving.snapshot().item_tower.encoder is encoder
+    babel = CreatedBabel(
+        babelId=babel_id,
+        runId=run_id,
+        creatorId=uuid4(),
+        sourceArticleKey="enwiki:42",
+        title="Real article",
+        text="Real prepared lead.",
+        createdAtNs=1,
+    )
+    inserted = []
+    activated = []
+    runtime.database = SimpleNamespace(
+        insert_vectors=lambda records: inserted.extend(records),
+        activate_embedding_state=lambda **values: activated.append(values),
+    )
+    runtime.serving = serving
+    runtime._created = [babel]
+    runtime._content_hashes = {babel_id: "d" * 64}
+    runtime._serving_vectors = {babel_id: frozen[babel_id]}
+    runtime._records = []
+    runtime._serving_version = 0
+
+    runtime._materialize_new_babel()
+
+    assert len(inserted) == 1
+    assert np.asarray(inserted[0].vector, dtype="<f4").tobytes() == expected.astype(
+        "<f4"
+    ).tobytes()
+    assert activated[0]["model_id"] == model.modelId
+
+
+def test_v1_runtime_remains_fixture_smoke_only() -> None:
+    fixture = ModelManifestV1.model_validate_json(
+        (ROOT / "fixtures/online/tiny/original-model.json").read_text()
+    )
+    runtime = FridayDemoRuntime(
+        config=SimpleNamespace(runId=uuid4()),
+        database=SimpleNamespace(),
+        bundle=SimpleNamespace(
+            configs={
+                "demo_catalog_2026_06": (),
+                "demo_catalog_2026_07": (),
+            }
+        ),
+        model_lineage=[SimpleNamespace(manifest=fixture)],
+        kafka_bootstrap_servers="unused",
+        recommendation_port=8791,
+        stop_event=threading.Event(),
+    )
+
+    assert runtime.scale_run is False
+    assert runtime.qwen_encoder is None
+    assert runtime._catalogs() == {"2026-06": [], "2026-07": []}
 
 
 def test_same_run_seed_reproduces_sources_and_decision_draws_across_run_ids() -> None:

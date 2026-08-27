@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import OrderedDict
+import threading
 from uuid import UUID
 
 import numpy as np
@@ -107,3 +109,58 @@ def test_resolver_rejects_non_float32_or_nonfinite_database_bytes() -> None:
         assert "finite float32" in str(error)
     else:  # pragma: no cover - assertion aid
         raise AssertionError("nonfinite vector was accepted")
+
+
+def test_cache_hit_and_eviction_are_one_atomic_lru_operation() -> None:
+    reader_fetched = threading.Event()
+    allow_reader_move = threading.Event()
+    eviction_completed = threading.Event()
+
+    class ControlledCache(OrderedDict):
+        def get(self, cache_key, default=None):
+            value = super().get(cache_key, default)
+            if (
+                threading.current_thread().name == "cache-reader"
+                and cache_key == key(BABEL_A)
+            ):
+                reader_fetched.set()
+                assert allow_reader_move.wait(2)
+            return value
+
+        def popitem(self, last=True):
+            value = super().popitem(last=last)
+            eviction_completed.set()
+            return value
+
+    resolver = SourceVectorResolver(
+        FakeQwen(), load_active=lambda cache_key: raw(cache_key.babel_id.int % 10), capacity=1
+    )
+    resolver._cache = ControlledCache({key(BABEL_A): raw(0)})
+    results = []
+    errors = []
+
+    def read_a() -> None:
+        try:
+            results.append(resolver.resolve_existing(key(BABEL_A)))
+        except Exception as error:  # pragma: no cover - assertion captures it
+            errors.append(error)
+
+    def load_b() -> None:
+        try:
+            resolver.resolve_existing(key(BABEL_B))
+        except Exception as error:  # pragma: no cover - assertion captures it
+            errors.append(error)
+
+    reader = threading.Thread(target=read_a, name="cache-reader")
+    evictor = threading.Thread(target=load_b, name="cache-evictor")
+    reader.start()
+    assert reader_fetched.wait(1)
+    evictor.start()
+    eviction_completed.wait(0.25)
+    allow_reader_move.set()
+    reader.join(2)
+    evictor.join(2)
+
+    assert errors == []
+    assert results[0].origin == "cache_hit"
+    assert results[0].vector.tobytes() == raw(0).tobytes()

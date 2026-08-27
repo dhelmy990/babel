@@ -18,6 +18,7 @@ from ..contracts import (
     CandidateActionV1,
     FeedbackEventV1,
     ModelManifestV1,
+    ModelManifestV2,
     RecommendationActivityV1,
     RecommendationRequestV1,
     canonical_pgvector_snapshot_sha256,
@@ -32,6 +33,7 @@ from ..feedback import (
 from ..model.candidate_index import MaterializedServingState
 from ..model.item_tower import ItemTower
 from ..model.pgvector_index import PgvectorCandidateIndex
+from ..model.qwen_encoder import Qwen100Encoder, format_article_input
 from ..model.registry import ModelRegistry
 from ..observable import CreatedBabel, VectorRecord
 from ..serving import ServingState, create_app
@@ -158,6 +160,7 @@ class FridayDemoRuntime:
         kafka_bootstrap_servers: str,
         recommendation_port: int,
         stop_event: threading.Event,
+        qwen_encoder: Qwen100Encoder | None = None,
     ) -> None:
         self.config = config
         self.database = database
@@ -167,6 +170,26 @@ class FridayDemoRuntime:
         self.model_lineage = model_lineage
         self.starting_artifact = model_lineage[-1]
         self.starting_model = self.starting_artifact.manifest
+        self.scale_run = isinstance(self.starting_model, ModelManifestV2)
+        if self.scale_run and not isinstance(qwen_encoder, Qwen100Encoder):
+            raise ValueError("ModelManifestV2 runtime requires one Qwen100Encoder")
+        if not self.scale_run and qwen_encoder is not None:
+            raise ValueError("fixture ModelManifestV1 cannot receive a Qwen100Encoder")
+        if self.scale_run:
+            contract = qwen_encoder.contract
+            model = self.starting_model
+            if (
+                contract.artifactRepo != model.encoderRepo
+                or contract.artifactRevision != model.encoderRevision
+                or contract.artifactId != model.artifactId
+                or contract.baseModelRevision != model.baseModelRevision
+                or contract.datasetRevision != model.datasetRevision
+                or contract.adapterSha256 != model.adapterSha256
+                or contract.projectionSha256 != model.projectionSha256
+                or contract.validationSha256 != model.validationSha256
+            ):
+                raise ValueError("Qwen encoder identity differs from selected V2 model")
+        self.qwen_encoder = qwen_encoder
         self.kafka_bootstrap_servers = kafka_bootstrap_servers
         self.recommendation_port = recommendation_port
         self.stop_event = stop_event
@@ -192,17 +215,23 @@ class FridayDemoRuntime:
             self._server = None
 
     def _catalogs(self) -> dict[str, list[dict[str, Any]]]:
+        prefix = "catalog" if getattr(self, "scale_run", False) else "demo_catalog"
         return {
-            "2026-06": list(self.bundle.configs["demo_catalog_2026_06"]),
-            "2026-07": list(self.bundle.configs["demo_catalog_2026_07"]),
+            "2026-06": list(self.bundle.configs[f"{prefix}_2026_06"]),
+            "2026-07": list(self.bundle.configs[f"{prefix}_2026_07"]),
         }
 
     def _hidden_edges(self) -> dict[str, set[tuple[str, str]]]:
         result: dict[str, set[tuple[str, str]]] = {"2026-06": set(), "2026-07": set()}
         for period in result:
-            config = f"demo_simulator_{period.replace('-', '_')}_hidden"
+            prefix = (
+                "simulator"
+                if getattr(self, "scale_run", False)
+                else "demo_simulator"
+            )
+            config = f"{prefix}_{period.replace('-', '_')}_hidden"
             for row in self.bundle.configs[config]:
-                if row.get("record_type") != "edges":
+                if row.get("record_type") not in {"edges", "pagelink"}:
                     continue
                 payload = json.loads(row["payload_json"])
                 result[period].add(
@@ -241,6 +270,60 @@ class FridayDemoRuntime:
                 plan.append((period, creator, chosen, babel_id))
                 sequence += 1
         return plan
+
+    def _encode_plan_vectors(
+        self,
+        plan: list[tuple[str, UUID, dict[str, Any], UUID]],
+        *,
+        batch_size: int = 16,
+    ) -> dict[UUID, np.ndarray]:
+        """Encode planned created Babels in bounded batches in the selected space."""
+        if batch_size <= 0:
+            raise ValueError("encoder batch size must be positive")
+        if not self.scale_run:
+            tower = ItemTower(self.starting_model.embeddingSpace)
+            return {
+                babel_id: tower.encode(
+                    format_article_input(
+                        article["canonical_title"],
+                        article.get("lead_text") or article["article_text"],
+                    )
+                )
+                for _period, _creator, article, babel_id in plan
+            }
+        if self.qwen_encoder is None:  # constructor invariant
+            raise RuntimeError("real Qwen encoder is unavailable")
+        result: dict[UUID, np.ndarray] = {}
+        for start in range(0, len(plan), batch_size):
+            batch = plan[start : start + batch_size]
+            texts = [
+                format_article_input(
+                    article["canonical_title"],
+                    article.get("lead_text") or article["article_text"],
+                )
+                for _period, _creator, article, _babel_id in batch
+            ]
+            vectors = self.qwen_encoder.encode(texts)
+            if vectors.shape != (len(batch), 100) or not np.isfinite(vectors).all():
+                raise ValueError("real Qwen plan encoding violated the 100d contract")
+            for row, vector in zip(batch, vectors, strict=True):
+                result[row[3]] = np.asarray(vector, dtype="<f4")
+        return result
+
+    def _create_serving_state(
+        self,
+        materialized_state: MaterializedServingState,
+        records: list[VectorRecord],
+    ) -> ServingState:
+        return ServingState(
+            registry=self.registry,
+            selected_model_id=self.starting_model.modelId,
+            materialized_state=materialized_state,
+            candidate_index=self.index,
+            vector_records=records,
+            qwen_encoder=self.qwen_encoder,
+            scale_run=self.scale_run,
+        )
 
     def _simulation_draw(
         self,
@@ -642,26 +725,29 @@ class FridayDemoRuntime:
             )
         )
         plan = self._plan()
-        tower = ItemTower(self.starting_model.embeddingSpace)
-        frozen = {
-            babel_id: tower.encode(
-                f"{article['canonical_title']}\n\n{article.get('lead_text') or article['article_text']}"
-            )
-            for _period, _creator, article, babel_id in plan
-        }
+        frozen = self._encode_plan_vectors(plan)
         self._frozen_vectors = {key: value.copy() for key, value in frozen.items()}
         query = np.mean(np.stack(list(frozen.values())), axis=0)
         self.model = NumpyWorkingModel(frozen, query_vector=query, learning_rate=0.05)
-        try:
-            starting_state = json.loads(self.starting_artifact.checkpoint_path.read_text())
-        except (OSError, json.JSONDecodeError):
-            starting_state = {}
+        starting_state = {}
+        if not self.scale_run:
+            try:
+                starting_state = json.loads(
+                    self.starting_artifact.checkpoint_path.read_text()
+                )
+            except (OSError, json.JSONDecodeError):
+                starting_state = {}
         if isinstance(starting_state, dict) and isinstance(
             starting_state.get("transferState"), dict
         ):
             self.model.load_transfer_state(starting_state["transferState"])
         self.registry = ModelRegistry()
-        self.registry.register_original(self.model_lineage[0].manifest)
+        if self.scale_run:
+            if len(self.model_lineage) != 1:
+                raise ValueError("V2 child lineage is owned by the model-state slice")
+            self.registry.register_real_original(self.starting_model)
+        else:
+            self.registry.register_original(self.model_lineage[0].manifest)
         for artifact in self.model_lineage[1:]:
             self.registry.register_child(artifact.manifest)
         self.index = PgvectorCandidateIndex(self.database.query_candidates)
@@ -675,13 +761,7 @@ class FridayDemoRuntime:
             pgvector_sha256=empty_sha,
             backend_sha256=empty_sha,
         )
-        self.serving = ServingState(
-            registry=self.registry,
-            selected_model_id=self.starting_model.modelId,
-            materialized_state=initial_state,
-            candidate_index=self.index,
-            vector_records=[],
-        )
+        self.serving = self._create_serving_state(initial_state, [])
         self.synchronizer = AtomicSynchronizer(
             Path(self.config.stateRoot) / str(self.config.runId) / "sync",
             serving_state=self.serving,

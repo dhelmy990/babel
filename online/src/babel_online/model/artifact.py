@@ -22,6 +22,14 @@ class LoadedArtifact:
     checkpoint_path: Path
 
 
+@dataclass(frozen=True)
+class LoadedRealArtifact:
+    """Accepted V2 original kept in memory beside its verified Hub payload."""
+
+    manifest: ModelManifestV2
+    distilled_artifact: DistilledArtifactV1
+
+
 def load_artifact(root: Path) -> LoadedArtifact:
     """Load one immutable manifest and verify its checkpoint bytes."""
     artifact_root = Path(root).resolve()
@@ -117,6 +125,7 @@ def model_manifest_sha256(manifest: ModelManifestV1 | ModelManifestV2) -> str:
 __all__ = [
     "ArtifactIntegrityError",
     "LoadedArtifact",
+    "LoadedRealArtifact",
     "build_real_original_manifest",
     "load_artifact",
     "model_manifest_sha256",
