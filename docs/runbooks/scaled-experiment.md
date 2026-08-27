@@ -288,12 +288,13 @@ babel-online performance-export \
 
 The resulting manifest records `formalPerformanceClaim=false` and the exact
 representative evidence scope. It cannot enter the formal accepted-model bundle
-or be attached through the formal publisher. Build the closed representative
-bundle from the completed export, all six condition evidence files, and the
-reviewed report:
+or be attached through the formal publisher. For a future fresh completed
+representative trial only, build the closed bundle from its export, all six
+condition evidence files, and the reviewed report. Never substitute either
+completed trial ID or immutable path recorded below.
 
 ```bash
-TRIAL_ID='0367346d-98f9-4419-b2db-9194c4c868f7'
+TRIAL_ID='<fresh-completed-representative-trial-id>'
 RUN_ROOT="/home/dhelmy990/Data/babel-data/runs/$TRIAL_ID"
 PERF_ROOT='/home/dhelmy990/Data/babel-data/state/performance'
 REPRESENTATIVE_ROOT="$RUN_ROOT/representative-accepted"
@@ -340,7 +341,8 @@ complete inventory at the returned commit to verify every checksum. The printed
 receipt contains no token. This representative receipt must not be passed to
 `trial-bundle-attach` and cannot claim formal performance evidence.
 
-The first successful representative bundle above contains 17 files and was
+The first successful representative bundle is an archival completed pin, not a
+runnable example. It contains 17 files and was
 remotely verified at dataset commit
 `dc0d158ff75851a5f944aa674f9fb88221440ede`, path
 `representative-runs/0367346d-98f9-4419-b2db-9194c4c868f7/08fcd65c2e723760e95e93dea0c48fb827de3b0702a5befece7ae9b0dc1786b1/`.
