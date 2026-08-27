@@ -14,9 +14,12 @@ performance claim false**.
 - Load modes: serving only, training without activation, training with activation.
 - Bound: at most 20 requests per condition and 180 requests total.
 - Input: the current fixture only; no 10,000-Babel population was started.
-- Timeout: each condition runs in a Linux fork worker. The suite reserves a
-  cooperative-cancellation window, then terminates/kills a stuck worker before
-  returning; a late condition prevents receipt publication.
+- Timeout: each condition runs in a verified worker-only Linux process group.
+  The callback cannot start until the parent acknowledges that isolation
+  handshake. The suite then reserves a cooperative-cancellation window,
+  terminates/kills the whole group, and reaps the worker before returning; a
+  late condition prevents receipt publication and cannot leave a callback
+  subprocess running.
 - Receipt: positive requests/edges, startup/cleanup, progress, ratios, trainer-
   failure serving availability, and an existing nonempty raw-result file are
   mandatory, with
@@ -70,7 +73,10 @@ separate start/continuation draw checksums.
 The creator schedule is explicitly creator-local. Start and continuation use
 independent recorded draw streams, each with probability 0.40. Cohort validation
 requires every expected condition exactly once and rejects duplicates, extras,
-identity drift, and `same_process` masquerading as the selected split.
+identity drift, `same_process` masquerading as the selected split, a receipt
+cohort that differs from its condition IDs, and counts that differ from the
+exact frozen 10,000-row population. Callers cannot weaken this with an
+independent threshold.
 
 All current topology labels are same-host. They measure process scheduling,
 memory contention, model-activation pauses, Kafka lag, and failure isolation.

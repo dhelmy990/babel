@@ -266,7 +266,7 @@ def validate_controlled_cohort(
     expected_condition_ids: set[str],
     expected_population: FrozenPopulationReceipt,
     expected_workload: FrozenWorkloadReceipt,
-    formal_threshold: int = 10_000,
+    formal_threshold: int | None = None,
 ) -> tuple[ControlledConditionReceipt, ...]:
     receipt_ids = tuple(row.condition_id for row in receipts)
     if (
@@ -279,6 +279,23 @@ def validate_controlled_cohort(
             "controlled cohort must contain each expected condition exactly once"
         )
     expected_population.validate_for_formal()
+    if (
+        formal_threshold is not None
+        and formal_threshold != expected_population.formal_threshold
+    ):
+        raise ValueError("controlled cohort threshold cannot weaken frozen population")
+    try:
+        expected_cohorts = {
+            int(condition_id.split(".", 1)[0].removeprefix("cohort-"))
+            for condition_id in expected_condition_ids
+        }
+    except ValueError as error:
+        raise ValueError("controlled cohort condition identity is malformed") from error
+    if len(expected_cohorts) != 1:
+        raise ValueError("controlled cohort condition identities mix cohort sizes")
+    expected_cohort = next(iter(expected_cohorts))
+    if any(row.cohort_size != expected_cohort for row in receipts):
+        raise ValueError("receipt cohort differs from its expected condition cohort")
     baseline = receipts[0]
     identity = (
         baseline.cohort_size,
@@ -305,11 +322,11 @@ def validate_controlled_cohort(
     ):
         raise ValueError("controlled cohort differs from its expected frozen identity")
     if any(
-        row.created_count != row.indexed_count
-        or row.indexed_count < formal_threshold
+        row.created_count != expected_population.distinct_babel_count
+        or row.indexed_count != expected_population.indexed_count
         for row in receipts
     ):
-        raise ValueError("controlled cohort is below its created/indexed threshold")
+        raise ValueError("controlled cohort counts differ from frozen population")
     return receipts
 
 

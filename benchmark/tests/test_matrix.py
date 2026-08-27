@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+import subprocess
+import sys
 import time
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
+import babel_benchmark.matrix as matrix_module
 from babel_benchmark.matrix import (
     CallbackSmokeRuntime,
     DashboardPerformanceHttpClient,
@@ -171,6 +175,80 @@ def test_timeout_terminates_never_returning_executor(tmp_path) -> None:
     assert time.monotonic() - started < 0.2
     assert {child.pid for child in multiprocessing.active_children()} == before
     time.sleep(0.22)
+    assert not delayed_side_effect.exists()
+
+
+def test_timeout_terminates_executor_process_group_descendants(tmp_path) -> None:
+    plan = tiny_smoke_plan(timeout_seconds=0.08)
+    descendant_pid_path = tmp_path / "descendant.pid"
+    delayed_side_effect = tmp_path / "descendant-side-effect"
+    started = time.monotonic()
+
+    def launches_descendant(_condition, _limit, _timeout, _cancel):
+        script = (
+            "import os,time,pathlib; "
+            f"pathlib.Path({str(descendant_pid_path)!r}).write_text(str(os.getpid())); "
+            "time.sleep(0.25); "
+            f"pathlib.Path({str(delayed_side_effect)!r}).write_text('bad'); "
+            "time.sleep(10)"
+        )
+        subprocess.Popen([sys.executable, "-c", script])
+        while True:
+            time.sleep(1)
+
+    with pytest.raises(TimeoutError, match="strict suite timeout"):
+        run_tiny_smoke(
+            plan,
+            launches_descendant,
+            receipt_path=tmp_path / "receipt.json",
+        )
+
+    assert time.monotonic() - started < 0.25
+    assert descendant_pid_path.is_file()
+    descendant_pid = int(descendant_pid_path.read_text(encoding="utf-8"))
+    descendant_proc = Path(f"/proc/{descendant_pid}")
+    deadline = time.monotonic() + 0.5
+    while time.monotonic() < deadline and descendant_proc.exists():
+        time.sleep(0.01)
+    assert not descendant_proc.exists()
+    time.sleep(0.3)
+    assert not delayed_side_effect.exists()
+
+
+def test_timeout_recovers_late_process_group_handshake(
+    tmp_path, monkeypatch
+) -> None:
+    plan = tiny_smoke_plan(timeout_seconds=0.14)
+    descendant_pid_path = tmp_path / "late-descendant.pid"
+    delayed_side_effect = tmp_path / "late-descendant-side-effect"
+    real_setsid = matrix_module.os.setsid
+
+    def delayed_setsid():
+        time.sleep(0.07)
+        return real_setsid()
+
+    monkeypatch.setattr(matrix_module.os, "setsid", delayed_setsid)
+
+    def launches_descendant(_condition, _limit, _timeout, _cancel):
+        script = (
+            "import os,time,pathlib; "
+            f"pathlib.Path({str(descendant_pid_path)!r}).write_text(str(os.getpid())); "
+            "time.sleep(0.25); "
+            f"pathlib.Path({str(delayed_side_effect)!r}).write_text('bad')"
+        )
+        subprocess.Popen([sys.executable, "-c", script])
+        while True:
+            time.sleep(1)
+
+    with pytest.raises(TimeoutError, match="strict suite timeout"):
+        run_tiny_smoke(
+            plan,
+            launches_descendant,
+            receipt_path=tmp_path / "receipt.json",
+        )
+
+    assert not descendant_pid_path.exists()
+    time.sleep(0.3)
     assert not delayed_side_effect.exists()
 
 

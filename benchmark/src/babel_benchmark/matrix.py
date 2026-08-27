@@ -3,6 +3,7 @@
 import json
 import multiprocessing
 import os
+import signal
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -170,10 +171,25 @@ def _execute_with_timeout(
     except ValueError as error:  # pragma: no cover - Linux demo contract
         raise RuntimeError("tiny smoke requires a Linux fork process boundary") from error
     receive, send = context.Pipe(duplex=False)
+    ready_receive, ready_send = context.Pipe(duplex=False)
+    approval_receive, approval_send = context.Pipe(duplex=False)
     cancel = context.Event()
 
     def invoke() -> None:
         receive.close()
+        ready_receive.close()
+        approval_send.close()
+        os.setsid()
+        ready_send.send((os.getpid(), os.getpgrp()))
+        ready_send.close()
+        try:
+            approved = approval_receive.recv()
+        except EOFError:
+            approval_receive.close()
+            return
+        approval_receive.close()
+        if approved is not True:
+            return
         try:
             value: tuple[bool, object] = (
                 True,
@@ -198,20 +214,65 @@ def _execute_with_timeout(
         daemon=False,
         name=f"tiny-smoke-{condition.condition_id}",
     )
+    deadline = time.monotonic() + timeout_seconds
     worker.start()
     send.close()
-    cancellation_grace = min(0.05, timeout_seconds / 2)
-    worker.join(max(0.0, timeout_seconds - cancellation_grace))
+    ready_send.close()
+    approval_receive.close()
+    isolated_group: int | None = None
+
+    def read_isolation_handshake(timeout: float, *, allow_callback: bool) -> None:
+        nonlocal isolated_group
+        if isolated_group is not None or not ready_receive.poll(timeout):
+            return
+        try:
+            worker_pid, worker_group = ready_receive.recv()
+        except EOFError:
+            return
+        if worker_pid == worker.pid and worker_group == worker.pid:
+            isolated_group = worker_group
+            if allow_callback:
+                approval_send.send(True)
+
+    ready_wait = min(0.05, max(0.0, deadline - time.monotonic()))
+    read_isolation_handshake(ready_wait, allow_callback=True)
+
+    remaining = max(0.0, deadline - time.monotonic())
+    cancellation_grace = min(0.05, remaining / 2)
+    worker.join(max(0.0, remaining - cancellation_grace))
+    timed_out = worker.is_alive()
     if worker.is_alive():
         cancel.set()
         worker.join(cancellation_grace)
-    if worker.is_alive():
+
+    # A callback cannot begin until its handshake send completes. Re-polling
+    # immediately before cleanup closes the only race where isolation became
+    # ready just after the initial bounded readiness window.
+    read_isolation_handshake(0.0, allow_callback=False)
+    ready_receive.close()
+    approval_send.close()
+
+    # Always clear the verified worker-only process group. On timeout this
+    # terminates the callback and every subprocess it launched. On success it
+    # prevents an accidentally detached background child escaping a condition.
+    if isolated_group is not None:
+        try:
+            os.killpg(isolated_group, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    elif worker.is_alive():
         worker.terminate()
-        worker.join(0.05)
-    if worker.is_alive():  # pragma: no cover - termination fallback
-        worker.kill()
+    worker.join(0.05)
+    if worker.is_alive():
+        if isolated_group is not None:
+            try:
+                os.killpg(isolated_group, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        else:  # pragma: no cover - pre-isolation startup failure
+            worker.kill()
         worker.join()
-    if cancel.is_set():
+    if timed_out:
         receive.close()
         raise TimeoutError("tiny smoke exceeded its strict suite timeout")
     if not receive.poll(0.05):

@@ -316,6 +316,21 @@ def test_controlled_conditions_must_clone_identical_population_and_workload() ->
             expected_workload=workload,
         )
 
+    weakened = tuple(
+        row.model_copy(
+            update={"cohort_size": 100, "created_count": 1, "indexed_count": 1}
+        )
+        for row in receipts
+    )
+    with pytest.raises(ValueError, match="cohort|frozen population|threshold"):
+        validate_controlled_cohort(
+            weakened,
+            expected_condition_ids=expected_ids,
+            expected_population=population,
+            expected_workload=workload,
+            formal_threshold=1,
+        )
+
     wrong_expected = set(expected_ids)
     wrong_expected.remove(next(iter(wrong_expected)))
     wrong_expected.add("cohort-50.same_process.unknown.pgvector")

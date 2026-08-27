@@ -88,10 +88,12 @@ PYTHONPATH=benchmark/src:online/src online/.venv/bin/python -m pytest \
 180 total, one suite timeout, the current fixture, and
 `formal_performance_claim=false`. `run_lifecycle_tiny_smoke()` calls one suite
 start, each condition callback, and one suite stop. It publishes the receipt
-only after cleanup succeeds. Each condition runs in a Linux fork worker and
-receives a cancellation event. The runner reserves a cooperative-cancellation
-window, then terminates or kills a stuck worker and reaps it before returning;
-no callback remains alive after `TimeoutError`. A successful condition requires
+only after cleanup succeeds. Each condition runs in a parent-acknowledged,
+worker-only Linux process group and receives a cancellation event; the callback
+cannot start before that isolation handshake. The runner reserves a
+cooperative-cancellation window, then terminates or kills the whole group and
+reaps its worker before returning; neither the callback nor a subprocess it
+launched remains active after `TimeoutError`. A successful condition requires
 positive requests and edges, all required health observations, and an existing
 nonempty raw evidence file. `DashboardPerformanceHttpClient` maps saved-trial
 creation and graceful stop to the Task 10 loopback admin endpoints; its caller
@@ -113,6 +115,11 @@ exact bytes into every condition. Freeze the request corpus, feedback,
 creator-local schedule, event mix, probability-0.40 start draws, and independent
 probability-0.40 continuation draws as six checksums. Do not regenerate walks
 from condition-specific recommendations.
+
+Every controlled receipt must use the cohort encoded in its condition ID and
+must report exactly the frozen population's 10,000 created/indexed rows. The
+formal threshold is owned by that frozen receipt and cannot be lowered per
+validation call.
 
 `FrozenPopulationReceipt` and `FrozenWorkloadReceipt` validate these artifacts;
 they do not create them. The exporter/checksum/clone driver remains required
