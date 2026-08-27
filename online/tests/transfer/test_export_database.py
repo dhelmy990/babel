@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import stat
 import struct
 from datetime import datetime, timezone
 from pathlib import Path
@@ -213,6 +214,8 @@ def database_row(ordinal: int) -> tuple:
         0,
         EMBEDDING_SPACE_ID,
         VECTOR_WIRE,
+        creator_id,
+        hashlib.sha256(f"Article {ordinal}".encode()).hexdigest(),
         DATASET_REPOSITORY,
         DATASET_CONFIGURATION,
         DATASET_REVISION,
@@ -289,8 +292,9 @@ def test_export_uses_one_read_only_snapshot_and_exact_binary_selector(
     def record_bundle(source, root):
         captured["source"] = source
         captured["root"] = Path(root)
+        bundle_root = Path(root) / ("a" * 64)
         return SimpleNamespace(
-            root=Path(root),
+            root=bundle_root,
             digest="a" * 64,
             manifest_contract=SimpleNamespace(rowCount=10_000),
         )
@@ -307,6 +311,7 @@ def test_export_uses_one_read_only_snapshot_and_exact_binary_selector(
     receipt = export_population("postgresql://secret", ORIGIN_TRIAL_ID, tmp_path / "bundle")
 
     assert receipt.bundleDigest == "a" * 64
+    assert receipt.bundlePath == str((tmp_path / "bundle" / ("a" * 64)).resolve())
     assert receipt.rowCount == 10_000
     assert len(captured["source"].rows) == 10_000
     assert captured["source"].metadata.createdAt == datetime(
@@ -330,6 +335,8 @@ def test_export_uses_one_read_only_snapshot_and_exact_binary_selector(
     ):
         assert table in selector
     assert "ORDER BY xb.babel_id" in selector
+    assert "eb.creator_id=xb.creator_id" in selector
+    assert "eb.catalog_content_hash=xb.catalog_content_hash" in selector
     assert "embedding::text" not in selector
     assert parameters == (
         ORIGIN_TRIAL_ID,
@@ -343,7 +350,8 @@ def test_export_uses_one_read_only_snapshot_and_exact_binary_selector(
 def test_final_frozen_hash_check_precedes_atomic_bundle_install(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    destination = tmp_path / "bundle"
+    output_root = tmp_path / "bundles"
+    destination = output_root / ("a" * 64)
     manifest = frozen_manifest()
 
     def staged_writer(_source, root):
@@ -370,9 +378,51 @@ def test_final_frozen_hash_check_precedes_atomic_bundle_install(
     )
 
     with pytest.raises(PopulationTransferIntegrityError, match="ordered population"):
-        _write_authoritative_bundle(SimpleNamespace(), destination, manifest)
+        _write_authoritative_bundle(SimpleNamespace(), output_root, manifest)
 
     assert not destination.exists()
+
+
+def test_bundle_installs_create_only_under_its_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_root = tmp_path / "bundles"
+    digest = "a" * 64
+    manifest = frozen_manifest()
+
+    def staged_writer(_source, root):
+        root = Path(root)
+        root.mkdir()
+        (root / "sentinel").write_text("verified")
+        return SimpleNamespace(root=root, digest=digest)
+
+    verified_contract = SimpleNamespace(
+        rowCount=10_000,
+        orderedPopulationSha256=ORDERED_SHA,
+        snapshotSha256=SNAPSHOT_SHA,
+        scheduleSha256=SCHEDULE_SHA,
+        contentSha256=CONTENT_SHA,
+    )
+    monkeypatch.setattr(
+        "babel_online.transfer.database.write_bundle_payloads", staged_writer
+    )
+    monkeypatch.setattr(
+        "babel_online.transfer.database.verify_bundle",
+        lambda root, trusted: SimpleNamespace(
+            root=Path(root), digest=trusted, manifest_contract=verified_contract
+        ),
+    )
+
+    installed = _write_authoritative_bundle(
+        SimpleNamespace(), output_root, manifest
+    )
+
+    assert installed.root == output_root / digest
+    assert installed.root.joinpath("sentinel").read_text() == "verified"
+    assert stat.S_IMODE(output_root.stat().st_mode) == 0o700
+    with pytest.raises(PopulationTransferIntegrityError, match="collision"):
+        _write_authoritative_bundle(SimpleNamespace(), output_root, manifest)
+    assert installed.root.joinpath("sentinel").read_text() == "verified"
 
 
 @pytest.mark.parametrize(
@@ -520,3 +570,33 @@ def test_export_rejects_wrong_row_count_and_fixture_contamination(
     )
     with pytest.raises(PopulationTransferIntegrityError, match="serving model"):
         export_population("postgresql://secret", ORIGIN_TRIAL_ID, tmp_path / "bundle2")
+
+
+@pytest.mark.parametrize(
+    ("position", "value", "message"),
+    [
+        (21, UUID(int=99), "embedding creator"),
+        (22, "0" * 64, "embedding content hash"),
+    ],
+)
+def test_export_rejects_embedding_row_identity_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    position: int,
+    value: object,
+    message: str,
+) -> None:
+    manifest, cursor = configured_source(tmp_path)
+    drifted = list(cursor.rows[0])
+    drifted[position] = value
+    cursor.rows[0] = tuple(drifted)
+    monkeypatch.setattr(
+        "babel_online.transfer.database._connect_psycopg",
+        lambda _url: RecordingConnection(cursor),
+    )
+    monkeypatch.setattr(
+        "babel_online.transfer.database.load_frozen_population", lambda _path: manifest
+    )
+
+    with pytest.raises(PopulationTransferIntegrityError, match=message):
+        export_population("postgresql://secret", ORIGIN_TRIAL_ID, tmp_path / "bundles")

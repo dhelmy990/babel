@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -212,6 +214,7 @@ SELECT xb.babel_id,xb.creator_id,xb.source_article_key,xb.title,xb.article_text,
        (extract(epoch from ws.created_at) * 1000000000)::bigint,
        eb.serving_model_id,eb.materialized_model_version,eb.embedding_space_id,
        public.vector_send(eb.embedding),
+       eb.creator_id,eb.catalog_content_hash,
        er.dataset_repository,er.dataset_config,er.dataset_revision
 FROM performance_experiments AS pe
 JOIN experiment_runs AS er ON er.id=pe.run_id
@@ -222,7 +225,10 @@ JOIN experiment_work_schedule AS ws
  AND ws.creator_id=xb.creator_id
  AND ws.source_article_key=xb.source_article_key
 JOIN babel_embeddings AS eb
-  ON eb.run_id=xb.run_id AND eb.babel_id=xb.babel_id
+  ON eb.run_id=xb.run_id
+ AND eb.babel_id=xb.babel_id
+ AND eb.creator_id=xb.creator_id
+ AND eb.catalog_content_hash=xb.catalog_content_hash
 JOIN run_embedding_states AS active ON active.run_id=er.id
 JOIN recommender_models AS rm ON rm.id=eb.serving_model_id
 WHERE pe.id=%s AND er.id=%s
@@ -510,7 +516,7 @@ def _rows_from_database(rows: Sequence[Sequence[object]]) -> tuple[PopulationTra
         )
     converted: list[PopulationTransferRow] = []
     for row in rows:
-        if len(row) != 24:
+        if len(row) != 26:
             raise PopulationTransferIntegrityError(
                 "authoritative population row has an unexpected shape"
             )
@@ -520,6 +526,14 @@ def _rows_from_database(rows: Sequence[Sequence[object]]) -> tuple[PopulationTra
             raise PopulationTransferIntegrityError(
                 "authoritative pgvector binary row is invalid"
             ) from error
+        if str(row[21]) != str(row[1]):
+            raise PopulationTransferIntegrityError(
+                "embedding creator differs from catalog creator"
+            )
+        if str(row[22]) != str(row[5]):
+            raise PopulationTransferIntegrityError(
+                "embedding content hash differs from catalog content hash"
+            )
         converted.append(
             PopulationTransferRow(
                 babel_id=str(row[0]),
@@ -543,9 +557,9 @@ def _rows_from_database(rows: Sequence[Sequence[object]]) -> tuple[PopulationTra
                 materialized_model_version=int(row[18]),
                 embedding_space_id=str(row[19]),
                 vector=np.frombuffer(f32le, dtype="<f4").copy(),
-                dataset_repository=str(row[21]),
-                dataset_configuration=str(row[22]),
-                dataset_revision=str(row[23]),
+                dataset_repository=str(row[23]),
+                dataset_configuration=str(row[24]),
+                dataset_revision=str(row[25]),
                 model_artifact_id=MODEL_ARTIFACT_ID,
             )
         )
@@ -586,6 +600,42 @@ def _metadata(created_at: datetime) -> PopulationTransferMetadataV1:
     )
 
 
+def _rename_directory_noreplace(source: Path, destination: Path) -> None:
+    """Atomically install a directory without replacing any destination."""
+
+    library = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(library, "renameat2", None)
+    if renameat2 is None:  # pragma: no cover - Linux deployment requirement
+        raise PopulationTransferIntegrityError(
+            "create-only atomic bundle installation is unavailable"
+        )
+    renameat2.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    renameat2.restype = ctypes.c_int
+    at_fdcwd = -100
+    rename_noreplace = 1
+    result = renameat2(
+        at_fdcwd,
+        os.fsencode(source),
+        at_fdcwd,
+        os.fsencode(destination),
+        rename_noreplace,
+    )
+    if result == 0:
+        return
+    error_number = ctypes.get_errno()
+    if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
+        raise PopulationTransferIntegrityError(
+            "bundle digest destination collision"
+        )
+    raise OSError(error_number, os.strerror(error_number), str(destination))
+
+
 def _write_authoritative_bundle(
     source: PopulationTransferBundleInput,
     output_root: str | Path,
@@ -593,12 +643,18 @@ def _write_authoritative_bundle(
 ) -> BundleFiles:
     """Install only after bundle and source-frozen hashes agree."""
 
-    destination = Path(output_root)
-    if destination.exists() or destination.is_symlink():
-        raise PopulationTransferIntegrityError("bundle destination already exists")
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    output_parent = Path(output_root)
+    if output_parent.is_symlink():
+        raise PopulationTransferIntegrityError("bundle output root must not be a symlink")
+    output_parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if not output_parent.is_dir():
+        raise PopulationTransferIntegrityError("bundle output root is not a directory")
+    if stat.S_IMODE(output_parent.stat().st_mode) & 0o077:
+        raise PopulationTransferIntegrityError(
+            "bundle output root must be mode 0700 or stricter"
+        )
     temporary_parent = Path(
-        tempfile.mkdtemp(prefix=f".{destination.name}.export.", dir=destination.parent)
+        tempfile.mkdtemp(prefix=".population-export.", dir=output_parent)
     )
     temporary_parent.chmod(0o700)
     staged = temporary_parent / "bundle"
@@ -633,7 +689,8 @@ def _write_authoritative_bundle(
                 raise PopulationTransferIntegrityError(
                     f"exported {label} differs from frozen population"
                 )
-        os.replace(staged, destination)
+        destination = output_parent / verified.digest
+        _rename_directory_noreplace(staged, destination)
         return verify_bundle(destination, verified.digest)
     finally:
         shutil.rmtree(temporary_parent, ignore_errors=True)

@@ -21,11 +21,12 @@ def test_export_cli_requires_explicit_arguments_and_writes_protected_receipt_las
 
     def export(url, trial_id, output_root):
         calls.append((url, trial_id, Path(output_root)))
+        bundle_path = Path(output_root).resolve() / ("a" * 64)
         return SimpleNamespace(
             schemaVersion=1,
             originTrialId=ORIGIN_TRIAL_ID,
             originRunId=ORIGIN_RUN_ID,
-            bundlePath=str(Path(output_root).resolve()),
+            bundlePath=str(bundle_path),
             bundleDigest="a" * 64,
             rowCount=10_000,
             exportedAt="2026-08-27T03:04:05Z",
@@ -33,7 +34,7 @@ def test_export_cli_requires_explicit_arguments_and_writes_protected_receipt_las
                 "schemaVersion": 1,
                 "originTrialId": str(ORIGIN_TRIAL_ID),
                 "originRunId": str(ORIGIN_RUN_ID),
-                "bundlePath": str(Path(output_root).resolve()),
+                "bundlePath": str(bundle_path),
                 "bundleDigest": "a" * 64,
                 "rowCount": 10_000,
                 "exportedAt": "2026-08-27T03:04:05Z",
@@ -58,7 +59,11 @@ def test_export_cli_requires_explicit_arguments_and_writes_protected_receipt_las
 
     assert result == 0
     assert calls == [(database_url, ORIGIN_TRIAL_ID, tmp_path / "bundle")]
-    assert json.loads(receipt.read_text())["bundleDigest"] == "a" * 64
+    receipt_document = json.loads(receipt.read_text())
+    assert receipt_document["bundleDigest"] == "a" * 64
+    assert receipt_document["bundlePath"] == str(
+        (tmp_path / "bundle" / ("a" * 64)).resolve()
+    )
     assert stat.S_IMODE(receipt.stat().st_mode) == 0o600
     assert database_url not in receipt.read_text()
     assert stat.S_IMODE(receipt.parent.stat().st_mode) == 0o700
