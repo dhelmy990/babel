@@ -149,27 +149,54 @@ class VerifiedLiveIdentityLedger:
         run_id: UUID,
         starting_model_id: UUID,
         embedding_space_id: UUID,
+        initial_state: Any,
     ) -> None:
         self.database = database
         self.run_id = run_id
         self.starting_model_id = starting_model_id
         self.embedding_space_id = embedding_space_id
         self._observed: list[tuple[str, int, str, str]] = []
+        if (
+            initial_state.run_id != run_id
+            or initial_state.embedding_space_id != embedding_space_id
+        ):
+            raise ValueError("initial serving state differs from the condition identity")
+        initial = (
+            initial_state.model_id,
+            int(initial_state.model_version),
+            str(initial_state.pgvector_snapshot_sha256),
+            str(initial_state.backend_snapshot_sha256),
+        )
+        if not self._database_verifies(initial):
+            raise ValueError("initial serving state is outside the verified model lineage")
+        self._verified = {initial}
+
+    def _database_verifies(self, value: tuple[UUID, int, str, str]) -> bool:
+        model_id, model_version, pgvector_sha256, backend_sha256 = value
+        return bool(
+            self.database.verify_live_serving_identity(
+                run_id=self.run_id,
+                starting_model_id=self.starting_model_id,
+                model_id=model_id,
+                model_version=model_version,
+                embedding_space_id=self.embedding_space_id,
+                pgvector_sha256=pgvector_sha256,
+                backend_sha256=backend_sha256,
+            )
+        )
 
     def validate(self, response: Any) -> None:
         if response.embeddingSpaceId != self.embedding_space_id:
             raise ValueError("live serving embedding space differs")
-        valid = self.database.verify_live_serving_identity(
-            run_id=self.run_id,
-            starting_model_id=self.starting_model_id,
-            model_id=response.modelId,
-            model_version=response.modelVersion,
-            embedding_space_id=response.embeddingSpaceId,
-            pgvector_sha256=response.pgvectorSnapshotSha256,
-            backend_sha256=response.backendSnapshotSha256,
+        identity = (
+            response.modelId,
+            int(response.modelVersion),
+            str(response.pgvectorSnapshotSha256),
+            str(response.backendSnapshotSha256),
         )
-        if not valid:
+        if identity not in self._verified and not self._database_verifies(identity):
             raise ValueError("live serving state is outside the verified model lineage")
+        self._verified.add(identity)
         value = (
             str(response.modelId),
             int(response.modelVersion),
@@ -957,6 +984,7 @@ def execute_live_condition(
             run_id=run_id,
             starting_model_id=trial.starting_model_id,
             embedding_space_id=active.embedding_space_id,
+            initial_state=active,
         )
         if condition.activation_enabled
         else None

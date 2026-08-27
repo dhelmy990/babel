@@ -106,6 +106,14 @@ def test_live_identity_ledger_accepts_only_database_verified_lineage():
         run_id=UUID(int=1),
         starting_model_id=UUID(int=2),
         embedding_space_id=UUID(int=3),
+        initial_state=SimpleNamespace(
+            run_id=UUID(int=1),
+            model_id=UUID(int=2),
+            model_version=0,
+            embedding_space_id=UUID(int=3),
+            pgvector_snapshot_sha256="0" * 64,
+            backend_snapshot_sha256="0" * 64,
+        ),
     )
     response = type(
         "Response",
@@ -126,6 +134,82 @@ def test_live_identity_ledger_accepts_only_database_verified_lineage():
     response.modelVersion = 7
     with pytest.raises(ValueError, match="lineage"):
         ledger.validate(response)
+
+
+def test_live_identity_ledger_accepts_delayed_pre_activation_response():
+    original = SimpleNamespace(
+        run_id=UUID(int=1),
+        model_id=UUID(int=2),
+        model_version=0,
+        embedding_space_id=UUID(int=3),
+        pgvector_snapshot_sha256="a" * 64,
+        backend_snapshot_sha256="a" * 64,
+    )
+    child = SimpleNamespace(
+        modelId=UUID(int=4),
+        modelVersion=1,
+        embeddingSpaceId=UUID(int=3),
+        pgvectorSnapshotSha256="b" * 64,
+        backendSnapshotSha256="b" * 64,
+    )
+    active = {
+        "identity": (
+            original.model_id,
+            original.model_version,
+            original.pgvector_snapshot_sha256,
+            original.backend_snapshot_sha256,
+        )
+    }
+
+    class Database:
+        def verify_live_serving_identity(self, **values):
+            return (
+                values["model_id"],
+                values["model_version"],
+                values["pgvector_sha256"],
+                values["backend_sha256"],
+            ) == active["identity"]
+
+    ledger = VerifiedLiveIdentityLedger(
+        database=Database(),
+        run_id=original.run_id,
+        starting_model_id=original.model_id,
+        embedding_space_id=original.embedding_space_id,
+        initial_state=original,
+    )
+    original_response = SimpleNamespace(
+        modelId=original.model_id,
+        modelVersion=original.model_version,
+        embeddingSpaceId=original.embedding_space_id,
+        pgvectorSnapshotSha256=original.pgvector_snapshot_sha256,
+        backendSnapshotSha256=original.backend_snapshot_sha256,
+    )
+
+    # The original request is in flight. Activation commits, and the child
+    # response reaches the validator before the older original response.
+    active["identity"] = (
+        child.modelId,
+        child.modelVersion,
+        child.pgvectorSnapshotSha256,
+        child.backendSnapshotSha256,
+    )
+    ledger.validate(child)
+    ledger.validate(original_response)
+
+    unactivated = SimpleNamespace(
+        modelId=UUID(int=5),
+        modelVersion=2,
+        embeddingSpaceId=original.embedding_space_id,
+        pgvectorSnapshotSha256="c" * 64,
+        backendSnapshotSha256="c" * 64,
+    )
+    with pytest.raises(ValueError, match="lineage"):
+        ledger.validate(unactivated)
+
+    assert ledger.observed == (
+        (str(child.modelId), 1, "b" * 64, "b" * 64),
+        (str(original.model_id), 0, "a" * 64, "a" * 64),
+    )
 
 
 def test_live_condition_rebinds_workload_and_publishes_exact_feedback(
