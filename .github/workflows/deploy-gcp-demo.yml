@@ -68,7 +68,7 @@ jobs:
       - name: Install test dependencies
         run: |
           npm ci
-          uv sync --directory online --frozen --extra pgvector --extra kafka --extra qwen --extra dev
+          uv sync --directory online --frozen --extra pgvector --extra kafka --extra qwen --extra dev --extra benchmark --extra parquet
 
       - name: Run JavaScript and deployment tests
         run: |

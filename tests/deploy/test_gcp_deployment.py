@@ -92,6 +92,32 @@ def test_release_contract_rejects_missing_unknown_and_multiline_values() -> None
         release.validate_release(multiline)
 
 
+def test_runtime_worker_token_is_parsed_without_evaluation_or_release_override(
+    tmp_path: Path,
+) -> None:
+    release = _load_release_module()
+    marker = tmp_path / "must-not-exist"
+    token = "a" * 64
+    runtime_env = tmp_path / "runtime.env"
+    runtime_env.write_text(
+        f"BABEL_PERFORMANCE_WORKER_TOKEN={token}\n"
+        "BABEL_GCP_TRIAL_ID=runtime-must-not-override-release\n"
+        f"MALICIOUS=$(touch {marker})\n",
+        encoding="utf-8",
+    )
+
+    assert release.read_runtime_worker_token(runtime_env) == token
+    assert not marker.exists()
+
+    runtime_env.write_text(
+        f"BABEL_PERFORMANCE_WORKER_TOKEN={token}\n"
+        f"BABEL_PERFORMANCE_WORKER_TOKEN={'b' * 64}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="repeats"):
+        release.read_runtime_worker_token(runtime_env)
+
+
 def test_receipt_is_canonical_and_records_exact_image_digests() -> None:
     release = _load_release_module()
     receipt = release.deployment_receipt(
@@ -182,6 +208,26 @@ def test_workflow_provisions_pinned_just_before_javascript_tests() -> None:
         '[[ "$("$RUNNER_TEMP/just/bin/just" --version)" == "just 1.57.0" ]]'
         in install
     )
+
+
+def test_workflow_installs_locked_extras_for_selected_publication_tests() -> None:
+    workflow = (ROOT / ".github/workflows/deploy-gcp-demo.yml").read_text()
+    steps = yaml.load(workflow, Loader=yaml.BaseLoader)["jobs"]["test"]["steps"]
+    install = next(
+        step["run"]
+        for step in steps
+        if step.get("name") == "Install test dependencies"
+    )
+    runtime_tests = next(
+        step["run"]
+        for step in steps
+        if step.get("name") == "Run online runtime tests"
+    )
+
+    assert "benchmark/tests/test_representative_publication.py" in runtime_tests
+    assert "uv sync --directory online --frozen" in install
+    assert "--extra benchmark" in install
+    assert "--extra parquet" in install
 
 
 def test_release_rejects_nonfresh_or_unbound_gcp_ids() -> None:
@@ -410,6 +456,24 @@ def test_condition3_operator_is_bounded_and_never_auto_continues_matrix() -> Non
     assert "BABEL_ONLINE_ALLOW_POPULATION_BUILD" in script
     assert "approve-next-scale" not in script
     assert "condition-4" not in script
+    assert "source \"$RUNTIME_ENV\"" not in script
+    assert "runtime-token" in script
+    assert "--header \"X-Babel-Worker-Token:" not in script
+    assert "--config -" in script
+    assert "babel_acquire_rollout_lock /var/lock/babel-gcp-demo-rollout.lock" in script
+    assert "trap condition3_finish EXIT" in script
+    assert "trap 'exit 129' HUP" in script
+    assert 'status_phase "$GATE_TRIAL_ID"' in script
+    assert 'document.get("experimentId") != expected' in script
+    assert "failed to restore regular services after Condition 3" in script
+    assert "elif ! compose up --detach backend serving trainer" not in script
+    assert 'rm -f "$READY_PATH"' in script
+    assert "validate-trainer-instance" in script
+    assert "validate-serving-health" in script
+    restore = script.split("restore_regular_services() {", 1)[1].split(
+        "condition3_finish() {", 1
+    )[0]
+    assert "return 1" not in restore.split("compose stop performance-worker", 1)[0]
     result = subprocess.run(
         ["bash", "-n", os.fspath(DEPLOY / "condition3_gate.sh")],
         capture_output=True,

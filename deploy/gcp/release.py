@@ -76,6 +76,17 @@ def parse_env(path: str | Path) -> dict[str, str]:
     return values
 
 
+def read_runtime_worker_token(path: str | Path) -> str:
+    """Read only the worker token without evaluating the Docker env file."""
+    values = parse_env(path)
+    token = values.get("BABEL_PERFORMANCE_WORKER_TOKEN", "")
+    if SHA256.fullmatch(token) is None:
+        raise ValueError(
+            "BABEL_PERFORMANCE_WORKER_TOKEN must be exactly 64 lowercase hex characters"
+        )
+    return token
+
+
 def validate_release(values: dict[str, str]) -> dict[str, str]:
     if set(values) != REQUIRED_KEYS:
         raise ValueError("release environment must contain the exact keys")
@@ -304,6 +315,8 @@ def main(argv: list[str] | None = None) -> int:
     newer = commands.add_parser("assert-newer")
     newer.add_argument("candidate", type=Path)
     newer.add_argument("previous", type=Path)
+    runtime_token = commands.add_parser("runtime-token")
+    runtime_token.add_argument("runtime_env", type=Path)
     arguments = parser.parse_args(argv)
     try:
         if arguments.command in {"validate", "receipt"}:
@@ -339,6 +352,8 @@ def main(argv: list[str] | None = None) -> int:
                 parse_env(arguments.candidate),
                 previous=parse_env(arguments.previous),
             )
+        elif arguments.command == "runtime-token":
+            print(read_runtime_worker_token(arguments.runtime_env))
     except (json.JSONDecodeError, OSError, ValueError) as error:
         print(str(error), file=sys.stderr)
         return 1

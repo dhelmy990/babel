@@ -199,6 +199,12 @@ class LiveConditionEvidence:
 
 def validate_condition3_gate_evidence(
     raw_evidence: dict[str, Any],
+    *,
+    request_count: int,
+    p95_ms: float,
+    expected_warmup_count: int,
+    expected_request_count: int,
+    latency_safety_threshold_ms: float,
 ) -> dict[str, Any]:
     """Accept only a clean same-process training-and-activation receipt."""
     identity = raw_evidence.get("conditionIdentity")
@@ -214,11 +220,48 @@ def validate_condition3_gate_evidence(
         not isinstance(measurements, list)
         or not measurements
         or any(
-            not isinstance(row, dict) or row.get("outcome") != "success"
+            not isinstance(row, dict)
+            or row.get("outcome") != "success"
+            or type(row.get("scheduleIndex")) is not int
+            or type(row.get("isWarmup")) is not bool
+            or type(row.get("clientTotalNs")) is not int
+            or row["clientTotalNs"] < 0
             for row in measurements
         )
     ):
         raise ValueError("Condition 3 contains unsuccessful measurements")
+    if (
+        type(request_count) is not int
+        or request_count != expected_request_count
+        or type(raw_evidence.get("warmupCount")) is not int
+        or raw_evidence["warmupCount"] != expected_warmup_count
+        or type(raw_evidence.get("selectedRequestCount")) is not int
+        or raw_evidence["selectedRequestCount"] != len(measurements)
+        or len(measurements) != expected_warmup_count + expected_request_count
+    ):
+        raise ValueError("Condition 3 measured request count differs")
+    warmup = [row for row in measurements if row["isWarmup"]]
+    measured = [row for row in measurements if not row["isWarmup"]]
+    if len(warmup) != expected_warmup_count or len(measured) != request_count:
+        raise ValueError("Condition 3 measured request count differs")
+    if any(
+        row["scheduleIndex"] != index
+        or row["isWarmup"] != (index < expected_warmup_count)
+        for index, row in enumerate(measurements)
+    ):
+        raise ValueError("Condition 3 warmup schedule differs")
+    ordered_ns = sorted(row["clientTotalNs"] for row in measured)
+    raw_p95_ms = ordered_ns[
+        max(0, math.ceil(0.95 * len(ordered_ns)) - 1)
+    ] / 1_000_000.0
+    if not math.isfinite(p95_ms) or p95_ms != raw_p95_ms:
+        raise ValueError("Condition 3 p95 differs from raw measurements")
+    if (
+        not math.isfinite(latency_safety_threshold_ms)
+        or latency_safety_threshold_ms != 5_000.0
+        or p95_ms > latency_safety_threshold_ms
+    ):
+        raise ValueError("Condition 3 exceeds the approved 5,000 ms safety threshold")
     placement = raw_evidence.get("placement")
     processes = placement.get("processes") if isinstance(placement, dict) else None
     if (
@@ -687,11 +730,21 @@ class PerformanceConditionCommandRunner:
             "rawEvidence",
         }:
             raise ValueError("live performance condition evidence contract differs")
+        request_count = document["requestCount"]
+        p95_ms = document["p95Ms"]
+        if type(request_count) is not int:
+            raise ValueError("live condition requestCount must be an integer")
+        if (
+            isinstance(p95_ms, bool)
+            or not isinstance(p95_ms, (int, float))
+            or not math.isfinite(float(p95_ms))
+        ):
+            raise ValueError("live condition p95Ms must be a finite number")
         evidence = LiveConditionEvidence(
             condition_id=UUID(str(document["conditionId"])),
             run_id=UUID(str(document["runId"])),
-            request_count=int(document["requestCount"]),
-            p95_ms=float(document["p95Ms"]),
+            request_count=request_count,
+            p95_ms=float(p95_ms),
             raw_evidence=dict(document["rawEvidence"]),
         )
         if evidence.condition_id != condition.id or evidence.run_id != run_id:
@@ -766,6 +819,7 @@ class PerformanceJobManager:
         self._thread: threading.Thread | None = None
         self._phase = "idle"
         self._failure: str | None = None
+        self._condition3_preparation_binding: tuple[UUID, UUID] | None = None
 
     def _validate_imported_ready_population(
         self, trial: PerformanceExperiment
@@ -825,12 +879,17 @@ class PerformanceJobManager:
             self._phase = "failed"
             self._failure = str(error)
 
-    def _launch(self, experiment_id: UUID, operation: Callable[[], None]) -> None:
-        with self._lock:
-            if self._thread is not None and self._thread.is_alive():
-                if self._experiment_id == experiment_id:
-                    return
-                raise RuntimeError("another performance experiment is active")
+    def _launch(
+        self,
+        experiment_id: UUID,
+        operation: Callable[[], None],
+        *,
+        handoff_from_phase: str | None = None,
+        handoff_start_phase: str | None = None,
+    ) -> None:
+        prior_thread: threading.Thread | None = None
+
+        def start_locked() -> None:
             self._experiment_id = experiment_id
             self._stop.clear()
             self._failure = None
@@ -864,6 +923,37 @@ class PerformanceJobManager:
                 name=f"babel-performance-{experiment_id}",
             )
             self._thread.start()
+
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                if (
+                    self._experiment_id == experiment_id
+                    and handoff_from_phase is not None
+                    and self._phase == handoff_from_phase
+                ):
+                    prior_thread = self._thread
+                elif self._experiment_id == experiment_id:
+                    return
+                else:
+                    raise RuntimeError("another performance experiment is active")
+            else:
+                start_locked()
+                return
+
+        if prior_thread is None:
+            return
+        prior_thread.join()
+        with self._lock:
+            if (
+                self._thread is not prior_thread
+                or self._experiment_id != experiment_id
+                or self._phase != handoff_from_phase
+            ):
+                if self._experiment_id == experiment_id:
+                    return
+                raise RuntimeError("another performance experiment is active")
+            self._phase = handoff_start_phase or f"{handoff_from_phase}_handoff"
+            start_locked()
 
     def start(self, experiment_id: UUID) -> None:
         trial = self.database.load_performance_experiment(experiment_id)
@@ -1176,16 +1266,18 @@ class PerformanceJobManager:
             workload = self.workload_freezer(
                 trial, manifest, population_dir, self._stop.is_set
             )
-            self.database.create_condition_run(trial, condition, run_id)
-            self.database.clone_performance_population(trial, condition, run_id)
-            self.database.bind_performance_condition(
-                str(experiment_id), str(condition.id), run_id
-            )
-            self.database.transition_performance(experiment_id, "running")
-            self.database.transition_performance_condition(
-                experiment_id, condition.id, "running"
-            )
+            run_created = False
             try:
+                self.database.create_condition_run(trial, condition, run_id)
+                run_created = True
+                self.database.clone_performance_population(trial, condition, run_id)
+                self.database.bind_performance_condition(
+                    str(experiment_id), str(condition.id), run_id
+                )
+                self.database.transition_performance(experiment_id, "running")
+                self.database.transition_performance_condition(
+                    experiment_id, condition.id, "running"
+                )
                 evidence = self.condition_runner(
                     trial, condition, run_id, workload, self._stop.is_set
                 )
@@ -1194,17 +1286,39 @@ class PerformanceJobManager:
                     or evidence.run_id != run_id
                 ):
                     raise ValueError("Condition 3 gate returned drifted execution identity")
-                validate_condition3_gate_evidence(evidence.raw_evidence)
-            except BaseException as error:
-                self.database.transition(run_id, "failed", failure=str(error)[:1000])
-                self.database.transition_performance_condition(
-                    experiment_id, condition.id, "failed"
+                expected_warmup_count = round(
+                    trial.warmup_seconds * trial.target_rps
                 )
+                expected_request_count = math.ceil(
+                    trial.duration_seconds * trial.target_rps
+                )
+                validate_condition3_gate_evidence(
+                    evidence.raw_evidence,
+                    request_count=evidence.request_count,
+                    p95_ms=evidence.p95_ms,
+                    expected_warmup_count=expected_warmup_count,
+                    expected_request_count=expected_request_count,
+                    latency_safety_threshold_ms=5_000.0,
+                )
+                self.database.transition(run_id, "completed")
+                self.database.transition_performance_condition(
+                    experiment_id, condition.id, "completed"
+                )
+            except BaseException as error:
+                if run_created:
+                    try:
+                        self.database.transition(
+                            run_id, "failed", failure=str(error)[:1000]
+                        )
+                    except Exception:
+                        pass
+                try:
+                    self.database.transition_performance_condition(
+                        experiment_id, condition.id, "failed"
+                    )
+                except Exception:
+                    pass
                 raise
-            self.database.transition(run_id, "completed")
-            self.database.transition_performance_condition(
-                experiment_id, condition.id, "completed"
-            )
             receipt = {
                 "schemaVersion": 1,
                 "status": "passed",
@@ -1214,6 +1328,7 @@ class PerformanceJobManager:
                 "runId": str(run_id),
                 "requestCount": evidence.request_count,
                 "p95Ms": evidence.p95_ms,
+                "latencySafetyThresholdMs": 5_000.0,
                 "cleanupVerified": True,
                 "activationVerified": True,
                 "offsetCoverageVerified": True,
@@ -1251,7 +1366,12 @@ class PerformanceJobManager:
             with self._lock:
                 self._phase = "condition3_gate_passed"
 
-        self._launch(experiment_id, gate)
+        self._launch(
+            experiment_id,
+            gate,
+            handoff_from_phase="condition3_gate_ready",
+            handoff_start_phase="condition3_gate_starting",
+        )
 
     def prepare_condition3_gate(
         self, *, source_trial_id: UUID, gate_trial_id: UUID
@@ -1261,6 +1381,54 @@ class PerformanceJobManager:
 
         if source_trial_id == gate_trial_id:
             raise ValueError("Condition 3 gate trial must use a fresh identity")
+        with self._lock:
+            binding = self._condition3_preparation_binding
+            if binding is not None and binding[1] == gate_trial_id:
+                if binding[0] != source_trial_id:
+                    raise ValueError("Condition 3 gate source trial differs")
+                if self._phase == "condition3_gate_ready":
+                    return
+        try:
+            existing_gate = self.database.load_performance_experiment(gate_trial_id)
+        except KeyError:
+            existing_gate = None
+        if existing_gate is not None:
+            existing_gate.validate_runnable_contract()
+            if (
+                existing_gate.status != "population_ready"
+                or existing_gate.operator_approved
+                or existing_gate.evidence_scope
+                != "representative_same_process_vs_split"
+                or existing_gate.source_trial_id != source_trial_id
+                or existing_gate.warmup_seconds != 30
+                or existing_gate.duration_seconds != 120
+                or existing_gate.target_rps != 5.0
+                or existing_gate.training_micro_batch_size != 8
+                or existing_gate.sync_every_steps != 10
+            ):
+                raise ValueError("existing Condition 3 gate binding differs")
+            with self._lock:
+                if (
+                    self._thread is not None
+                    and self._thread.is_alive()
+                    and self._experiment_id != gate_trial_id
+                ):
+                    raise RuntimeError("another performance experiment is active")
+                binding = self._condition3_preparation_binding
+                if (
+                    binding is not None
+                    and binding[1] == gate_trial_id
+                    and binding[0] != source_trial_id
+                ):
+                    raise ValueError("Condition 3 gate source trial differs")
+                self._condition3_preparation_binding = (
+                    source_trial_id,
+                    gate_trial_id,
+                )
+                self._experiment_id = gate_trial_id
+                self._phase = "condition3_gate_ready"
+                self._failure = None
+            return
         source = self.database.load_performance_experiment(source_trial_id)
         source.validate_formal_defaults()
         if (
@@ -1274,6 +1442,23 @@ class PerformanceJobManager:
         ):
             raise ValueError("Condition 3 source trial differs from the formal gate")
         manifest, population_dir = self._validate_imported_ready_population(source)
+
+        with self._lock:
+            binding = self._condition3_preparation_binding
+            if binding is not None and binding[1] == gate_trial_id:
+                if binding[0] != source_trial_id:
+                    raise ValueError("Condition 3 gate source trial differs")
+            elif (
+                self._thread is not None
+                and self._thread.is_alive()
+                and self._experiment_id != gate_trial_id
+            ):
+                raise RuntimeError("another performance experiment is active")
+            else:
+                self._condition3_preparation_binding = (
+                    source_trial_id,
+                    gate_trial_id,
+                )
 
         def prepare() -> None:
             self.workload_freezer(
@@ -1292,7 +1477,7 @@ class PerformanceJobManager:
                 self._experiment_id = gate_trial_id
                 self._phase = "condition3_gate_ready"
 
-        self._launch(source_trial_id, prepare)
+        self._launch(gate_trial_id, prepare)
 
     def request_stop(self, experiment_id: UUID) -> None:
         trial = self.database.load_performance_experiment(experiment_id)

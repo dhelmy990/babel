@@ -143,6 +143,7 @@ class FakeDatabase:
         self.clones: list[UUID] = []
         self.results = []
         self.run_transitions: list[tuple[UUID, str]] = []
+        self.condition_transitions: list[tuple[UUID, UUID, str]] = []
 
     def load_performance_experiment(self, experiment_id: UUID):
         if experiment_id != self.trial.id:
@@ -166,6 +167,8 @@ class FakeDatabase:
         )
 
     def transition_performance(self, experiment_id, status, failure=None):
+        if experiment_id != self.trial.id:
+            raise KeyError(experiment_id)
         self.trial = replace(self.trial, status=status)
 
     def create_condition_run(self, trial, condition, run_id):
@@ -178,7 +181,7 @@ class FakeDatabase:
         self.bound_conditions.append((condition_id, run_id))
 
     def transition_performance_condition(self, experiment_id, condition_id, status):
-        return None
+        self.condition_transitions.append((experiment_id, condition_id, status))
 
     def save_performance_condition_result(self, experiment_id, evidence, **trio):
         self.results.append((evidence, trio))
@@ -191,7 +194,18 @@ def _wait(manager: PerformanceJobManager) -> None:
     manager.wait(timeout=5)
 
 
-def _condition3_gate_raw_evidence() -> dict[str, object]:
+def _condition3_gate_raw_evidence(
+    *, measured_count: int = 600, warmup_count: int = 150, latency_ms: float = 20.0
+) -> dict[str, object]:
+    measurements = [
+        {
+            "outcome": "success",
+            "scheduleIndex": index,
+            "isWarmup": index < warmup_count,
+            "clientTotalNs": round(latency_ms * 1_000_000),
+        }
+        for index in range(warmup_count + measured_count)
+    ]
     return {
         "conditionIdentity": {
             "topology": "same_process",
@@ -199,7 +213,9 @@ def _condition3_gate_raw_evidence() -> dict[str, object]:
             "activationEnabled": True,
             "retrievalBackend": "pgvector",
         },
-        "measurements": [{"outcome": "success"}],
+        "warmupCount": warmup_count,
+        "selectedRequestCount": len(measurements),
+        "measurements": measurements,
         "placement": {
             "requestedTopology": "same_process",
             "actualTopology": "same_process",
@@ -237,9 +253,35 @@ def _condition3_gate_raw_evidence() -> dict[str, object]:
     }
 
 
+def _ready_condition3_source(
+    tmp_path: Path, database: FakeDatabase
+) -> FrozenPopulationManifestV1:
+    population = _population_manifest()
+    population_dir = tmp_path / "population"
+    population_dir.mkdir()
+    manifest_bytes = population.model_dump_json().encode() + b"\n"
+    (population_dir / "manifest.json").write_bytes(manifest_bytes)
+    database.trial = _trial(
+        status="population_ready",
+        duration_seconds=120,
+        population_ready=True,
+        population_run_id=POPULATION_RUN_ID,
+        population_bundle_path=str(population_dir),
+        population_manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+    )
+    return population
+
+
 def test_condition3_gate_evidence_hard_fails_dirty_activation_or_kafka_state() -> None:
     raw = _condition3_gate_raw_evidence()
-    assert validate_condition3_gate_evidence(raw) == raw
+    assert validate_condition3_gate_evidence(
+        raw,
+        request_count=600,
+        p95_ms=20.0,
+        expected_warmup_count=150,
+        expected_request_count=600,
+        latency_safety_threshold_ms=5_000.0,
+    ) == raw
 
     for mutation, message in (
         (
@@ -262,7 +304,87 @@ def test_condition3_gate_evidence_hard_fails_dirty_activation_or_kafka_state() -
         candidate = json.loads(json.dumps(raw))
         mutation(candidate)
         with pytest.raises(ValueError, match=message):
-            validate_condition3_gate_evidence(candidate)
+            validate_condition3_gate_evidence(
+                candidate,
+                request_count=600,
+                p95_ms=20.0,
+                expected_warmup_count=150,
+                expected_request_count=600,
+                latency_safety_threshold_ms=5_000.0,
+            )
+
+
+def test_condition3_gate_evidence_rejects_one_measured_row_claiming_600() -> None:
+    raw = _condition3_gate_raw_evidence(measured_count=1)
+
+    with pytest.raises(ValueError, match="measured request count"):
+        validate_condition3_gate_evidence(
+            raw,
+            request_count=600,
+            p95_ms=20.0,
+            expected_warmup_count=150,
+            expected_request_count=600,
+            latency_safety_threshold_ms=5_000.0,
+        )
+
+
+def test_condition3_gate_evidence_rejects_p95_different_from_raw_latencies() -> None:
+    raw = _condition3_gate_raw_evidence(latency_ms=21.0)
+
+    with pytest.raises(ValueError, match="p95 differs"):
+        validate_condition3_gate_evidence(
+            raw,
+            request_count=600,
+            p95_ms=20.0,
+            expected_warmup_count=150,
+            expected_request_count=600,
+            latency_safety_threshold_ms=5_000.0,
+        )
+
+
+def test_condition3_gate_evidence_requires_exact_raw_p95() -> None:
+    raw = _condition3_gate_raw_evidence(latency_ms=5_000.000004)
+
+    with pytest.raises(ValueError, match="p95 differs"):
+        validate_condition3_gate_evidence(
+            raw,
+            request_count=600,
+            p95_ms=5_000.0,
+            expected_warmup_count=150,
+            expected_request_count=600,
+            latency_safety_threshold_ms=5_000.0,
+        )
+
+
+def test_condition3_gate_evidence_requires_exact_warmup_schedule_prefix() -> None:
+    raw = _condition3_gate_raw_evidence()
+    measurements = raw["measurements"]
+    measurements[0]["isWarmup"] = False
+    measurements[150]["isWarmup"] = True
+
+    with pytest.raises(ValueError, match="warmup schedule"):
+        validate_condition3_gate_evidence(
+            raw,
+            request_count=600,
+            p95_ms=20.0,
+            expected_warmup_count=150,
+            expected_request_count=600,
+            latency_safety_threshold_ms=5_000.0,
+        )
+
+
+def test_condition3_gate_evidence_rejects_approved_latency_threshold_violation() -> None:
+    raw = _condition3_gate_raw_evidence(latency_ms=5_001.0)
+
+    with pytest.raises(ValueError, match="5,000 ms safety threshold"):
+        validate_condition3_gate_evidence(
+            raw,
+            request_count=600,
+            p95_ms=5_001.0,
+            expected_warmup_count=150,
+            expected_request_count=600,
+            latency_safety_threshold_ms=5_000.0,
+        )
 
 
 def test_condition3_gate_runs_only_prepared_condition_three_without_population_build(
@@ -344,24 +466,77 @@ def test_condition3_gate_runs_only_prepared_condition_three_without_population_b
     assert receipt["finalKafkaLag"] == 0
 
 
-def test_condition3_gate_preparation_freezes_source_without_starting_matrix(
-    tmp_path: Path, monkeypatch
+@pytest.mark.parametrize("failure_at", ["clone", "bind"])
+def test_condition3_gate_partial_setup_failure_is_terminal(
+    tmp_path: Path, failure_at: str
 ) -> None:
-    gate_id = UUID("eeeeeeee-eeee-5eee-8eee-eeeeeeeeeeee")
+    gate_id = UUID("dddddddd-dddd-5ddd-8ddd-dddddddddddd")
     database = FakeDatabase()
     population = _population_manifest()
     population_dir = tmp_path / "population"
     population_dir.mkdir()
     manifest_bytes = population.model_dump_json().encode() + b"\n"
     (population_dir / "manifest.json").write_bytes(manifest_bytes)
-    database.trial = _trial(
+    conditions = tuple(
+        replace(row, id=uuid5(gate_id, f"condition:{row.condition_index}"))
+        for row in _conditions()[:6]
+    )
+    database.trial = replace(
+        _trial(),
+        id=gate_id,
         status="population_ready",
+        evidence_scope="representative_same_process_vs_split",
+        source_trial_id=EXPERIMENT_ID,
+        source_workload_path=str(tmp_path / "source-workload"),
+        source_workload_identity=(SHA,) * 6,
+        replay_request_limit=750,
         duration_seconds=120,
         population_ready=True,
         population_run_id=POPULATION_RUN_ID,
         population_bundle_path=str(population_dir),
         population_manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+        conditions=conditions,
     )
+    frozen = tmp_path / "source-workload"
+    frozen.mkdir()
+    condition = conditions[2]
+    run_id = uuid5(gate_id, "condition:3")
+
+    if failure_at == "clone":
+        database.clone_performance_population = lambda *_args: (_ for _ in ()).throw(
+            RuntimeError("injected clone failure")
+        )
+    else:
+        database.bind_performance_condition = lambda *_args: (_ for _ in ()).throw(
+            RuntimeError("injected bind failure")
+        )
+    manager = PerformanceJobManager(
+        database=database,
+        output_root=tmp_path,
+        population_builder=lambda *_args: pytest.fail("population build is disabled"),
+        workload_freezer=lambda *_args: type(
+            "Frozen", (), {"path": frozen, "identity": (SHA,) * 6}
+        )(),
+        condition_runner=lambda *_args: pytest.fail("setup failure must block runner"),
+        population_loader=lambda _path: population,
+        allow_population_build=False,
+    )
+
+    manager.run_condition3_gate(gate_id)
+    _wait(manager)
+
+    assert database.run_transitions == [(run_id, "failed")]
+    assert database.condition_transitions[-1] == (gate_id, condition.id, "failed")
+    assert database.trial.status == "failed"
+    assert manager.status["phase"] == "failed"
+
+
+def test_condition3_gate_preparation_freezes_source_without_starting_matrix(
+    tmp_path: Path, monkeypatch
+) -> None:
+    gate_id = UUID("eeeeeeee-eeee-5eee-8eee-eeeeeeeeeeee")
+    database = FakeDatabase()
+    population = _ready_condition3_source(tmp_path, database)
     frozen = tmp_path / str(EXPERIMENT_ID) / "workload"
     frozen.mkdir(parents=True)
     calls: list[tuple[str, object]] = []
@@ -389,6 +564,15 @@ def test_condition3_gate_preparation_freezes_source_without_starting_matrix(
         source_trial_id=EXPERIMENT_ID, gate_trial_id=gate_id
     )
     _wait(manager)
+    with pytest.raises(ValueError, match="source trial differs"):
+        manager.prepare_condition3_gate(
+            source_trial_id=UUID("aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaab"),
+            gate_trial_id=gate_id,
+        )
+    manager.prepare_condition3_gate(
+        source_trial_id=EXPERIMENT_ID, gate_trial_id=gate_id
+    )
+    _wait(manager)
 
     assert [name for name, _value in calls] == ["freeze", "create"]
     create_values = calls[1][1]
@@ -402,6 +586,190 @@ def test_condition3_gate_preparation_freezes_source_without_starting_matrix(
         "phase": "condition3_gate_ready",
         "failure": None,
     }
+
+
+def test_condition3_gate_preparation_failure_never_fails_source_trial(
+    tmp_path: Path,
+) -> None:
+    gate_id = UUID("eeeeeeee-eeee-5eee-8eee-eeeeeeeeeeef")
+    database = FakeDatabase()
+    population = _ready_condition3_source(tmp_path, database)
+
+    def fail_freeze(*_args):
+        raise RuntimeError("injected workload freeze failure")
+
+    manager = PerformanceJobManager(
+        database=database,
+        output_root=tmp_path,
+        population_builder=lambda *_args: pytest.fail("population build is disabled"),
+        workload_freezer=fail_freeze,
+        condition_runner=lambda *_args: pytest.fail("gate was not prepared"),
+        population_loader=lambda _path: population,
+        allow_population_build=False,
+    )
+
+    manager.prepare_condition3_gate(
+        source_trial_id=EXPERIMENT_ID, gate_trial_id=gate_id
+    )
+    _wait(manager)
+
+    assert database.trial.status == "population_ready"
+    assert database.trial.operator_approved is False
+    assert manager.status == {
+        "experimentId": str(gate_id),
+        "phase": "failed",
+        "failure": "injected workload freeze failure",
+    }
+
+
+def test_condition3_gate_preparation_is_retry_safe_only_for_same_gate(
+    tmp_path: Path,
+) -> None:
+    gate_id = UUID("eeeeeeee-eeee-5eee-8eee-eeeeeeeeeeee")
+    other_gate_id = UUID("eeeeeeee-eeee-5eee-8eee-eeeeeeeeeeed")
+    database = FakeDatabase()
+    population = _ready_condition3_source(tmp_path, database)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def freeze(*_args):
+        entered.set()
+        assert release.wait(2)
+        raise RuntimeError("stop after concurrency assertions")
+
+    manager = PerformanceJobManager(
+        database=database,
+        output_root=tmp_path,
+        population_builder=lambda *_args: pytest.fail("population build is disabled"),
+        workload_freezer=freeze,
+        condition_runner=lambda *_args: pytest.fail("gate was not prepared"),
+        population_loader=lambda _path: population,
+        allow_population_build=False,
+    )
+
+    manager.prepare_condition3_gate(
+        source_trial_id=EXPERIMENT_ID, gate_trial_id=gate_id
+    )
+    assert entered.wait(1)
+    try:
+        manager.prepare_condition3_gate(
+            source_trial_id=EXPERIMENT_ID, gate_trial_id=gate_id
+        )
+        assert manager.status["experimentId"] == str(gate_id)
+        with pytest.raises(ValueError, match="source trial differs"):
+            manager.prepare_condition3_gate(
+                source_trial_id=UUID("aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaab"),
+                gate_trial_id=gate_id,
+            )
+        with pytest.raises(RuntimeError, match="another performance experiment"):
+            manager.prepare_condition3_gate(
+                source_trial_id=EXPERIMENT_ID, gate_trial_id=other_gate_id
+            )
+    finally:
+        release.set()
+        _wait(manager)
+
+    assert database.trial.status == "population_ready"
+
+
+def test_condition3_gate_ready_handoff_never_silently_drops_gate_launch(
+    tmp_path: Path,
+) -> None:
+    database = FakeDatabase()
+    manager = PerformanceJobManager(
+        database=database,
+        output_root=tmp_path,
+        population_builder=lambda *_args: None,
+        workload_freezer=lambda *_args: None,
+        condition_runner=lambda *_args: None,
+    )
+    ready = threading.Event()
+    release = threading.Event()
+    prior_finished = threading.Event()
+    gate_started = threading.Event()
+
+    def finishing_preparation() -> None:
+        with manager._lock:
+            manager._phase = "condition3_gate_ready"
+        ready.set()
+        assert release.wait(2)
+        prior_finished.set()
+
+    prior = threading.Thread(target=finishing_preparation)
+    with manager._lock:
+        manager._experiment_id = EXPERIMENT_ID
+        manager._thread = prior
+    prior.start()
+    assert ready.wait(1)
+    timer = threading.Timer(0.05, release.set)
+    timer.start()
+    try:
+        manager._launch(
+            EXPERIMENT_ID,
+            lambda: gate_started.set(),
+            handoff_from_phase="condition3_gate_ready",
+        )
+    finally:
+        release.set()
+        timer.cancel()
+        prior.join(timeout=1)
+    _wait(manager)
+
+    assert prior_finished.is_set()
+    assert gate_started.is_set()
+
+
+def test_existing_condition3_gate_never_relabels_an_active_formal_matrix(
+    tmp_path: Path,
+) -> None:
+    gate_id = UUID("eeeeeeee-eeee-5eee-8eee-eeeeeeeeeeee")
+    database = FakeDatabase()
+    conditions = tuple(
+        replace(row, id=uuid5(gate_id, f"condition:{row.condition_index}"))
+        for row in _conditions()[:6]
+    )
+    gate = replace(
+        _trial(),
+        id=gate_id,
+        status="population_ready",
+        evidence_scope="representative_same_process_vs_split",
+        source_trial_id=EXPERIMENT_ID,
+        source_workload_path=str(tmp_path / "source-workload"),
+        source_workload_identity=(SHA,) * 6,
+        replay_request_limit=750,
+        duration_seconds=120,
+        population_ready=True,
+        population_run_id=POPULATION_RUN_ID,
+        conditions=conditions,
+    )
+    load_source = database.load_performance_experiment
+    database.load_performance_experiment = lambda experiment_id: (
+        gate if experiment_id == gate_id else load_source(experiment_id)
+    )
+    manager = PerformanceJobManager(
+        database=database,
+        output_root=tmp_path,
+        population_builder=lambda *_args: None,
+        workload_freezer=lambda *_args: None,
+        condition_runner=lambda *_args: None,
+    )
+    release = threading.Event()
+    active = threading.Thread(target=lambda: release.wait(2))
+    with manager._lock:
+        manager._experiment_id = EXPERIMENT_ID
+        manager._phase = "matrix"
+        manager._thread = active
+    active.start()
+    try:
+        with pytest.raises(RuntimeError, match="another performance experiment"):
+            manager.prepare_condition3_gate(
+                source_trial_id=EXPERIMENT_ID, gate_trial_id=gate_id
+            )
+        assert manager.status["experimentId"] == str(EXPERIMENT_ID)
+        assert manager.status["phase"] == "matrix"
+    finally:
+        release.set()
+        active.join(timeout=1)
 
 
 def test_start_builds_exact_population_then_waits_for_durable_approval(tmp_path: Path):
@@ -1293,6 +1661,37 @@ def test_condition_runner_invokes_concrete_live_command_and_loads_evidence(
     assert retried == evidence
     assert len(calls) == 1
     assert evidence.raw_evidence["driver"] == "real_live_condition"
+
+
+def test_condition_runner_rejects_fractional_outer_request_count(tmp_path: Path) -> None:
+    condition = _conditions()[0]
+    run_id = uuid5(EXPERIMENT_ID, "condition:1")
+    evidence_path = (
+        tmp_path / str(EXPERIMENT_ID) / "conditions" / "01" / "live-evidence.json"
+    )
+    evidence_path.parent.mkdir(parents=True)
+    evidence_path.write_text(
+        json.dumps(
+            {
+                "conditionId": str(condition.id),
+                "runId": str(run_id),
+                "requestCount": 600.9,
+                "p95Ms": 17.5,
+                "rawEvidence": {"driver": "real_live_condition"},
+            }
+        )
+        + "\n"
+    )
+    runner = PerformanceConditionCommandRunner(output_root=tmp_path)
+
+    with pytest.raises(ValueError, match="requestCount must be an integer"):
+        runner(
+            _trial(),
+            condition,
+            run_id,
+            type("Frozen", (), {"path": tmp_path / "workload"})(),
+            lambda: False,
+        )
 
 
 def test_condition_runner_stops_the_entire_process_group(tmp_path, monkeypatch):
