@@ -6,8 +6,8 @@ No fixture latency in this file is a performance claim.
 
 ## Smoke
 
-Status: **bounded callback-harness smoke passed; live smoke pending; formal
-performance claim false**.
+Status: **bounded live 3×3 fixture smoke passed; formal performance claim
+false**.
 
 - Matrix: exactly three topologies by three load modes.
 - Topologies: `same_process`, `same_host_split`, `same_host_isolated`.
@@ -26,20 +26,24 @@ performance claim false**.
   mandatory, with
   `formal_performance_claim=false`.
 
-The test callback harness ran all nine condition slots and exercised the
-single-start/single-stop lifecycle. This proves the request bound, bounded worker
-termination, receipt validation, and cleanup contracts. It is not a live
-dashboard run.
-Task 9's fixture-scale component acceptance separately exercises the real Babel
-recommendation FastAPI application, coordinator, feedback path, and
-`OnlineTrainer`, including trainer-kill serving availability. Neither result is
-a Qwen scale measurement.
+On 27 August 2026, `babel-live-smoke` executed all nine conditions with one
+request per condition (nine total) against the current fixture. Every condition
+made a real loopback HTTP recommendation request, published acknowledged
+feedback through the local Kafka broker, observed an accepted edge, and wrote
+raw evidence. Training conditions consumed the event with the real
+`OnlineTrainer` and saved a checkpoint. Activation conditions advanced serving
+health from model version 0 to 1. Split conditions used independent serving and
+trainer processes; isolated conditions additionally verified distinct CPU
+affinities. Killing the trainer left serving healthy, and no role process
+remained after cleanup. The receipt is
+`state/live-smoke-actual/receipt.json`.
 
-The scoped Task 12 library still needs a live condition driver (or CLI) that
-turns each matrix row into Task 9/10 start, load, evidence collection, and
-cleanup actions. `DashboardPerformanceHttpClient` currently creates and stops
-a saved performance-trial record only; record creation does not start the
-workload. Until that driver exists, do not describe the 3×3 smoke as live.
+This is live systems-wiring evidence, but it remains deliberately non-formal:
+the input is the small deterministic fixture, the encoder is the fixture item
+tower, only nine requests were issued, and it does not use the approved 10,000-
+Babel real-Qwen population. It must not be quoted as a latency, throughput, or
+model-quality result. The earlier callback-harness tests remain the evidence for
+strict timeout/process-group behavior.
 
 ## Population
 
@@ -63,7 +67,7 @@ deliberately held behind operator approval rather than deferred to Task 13.
 
 ## Topology
 
-Status: **matrix contracts ready; live driver and formal values pending**.
+Status: **bounded live driver passed; formal values pending**.
 
 At cohort 50, the controlled runner expects all nine topology/load conditions.
 At cohorts 100 and 500 it compares the monolith with one operator-selected split
@@ -131,7 +135,7 @@ No formal values have been collected yet. Populate this section only after the
 
 | Evidence | Status | Artifact |
 |---|---|---|
-| Tiny 3×3 smoke | Harness passed; live pending; non-formal | test-temporary receipt |
+| Tiny 3×3 smoke | Live passed; 9 requests; non-formal | `state/live-smoke-actual/receipt.json` |
 | Frozen 10,000-Babel population | Pending | — |
 | Cohort-50 topology matrix | Pending | — |
 | pgvector/HNSW comparison | Pending | — |

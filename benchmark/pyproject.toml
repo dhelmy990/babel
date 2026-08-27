@@ -15,6 +15,7 @@ dependencies = [
 
 [project.scripts]
 babel-friday-benchmark = "babel_benchmark.cli:main"
+babel-live-smoke = "babel_benchmark.live_smoke:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3,<8.4"]
