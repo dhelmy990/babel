@@ -585,6 +585,8 @@ must not mutate or stop a run.
 - Create: `benchmark/tests/test_topology.py`
 - Modify: `benchmark/tests/test_analysis.py`
 - Modify: `benchmark/pyproject.toml`
+- Create: `online/src/babel_online/model/hnswlib_index.py`
+- Create: `online/tests/model/test_hnswlib_index.py`
 
 **Interfaces:**
 - Consumes: saved condition manifest and POST endpoint.
@@ -603,12 +605,12 @@ IActivationIncrement = p95(training plus activation) / p95(training no activatio
 percent = (ratio - 1) * 100
 ```
 
-- [ ] Keep pgvector/hnswlib comparison separate: fixed topology, identical ordered IDs/vector bytes/snapshot/queries, preparation separate from steady latency, Recall@10/50 exact audit.
+- [ ] Keep pgvector/hnswlib comparison separate: fixed topology, identical ordered IDs/vector bytes/snapshot/queries, preparation separate from steady latency, Recall@10/50 exact audit. Implement the optional `HnswlibCandidateIndex` adapter here so Task 12 does not depend on an unowned placeholder; pgvector remains the default and the adapter does not participate in topology conclusions.
 - [ ] Test and commit:
 
 ```bash
-PYTHONPATH=benchmark/src:online/src python3 -m pytest benchmark/tests -v
-git add benchmark
+PYTHONPATH=benchmark/src:online/src python3 -m pytest benchmark/tests online/tests/model/test_hnswlib_index.py -v
+git add benchmark online/src/babel_online/model/hnswlib_index.py online/tests/model/test_hnswlib_index.py
 git commit -m "feat: benchmark concurrent topology interference"
 ```
 
