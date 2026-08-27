@@ -1,0 +1,214 @@
+{
+  "$id": "https://babel.local/schemas/online/experiment-run-v2.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Scaled-run settings; V1 remains the frozen smoke/demo contract.",
+  "properties": {
+    "artifactRoot": {
+      "default": "artifacts/online",
+      "minLength": 1,
+      "title": "Artifactroot",
+      "type": "string"
+    },
+    "checkpointEveryEvents": {
+      "default": 100,
+      "exclusiveMinimum": 0,
+      "title": "Checkpointeveryevents",
+      "type": "integer"
+    },
+    "concurrentUsers": {
+      "default": 50,
+      "maximum": 10000,
+      "minimum": 1,
+      "title": "Concurrentusers",
+      "type": "integer"
+    },
+    "continuationProbability": {
+      "default": 0.4,
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Continuationprobability",
+      "type": "number"
+    },
+    "creatorCount": {
+      "default": 50,
+      "maximum": 10000,
+      "minimum": 1,
+      "title": "Creatorcount",
+      "type": "integer"
+    },
+    "datasetConfig": {
+      "minLength": 1,
+      "title": "Datasetconfig",
+      "type": "string"
+    },
+    "datasetRepo": {
+      "minLength": 1,
+      "title": "Datasetrepo",
+      "type": "string"
+    },
+    "datasetRevision": {
+      "pattern": "^[a-f0-9]{40,64}$",
+      "title": "Datasetrevision",
+      "type": "string"
+    },
+    "embeddingDimension": {
+      "const": 100,
+      "default": 100,
+      "title": "Embeddingdimension",
+      "type": "integer"
+    },
+    "environmentSequence": {
+      "items": {
+        "enum": [
+          "2026-06",
+          "2026-07"
+        ],
+        "type": "string"
+      },
+      "maxItems": 2,
+      "minItems": 1,
+      "title": "Environmentsequence",
+      "type": "array"
+    },
+    "interleaveCreationAndRecommendations": {
+      "default": true,
+      "title": "Interleavecreationandrecommendations",
+      "type": "boolean"
+    },
+    "kafkaGroup": {
+      "default": "babel-online-trainer-v1",
+      "minLength": 1,
+      "title": "Kafkagroup",
+      "type": "string"
+    },
+    "kafkaTopic": {
+      "default": "babel.feedback.v1",
+      "minLength": 1,
+      "title": "Kafkatopic",
+      "type": "string"
+    },
+    "maximumRequestsPerTraversal": {
+      "default": 10,
+      "maximum": 10,
+      "minimum": 1,
+      "title": "Maximumrequestspertraversal",
+      "type": "integer"
+    },
+    "maximumTraversalDepth": {
+      "const": 2,
+      "default": 2,
+      "title": "Maximumtraversaldepth",
+      "type": "integer"
+    },
+    "perMonthEventBudget": {
+      "additionalProperties": {
+        "type": "integer"
+      },
+      "propertyNames": {
+        "enum": [
+          "2026-06",
+          "2026-07"
+        ]
+      },
+      "title": "Permontheventbudget",
+      "type": "object"
+    },
+    "recommendationK": {
+      "default": 10,
+      "exclusiveMinimum": 0,
+      "maximum": 100,
+      "title": "Recommendationk",
+      "type": "integer"
+    },
+    "recommendationStartProbability": {
+      "default": 0.4,
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Recommendationstartprobability",
+      "type": "number"
+    },
+    "retrievalBackend": {
+      "default": "pgvector",
+      "enum": [
+        "pgvector",
+        "hnswlib"
+      ],
+      "title": "Retrievalbackend",
+      "type": "string"
+    },
+    "runId": {
+      "format": "uuid",
+      "title": "Runid",
+      "type": "string"
+    },
+    "runSeed": {
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "title": "Runseed",
+      "type": "integer"
+    },
+    "schemaVersion": {
+      "const": 2,
+      "title": "Schemaversion",
+      "type": "integer"
+    },
+    "sourceArticlesPerMonth": {
+      "default": 5000,
+      "maximum": 1000000,
+      "minimum": 1,
+      "title": "Sourcearticlespermonth",
+      "type": "integer"
+    },
+    "startingModelId": {
+      "format": "uuid",
+      "title": "Startingmodelid",
+      "type": "string"
+    },
+    "stateRoot": {
+      "default": "state/online",
+      "minLength": 1,
+      "title": "Stateroot",
+      "type": "string"
+    },
+    "syncEverySteps": {
+      "default": 10,
+      "exclusiveMinimum": 0,
+      "title": "Synceverysteps",
+      "type": "integer"
+    },
+    "targetCreatedBabels": {
+      "maximum": 1000000,
+      "minimum": 1,
+      "title": "Targetcreatedbabels",
+      "type": "integer"
+    },
+    "topL": {
+      "default": 100,
+      "exclusiveMinimum": 0,
+      "title": "Topl",
+      "type": "integer"
+    },
+    "trainingMicroBatchSize": {
+      "default": 8,
+      "maximum": 1024,
+      "minimum": 1,
+      "title": "Trainingmicrobatchsize",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "runId",
+    "datasetRepo",
+    "datasetConfig",
+    "datasetRevision",
+    "startingModelId",
+    "environmentSequence",
+    "perMonthEventBudget",
+    "runSeed",
+    "targetCreatedBabels"
+  ],
+  "title": "RunConfigV2",
+  "type": "object"
+}

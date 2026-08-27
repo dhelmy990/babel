@@ -1,0 +1,52 @@
+services:
+  backend:
+    image: ${BABEL_BACKEND_IMAGE:?BABEL_BACKEND_IMAGE must be an immutable digest}
+    network_mode: host
+    env_file: /etc/babel/runtime.env
+    environment:
+      # Fail closed: the population/performance worker is deliberately absent.
+      BABEL_ONLINE_WORKER_ENDPOINT: http://127.0.0.1:9
+      BABEL_PERFORMANCE_WORKER_ENDPOINT: http://127.0.0.1:9
+    command: ["serve"]
+    restart: unless-stopped
+    labels:
+      dev.babel.source-commit: ${BABEL_SOURCE_COMMIT}
+      dev.babel.model-revision: ${BABEL_MODEL_REVISION}
+      dev.babel.dataset-revision: ${BABEL_DATASET_REVISION}
+
+  serving:
+    image: ${BABEL_SERVING_IMAGE:?BABEL_SERVING_IMAGE must be an immutable digest}
+    network_mode: host
+    env_file: /etc/babel/runtime.env
+    environment:
+      BABEL_ONLINE_QWEN_DEVICE: cuda
+      BABEL_ONLINE_STATE_ROOT: /var/lib/babel-online/state
+      BABEL_ONLINE_MODEL_ARTIFACT_CACHE: /var/lib/babel-online/cache/model-artifact
+      BABEL_ONLINE_QWEN_CACHE: /var/lib/babel-online/cache/qwen-base
+    command: ["--run-id", "${BABEL_GCP_RUN_ID}", "--port", "8791"]
+    restart: unless-stopped
+    gpus: all
+    volumes:
+      - /var/lib/babel-online:/var/lib/babel-online
+    labels:
+      dev.babel.source-commit: ${BABEL_SOURCE_COMMIT}
+      dev.babel.model-revision: ${BABEL_MODEL_REVISION}
+      dev.babel.dataset-revision: ${BABEL_DATASET_REVISION}
+
+  trainer:
+    image: ${BABEL_TRAINER_IMAGE:?BABEL_TRAINER_IMAGE must be an immutable digest}
+    network_mode: host
+    env_file: /etc/babel/runtime.env
+    environment:
+      BABEL_ONLINE_QWEN_DEVICE: cpu
+      BABEL_ONLINE_STATE_ROOT: /var/lib/babel-online/state
+      BABEL_TRAINER_READY_PATH: /var/lib/babel-online/trainer-ready.json
+    command:
+      ["--run-id", "${BABEL_GCP_RUN_ID}", "--activation-enabled", "true"]
+    restart: unless-stopped
+    volumes:
+      - /var/lib/babel-online:/var/lib/babel-online
+    labels:
+      dev.babel.source-commit: ${BABEL_SOURCE_COMMIT}
+      dev.babel.model-revision: ${BABEL_MODEL_REVISION}
+      dev.babel.dataset-revision: ${BABEL_DATASET_REVISION}

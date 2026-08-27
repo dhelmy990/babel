@@ -1,0 +1,132 @@
+{
+  "$defs": {
+    "RecommendationCandidateV1": {
+      "additionalProperties": false,
+      "properties": {
+        "babelId": {
+          "format": "uuid",
+          "title": "Babelid",
+          "type": "string"
+        },
+        "creatorId": {
+          "format": "uuid",
+          "title": "Creatorid",
+          "type": "string"
+        },
+        "modelScore": {
+          "maximum": 1.0,
+          "minimum": -1.0,
+          "title": "Modelscore",
+          "type": "number"
+        },
+        "rank": {
+          "exclusiveMinimum": 0,
+          "title": "Rank",
+          "type": "integer"
+        },
+        "sourceArticleKey": {
+          "pattern": "^enwiki:[1-9][0-9]*$",
+          "title": "Sourcearticlekey",
+          "type": "string"
+        }
+      },
+      "required": [
+        "babelId",
+        "creatorId",
+        "sourceArticleKey",
+        "rank",
+        "modelScore"
+      ],
+      "title": "RecommendationCandidateV1",
+      "type": "object"
+    }
+  },
+  "$id": "https://babel.local/schemas/online/recommendation-response-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "backendSnapshotSha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Backendsnapshotsha256",
+      "type": "string"
+    },
+    "candidates": {
+      "items": {
+        "$ref": "#/$defs/RecommendationCandidateV1"
+      },
+      "title": "Candidates",
+      "type": "array"
+    },
+    "embeddingSpaceId": {
+      "format": "uuid",
+      "title": "Embeddingspaceid",
+      "type": "string"
+    },
+    "modelId": {
+      "format": "uuid",
+      "title": "Modelid",
+      "type": "string"
+    },
+    "modelVersion": {
+      "minimum": 0,
+      "title": "Modelversion",
+      "type": "integer"
+    },
+    "pgvectorSnapshotSha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Pgvectorsnapshotsha256",
+      "type": "string"
+    },
+    "queryVectorSha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Queryvectorsha256",
+      "type": "string"
+    },
+    "requestId": {
+      "format": "uuid",
+      "title": "Requestid",
+      "type": "string"
+    },
+    "retrievalBackend": {
+      "enum": [
+        "pgvector",
+        "hnswlib"
+      ],
+      "title": "Retrievalbackend",
+      "type": "string"
+    },
+    "runId": {
+      "format": "uuid",
+      "title": "Runid",
+      "type": "string"
+    },
+    "schemaVersion": {
+      "const": 1,
+      "title": "Schemaversion",
+      "type": "integer"
+    },
+    "timingsNs": {
+      "additionalProperties": {
+        "type": "integer"
+      },
+      "title": "Timingsns",
+      "type": "object"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "requestId",
+    "runId",
+    "modelId",
+    "modelVersion",
+    "retrievalBackend",
+    "embeddingSpaceId",
+    "pgvectorSnapshotSha256",
+    "backendSnapshotSha256",
+    "queryVectorSha256",
+    "candidates",
+    "timingsNs"
+  ],
+  "title": "RecommendationResponseV1",
+  "type": "object"
+}

@@ -1,0 +1,268 @@
+name: Deploy GCP demo
+
+on:
+  push:
+    branches: [demo]
+  workflow_dispatch:
+
+concurrency:
+  group: babel-gcp-demo
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MODEL_REVISION: 57d949cd634b920cc1a46f27c9b21df094b5240e
+  DATASET_REVISION: 0d1ab2c7f0e2295682288fcf10077d2d776bf559
+
+jobs:
+  test:
+    if: github.ref == 'refs/heads/demo'
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.6-pg18-bookworm
+        env:
+          POSTGRES_DB: babel
+          POSTGRES_USER: babel
+          POSTGRES_PASSWORD: babel-local-dev
+        ports:
+          - 54329:5432
+        options: >-
+          --health-cmd "pg_isready -U babel -d babel"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - name: Check out the pushed commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.3"
+          enable-cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Set up just
+        run: |
+          set -euo pipefail
+          cargo install --locked --version '=1.57.0' --root "$RUNNER_TEMP/just" just
+          printf '%s\n' "$RUNNER_TEMP/just/bin" >>"$GITHUB_PATH"
+          [[ "$("$RUNNER_TEMP/just/bin/just" --version)" == "just 1.57.0" ]]
+
+      - name: Install test dependencies
+        run: |
+          npm ci
+          uv sync --directory online --frozen --extra pgvector --extra kafka --extra qwen --extra dev
+
+      - name: Run JavaScript and deployment tests
+        run: |
+          npm test
+          online/.venv/bin/python -m pytest -q \
+            tests/deploy/test_gcp_deployment.py \
+            tests/deploy/test_gcp_predeploy.py \
+            tests/deploy/test_rollout_supervisor.py
+
+      - name: Run online runtime tests
+        env:
+          PYTHONPATH: online/src:benchmark/src:.
+        run: |
+          online/.venv/bin/python -m pytest -q \
+            online/tests/training/test_torch_online.py \
+            online/tests/training/test_checkpoint.py \
+            online/tests/feedback/test_kafka.py \
+            online/tests/runtime/test_standalone_roles.py \
+            online/tests/runtime/test_topology.py \
+            online/tests/runtime/test_topology_acceptance.py
+
+      - name: Enforce demo expand-contract migration policy
+        run: git diff --exit-code 326b8403ec166f44099cd8950d6ff05b7d2d75cb..HEAD -- backend/migrations
+
+      - name: Enable pgvector for native integration tests
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: >-
+          docker exec "$POSTGRES_CONTAINER" psql --set ON_ERROR_STOP=1
+          --username babel --dbname babel
+          --command 'CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public'
+
+      - name: Build and run the native test image
+        # The backend integration suite uses the job's pgvector service through
+        # its fixed local test port. This test image is never published.
+        run: docker build --network host --target backend-test --build-arg SOURCE_COMMIT="$GITHUB_SHA" .
+
+  publish-and-deploy:
+    if: github.ref == 'refs/heads/demo'
+    needs: test
+    runs-on: ubuntu-24.04
+    environment: gcp-demo
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out the tested commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Validate dedicated Babel deployment variables
+        env:
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          WIF_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          DEPLOY_SA: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          ARTIFACT_REGION: ${{ vars.GCP_ARTIFACT_REGION }}
+          ARTIFACT_REPOSITORY: ${{ vars.GCP_ARTIFACT_REPOSITORY }}
+          VM_NAME: ${{ vars.GCP_VM_NAME }}
+          VM_ZONE: ${{ vars.GCP_VM_ZONE }}
+        run: |
+          set -euo pipefail
+          [[ "$PROJECT_ID" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9]$ ]]
+          [[ "$WIF_PROVIDER" =~ ^projects/[0-9]+/locations/global/workloadIdentityPools/github/providers/babel-demo$ ]]
+          [[ "$DEPLOY_SA" == "babel-github-deployer@${PROJECT_ID}.iam.gserviceaccount.com" ]]
+          [[ "$ARTIFACT_REGION" =~ ^[a-z]+-[a-z]+[0-9]$ ]]
+          [[ "$ARTIFACT_REPOSITORY" == "babel-demo" ]]
+          [[ "$VM_NAME" =~ ^[a-z]([-a-z0-9]*[a-z0-9])?$ ]]
+          [[ "$VM_ZONE" =~ ^[a-z]+-[a-z]+[0-9]-[a-z]$ ]]
+
+      - name: Authenticate with Babel Workload Identity Federation
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          create_credentials_file: true
+          export_environment_variables: true
+
+      - name: Set up Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+
+      - name: Authenticate Docker to Artifact Registry
+        env:
+          ARTIFACT_REGION: ${{ vars.GCP_ARTIFACT_REGION }}
+        run: gcloud auth configure-docker "${ARTIFACT_REGION}-docker.pkg.dev" --quiet
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Build and push backend
+        id: backend
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          target: backend
+          push: true
+          build-args: SOURCE_COMMIT=${{ github.sha }}
+          tags: ${{ vars.GCP_ARTIFACT_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ vars.GCP_ARTIFACT_REPOSITORY }}/babel-backend:${{ github.sha }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+      - name: Build and push CUDA serving
+        id: serving
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          target: serving
+          push: true
+          build-args: SOURCE_COMMIT=${{ github.sha }}
+          tags: ${{ vars.GCP_ARTIFACT_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ vars.GCP_ARTIFACT_REPOSITORY }}/babel-serving:${{ github.sha }}
+          cache-from: type=gha,scope=online
+          cache-to: type=gha,mode=max,scope=online
+
+      - name: Build and push CPU trainer
+        id: trainer
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          target: trainer
+          push: true
+          build-args: SOURCE_COMMIT=${{ github.sha }}
+          tags: ${{ vars.GCP_ARTIFACT_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ vars.GCP_ARTIFACT_REPOSITORY }}/babel-trainer:${{ github.sha }}
+          cache-from: type=gha,scope=online
+          cache-to: type=gha,mode=max,scope=online
+
+      - name: Create immutable release package
+        env:
+          BACKEND_DIGEST: ${{ steps.backend.outputs.digest }}
+          SERVING_DIGEST: ${{ steps.serving.outputs.digest }}
+          TRAINER_DIGEST: ${{ steps.trainer.outputs.digest }}
+          GCP_TRIAL_ID: ${{ vars.BABEL_GCP_TRIAL_ID }}
+          GCP_RUN_ID: ${{ vars.BABEL_GCP_RUN_ID }}
+          POPULATION_VECTOR_SHA256: ${{ vars.BABEL_POPULATION_VECTOR_SHA256 }}
+          POPULATION_SNAPSHOT_SHA256: ${{ vars.BABEL_POPULATION_SNAPSHOT_SHA256 }}
+          REGISTRY: ${{ vars.GCP_ARTIFACT_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ vars.GCP_ARTIFACT_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          release="babel-release-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -m 0700 "$release"
+          backend_image="${REGISTRY}/babel-backend@${BACKEND_DIGEST}"
+          serving_image="${REGISTRY}/babel-serving@${SERVING_DIGEST}"
+          trainer_image="${REGISTRY}/babel-trainer@${TRAINER_DIGEST}"
+          [[ "$backend_image" == *@sha256:* ]]
+          [[ "$serving_image" == *@sha256:* ]]
+          [[ "$trainer_image" == *@sha256:* ]]
+          {
+            printf 'BABEL_SOURCE_COMMIT=%s\n' "$GITHUB_SHA"
+            printf 'BABEL_BACKEND_IMAGE=%s\n' "$backend_image"
+            printf 'BABEL_SERVING_IMAGE=%s\n' "$serving_image"
+            printf 'BABEL_TRAINER_IMAGE=%s\n' "$trainer_image"
+            printf 'BABEL_MODEL_REVISION=%s\n' "$MODEL_REVISION"
+            printf 'BABEL_DATASET_REVISION=%s\n' "$DATASET_REVISION"
+            printf 'BABEL_GCP_TRIAL_ID=%s\n' "$GCP_TRIAL_ID"
+            printf 'BABEL_GCP_RUN_ID=%s\n' "$GCP_RUN_ID"
+            printf 'BABEL_POPULATION_VECTOR_SHA256=%s\n' "$POPULATION_VECTOR_SHA256"
+            printf 'BABEL_POPULATION_SNAPSHOT_SHA256=%s\n' "$POPULATION_SNAPSHOT_SHA256"
+            printf 'BABEL_DEPLOYMENT_RUN_ID=%s\n' "$GITHUB_RUN_ID"
+            printf 'BABEL_DEPLOYMENT_RUN_ATTEMPT=%s\n' "$GITHUB_RUN_ATTEMPT"
+          } >"$release/release.env"
+          install -m 0600 deploy/gcp/compose.yaml "$release/compose.yaml"
+          install -m 0700 deploy/gcp/rollout.sh "$release/rollout.sh"
+          install -m 0700 deploy/gcp/rollout_supervisor.sh "$release/rollout_supervisor.sh"
+          install -m 0700 deploy/gcp/release.py "$release/release.py"
+          install -m 0700 deploy/gcp/predeploy.py "$release/predeploy.py"
+          python3 "$release/release.py" validate "$release/release.env"
+          (
+            cd "$release"
+            sha256sum compose.yaml predeploy.py release.env release.py rollout.sh rollout_supervisor.sh >SHA256SUMS
+          )
+          printf 'RELEASE=%s\n' "$release" >>"$GITHUB_ENV"
+
+      - name: Stage release on the private VM
+        env:
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          VM_NAME: ${{ vars.GCP_VM_NAME }}
+          VM_ZONE: ${{ vars.GCP_VM_ZONE }}
+        run: |
+          gcloud compute scp --quiet --recurse --tunnel-through-iap \
+            "$RELEASE" \
+            "${VM_NAME}:/tmp/" \
+            --project "$PROJECT_ID" \
+            --zone "$VM_ZONE"
+
+      - name: Promote exact image digests and verify health
+        env:
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          VM_NAME: ${{ vars.GCP_VM_NAME }}
+          VM_ZONE: ${{ vars.GCP_VM_ZONE }}
+        run: |
+          gcloud compute ssh --quiet --tunnel-through-iap \
+            "$VM_NAME" \
+            --project "$PROJECT_ID" \
+            --zone "$VM_ZONE" \
+            --command "sudo bash /tmp/${RELEASE}/rollout.sh /tmp/${RELEASE}"

@@ -135,6 +135,37 @@ TEST_CASE("page ID import creates one owned sanitized Babel") {
   CHECK(sanitizer.last_canonical_url == article.canonical_url);
 }
 
+TEST_CASE("pinned Hugging Face import stores complete snapshot provenance") {
+  ImportFixture fixture;
+  fixture.source.provider_name = "huggingface_wikipedia";
+  auto& article = fixture.source.articleFor(fixture.page_id);
+  article.provenance = ArticleProvenance{
+      .repository = "dhelmy990/babel-wikipedia-experiment",
+      .configuration = "catalog_2026_06",
+      .commit_sha = std::string(40, 'a'),
+      .article_key = "enwiki:55",
+      .snapshot_date = "2026-06-01",
+      .content_sha256 = std::string(64, 'b'),
+  };
+  WikipediaImportService service(fixture.creators, fixture.babels, fixture.source,
+                                 fixture.sanitizer, fixture.ids);
+
+  const auto result = service.importWikipediaBabel(fixture.creators.creator->id,
+                                                   fixture.page_id);
+
+  REQUIRE(result.has_value());
+  REQUIRE(fixture.babels.last_source.has_value());
+  const auto& source = *fixture.babels.last_source;
+  CHECK(source.provider == "huggingface_wikipedia");
+  CHECK(source.source_repository == article.provenance->repository);
+  CHECK(source.source_config == article.provenance->configuration);
+  CHECK(source.source_commit_sha == article.provenance->commit_sha);
+  CHECK(source.source_article_key == article.provenance->article_key);
+  CHECK(source.source_snapshot_date == article.provenance->snapshot_date);
+  CHECK(source.source_content_sha256 == article.provenance->content_sha256);
+  CHECK(fixture.babels.last_find_provider == "huggingface_wikipedia");
+}
+
 TEST_CASE("different pages for one owner never share fake repository identity") {
   ImportFixture fixture;
   WikipediaImportService service(fixture.creators, fixture.babels, fixture.source,

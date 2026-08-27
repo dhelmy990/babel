@@ -1,0 +1,22 @@
+[
+  {
+    "article_key": "alpha",
+    "student_neighbors": ["delta", "charlie", "bravo"],
+    "teacher_neighbors": ["delta", "charlie", "bravo"]
+  },
+  {
+    "article_key": "bravo",
+    "student_neighbors": ["charlie", "alpha", "delta"],
+    "teacher_neighbors": ["charlie", "alpha", "delta"]
+  },
+  {
+    "article_key": "charlie",
+    "student_neighbors": ["alpha", "bravo", "delta"],
+    "teacher_neighbors": ["alpha", "bravo", "delta"]
+  },
+  {
+    "article_key": "delta",
+    "student_neighbors": ["alpha", "charlie", "bravo"],
+    "teacher_neighbors": ["alpha", "charlie", "bravo"]
+  }
+]

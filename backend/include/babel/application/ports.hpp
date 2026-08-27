@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -31,7 +32,8 @@ class WikipediaBabelRepository {
  public:
   virtual ~WikipediaBabelRepository() = default;
 
-  virtual Result<std::optional<Babel>> findByPage(CreatorId, WikipediaPageId) = 0;
+  virtual Result<std::optional<Babel>> findByPage(
+      CreatorId, WikipediaPageId, std::string_view provider = "wikipedia") = 0;
   // Commit the Babel and its source atomically, or persist neither record.
   virtual Result<void> insertWikipediaBabel(const Babel&, const BabelSource&) = 0;
   virtual Result<void> attachSeedAssignment(BabelId, SeedAssignmentId, std::string_view) = 0;
@@ -52,6 +54,9 @@ class SeedRunRepository {
   virtual Result<SeedStatusDto> status(SeedRunId) = 0;
   virtual Result<SeedStatusDto> latestStatus() = 0;
   virtual Result<void> markNonterminalAsInterrupted() = 0;
+  virtual Result<void> recordSourcePin(SeedRunId, const PinnedSourceProvenance&) {
+    return {};
+  }
 };
 
 class LegacyMigrationRepository {
@@ -71,6 +76,24 @@ class ArticleSource {
 
   virtual Result<ResolvedWikipediaPage> resolveTitle(std::string_view) = 0;
   virtual Result<RawWikipediaArticle> fetchByPageId(WikipediaPageId) = 0;
+  [[nodiscard]] virtual std::string_view provider() const noexcept { return "wikipedia"; }
+};
+
+class PinnedArticleSource : public ArticleSource {
+ public:
+  ~PinnedArticleSource() override = default;
+
+  [[nodiscard]] std::string_view provider() const noexcept final {
+    return "huggingface_wikipedia";
+  }
+  [[nodiscard]] virtual const PinnedSourceProvenance& provenance() const noexcept = 0;
+};
+
+class ArticleSourceFactory {
+ public:
+  virtual ~ArticleSourceFactory() = default;
+
+  virtual Result<std::shared_ptr<PinnedArticleSource>> pin(const SourceSelection&) = 0;
 };
 
 class HtmlSanitizer {

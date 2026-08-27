@@ -194,6 +194,8 @@ TEST_CASE("admin serves nonce-injected no-store assets and maps seed state") {
     std::ofstream(temp / "dashboard.css") << "body{}";
     std::ofstream(temp / "dashboard.js") << "void 0;";
     std::ofstream(temp / "seed-status.js") << "void 0;";
+    std::ofstream(temp / "experiment-status.js") << "void 0;";
+    std::ofstream(temp / "experiment-dashboard.js") << "void 0;";
   }
   const auto run_id = SeedRunId::v5("http-active-run").value();
   AdminSecurity security{"fixed-process-nonce"};
@@ -239,7 +241,18 @@ TEST_CASE("admin serves nonce-injected no-store assets and maps seed state") {
         controller.seedStatusJs(req, std::move(callback));
       },
       request(drogon::Get, "/admin/seed-status.js"));
-  for (const auto& response : {css, dashboard_js, status_js}) {
+  const auto experiment_status_js = invoke(
+      [&](const auto& req, auto callback) {
+        controller.experimentStatusJs(req, std::move(callback));
+      },
+      request(drogon::Get, "/admin/experiment-status.js"));
+  const auto experiment_dashboard_js = invoke(
+      [&](const auto& req, auto callback) {
+        controller.experimentDashboardJs(req, std::move(callback));
+      },
+      request(drogon::Get, "/admin/experiment-dashboard.js"));
+  for (const auto& response :
+       {css, dashboard_js, status_js, experiment_status_js, experiment_dashboard_js}) {
     CHECK(response->getStatusCode() == drogon::k200OK);
     CHECK(response->getHeader("cache-control") == "no-store");
   }
@@ -354,6 +367,24 @@ TEST_CASE("runtime configuration is fixed to loopback and rejects unsafe databas
   CHECK(defaults->port == 8787);
   CHECK(defaults->database_url ==
         "postgresql://babel:babel-local-dev@127.0.0.1:54329/babel");
+  CHECK(defaults->seed_source.repository == "dhelmy990/babel-wikipedia-experiment");
+  CHECK(defaults->seed_source.configuration == "catalog_2026_06");
+  CHECK(defaults->experiment_source.repository ==
+        "dhelmy990/babel-wikipedia-experiment");
+  CHECK(defaults->experiment_source.configuration == "demo_crosswalk");
+  CHECK(defaults->experiment_source.commit_sha ==
+        "e1acc648fcace8820dd5ee70bae9216ea4334555");
+  CHECK(defaults->seed_source.requested_revision ==
+        "0d1ab2c7f0e2295682288fcf10077d2d776bf559");
+  CHECK(defaults->seed_source.artifact_path ==
+        "backend-seed/2026-06/resolved-catalog-v3.jsonl");
+  CHECK(defaults->huggingface_cache_root ==
+        "/home/dhelmy990/Data/babel-data/cache/backend-seed");
+  CHECK_FALSE(defaults->huggingface_token.has_value());
+  CHECK(defaults->online_worker_endpoint == "http://127.0.0.1:8790");
+  CHECK_FALSE(defaults->online_worker_token.has_value());
+  CHECK(defaults->performance_worker_endpoint == "http://127.0.0.1:8792");
+  CHECK_FALSE(defaults->performance_worker_token.has_value());
 
   const auto nul = RuntimeConfig::fromEnvironment([](std::string_view name) {
     return name == "BABEL_DATABASE_URL"
@@ -361,6 +392,41 @@ TEST_CASE("runtime configuration is fixed to loopback and rejects unsafe databas
                : std::nullopt;
   });
   CHECK_FALSE(nul.has_value());
+
+  const auto configured = RuntimeConfig::fromEnvironment([](std::string_view name) {
+    if (name == "HF_TOKEN") return std::optional<std::string>{"server-secret"};
+    if (name == "BABEL_HF_REVISION") return std::optional<std::string>{std::string(40, 'a')};
+    if (name == "BABEL_HF_CONFIG") return std::optional<std::string>{"demo_catalog"};
+    if (name == "BABEL_ONLINE_DATASET_REPOSITORY")
+      return std::optional<std::string>{"owner/online"};
+    if (name == "BABEL_ONLINE_DATASET_CONFIG")
+      return std::optional<std::string>{"online_demo"};
+    if (name == "BABEL_ONLINE_DATASET_REVISION")
+      return std::optional<std::string>{std::string(40, 'd')};
+    if (name == "BABEL_ONLINE_WORKER_ENDPOINT")
+      return std::optional<std::string>{"http://127.0.0.1:9876"};
+    if (name == "BABEL_ONLINE_WORKER_TOKEN")
+      return std::optional<std::string>{std::string(64, 'e')};
+    if (name == "BABEL_PERFORMANCE_WORKER_ENDPOINT")
+      return std::optional<std::string>{"http://127.0.0.1:9878"};
+    if (name == "BABEL_PERFORMANCE_WORKER_TOKEN")
+      return std::optional<std::string>{std::string(64, 'f')};
+    if (name == "BABEL_DATA_ROOT") return std::optional<std::string>{"/srv/babel-data"};
+    return std::optional<std::string>{};
+  });
+  REQUIRE(configured.has_value());
+  CHECK(configured->huggingface_token == "server-secret");
+  CHECK(configured->seed_source.requested_revision == std::string(40, 'a'));
+  CHECK(configured->seed_source.configuration == "demo_catalog");
+  CHECK(configured->experiment_source.repository == "owner/online");
+  CHECK(configured->experiment_source.configuration == "online_demo");
+  CHECK(configured->experiment_source.commit_sha == std::string(40, 'd'));
+  CHECK(configured->huggingface_cache_root == "/srv/babel-data/cache/backend-seed");
+  CHECK(configured->online_worker_endpoint == "http://127.0.0.1:9876");
+  CHECK(configured->online_worker_token == std::optional{std::string(64, 'e')});
+  CHECK(configured->performance_worker_endpoint == "http://127.0.0.1:9878");
+  CHECK(configured->performance_worker_token ==
+        std::optional{std::string(64, 'f')});
 }
 
 TEST_CASE("runtime command parser exposes migrate serve and typed Personal migration only") {

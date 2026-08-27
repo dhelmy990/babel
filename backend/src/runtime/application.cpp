@@ -14,19 +14,25 @@
 #include <pqxx/pqxx>
 
 #include "babel/adapters/html/libxml_html_sanitizer.hpp"
+#include "babel/adapters/huggingface/huggingface_article_source.hpp"
+#include "babel/adapters/postgres/experiment_repository.hpp"
 #include "babel/adapters/postgres/migration_runner.hpp"
 #include "babel/adapters/postgres/postgres_database.hpp"
 #include "babel/adapters/postgres/postgres_repositories.hpp"
 #include "babel/adapters/postgres/profile_roster_installer.hpp"
-#include "babel/adapters/wikipedia/mediawiki_article_source.hpp"
 #include "babel/application/profile_manifest.hpp"
+#include "babel/application/experiment_service.hpp"
 #include "babel/application/profile_query_service.hpp"
 #include "babel/application/seed_service.hpp"
 #include "babel/application/wikipedia_import_service.hpp"
 #include "babel/http/admin_controller.hpp"
 #include "babel/http/admin_security.hpp"
+#include "babel/http/experiment_controller.hpp"
 #include "babel/http/profile_controller.hpp"
 #include "babel/runtime/seed_job_runner.hpp"
+#include "babel/runtime/experiment_job_runner.hpp"
+#include "babel/runtime/experiment_worker_http_client.hpp"
+#include "babel/runtime/performance_worker_http_client.hpp"
 
 namespace babel {
 class BackendInstanceLease::State final {
@@ -124,6 +130,20 @@ ApplicationError commandError(std::string message) {
   return ApplicationError{.code = ErrorCode::invalid_argument, .message = std::move(message)};
 }
 
+class UnavailablePerformanceWorker final : public PerformanceExperimentWorker {
+ public:
+  Result<void> start(std::string_view) override { return unavailable(); }
+  Result<void> requestGracefulStop(std::string_view) override { return unavailable(); }
+  Result<void> approveNextScale(std::string_view) override { return unavailable(); }
+
+ private:
+  static Result<void> unavailable() {
+    return tl::make_unexpected(ApplicationError{
+        ErrorCode::database_unavailable,
+        "performance worker token is not configured"});
+  }
+};
+
 }  // namespace
 
 BackendInstanceLease::BackendInstanceLease(std::unique_ptr<State> state)
@@ -203,7 +223,18 @@ Result<void> Application::verifySchemaReady() {
           to_regclass('public.edges') IS NOT NULL AND
           to_regclass('public.seed_runs') IS NOT NULL AND
           to_regclass('public.seed_run_items') IS NOT NULL AND
-          to_regclass('public.legacy_migrations') IS NOT NULL
+          to_regclass('public.legacy_migrations') IS NOT NULL AND
+          to_regclass('public.recommender_models') IS NOT NULL AND
+          to_regclass('public.experiment_runs') IS NOT NULL AND
+          to_regclass('public.experiment_babels') IS NOT NULL AND
+          to_regclass('public.experiment_activity_logs') IS NOT NULL AND
+          to_regclass('public.babel_embeddings') IS NOT NULL AND
+          to_regclass('public.run_embedding_states') IS NOT NULL AND
+          to_regclass('public.performance_experiments') IS NOT NULL AND
+          to_regclass('public.performance_conditions') IS NOT NULL AND
+          to_regclass('public.performance_progress_snapshots') IS NOT NULL AND
+          to_regclass('public.performance_results') IS NOT NULL AND
+          to_regclass('public.performance_approvals') IS NOT NULL
       )");
     if (!tables_ready.one_field().as<bool>()) {
       return tl::make_unexpected(ApplicationError{
@@ -212,7 +243,8 @@ Result<void> Application::verifySchemaReady() {
       });
     }
     if (transaction.exec(
-            "SELECT count(*) = 3 FROM schema_migrations WHERE version IN ('1', '2', '3')")
+            "SELECT count(*) = 10 FROM schema_migrations "
+            "WHERE version IN ('1', '2', '3', '4', '5', '6', '7', '8', '9', '10')")
             .one_field()
             .as<bool>() == false) {
       return tl::make_unexpected(ApplicationError{
@@ -249,20 +281,34 @@ Result<void> Application::serve() {
 
   auto ready = verifySchemaReady();
   if (!ready) return tl::make_unexpected(ready.error());
+  if (!config_.huggingface_token) {
+    return invalidArgument("HF_TOKEN is required to serve the dashboard seed source");
+  }
 
   PostgresCreatorRepository creators(database);
   PostgresGraphRepository graphs(database);
   PostgresWikipediaBabelRepository wikipedia_babels(database);
   PostgresSeedRunRepository seed_runs(database);
+  PostgresExperimentRepository experiment_runs(database);
   CurlHttpTransport transport;
-  MediaWikiArticleSource article_source(transport);
+  HuggingFaceArticleSourceFactory article_source_factory(
+      transport, config_.huggingface_cache_root, *config_.huggingface_token);
   LibxmlHtmlSanitizer sanitizer;
   ThreadSafeIdGenerator ids;
   ProfileQueryService profiles(creators, graphs);
-  WikipediaImportService importer(creators, wikipedia_babels, article_source, sanitizer, ids);
-  SeedService seed_service(ProfileManifest::seedAssignments(), seed_runs, article_source,
-                           importer, SeedRetryPolicy::withDefaultDelay());
-  SeedJobRunner seed_runner(std::string{kManifestVersion}, seed_service, seed_runs);
+  const auto assignments = ProfileManifest::seedAssignments();
+  SeedJobRunner seed_runner(
+      std::string{kManifestVersion}, assignments, article_source_factory,
+      config_.seed_source,
+      [&](SeedRunId run_id, std::shared_ptr<PinnedArticleSource> article_source,
+          std::stop_token stop_token) -> Result<void> {
+        WikipediaImportService importer(creators, wikipedia_babels, *article_source,
+                                        sanitizer, ids);
+        SeedService seed_service(assignments, seed_runs, *article_source, importer,
+                                 SeedRetryPolicy::withDefaultDelay());
+        return seed_service.run(run_id, stop_token);
+      },
+      seed_runs);
 
   std::string instance_token;
   if (config_.instance_token) {
@@ -276,8 +322,32 @@ Result<void> Application::serve() {
   if (!admin_nonce) return tl::make_unexpected(admin_nonce.error());
   AdminSecurity admin_security(std::move(*admin_nonce));
 
+  std::unique_ptr<ExperimentWorker> experiment_worker;
+  if (config_.online_worker_token) {
+    experiment_worker = std::make_unique<ExperimentWorkerHttpClient>(
+        config_.online_worker_endpoint, *config_.online_worker_token);
+  } else {
+    experiment_worker = std::make_unique<ExperimentJobRunner>(
+        ExperimentJobRunner::Start{}, ExperimentJobRunner::GracefulStop{});
+  }
+  std::unique_ptr<PerformanceExperimentWorker> performance_worker;
+  if (config_.performance_worker_token) {
+    performance_worker = std::make_unique<PerformanceWorkerHttpClient>(
+        config_.performance_worker_endpoint, *config_.performance_worker_token);
+  } else {
+    performance_worker = std::make_unique<UnavailablePerformanceWorker>();
+  }
+  ExperimentService experiment_service(experiment_runs, *experiment_worker,
+                                       config_.experiment_source,
+                                       performance_worker.get());
+  ExperimentController experiment_controller(admin_security, experiment_service);
+
   auto interrupted = seed_runner.markInterruptedRuns();
   if (!interrupted) return tl::make_unexpected(interrupted.error());
+  auto interrupted_experiments = experiment_runs.markInterruptedRuns();
+  if (!interrupted_experiments) {
+    return tl::make_unexpected(interrupted_experiments.error());
+  }
 
   ProfileController profile_controller(profiles, std::move(instance_token));
   AdminController admin_controller(admin_security, config_.admin_asset_directory, seed_runner);
@@ -334,6 +404,34 @@ Result<void> Application::serve() {
       },
       {drogon::Get});
   server.registerHandler(
+      "/admin/experiment-status.js",
+      [&admin_controller](const drogon::HttpRequestPtr& request,
+                          AdminController::Callback&& callback) {
+        admin_controller.experimentStatusJs(request, std::move(callback));
+      },
+      {drogon::Get});
+  server.registerHandler(
+      "/admin/experiment-dashboard.js",
+      [&admin_controller](const drogon::HttpRequestPtr& request,
+                          AdminController::Callback&& callback) {
+        admin_controller.experimentDashboardJs(request, std::move(callback));
+      },
+      {drogon::Get});
+  server.registerHandler(
+      "/admin/trial-progress.js",
+      [&admin_controller](const drogon::HttpRequestPtr& request,
+                          AdminController::Callback&& callback) {
+        admin_controller.trialProgressJs(request, std::move(callback));
+      },
+      {drogon::Get});
+  server.registerHandler(
+      "/admin/scalability-dashboard.js",
+      [&admin_controller](const drogon::HttpRequestPtr& request,
+                          AdminController::Callback&& callback) {
+        admin_controller.scalabilityDashboardJs(request, std::move(callback));
+      },
+      {drogon::Get});
+  server.registerHandler(
       "/admin/api/v1/seed",
       [&admin_controller](const drogon::HttpRequestPtr& request,
                           AdminController::Callback&& callback) {
@@ -345,6 +443,102 @@ Result<void> Application::serve() {
       [&admin_controller](const drogon::HttpRequestPtr& request,
                           AdminController::Callback&& callback) {
         admin_controller.startSeed(request, std::move(callback));
+      },
+      {drogon::Post});
+  server.registerHandler(
+      "/admin/api/v1/experiment/models",
+      [&experiment_controller](const drogon::HttpRequestPtr& request,
+                               ExperimentController::Callback&& callback) {
+        experiment_controller.models(request, std::move(callback));
+      },
+      {drogon::Get});
+  server.registerHandler(
+      "/admin/api/v1/experiment/runs/latest",
+      [&experiment_controller](const drogon::HttpRequestPtr& request,
+                               ExperimentController::Callback&& callback) {
+        experiment_controller.latest(request, std::move(callback));
+      },
+      {drogon::Get});
+  server.registerHandler(
+      "/admin/api/v1/experiment/runs/{1}",
+      [&experiment_controller](const drogon::HttpRequestPtr& request,
+                               ExperimentController::Callback&& callback,
+                               std::string run_id) {
+        experiment_controller.run(request, std::move(run_id), std::move(callback));
+      },
+      {drogon::Get});
+  server.registerHandler(
+      "/admin/api/v1/experiment/runs/{1}/logs",
+      [&experiment_controller](const drogon::HttpRequestPtr& request,
+                               ExperimentController::Callback&& callback,
+                               std::string run_id) {
+        experiment_controller.activity(request, std::move(run_id), std::move(callback));
+      },
+      {drogon::Get});
+  server.registerHandler(
+      "/admin/api/v1/experiment/runs",
+      [&experiment_controller](const drogon::HttpRequestPtr& request,
+                               ExperimentController::Callback&& callback) {
+        experiment_controller.start(request, std::move(callback));
+      },
+      {drogon::Post});
+  server.registerHandler(
+      "/admin/api/v1/experiment/runs/{1}/graceful-stop",
+      [&experiment_controller](const drogon::HttpRequestPtr& request,
+                               ExperimentController::Callback&& callback,
+                               std::string run_id) {
+        experiment_controller.gracefulStop(request, std::move(run_id),
+                                           std::move(callback));
+      },
+      {drogon::Post});
+  server.registerHandler(
+      "/admin/api/v1/performance",
+      [&experiment_controller](const drogon::HttpRequestPtr& request,
+                               ExperimentController::Callback&& callback) {
+        experiment_controller.performanceList(request, std::move(callback));
+      },
+      {drogon::Get});
+  server.registerHandler(
+      "/admin/api/v1/performance",
+      [&experiment_controller](const drogon::HttpRequestPtr& request,
+                               ExperimentController::Callback&& callback) {
+        experiment_controller.createPerformance(request, std::move(callback));
+      },
+      {drogon::Post});
+  server.registerHandler(
+      "/admin/api/v1/performance/{1}",
+      [&experiment_controller](const drogon::HttpRequestPtr& request,
+                               ExperimentController::Callback&& callback,
+                               std::string experiment_id) {
+        experiment_controller.performance(request, std::move(experiment_id),
+                                          std::move(callback));
+      },
+      {drogon::Get});
+  server.registerHandler(
+      "/admin/api/v1/performance/{1}/graceful-stop",
+      [&experiment_controller](const drogon::HttpRequestPtr& request,
+                               ExperimentController::Callback&& callback,
+                               std::string experiment_id) {
+        experiment_controller.performanceGracefulStop(
+            request, std::move(experiment_id), std::move(callback));
+      },
+      {drogon::Post});
+  server.registerHandler(
+      "/admin/api/v1/performance/{1}/approve-next-scale",
+      [&experiment_controller](const drogon::HttpRequestPtr& request,
+                               ExperimentController::Callback&& callback,
+                               std::string experiment_id) {
+        experiment_controller.approveNextScale(request, std::move(experiment_id),
+                                               std::move(callback));
+      },
+      {drogon::Post});
+  server.registerHandler(
+      "/admin/api/v1/performance/{1}/artifact",
+      [&experiment_controller](const drogon::HttpRequestPtr& request,
+                               ExperimentController::Callback&& callback,
+                               std::string experiment_id) {
+        experiment_controller.attachPerformanceArtifact(
+            request, std::move(experiment_id), std::move(callback));
       },
       {drogon::Post});
 

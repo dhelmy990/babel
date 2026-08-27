@@ -8,6 +8,8 @@
 #include <string_view>
 
 #include "babel/application/errors.hpp"
+#include "babel/application/experiment_models.hpp"
+#include "babel/domain/models.hpp"
 
 namespace babel {
 
@@ -20,6 +22,24 @@ struct RuntimeConfig {
   std::optional<std::string> instance_token;
   std::filesystem::path migration_directory;
   std::filesystem::path admin_asset_directory;
+  std::optional<std::string> huggingface_token;
+  SourceSelection seed_source{
+      .repository = "dhelmy990/babel-wikipedia-experiment",
+      .configuration = "catalog_2026_06",
+      .requested_revision = "0d1ab2c7f0e2295682288fcf10077d2d776bf559",
+      .artifact_path = "backend-seed/2026-06/resolved-catalog-v3.jsonl",
+  };
+  std::filesystem::path huggingface_cache_root{
+      "/home/dhelmy990/Data/babel-data/cache/backend-seed"};
+  ExperimentSourcePin experiment_source{
+      .repository = "dhelmy990/babel-wikipedia-experiment",
+      .configuration = "demo_crosswalk",
+      .commit_sha = "e1acc648fcace8820dd5ee70bae9216ea4334555",
+  };
+  std::string online_worker_endpoint{"http://127.0.0.1:8790"};
+  std::optional<std::string> online_worker_token;
+  std::string performance_worker_endpoint{"http://127.0.0.1:8792"};
+  std::optional<std::string> performance_worker_token;
 
   static Result<RuntimeConfig> fromEnvironment();
   static Result<RuntimeConfig> fromEnvironment(const Environment&);

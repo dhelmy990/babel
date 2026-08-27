@@ -1,0 +1,557 @@
+"""Bounded smoke matrix orchestration for recommendation experiments."""
+
+import json
+import multiprocessing
+import os
+import signal
+import time
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any, Literal, Protocol
+from urllib.parse import urlsplit
+
+
+Topology = Literal["same_process", "same_host_split", "same_host_isolated"]
+LoadMode = Literal[
+    "serving_only", "training_no_activation", "training_and_activation"
+]
+
+
+@dataclass(frozen=True, slots=True)
+class SmokeCondition:
+    topology: Topology
+    load_mode: LoadMode
+    request_limit: int = 20
+
+    @property
+    def condition_id(self) -> str:
+        return f"{self.topology}.{self.load_mode}.pgvector"
+
+
+@dataclass(frozen=True, slots=True)
+class TinySmokePlan:
+    conditions: tuple[SmokeCondition, ...]
+    fixture: Literal["current_fixture"]
+    timeout_seconds: float
+    formal_performance_claim: Literal[False]
+
+    def __post_init__(self) -> None:
+        if self.timeout_seconds <= 0:
+            raise ValueError("smoke timeout must be positive")
+        if len(self.conditions) != 9 or len(
+            {(row.topology, row.load_mode) for row in self.conditions}
+        ) != 9:
+            raise ValueError("tiny smoke requires exactly one 3x3 condition matrix")
+        if any(row.request_limit <= 0 or row.request_limit > 20 for row in self.conditions):
+            raise ValueError("tiny smoke conditions are capped at 20 requests")
+        if self.total_request_limit > 180:
+            raise ValueError("tiny smoke is capped at 180 requests")
+
+    @property
+    def total_request_limit(self) -> int:
+        return sum(row.request_limit for row in self.conditions)
+
+
+@dataclass(frozen=True, slots=True)
+class SmokeConditionResult:
+    condition_id: str
+    request_count: int
+    client_p95_ms: float
+    startup_verified: bool
+    cleanup_verified: bool
+    edges_observed: int
+    progress_observed: bool
+    raw_results_path: str
+    trainer_failure_status: Literal["verified", "not_applicable"]
+
+    def __post_init__(self) -> None:
+        if not self.condition_id or not self.raw_results_path:
+            raise ValueError("smoke condition evidence paths and identity are required")
+        if not 0 <= self.request_count <= 20:
+            raise ValueError("smoke result exceeds its 20-request bound")
+        if self.client_p95_ms <= 0:
+            raise ValueError("smoke condition p95 must be positive")
+        if self.edges_observed < 0:
+            raise ValueError("observed edge count cannot be negative")
+
+
+@dataclass(frozen=True, slots=True)
+class SmokeTopologyRatios:
+    topology: Topology
+    Itraining: float
+    Ifull: float
+    IActivationIncrement: float
+
+    def __post_init__(self) -> None:
+        if any(
+            not isinstance(value, (int, float)) or value <= 0
+            for value in (self.Itraining, self.Ifull, self.IActivationIncrement)
+        ):
+            raise ValueError("smoke interference ratios must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class TinySmokeReceipt:
+    schema_version: Literal[2]
+    fixture: Literal["current_fixture"]
+    timeout_seconds: float
+    started_at_monotonic_ns: int
+    completed_at_monotonic_ns: int
+    conditions: tuple[SmokeConditionResult, ...]
+    interference_ratios: tuple[SmokeTopologyRatios, ...]
+    formal_performance_claim: Literal[False]
+
+    @property
+    def total_requests(self) -> int:
+        return sum(row.request_count for row in self.conditions)
+
+    @property
+    def startup_cleanup_verified(self) -> bool:
+        return all(row.startup_verified and row.cleanup_verified for row in self.conditions)
+
+    @property
+    def edges_observed(self) -> bool:
+        return all(row.edges_observed > 0 for row in self.conditions)
+
+    @property
+    def progress_observed(self) -> bool:
+        return all(row.progress_observed for row in self.conditions)
+
+    @property
+    def raw_persistence_verified(self) -> bool:
+        return all(bool(row.raw_results_path) for row in self.conditions)
+
+    @property
+    def ratios_observed(self) -> bool:
+        return len(self.interference_ratios) == 3
+
+    @property
+    def trainer_failure_availability_verified(self) -> bool:
+        for row in self.conditions:
+            topology, load_mode, _backend = row.condition_id.split(".")
+            expected = (
+                "verified"
+                if topology != "same_process" and load_mode != "serving_only"
+                else "not_applicable"
+            )
+            if row.trainer_failure_status != expected:
+                return False
+        return True
+
+    def as_document(self) -> dict[str, object]:
+        document = asdict(self)
+        document.update(
+            total_requests=self.total_requests,
+            startup_cleanup_verified=self.startup_cleanup_verified,
+            edges_observed=self.edges_observed,
+            progress_observed=self.progress_observed,
+            raw_persistence_verified=self.raw_persistence_verified,
+            ratios_observed=self.ratios_observed,
+            trainer_failure_availability_verified=(
+                self.trainer_failure_availability_verified
+            ),
+        )
+        return document
+
+
+def tiny_smoke_plan(*, timeout_seconds: float = 60.0) -> TinySmokePlan:
+    topologies: tuple[Topology, ...] = (
+        "same_process",
+        "same_host_split",
+        "same_host_isolated",
+    )
+    load_modes: tuple[LoadMode, ...] = (
+        "serving_only",
+        "training_no_activation",
+        "training_and_activation",
+    )
+    return TinySmokePlan(
+        conditions=tuple(
+            SmokeCondition(topology, load_mode)
+            for topology in topologies
+            for load_mode in load_modes
+        ),
+        fixture="current_fixture",
+        timeout_seconds=timeout_seconds,
+        formal_performance_claim=False,
+    )
+
+
+class CancellationEvent(Protocol):
+    def is_set(self) -> bool: ...
+
+    def wait(self, timeout: float | None = None) -> bool: ...
+
+
+ConditionExecutor = Callable[
+    [SmokeCondition, int, float, CancellationEvent], SmokeConditionResult
+]
+
+
+def _execute_with_timeout(
+    execute_condition: ConditionExecutor,
+    condition: SmokeCondition,
+    timeout_seconds: float,
+) -> SmokeConditionResult:
+    try:
+        context = multiprocessing.get_context("fork")
+    except ValueError as error:  # pragma: no cover - Linux demo contract
+        raise RuntimeError("tiny smoke requires a Linux fork process boundary") from error
+    receive, send = context.Pipe(duplex=False)
+    ready_receive, ready_send = context.Pipe(duplex=False)
+    approval_receive, approval_send = context.Pipe(duplex=False)
+    cancel = context.Event()
+
+    def invoke() -> None:
+        receive.close()
+        ready_receive.close()
+        approval_send.close()
+        os.setsid()
+        ready_send.send((os.getpid(), os.getpgrp()))
+        ready_send.close()
+        try:
+            approved = approval_receive.recv()
+        except EOFError:
+            approval_receive.close()
+            return
+        approval_receive.close()
+        if approved is not True:
+            return
+        try:
+            value: tuple[bool, object] = (
+                True,
+                execute_condition(
+                    condition,
+                    condition.request_limit,
+                    timeout_seconds,
+                    cancel,
+                ),
+            )
+        except BaseException as error:
+            value = (False, error)
+        try:
+            send.send(value)
+        except Exception:
+            send.send((False, RuntimeError("condition result could not be serialized")))
+        finally:
+            send.close()
+
+    worker = context.Process(
+        target=invoke,
+        daemon=False,
+        name=f"tiny-smoke-{condition.condition_id}",
+    )
+    deadline = time.monotonic() + timeout_seconds
+    worker.start()
+    send.close()
+    ready_send.close()
+    approval_receive.close()
+    isolated_group: int | None = None
+
+    def read_isolation_handshake(timeout: float, *, allow_callback: bool) -> None:
+        nonlocal isolated_group
+        if isolated_group is not None or not ready_receive.poll(timeout):
+            return
+        try:
+            worker_pid, worker_group = ready_receive.recv()
+        except EOFError:
+            return
+        if worker_pid == worker.pid and worker_group == worker.pid:
+            isolated_group = worker_group
+            if allow_callback:
+                approval_send.send(True)
+
+    ready_wait = min(0.05, max(0.0, deadline - time.monotonic()))
+    read_isolation_handshake(ready_wait, allow_callback=True)
+
+    remaining = max(0.0, deadline - time.monotonic())
+    cancellation_grace = min(0.05, remaining / 2)
+    worker.join(max(0.0, remaining - cancellation_grace))
+    timed_out = worker.is_alive()
+    if worker.is_alive():
+        cancel.set()
+        worker.join(cancellation_grace)
+
+    # A callback cannot begin until its handshake send completes. Re-polling
+    # immediately before cleanup closes the only race where isolation became
+    # ready just after the initial bounded readiness window.
+    read_isolation_handshake(0.0, allow_callback=False)
+    ready_receive.close()
+    approval_send.close()
+
+    # Always clear the verified worker-only process group. On timeout this
+    # terminates the callback and every subprocess it launched. On success it
+    # prevents an accidentally detached background child escaping a condition.
+    if isolated_group is not None:
+        try:
+            os.killpg(isolated_group, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    elif worker.is_alive():
+        worker.terminate()
+    worker.join(0.05)
+    if isolated_group is not None:
+        # The group leader may have honored SIGTERM while a descendant ignored
+        # it. Escalate the group regardless of the leader's liveness.
+        try:
+            os.killpg(isolated_group, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    elif worker.is_alive():  # pragma: no cover - pre-isolation startup failure
+        worker.kill()
+    if worker.is_alive():
+        worker.join()
+    if timed_out:
+        receive.close()
+        raise TimeoutError("tiny smoke exceeded its strict suite timeout")
+    if not receive.poll(0.05):
+        receive.close()
+        raise RuntimeError("smoke condition worker exited without a result")
+    succeeded, value = receive.recv()
+    receive.close()
+    if not succeeded:
+        if not isinstance(value, BaseException):  # pragma: no cover - defensive
+            raise RuntimeError("smoke condition callback failed without an error")
+        raise value
+    if not isinstance(value, SmokeConditionResult):
+        raise TypeError("smoke condition callback returned an invalid result")
+    return value
+
+
+def _persist_receipt(path: Path, receipt: TinySmokeReceipt) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    partial = path.with_suffix(path.suffix + ".partial")
+    partial.write_text(
+        json.dumps(receipt.as_document(), sort_keys=True, separators=(",", ":"))
+        + "\n",
+        encoding="utf-8",
+    )
+    os.replace(partial, path)
+
+
+def _validate_success_evidence(result: SmokeConditionResult) -> None:
+    complete = (
+        result.request_count > 0
+        and result.edges_observed > 0
+        and result.startup_verified
+        and result.cleanup_verified
+        and result.progress_observed
+        and result.trainer_failure_status in {"verified", "not_applicable"}
+    )
+    raw_path = Path(result.raw_results_path)
+    raw_complete = raw_path.is_file() and raw_path.stat().st_size > 0
+    if not complete or not raw_complete:
+        raise ValueError(
+            "successful smoke condition requires requests, edges, all health "
+            "checks, and a nonempty raw evidence file"
+        )
+
+
+def run_tiny_smoke(
+    plan: TinySmokePlan,
+    execute_condition: ConditionExecutor,
+    *,
+    receipt_path: str | Path,
+    monotonic: Callable[[], float] = time.monotonic,
+    monotonic_ns: Callable[[], int] = time.monotonic_ns,
+) -> TinySmokeReceipt:
+    """Run only the bounded fixture matrix and persist its non-formal receipt."""
+    started = monotonic()
+    started_ns = monotonic_ns()
+    results: list[SmokeConditionResult] = []
+    for condition in plan.conditions:
+        remaining = plan.timeout_seconds - (monotonic() - started)
+        if remaining <= 0:
+            raise TimeoutError("tiny smoke exceeded its strict suite timeout")
+        result = _execute_with_timeout(execute_condition, condition, remaining)
+        if result.condition_id != condition.condition_id:
+            raise ValueError("condition result identity differs from smoke plan")
+        if result.request_count > condition.request_limit:
+            raise ValueError("condition result exceeds planned request bound")
+        if monotonic() - started > plan.timeout_seconds:
+            raise TimeoutError("tiny smoke exceeded its strict suite timeout")
+        _validate_success_evidence(result)
+        results.append(result)
+    by_topology = {
+        topology: {
+            row.condition_id.split(".")[1]: row
+            for row in results
+            if row.condition_id.split(".")[0] == topology
+        }
+        for topology in ("same_process", "same_host_split", "same_host_isolated")
+    }
+    ratios = tuple(
+        SmokeTopologyRatios(
+            topology=topology,
+            Itraining=values["training_no_activation"].client_p95_ms
+            / values["serving_only"].client_p95_ms,
+            Ifull=values["training_and_activation"].client_p95_ms
+            / values["serving_only"].client_p95_ms,
+            IActivationIncrement=values["training_and_activation"].client_p95_ms
+            / values["training_no_activation"].client_p95_ms,
+        )
+        for topology, values in by_topology.items()
+    )
+    receipt = TinySmokeReceipt(
+        schema_version=2,
+        fixture=plan.fixture,
+        timeout_seconds=plan.timeout_seconds,
+        started_at_monotonic_ns=started_ns,
+        completed_at_monotonic_ns=monotonic_ns(),
+        conditions=tuple(results),
+        interference_ratios=ratios,
+        formal_performance_claim=False,
+    )
+    if len(receipt.conditions) != 9 or receipt.total_requests > 180:
+        raise RuntimeError("tiny smoke receipt escaped its fixed execution bound")
+    if not receipt.trainer_failure_availability_verified:
+        raise RuntimeError("tiny smoke trainer-failure applicability is untruthful")
+    _persist_receipt(Path(receipt_path), receipt)
+    return receipt
+
+
+class CallbackSmokeRuntime:
+    """Concrete orchestration seam for dashboard/Task 9 condition actions."""
+
+    def __init__(
+        self,
+        *,
+        start_suite: Callable[[TinySmokePlan], Any],
+        run_condition: Callable[
+            [Any, SmokeCondition, int, float, CancellationEvent],
+            SmokeConditionResult,
+        ],
+        stop_suite: Callable[[Any], None],
+    ) -> None:
+        self._start_suite = start_suite
+        self._run_condition = run_condition
+        self._stop_suite = stop_suite
+
+    def start_suite(self, plan: TinySmokePlan) -> Any:
+        return self._start_suite(plan)
+
+    def run_condition(
+        self,
+        handle: Any,
+        condition: SmokeCondition,
+        request_limit: int,
+        timeout_seconds: float,
+        cancel: CancellationEvent,
+    ) -> SmokeConditionResult:
+        return self._run_condition(
+            handle, condition, request_limit, timeout_seconds, cancel
+        )
+
+    def stop_suite(self, handle: Any) -> None:
+        self._stop_suite(handle)
+
+
+def run_lifecycle_tiny_smoke(
+    plan: TinySmokePlan,
+    runtime: CallbackSmokeRuntime,
+    *,
+    receipt_path: str | Path,
+) -> TinySmokeReceipt:
+    """Start one saved trial, execute its nine conditions, then stop it once."""
+    destination = Path(receipt_path)
+    provisional = destination.with_suffix(destination.suffix + ".running")
+    handle = runtime.start_suite(plan)
+    completed = False
+    try:
+        receipt = run_tiny_smoke(
+            plan,
+            lambda condition, limit, timeout, cancel: runtime.run_condition(
+                handle, condition, limit, timeout, cancel
+            ),
+            receipt_path=provisional,
+        )
+        completed = True
+    finally:
+        try:
+            runtime.stop_suite(handle)
+        except Exception:
+            provisional.unlink(missing_ok=True)
+            raise
+    if not completed:  # pragma: no cover - defensive typing path
+        raise RuntimeError("tiny smoke did not complete")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(provisional, destination)
+    return receipt
+
+
+class DashboardPerformanceHttpClient:
+    """Loopback adapter for Task 10 saved-trial create and graceful stop."""
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        admin_nonce: str,
+        transport: Any | None = None,
+    ) -> None:
+        if not base_url.startswith(("http://127.0.0.1:", "http://localhost:")):
+            raise ValueError("dashboard endpoint must be loopback")
+        if not admin_nonce:
+            raise ValueError("dashboard admin nonce is required")
+        if transport is None:
+            import httpx
+
+            transport = httpx.Client()
+        self._transport = transport
+        self._base_url = base_url.rstrip("/")
+        parsed = urlsplit(base_url)
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        self._headers = {
+            "Origin": origin,
+            "X-Babel-Admin-Nonce": admin_nonce,
+        }
+
+    def create_trial(self, launch: dict[str, object]) -> str:
+        response = self._transport.request(
+            "POST",
+            f"{self._base_url}/admin/api/v1/performance",
+            headers=self._headers,
+            json=launch,
+            timeout=10.0,
+        )
+        if int(response.status_code) != 201:
+            raise RuntimeError(
+                f"dashboard trial create failed: HTTP {response.status_code}"
+            )
+        experiment_id = response.json().get("trial", {}).get("experimentId")
+        if not isinstance(experiment_id, str) or not experiment_id:
+            raise RuntimeError("dashboard trial create response has no experiment ID")
+        return experiment_id
+
+    def graceful_stop(self, experiment_id: str) -> None:
+        response = self._transport.request(
+            "POST",
+            f"{self._base_url}/admin/api/v1/performance/{experiment_id}/graceful-stop",
+            headers=self._headers,
+            json=None,
+            timeout=10.0,
+        )
+        if int(response.status_code) != 202:
+            raise RuntimeError(
+                f"dashboard graceful stop failed: HTTP {response.status_code}"
+            )
+
+    def close(self) -> None:
+        close = getattr(self._transport, "close", None)
+        if callable(close):
+            close()
+
+
+__all__ = [
+    "CallbackSmokeRuntime",
+    "DashboardPerformanceHttpClient",
+    "SmokeCondition",
+    "SmokeConditionResult",
+    "SmokeTopologyRatios",
+    "TinySmokePlan",
+    "TinySmokeReceipt",
+    "run_lifecycle_tiny_smoke",
+    "run_tiny_smoke",
+    "tiny_smoke_plan",
+]

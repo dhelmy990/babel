@@ -1,0 +1,25 @@
+[
+  {
+    "name": "Teacher ZIP",
+    "url": "https://ndownloader.figshare.com/files/7455673",
+    "filename": "2016-09-01_2016-09-30_en_100.zip",
+    "size": 727429988,
+    "md5": "ac70acfc41aff7a23cc9439e3bb1771f"
+  },
+  {
+    "name": "Wikipedia XML",
+    "url": "https://archive.org/download/enwiki-20161001/enwiki-20161001-pages-articles-multistream.xml.bz2",
+    "filename": "enwiki-20161001-pages-articles-multistream.xml.bz2",
+    "size": 14178624372,
+    "md5": "5df8e610829c336138dcb9191071b283",
+    "sha1": "86ba305ecc41dafcf03ba3e67c2eacb95724d5ca"
+  },
+  {
+    "name": "Wikipedia multistream index",
+    "url": "https://archive.org/download/enwiki-20161001/enwiki-20161001-pages-articles-multistream-index.txt.bz2",
+    "filename": "enwiki-20161001-pages-articles-multistream-index.txt.bz2",
+    "size": 185177516,
+    "md5": "7c9486cde3f9c43ff4e23443dd2323f3",
+    "sha1": "f13aebe90c8bea2157d826659e0320157a1978d9"
+  }
+]

@@ -320,7 +320,7 @@ PostgresWikipediaBabelRepository::PostgresWikipediaBabelRepository(PostgresDatab
     : database_(database) {}
 
 Result<std::optional<Babel>> PostgresWikipediaBabelRepository::findByPage(
-    CreatorId owner_id, WikipediaPageId page_id) {
+    CreatorId owner_id, WikipediaPageId page_id, std::string_view provider) {
   try {
     auto connection = database_.connect();
     pqxx::read_transaction transaction(*connection);
@@ -329,9 +329,9 @@ Result<std::optional<Babel>> PostgresWikipediaBabelRepository::findByPage(
                b.content_revision, b.content_hash
         FROM babels b
         JOIN babel_sources s ON s.babel_id = b.id
-        WHERE s.owner_id = $1 AND s.provider = 'wikipedia' AND s.external_page_id = $2
+        WHERE s.owner_id = $1 AND s.provider = $2 AND s.external_page_id = $3
       )",
-                                       pqxx::params{owner_id.value, page_id.value});
+                                       pqxx::params{owner_id.value, provider, page_id.value});
     if (rows.empty()) {
       return std::optional<Babel>{};
     }
@@ -368,11 +368,19 @@ Result<void> PostgresWikipediaBabelRepository::insertWikipediaBabel(
                              ? std::optional<std::string>{source.seed_assignment_id->value}
                              : std::nullopt);
     source_params.append(source.declared_title);
+    source_params.append(source.source_repository);
+    source_params.append(source.source_config);
+    source_params.append(source.source_commit_sha);
+    source_params.append(source.source_article_key);
+    source_params.append(source.source_snapshot_date);
+    source_params.append(source.source_content_sha256);
     transaction.exec(R"(
         INSERT INTO babel_sources(
           babel_id, owner_id, provider, external_page_id, canonical_url,
-          source_revision_id, seed_assignment_id, declared_title
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+          source_revision_id, seed_assignment_id, declared_title,
+          source_repository, source_config, source_commit_sha, source_article_key,
+          source_snapshot_date, source_content_sha256
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
       )",
                      source_params);
     transaction.commit();
@@ -624,6 +632,38 @@ Result<void> PostgresSeedRunRepository::markNonterminalAsInterrupted() {
         WHERE state IN ('queued', 'running')
       )");
     transaction.commit();
+  } catch (const std::exception& exception) {
+    return tl::make_unexpected(mapPostgresError(exception));
+  }
+  return {};
+}
+
+Result<void> PostgresSeedRunRepository::recordSourcePin(
+    SeedRunId run_id, const PinnedSourceProvenance& provenance) {
+  try {
+    auto connection = database_.connect();
+    pqxx::work transaction(*connection);
+    const auto result = transaction.exec(R"(
+        UPDATE seed_runs
+        SET source_repository = $2,
+            source_config = $3,
+            source_commit_sha = $4,
+            source_snapshot_date = $5
+        WHERE id = $1 AND source_repository IS NULL
+      )",
+                                         pqxx::params{run_id.value, provenance.repository,
+                                                      provenance.configuration,
+                                                      provenance.commit_sha,
+                                                      provenance.snapshot_date});
+    if (result.affected_rows() == 0) {
+      return tl::make_unexpected(ApplicationError{
+          .code = ErrorCode::conflict,
+          .message = "seed run source pin is already recorded",
+      });
+    }
+    transaction.commit();
+  } catch (const pqxx::check_violation& exception) {
+    return tl::make_unexpected(mapPostgresError(exception));
   } catch (const std::exception& exception) {
     return tl::make_unexpected(mapPostgresError(exception));
   }

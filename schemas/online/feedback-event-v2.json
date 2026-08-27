@@ -1,0 +1,179 @@
+{
+  "$defs": {
+    "CandidateActionV1": {
+      "additionalProperties": false,
+      "properties": {
+        "babelId": {
+          "format": "uuid",
+          "title": "Babelid",
+          "type": "string"
+        },
+        "sourceArticleKey": {
+          "pattern": "^enwiki:[1-9][0-9]*$",
+          "title": "Sourcearticlekey",
+          "type": "string"
+        },
+        "rank": {
+          "exclusiveMinimum": 0,
+          "title": "Rank",
+          "type": "integer"
+        },
+        "modelScore": {
+          "maximum": 1.0,
+          "minimum": -1.0,
+          "title": "Modelscore",
+          "type": "number"
+        },
+        "action": {
+          "enum": [
+            "include",
+            "exclude",
+            "ignore"
+          ],
+          "title": "Action",
+          "type": "string"
+        }
+      },
+      "required": [
+        "babelId",
+        "sourceArticleKey",
+        "rank",
+        "modelScore",
+        "action"
+      ],
+      "title": "CandidateActionV1",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "const": 2,
+      "title": "Schemaversion",
+      "type": "integer"
+    },
+    "eventId": {
+      "format": "uuid",
+      "title": "Eventid",
+      "type": "string"
+    },
+    "requestId": {
+      "format": "uuid",
+      "title": "Requestid",
+      "type": "string"
+    },
+    "runId": {
+      "format": "uuid",
+      "title": "Runid",
+      "type": "string"
+    },
+    "creatorId": {
+      "format": "uuid",
+      "title": "Creatorid",
+      "type": "string"
+    },
+    "sourceBabelId": {
+      "format": "uuid",
+      "title": "Sourcebabelid",
+      "type": "string"
+    },
+    "sourceArticleKey": {
+      "pattern": "^enwiki:[1-9][0-9]*$",
+      "title": "Sourcearticlekey",
+      "type": "string"
+    },
+    "traversalSessionId": {
+      "format": "uuid",
+      "title": "Traversalsessionid",
+      "type": "string"
+    },
+    "parentRequestId": {
+      "anyOf": [
+        {
+          "format": "uuid",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Parentrequestid"
+    },
+    "traversalDepth": {
+      "enum": [
+        0,
+        1
+      ],
+      "title": "Traversaldepth",
+      "type": "integer"
+    },
+    "modelId": {
+      "format": "uuid",
+      "title": "Modelid",
+      "type": "string"
+    },
+    "modelVersion": {
+      "minimum": 0,
+      "title": "Modelversion",
+      "type": "integer"
+    },
+    "embeddingSpaceId": {
+      "format": "uuid",
+      "title": "Embeddingspaceid",
+      "type": "string"
+    },
+    "retrievalBackend": {
+      "enum": [
+        "pgvector",
+        "hnswlib"
+      ],
+      "title": "Retrievalbackend",
+      "type": "string"
+    },
+    "sourceVectorOrigin": {
+      "enum": [
+        "qwen_encode",
+        "cache_hit",
+        "pgvector_load"
+      ],
+      "title": "Sourcevectororigin",
+      "type": "string"
+    },
+    "candidateActions": {
+      "items": {
+        "$ref": "#/$defs/CandidateActionV1"
+      },
+      "title": "Candidateactions",
+      "type": "array"
+    },
+    "occurredAtNs": {
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "title": "Occurredatns",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "eventId",
+    "requestId",
+    "runId",
+    "creatorId",
+    "sourceBabelId",
+    "sourceArticleKey",
+    "traversalSessionId",
+    "parentRequestId",
+    "traversalDepth",
+    "modelId",
+    "modelVersion",
+    "embeddingSpaceId",
+    "retrievalBackend",
+    "sourceVectorOrigin",
+    "candidateActions",
+    "occurredAtNs"
+  ],
+  "title": "FeedbackEventV2",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://babel.local/schemas/online/feedback-event-v2.json"
+}

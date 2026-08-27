@@ -16,5 +16,68 @@ services:
     volumes:
       - babel_postgres_data:/var/lib/postgresql
 
+  kafka:
+    image: apache/kafka:4.3.1
+    ports:
+      - "127.0.0.1:${BABEL_KAFKA_PORT:-29092}:29092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,PLAINTEXT_HOST://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:${BABEL_KAFKA_PORT:-29092}
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 1
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  # The topology image is built from the installable online/ package by the
+  # operator.  Its two role commands must be the real recommendation and
+  # trainer executables; the supervisor refuses an identical command pair.
+  online-topology-supervisor:
+    profiles: ["online-topology"]
+    image: ${BABEL_ONLINE_IMAGE:-babel-online:local}
+    network_mode: host
+    command: ["babel-online", "supervise"]
+    environment:
+      BABEL_RUNTIME_TOPOLOGY: ${BABEL_RUNTIME_TOPOLOGY:-same_host_split}
+      BABEL_ONLINE_SERVING_COMMAND: ${BABEL_ONLINE_SERVING_COMMAND:-babel-recommendation-server --run-id {run_id}}
+      BABEL_ONLINE_TRAINER_COMMAND: ${BABEL_ONLINE_TRAINER_COMMAND:-babel-online-trainer --run-id {run_id} --activation-enabled true}
+      BABEL_ONLINE_SERVING_VERSION: ${BABEL_ONLINE_SERVING_VERSION:-serving:babel-online/0.1.0}
+      BABEL_ONLINE_TRAINER_VERSION: ${BABEL_ONLINE_TRAINER_VERSION:-trainer:babel-online/0.1.0}
+      BABEL_ONLINE_SERVING_HEALTH_URL: ${BABEL_ONLINE_SERVING_HEALTH_URL:-http://127.0.0.1:8791/health}
+      BABEL_ONLINE_WORKER_TOKEN: ${BABEL_ONLINE_WORKER_TOKEN:-}
+      BABEL_ONLINE_STATE_ROOT: /var/lib/babel-online/topology
+      BABEL_DATABASE_URL: ${BABEL_DATABASE_URL:-postgresql://babel:babel-local-dev@127.0.0.1:54329/babel}
+      BABEL_KAFKA_BOOTSTRAP_SERVERS: ${BABEL_KAFKA_BOOTSTRAP_SERVERS:-127.0.0.1:29092}
+      HF_TOKEN: ${HF_TOKEN:-}
+      HF_HOME: /var/lib/babel-online/huggingface
+      BABEL_ONLINE_HF_CACHE: /var/lib/babel-online/cache/dataset
+      BABEL_ONLINE_MODEL_ARTIFACT_CACHE: /var/lib/babel-online/cache/model-artifact
+      BABEL_ONLINE_QWEN_CACHE: /var/lib/babel-online/cache/qwen-base
+      BABEL_SERVING_CPU_AFFINITY: ${BABEL_SERVING_CPU_AFFINITY:-}
+      BABEL_TRAINER_CPU_AFFINITY: ${BABEL_TRAINER_CPU_AFFINITY:-}
+      BABEL_SERVING_MEMORY_LIMIT_BYTES: ${BABEL_SERVING_MEMORY_LIMIT_BYTES:-}
+      BABEL_TRAINER_MEMORY_LIMIT_BYTES: ${BABEL_TRAINER_MEMORY_LIMIT_BYTES:-}
+      BABEL_SERVING_GPU_DEVICES: ${BABEL_SERVING_GPU_DEVICES:-}
+      BABEL_TRAINER_GPU_DEVICES: ${BABEL_TRAINER_GPU_DEVICES:-}
+    volumes:
+      - babel_online_state:/var/lib/babel-online
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
 volumes:
   babel_postgres_data:
+  babel_online_state:

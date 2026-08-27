@@ -4,16 +4,21 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="babel-admin-nonce" content="{{BABEL_ADMIN_NONCE}}">
-    <title>Babel Seed Operations</title>
+    <title>Babel Operations</title>
     <link rel="stylesheet" href="/admin/dashboard.css">
     <script src="/admin/seed-status.js" defer></script>
+    <script src="/admin/experiment-status.js" defer></script>
     <script src="/admin/dashboard.js" defer></script>
+    <script src="/admin/experiment-dashboard.js" defer></script>
+    <script src="/admin/trial-progress.js" defer></script>
+    <script src="/admin/scalability-dashboard.js" defer></script>
   </head>
   <body>
     <main class="operations" aria-labelledby="page-title">
       <header class="masthead">
         <p class="eyebrow">Babel / local operations</p>
-        <h1 id="page-title">Wikipedia seed</h1>
+        <h1 id="page-title">Babel operations</h1>
+        <h2>Wikipedia seed</h2>
         <p id="seed-status" class="status" aria-live="polite">Loading seed status</p>
       </header>
 
@@ -27,6 +32,161 @@
       <section class="errors" aria-labelledby="errors-title" aria-live="polite">
         <h2 id="errors-title">Live errors</h2>
         <ul id="seed-errors"></ul>
+      </section>
+
+      <section class="experiment" aria-labelledby="experiment-title">
+        <header class="section-heading">
+          <p class="eyebrow">Representative online pilot</p>
+          <h2 id="experiment-title">Recommendation experiment</h2>
+          <p id="experiment-status" class="status" aria-live="polite">Loading experiment status</p>
+        </header>
+
+        <div class="experiment-grid">
+          <label>Starting model
+            <select id="experiment-model" aria-label="Starting model"></select>
+          </label>
+          <label>Retrieval backend
+            <select id="experiment-retrieval">
+              <option value="pgvector">pgvector (default)</option>
+              <option value="hnswlib">hnswlib (optional)</option>
+            </select>
+          </label>
+          <label>Scenario
+            <select id="experiment-scenario">
+              <option value="june_to_july">June → July</option>
+              <option value="june_only">June only</option>
+            </select>
+          </label>
+          <label>Creators
+            <input id="experiment-creators" type="number" min="1" max="10000" value="50">
+          </label>
+          <label>Events / month
+            <input id="experiment-budget" type="number" min="1" max="1000000" value="100">
+          </label>
+          <label>Run seed
+            <input id="experiment-seed" type="number" min="0" max="9223372036854775807" value="0">
+          </label>
+        </div>
+        <div class="experiment-actions">
+          <button id="experiment-start" type="button">Start experiment</button>
+          <button id="experiment-stop" class="secondary" type="button" disabled>Graceful stop</button>
+        </div>
+
+        <h3>Live health</h3>
+        <dl id="experiment-health" class="health" aria-live="polite"></dl>
+
+        <h3>Observable activity</h3>
+        <ol id="experiment-activity" class="activity" aria-live="polite"></ol>
+      </section>
+
+      <section class="experiment scalability" aria-labelledby="scalability-title">
+        <header class="section-heading">
+          <p class="eyebrow">Saved architecture evidence</p>
+          <h2 id="scalability-title">Scalability trial</h2>
+          <p id="performance-status" class="status" aria-live="polite">Loading saved trials</p>
+        </header>
+
+        <div class="experiment-grid performance-controls">
+          <label>Formal creator cohort
+            <select id="performance-cohort">
+              <option value="50">50 creators · full 3×3 baseline</option>
+              <option value="100">100 creators · monolith vs split</option>
+              <option value="500">500 creators · monolith vs split</option>
+            </select>
+          </label>
+          <label>Topology
+            <select id="performance-topology">
+              <option value="same_host_split">Split services (default)</option>
+              <option value="same_process">Monolith control</option>
+              <option value="same_host_isolated">Resource-isolated split</option>
+            </select>
+          </label>
+          <label>Immutable model
+            <select id="performance-model"></select>
+          </label>
+          <label>Vector backend
+            <select id="performance-backend">
+              <option value="pgvector">pgvector (default)</option>
+              <option value="hnswlib">hnswlib snapshot</option>
+            </select>
+          </label>
+          <label>Dataset snapshot
+            <select id="performance-dataset">
+              <option value="0d1ab2c7f0e2295682288fcf10077d2d776bf559">Real June → July 2026 engineering release</option>
+            </select>
+          </label>
+          <label>Creators
+            <input id="performance-creators" type="number" min="1" max="10000" value="50">
+          </label>
+          <label class="paired-control">Seeded articles
+            <input id="performance-seeded-slider" type="range" min="100" max="10000" step="100" value="10000">
+            <input id="performance-seeded" type="number" min="1" value="10000">
+          </label>
+          <label class="paired-control">Created Babel target
+            <input id="performance-created-slider" type="range" min="100" max="10000" step="100" value="10000">
+            <input id="performance-created" type="number" min="1" value="10000">
+          </label>
+          <label class="paired-control">Concurrent users
+            <input id="performance-concurrent-slider" type="range" min="1" max="500" value="50">
+            <input id="performance-concurrent" type="number" min="1" value="50">
+          </label>
+          <label>Recommendation-start probability
+            <input id="performance-start-probability" type="number" min="0" max="1" step="0.05" value="0.4">
+          </label>
+          <label>Continuation probability
+            <input id="performance-continuation-probability" type="number" min="0" max="1" step="0.05" value="0.4">
+          </label>
+          <label>Maximum traversal depth
+            <input id="performance-depth" type="number" min="2" max="2" value="2">
+          </label>
+          <label>Requests / traversal cap
+            <input id="performance-request-cap" type="number" min="1" max="10" value="10">
+          </label>
+          <label>Warmup seconds
+            <input id="performance-warmup" type="number" min="0" max="3600" value="30">
+          </label>
+          <label>Training micro-batch
+            <input id="performance-training-batch" type="number" min="1" max="1024" value="8">
+          </label>
+          <label>Synchronize every trainer steps
+            <input id="performance-sync-steps" type="number" min="1" max="1000000" value="10">
+          </label>
+          <label>Duration seconds
+            <input id="performance-duration" type="number" min="1" max="86400" value="120">
+          </label>
+          <label>Target requests / second
+            <input id="performance-rps" type="number" min="0.01" step="0.25" value="5">
+          </label>
+          <label>p95 safety threshold (ms)
+            <input id="performance-safety" type="number" min="1" value="5000">
+          </label>
+          <label class="checkbox-control">
+            <input id="performance-interleave" type="checkbox" checked>
+            Interleave creation and recommendation events
+          </label>
+        </div>
+        <p class="contract-note">Walk contract: independent 0.40 start/continuation draws, depth 2, ten-request cap. The 50-creator baseline uses the exact 3×3 matrix; 100 and 500 compare same-process with the selected same-host split across all three load modes and currently require the immutable original model. Cohorts never auto-advance.</p>
+        <div class="experiment-actions">
+          <button id="performance-create" type="button">Save and launch cohort population</button>
+          <button id="performance-approve" type="button" disabled>Approve this cohort's measurements</button>
+          <button id="performance-stop" class="secondary" type="button" disabled>Graceful stop</button>
+        </div>
+
+        <div class="trial-progress" aria-live="polite">
+          <p id="performance-phase">No trial selected</p>
+          <progress id="performance-progress" max="100" value="0">0%</progress>
+          <p id="performance-rate">Rate and ETA pending</p>
+          <p id="performance-gate">Population evidence pending</p>
+        </div>
+
+        <h3>Interference ratios</h3>
+        <dl id="performance-ratios" class="health"></dl>
+        <h3>Persisted condition results</h3>
+        <ol id="performance-results" class="activity"></ol>
+        <h3>Topology, serving, trainer, and artifacts</h3>
+        <dl id="performance-telemetry" class="health"></dl>
+        <h3>Saved trials</h3>
+        <ol id="performance-trials" class="activity"></ol>
       </section>
     </main>
   </body>

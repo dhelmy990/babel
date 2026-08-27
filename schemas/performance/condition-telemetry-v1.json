@@ -1,0 +1,46 @@
+{
+  "$id": "https://babel.local/schemas/performance/condition-telemetry-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ConditionTelemetryV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "benchmarkRunId",
+    "condition",
+    "observedAtMonotonicNs",
+    "kind",
+    "durationNs",
+    "trainerStep",
+    "kafkaLag",
+    "synchronizationVersion"
+  ],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "benchmarkRunId": {"type": "string", "format": "uuid"},
+    "condition": {"enum": ["pgvector_serving_only", "pgvector_training_no_sync", "pgvector_training_and_sync"]},
+    "observedAtMonotonicNs": {"type": "integer", "minimum": 0},
+    "kind": {"enum": ["trainer_step", "kafka_lag", "synchronization"]},
+    "durationNs": {"$ref": "#/$defs/nullableNonnegativeInteger"},
+    "trainerStep": {"$ref": "#/$defs/nullableNonnegativeInteger"},
+    "kafkaLag": {"$ref": "#/$defs/nullableNonnegativeInteger"},
+    "synchronizationVersion": {"$ref": "#/$defs/nullableNonnegativeInteger"}
+  },
+  "$defs": {
+    "nullableNonnegativeInteger": {"anyOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"kind": {"const": "trainer_step"}}},
+      "then": {"properties": {"durationNs": {"type": "integer"}, "trainerStep": {"type": "integer"}}}
+    },
+    {
+      "if": {"properties": {"kind": {"const": "kafka_lag"}}},
+      "then": {"properties": {"kafkaLag": {"type": "integer"}}}
+    },
+    {
+      "if": {"properties": {"kind": {"const": "synchronization"}}},
+      "then": {"properties": {"durationNs": {"type": "integer"}, "synchronizationVersion": {"type": "integer"}}}
+    }
+  ]
+}

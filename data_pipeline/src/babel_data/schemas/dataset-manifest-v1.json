@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://babel.local/schemas/dataset-manifest-v1.json",
+  "title": "Dataset manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "manifest_version", "schema_version", "state", "schema", "dataset_config",
+    "pilot_article_keys", "counts", "shards", "aggregate_sha256",
+    "rows_sha256", "provenance"
+  ],
+  "properties": {
+    "manifest_version": {"const": 1},
+    "schema_version": {"const": 1},
+    "state": {"const": "prepared"},
+    "schema": {"const": "distillation-example-v1"},
+    "dataset_config": {"const": "distillation_2016"},
+    "pilot_article_keys": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^enwiki:2016-10-01:[1-9][0-9]*$"}
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "train", "validation", "test"],
+      "properties": {
+        "total": {"type": "integer", "minimum": 1},
+        "train": {"type": "integer", "minimum": 0},
+        "validation": {"type": "integer", "minimum": 0},
+        "test": {"type": "integer", "minimum": 0}
+      }
+    },
+    "shards": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path", "split", "rows", "bytes", "sha256", "rows_sha256",
+          "schema", "version", "min_article_key", "max_article_key",
+          "min_rank", "max_rank"
+        ],
+        "properties": {
+          "path": {"type": "string", "pattern": "^distillation_2016/(?:(?:train|validation|test)/part-[0-9]{5}|releases/[a-f0-9]{64}/(?:train|validation|test)/part-[0-9]{5})\\.parquet$"},
+          "split": {"enum": ["train", "validation", "test"]},
+          "rows": {"type": "integer", "minimum": 1},
+          "bytes": {"type": "integer", "minimum": 1},
+          "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+          "rows_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+          "schema": {"const": "distillation-example-v1"},
+          "version": {"const": 1},
+          "min_article_key": {"type": "string", "pattern": "^enwiki:2016-10-01:[1-9][0-9]*$"},
+          "max_article_key": {"type": "string", "pattern": "^enwiki:2016-10-01:[1-9][0-9]*$"},
+          "min_rank": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+          "max_rank": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+        }
+      }
+    },
+    "aggregate_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "rows_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "supersedes_commit_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "active_release_root": {"type": "string", "pattern": "^distillation_2016/releases/[a-f0-9]{64}$"},
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "identifiers", "document"],
+      "properties": {
+        "schema": {"const": "provenance-v1"},
+        "identifiers": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["dataset_config", "example_schema", "snapshot_date", "teacher_dimension"],
+          "properties": {
+            "dataset_config": {"const": "distillation_2016"},
+            "example_schema": {"const": "distillation-example-v1"},
+            "snapshot_date": {"const": "2016-10-01"},
+            "teacher_dimension": {"const": 100}
+          }
+        },
+        "document": {"type": "object"}
+      }
+    }
+  },
+  "dependentRequired": {
+    "supersedes_commit_sha": ["active_release_root"],
+    "active_release_root": ["supersedes_commit_sha"]
+  }
+}

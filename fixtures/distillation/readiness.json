@@ -1,0 +1,10 @@
+{
+  "state": "complete",
+  "schema_version": 1,
+  "teacher_dimension": 100,
+  "available_examples": 2,
+  "verified_shards": [{"path": "train/debug.parquet", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "examples": 2}],
+  "source_checksums": {"teacher": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+  "remote_verified": true,
+  "remote_commit_sha": "cccccccccccccccccccccccccccccccccccccccc"
+}

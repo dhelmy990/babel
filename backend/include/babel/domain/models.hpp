@@ -63,6 +63,35 @@ struct BabelSource {
   std::optional<std::int64_t> source_revision_id;
   std::optional<SeedAssignmentId> seed_assignment_id;
   std::string declared_title;
+  std::optional<std::string> source_repository{};
+  std::optional<std::string> source_config{};
+  std::optional<std::string> source_commit_sha{};
+  std::optional<std::string> source_article_key{};
+  std::optional<std::string> source_snapshot_date{};
+  std::optional<std::string> source_content_sha256{};
+};
+
+struct SourceSelection {
+  std::string repository;
+  std::string configuration;
+  std::string requested_revision;
+  std::string artifact_path;
+};
+
+struct PinnedSourceProvenance {
+  std::string repository;
+  std::string configuration;
+  std::string commit_sha;
+  std::string snapshot_date;
+};
+
+struct ArticleProvenance {
+  std::string repository;
+  std::string configuration;
+  std::string commit_sha;
+  std::string article_key;
+  std::string snapshot_date;
+  std::string content_sha256;
 };
 
 struct ResolvedWikipediaPage {
@@ -77,6 +106,7 @@ struct RawWikipediaArticle {
   std::string canonical_url;
   std::optional<std::int64_t> revision_id;
   std::string rendered_html;
+  std::optional<ArticleProvenance> provenance{};
 };
 
 struct SanitizedHtml {

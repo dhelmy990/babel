@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools==75.8.0", "wheel==0.45.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "babel-training"
+version = "0.1.0"
+description = "Babel Qwen distillation training"
+requires-python = ">=3.10,<3.14"
+dependencies = [
+  "accelerate==1.5.2",
+  "datasets==3.3.2",
+  "huggingface-hub==0.30.2",
+  "jsonschema[format-nongpl]==4.23.0",
+  "numpy==1.26.4; python_version < '3.13'",
+  "numpy==2.2.6; python_version >= '3.13'",
+  "peft==0.15.2",
+  "safetensors==0.5.3",
+  "torch==2.11.0+cu128",
+  # TorchData is archived; its matrix ends at Torch 2.6. The clean-lock
+  # StatefulDataLoader smoke test covers compatibility with Torch 2.11.
+  "torchdata==0.11.0",
+  "transformers==4.51.3",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest==8.3.4",
+  "setuptools==75.8.0",
+  "types-python-dateutil==2.9.0.20250822",
+  "wheel==0.45.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.setuptools.package-data]
+babel_training = ["schemas/*.json"]

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://babel.local/schemas/article-crosswalk-v1.json",
+  "title": "Cross-period article identity row v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["lineage_id", "period", "article_key", "page_id", "canonical_title", "wikidata_id", "change_kind", "match_basis"],
+  "properties": {
+    "lineage_id": {"type": "string", "minLength": 1},
+    "period": {"enum": ["2016", "2026-06", "2026-07"]},
+    "article_key": {"type": "string", "pattern": "^enwiki:[1-9][0-9]*$"},
+    "page_id": {"type": "integer", "minimum": 1},
+    "canonical_title": {"type": "string", "minLength": 1},
+    "wikidata_id": {"type": ["string", "null"], "pattern": "^Q[1-9][0-9]*$"},
+    "change_kind": {"enum": ["unchanged", "moved", "created", "deleted", "recreated", "ambiguous"]},
+    "match_basis": {"enum": ["qid", "page_id", "new", "ambiguous"]}
+  }
+}

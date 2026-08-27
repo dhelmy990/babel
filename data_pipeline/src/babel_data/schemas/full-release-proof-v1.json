@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://babel.local/schemas/full-release-proof-v1.json",
+  "title": "Full release proof v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "dataset_config", "provenance_sha256",
+    "accepted_jsonl", "reconciliation_report", "source_inventories"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "dataset_config": {"const": "distillation_2016"},
+    "provenance_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "accepted_jsonl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256", "size", "rows"],
+      "properties": {
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "size": {"type": "integer", "minimum": 1},
+        "rows": {"type": "integer", "minimum": 1}
+      }
+    },
+    "reconciliation_report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sha256", "size", "complete", "raw_rows", "accepted_rows", "excluded_rows",
+        "matched_wikipedia_pages"
+      ],
+      "properties": {
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "size": {"type": "integer", "minimum": 1},
+        "complete": {"const": true},
+        "raw_rows": {"type": "integer", "minimum": 1},
+        "accepted_rows": {"type": "integer", "minimum": 1},
+        "excluded_rows": {"type": "integer", "minimum": 0},
+        "matched_wikipedia_pages": {"type": "integer", "minimum": 1}
+      }
+    },
+    "source_inventories": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "filename", "url", "size", "md5", "downloaded_at", "role",
+          "records", "emitted_records", "upstream_excluded_records"
+        ],
+        "properties": {
+          "filename": {"type": "string", "minLength": 1},
+          "url": {"type": "string", "format": "uri"},
+          "size": {"type": "integer", "minimum": 1},
+          "md5": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+          "sha1": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+          "downloaded_at": {"type": "string", "format": "date"},
+          "role": {"enum": ["teacher", "wikipedia"]},
+          "records": {"type": "integer", "minimum": 1},
+          "emitted_records": {"type": "integer", "minimum": 0},
+          "upstream_excluded_records": {"type": "integer", "minimum": 0}
+        }
+      }
+    }
+  }
+}

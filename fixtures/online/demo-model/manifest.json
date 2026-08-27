@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "modelId": "00000000-0000-5000-8000-000000000002",
+  "label": "Deterministic Friday demo stand-in (replace after Colab)",
+  "parentModelId": null,
+  "producingRunId": null,
+  "encoderRepo": "fixture://babel/deterministic-qwen-stand-in",
+  "encoderRevision": "cccccccccccccccccccccccccccccccccccccccc",
+  "datasetRepo": "dhelmy990/babel-wikipedia-experiment",
+  "datasetRevision": "e1acc648fcace8820dd5ee70bae9216ea4334555",
+  "environmentSequence": ["2026-06", "2026-07"],
+  "trainingExamples": 0,
+  "checkpointPath": "working-state.json",
+  "checkpointSha256": "2d6cae7e5cb9fd8974e2716f208e059389ecda8bba3ce60a0f3845d20cbd363d",
+  "embeddingSpace": {
+    "schemaVersion": 1,
+    "embeddingSpaceId": "00000000-0000-5000-8000-000000000003",
+    "dimension": 100,
+    "distance": "cosine",
+    "distilledEncoderArtifact": "fixture://babel/deterministic-qwen-stand-in@v1",
+    "datasetRevision": "e1acc648fcace8820dd5ee70bae9216ea4334555",
+    "compatibilityVersion": "babel-online-v1"
+  },
+  "immutable": true
+}

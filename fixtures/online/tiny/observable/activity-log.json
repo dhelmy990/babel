@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "runId": "00000000-0000-5000-8000-000000000001",
+  "sequence": 1,
+  "occurredAtNs": 1001,
+  "level": "info",
+  "component": "serving",
+  "event": "recommendation_completed",
+  "message": "Recommendation completed.",
+  "metrics": {"serverTotalNs": 21000},
+  "details": {
+    "kind": "recommendation",
+    "creatorId": "00000000-0000-5000-8000-000000000101",
+    "newBabelId": "00000000-0000-5000-8000-000000000301",
+    "newBabelTitle": "Compiler notes",
+    "candidateBabelIds": [
+      "00000000-0000-5000-8000-000000000202",
+      "00000000-0000-5000-8000-000000000204"
+    ],
+    "includeBabelIds": ["00000000-0000-5000-8000-000000000202"],
+    "excludeBabelIds": [],
+    "ignoreBabelIds": ["00000000-0000-5000-8000-000000000204"],
+    "acceptedEdgeCount": 1,
+    "modelId": "00000000-0000-5000-8000-000000000002",
+    "modelVersion": 0
+  }
+}

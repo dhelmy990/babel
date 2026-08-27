@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "benchmarkRunId": "00000000-0000-5000-8000-000000000901",
+  "endpoint": "http://127.0.0.1:8081",
+  "requestPath": "/api/v1/recommendations",
+  "requestCorpusPath": "fixtures/performance/requests.jsonl",
+  "requestCorpusSha256": "239188de9c701cd88c66fd90f9033c39f354a206d7c38921e30fd3a6aed39d06",
+  "candidateUniversePath": "fixtures/performance/created-babels.jsonl",
+  "candidateUniverseSha256": "f2e33f58b9840f85e02b0b59c9c299dc37cb4ac1396718ca16dee944a39abf42",
+  "scheduleOffsetsNs": [0, 100000000, 200000000, 300000000, 400000000, 500000000],
+  "warmupCount": 1,
+  "timeoutSeconds": 1.0,
+  "conditions": [
+    {
+      "name": "pgvector_serving_only",
+      "trainingEnabled": false,
+      "syncEnabled": false,
+      "requestCorpusSha256": "239188de9c701cd88c66fd90f9033c39f354a206d7c38921e30fd3a6aed39d06",
+      "scheduleOffsetsNs": [0, 100000000, 200000000, 300000000, 400000000, 500000000],
+      "expectedModelId": "00000000-0000-5000-8000-000000000002",
+      "expectedEmbeddingSpaceId": "00000000-0000-5000-8000-000000000003",
+      "expectedPgvectorSnapshotSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "name": "pgvector_training_no_sync",
+      "trainingEnabled": true,
+      "syncEnabled": false,
+      "requestCorpusSha256": "239188de9c701cd88c66fd90f9033c39f354a206d7c38921e30fd3a6aed39d06",
+      "scheduleOffsetsNs": [0, 100000000, 200000000, 300000000, 400000000, 500000000],
+      "expectedModelId": "00000000-0000-5000-8000-000000000002",
+      "expectedEmbeddingSpaceId": "00000000-0000-5000-8000-000000000003",
+      "expectedPgvectorSnapshotSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "name": "pgvector_training_and_sync",
+      "trainingEnabled": true,
+      "syncEnabled": true,
+      "requestCorpusSha256": "239188de9c701cd88c66fd90f9033c39f354a206d7c38921e30fd3a6aed39d06",
+      "scheduleOffsetsNs": [0, 100000000, 200000000, 300000000, 400000000, 500000000],
+      "expectedModelId": "00000000-0000-5000-8000-000000000002",
+      "expectedEmbeddingSpaceId": "00000000-0000-5000-8000-000000000003",
+      "expectedPgvectorSnapshotSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ]
+}

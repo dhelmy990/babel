@@ -70,6 +70,10 @@ class FakeArticleSource final : public ArticleSource {
     return found->second;
   }
 
+  [[nodiscard]] std::string_view provider() const noexcept override {
+    return provider_name;
+  }
+
   void addArticle(RawWikipediaArticle article) {
     articles.insert_or_assign(article.page_id.value, std::move(article));
   }
@@ -94,6 +98,7 @@ class FakeArticleSource final : public ArticleSource {
   std::optional<WikipediaPageId> last_fetched_page;
   int resolve_count{0};
   int fetch_count{0};
+  std::string provider_name{"wikipedia"};
 };
 
 class FakeHtmlSanitizer final : public HtmlSanitizer {
@@ -121,14 +126,16 @@ class FakeWikipediaBabelRepository final : public WikipediaBabelRepository {
     BabelSource source;
   };
 
-  Result<std::optional<Babel>> findByPage(CreatorId owner_id,
-                                           WikipediaPageId page_id) override {
+  Result<std::optional<Babel>> findByPage(
+      CreatorId owner_id, WikipediaPageId page_id,
+      std::string_view provider = "wikipedia") override {
     ++find_count;
     last_find_owner = owner_id;
     last_find_page = page_id;
+    last_find_provider = provider;
     if (find_error) return tl::make_unexpected(*find_error);
     for (const auto& record : records) {
-      if (record.source.owner_id == owner_id && record.source.provider == "wikipedia" &&
+      if (record.source.owner_id == owner_id && record.source.provider == provider &&
           record.source.external_page_id == page_id) {
         return std::optional<Babel>{record.babel};
       }
@@ -198,6 +205,7 @@ class FakeWikipediaBabelRepository final : public WikipediaBabelRepository {
   std::optional<ApplicationError> attach_error;
   std::optional<CreatorId> last_find_owner;
   std::optional<WikipediaPageId> last_find_page;
+  std::string last_find_provider;
   std::optional<Babel> last_babel;
   std::optional<BabelSource> last_source;
   std::optional<BabelId> last_attached_babel;
@@ -210,13 +218,13 @@ class FakeWikipediaBabelRepository final : public WikipediaBabelRepository {
  private:
   Result<void> storeRecord(const Babel& babel, const BabelSource& source) {
     if (source.babel_id != babel.id || source.owner_id != babel.owner_id ||
-        source.provider != "wikipedia") {
+        (source.provider != "wikipedia" && source.provider != "huggingface_wikipedia")) {
       return tl::make_unexpected(
           error(ErrorCode::invalid_argument, "fake Wikipedia source identity mismatch"));
     }
     for (const auto& record : records) {
       if (record.babel.id == babel.id ||
-          (record.source.owner_id == source.owner_id &&
+          (record.source.owner_id == source.owner_id && record.source.provider == source.provider &&
            record.source.external_page_id == source.external_page_id)) {
         return tl::make_unexpected(
             error(ErrorCode::conflict, "fake Wikipedia Babel identity conflict"));

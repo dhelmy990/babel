@@ -513,6 +513,10 @@ later commands never scrape human-readable output.
 
 Run: `python3 -m pytest data_pipeline/tests/test_shard.py data_pipeline/tests/test_hub.py -v`
 
+If the host Python has unrelated globally installed pytest plugins, isolate
+this check with `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`; the data-pipeline tests do
+not require third-party pytest plugins.
+
 Run when `HF_TOKEN` is present:
 `babel-data verify-remote --repo dhelmy990/babel-wikipedia-experiment --revision "$BABEL_PILOT_SHA"`
 

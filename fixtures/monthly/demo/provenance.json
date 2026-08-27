@@ -1,0 +1,80 @@
+{
+  "manifest_version": 1,
+  "periods": {
+    "2016": {
+      "artifacts": {
+        "articles": {
+          "path": "2016/articles.jsonl",
+          "rows": 80,
+          "sha256": "5f2e31b128c35c311be37400b164e500cf684b5352a97fa23444975d1139629e"
+        }
+      }
+    },
+    "2026-06": {
+      "artifacts": {
+        "articles": {
+          "path": "june/articles.jsonl",
+          "rows": 80,
+          "sha256": "bf429e764503198dd760fa16b44d966322927046330bd88de1481ad62cc6cd8d"
+        },
+        "backend_seed_catalog": {
+          "path": "june/resolved-catalog-v3.jsonl",
+          "rows": 78,
+          "sha256": "28733aff4f16f3f63a14c6a20626095d5009aaab5e27c68615bee046576e8bce"
+        },
+        "clickstream": {
+          "path": "june/clickstream.jsonl",
+          "rows": 160,
+          "sha256": "309c9d1bc07412d8cdb375ee4bd5a8cc7e81ca77eb5d8d3ccaae1ae1a2c1989e"
+        },
+        "edges": {
+          "path": "june/edges.jsonl",
+          "rows": 160,
+          "sha256": "6e31a8f4444174aeb47b4903199ed835308b01180d51f998d30bbcbaa4f35a44"
+        },
+        "hidden_archetypes": {
+          "path": "june/hidden-archetypes.jsonl",
+          "rows": 20,
+          "sha256": "599f36f49d4aad4810393fa9b04c411e956746357ce64753f5a4db48c39c8b0b"
+        }
+      }
+    },
+    "2026-07": {
+      "artifacts": {
+        "articles": {
+          "path": "july/articles.jsonl",
+          "rows": 80,
+          "sha256": "925475641cb300cf9439b62f0683175894666c4e030324edf66ac237c8e422d4"
+        },
+        "backend_seed_catalog": {
+          "path": "july/resolved-catalog-v3.jsonl",
+          "rows": 78,
+          "sha256": "65c1c5172921d2fa2d001e9d4c83c1b1a14161da85a0033cf8796dfbf14af578"
+        },
+        "clickstream": {
+          "path": "july/clickstream.jsonl",
+          "rows": 160,
+          "sha256": "a3aa188ad524ffc8dd7ba60a8097ae5fe4e540e35dc4b1e18bfb88e34acd77ec"
+        },
+        "edges": {
+          "path": "july/edges.jsonl",
+          "rows": 160,
+          "sha256": "4ce67794c7a59e901711960f8b126f2cb091fa27ef21649277c2275e375e7ced"
+        },
+        "hidden_archetypes": {
+          "path": "july/hidden-archetypes.jsonl",
+          "rows": 20,
+          "sha256": "ea2255c0c4f4029a635d11347bf35c194e93e1e88a120e0085eb7f7cfa057792"
+        }
+      }
+    }
+  },
+  "readiness": "fixture_ready",
+  "release_scope": "friday_demo_fixture",
+  "snapshot_claim": "representative_fixture_not_official_monthly_snapshot",
+  "source": {
+    "config": "distillation_2016",
+    "repo_id": "dhelmy990/babel-wikipedia-experiment",
+    "revision": "c8cbb81fdb81f71a3aa5d0e5beb10348843ede6b"
+  }
+}

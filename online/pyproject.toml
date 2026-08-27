@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=75,<76", "wheel>=0.45,<0.46"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "babel-online"
+version = "0.1.0"
+description = "Babel synchronous online recommendation demo"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+  "fastapi>=0.115,<0.116",
+  "huggingface-hub>=0.30,<1",
+  "numpy>=2.2,<2.3",
+  "pydantic>=2.10,<2.11",
+  "uvicorn>=0.34,<0.35",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx>=0.28,<0.29",
+  "pytest>=8.3,<8.4",
+]
+pgvector = [
+  "pgvector>=0.3,<0.4",
+  "psycopg[binary]>=3.2,<3.3",
+]
+kafka = [
+  "confluent-kafka>=2.6,<3",
+]
+parquet = [
+  "pyarrow>=17,<26",
+]
+qwen = [
+  "accelerate>=1.5,<2",
+  "peft>=0.15,<0.16",
+  "safetensors>=0.5,<1",
+  "torch>=2.6,<2.7",
+  "transformers>=4.51,<4.52",
+]
+
+[project.scripts]
+babel-online = "babel_online.runtime.cli:main"
+babel-recommendation-server = "babel_online.runtime.services:serving_main"
+babel-online-trainer = "babel_online.runtime.services:trainer_main"
+babel-population-transfer = "babel_online.transfer.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "kafka: requires a real Kafka service",
+  "pgvector: requires a real PostgreSQL/pgvector service",
+  "real_model: requires access to the pinned private Qwen artifact",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
