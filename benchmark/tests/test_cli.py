@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from babel_benchmark.cli import _parser, main
 from babel_benchmark.contracts import RequestMeasurementV1, load_jsonl
+from babel_benchmark.resources import ResourceObservationV1
 
 
 ROOT = Path(__file__).parents[2]
@@ -135,3 +137,111 @@ def test_live_replay_cli_exposes_real_trainer_and_sync_inputs() -> None:
     assert args.command == "live-replay"
     assert args.publish_limit == 4000
     assert args.sync_every_steps == 50
+
+
+def test_v2_concurrent_replays_feed_the_three_ratio_report(tmp_path: Path) -> None:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), RecommendationHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        legacy = json.loads((FIXTURES / "manifest.json").read_text())
+        conditions = []
+        identities = (
+            (False, False),
+            (True, False),
+            (True, True),
+        )
+        for source, (training, activation) in zip(
+            legacy["conditions"], identities, strict=True
+        ):
+            conditions.append(
+                {
+                    "identity": {
+                        "topology": "same_process",
+                        "trainingEnabled": training,
+                        "activationEnabled": activation,
+                        "retrievalBackend": "pgvector",
+                    },
+                    "requestCorpusSha256": legacy["requestCorpusSha256"],
+                    "scheduleOffsetsNs": legacy["scheduleOffsetsNs"],
+                    "expectedModelId": source["expectedModelId"],
+                    "expectedEmbeddingSpaceId": source["expectedEmbeddingSpaceId"],
+                    "expectedDatasetSnapshotSha256": "a" * 64,
+                    "expectedBackendSnapshotSha256": "a" * 64,
+                }
+            )
+        manifest = {
+            **{key: value for key, value in legacy.items() if key != "conditions"},
+            "schemaVersion": 2,
+            "endpoint": f"http://127.0.0.1:{server.server_port}",
+            "scheduleMode": "open_loop",
+            "maxInFlight": 2,
+            "conditions": conditions,
+        }
+        manifest_path = tmp_path / "manifest-v2.json"
+        manifest_path.write_text(json.dumps(manifest))
+        outputs = []
+        resource_output = tmp_path / "resources.jsonl"
+        names = (
+            "same_process.serving.no_activation.pgvector",
+            "same_process.training.no_activation.pgvector",
+            "same_process.training.activation.pgvector",
+        )
+        for index, name in enumerate(names):
+            output = tmp_path / f"condition-{index}.jsonl"
+            outputs.append(output)
+            command = [
+                "concurrent-replay",
+                "--manifest",
+                str(manifest_path),
+                "--requests",
+                str(FIXTURES / "requests.jsonl"),
+                "--candidate-universe",
+                str(FIXTURES / "created-babels.jsonl"),
+                "--condition",
+                name,
+                "--measurements",
+                str(output),
+            ]
+            if index == 0:
+                command.extend(
+                    [
+                        "--resources",
+                        str(resource_output),
+                        "--service-pid",
+                        f"benchmark={os.getpid()}",
+                        "--resource-interval-seconds",
+                        "0.01",
+                        "--maximum-resource-samples",
+                        "2",
+                    ]
+                )
+            assert main(command) == 0
+        summary = tmp_path / "summary.json"
+        markdown = tmp_path / "report.md"
+        assert (
+            main(
+                [
+                    "report",
+                    "--measurements",
+                    *(str(path) for path in outputs),
+                    "--summary",
+                    str(summary),
+                    "--markdown",
+                    str(markdown),
+                ]
+            )
+            == 0
+        )
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+    assert json.loads(summary.read_text())["interference"] is not None
+    resources = load_jsonl(resource_output, ResourceObservationV1)
+    assert {row.service for row in resources} == {"host", "benchmark"}
+    report = markdown.read_text()
+    assert all(
+        name in report for name in ("Itraining", "Ifull", "IActivationIncrement")
+    )

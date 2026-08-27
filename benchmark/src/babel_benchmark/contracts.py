@@ -4,17 +4,29 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Literal, TypeVar
+from typing import Literal, TypeVar
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    HttpUrl,
+    field_validator,
+    model_validator,
+)
 
 
-ConditionName = Literal[
+LegacyConditionName = Literal[
     "pgvector_serving_only",
     "pgvector_training_no_sync",
     "pgvector_training_and_sync",
 ]
+ConditionName = str
+TopologyName = Literal[
+    "same_process", "same_host_split", "same_host_isolated", "cross_host"
+]
+RetrievalBackendName = Literal["pgvector", "hnswlib"]
 TimingStage = Literal[
     "queue", "encode", "context", "ann", "filtering", "serialization", "serverTotal"
 ]
@@ -34,8 +46,27 @@ class FrozenContract(BaseModel):
     )
 
 
+class ConditionIdentityV2(FrozenContract):
+    topology: TopologyName
+    trainingEnabled: bool
+    activationEnabled: bool
+    retrievalBackend: RetrievalBackendName = "pgvector"
+
+    @property
+    def stable_key(self) -> str:
+        training = "training" if self.trainingEnabled else "serving"
+        activation = "activation" if self.activationEnabled else "no_activation"
+        return f"{self.topology}.{training}.{activation}.{self.retrievalBackend}"
+
+    @model_validator(mode="after")
+    def activation_requires_training(self) -> "ConditionIdentityV2":
+        if self.activationEnabled and not self.trainingEnabled:
+            raise ValueError("model activation requires training")
+        return self
+
+
 class ConditionSpecV1(FrozenContract):
-    name: ConditionName
+    name: LegacyConditionName
     trainingEnabled: bool
     syncEnabled: bool
     requestCorpusSha256: str = Field(pattern=_SHA256)
@@ -94,9 +125,78 @@ class BenchmarkManifestV1(FrozenContract):
             "pgvector_training_no_sync",
             "pgvector_training_and_sync",
         ):
-            raise ValueError("manifest must contain the three Friday conditions in order")
+            raise ValueError(
+                "manifest must contain the three Friday conditions in order"
+            )
         if self.warmupCount >= len(self.scheduleOffsetsNs):
             raise ValueError("warmup count must leave at least one measured request")
+        for condition in self.conditions:
+            if condition.requestCorpusSha256 != self.requestCorpusSha256:
+                raise ValueError("every condition must use the frozen request corpus")
+            if condition.scheduleOffsetsNs != self.scheduleOffsetsNs:
+                raise ValueError("every condition must use the frozen request schedule")
+        return self
+
+
+class ConditionSpecV2(FrozenContract):
+    identity: ConditionIdentityV2
+    requestCorpusSha256: str = Field(pattern=_SHA256)
+    scheduleOffsetsNs: tuple[int, ...]
+    expectedModelId: UUID
+    expectedEmbeddingSpaceId: UUID
+    expectedDatasetSnapshotSha256: str = Field(pattern=_SHA256)
+    expectedBackendSnapshotSha256: str = Field(pattern=_SHA256)
+
+    @field_validator("scheduleOffsetsNs")
+    @classmethod
+    def offsets_are_monotonic(cls, value: tuple[int, ...]) -> tuple[int, ...]:
+        return ConditionSpecV1.offsets_are_monotonic(value)
+
+    @property
+    def name(self) -> str:
+        return self.identity.stable_key
+
+    @property
+    def trainingEnabled(self) -> bool:
+        return self.identity.trainingEnabled
+
+    @property
+    def syncEnabled(self) -> bool:
+        return self.identity.activationEnabled
+
+    @property
+    def expectedPgvectorSnapshotSha256(self) -> str:
+        return self.expectedDatasetSnapshotSha256
+
+
+class BenchmarkManifestV2(FrozenContract):
+    schemaVersion: Literal[2]
+    benchmarkRunId: UUID
+    endpoint: HttpUrl
+    requestPath: Literal["/api/v1/recommendations"]
+    requestCorpusPath: str = Field(min_length=1)
+    requestCorpusSha256: str = Field(pattern=_SHA256)
+    candidateUniversePath: str = Field(min_length=1)
+    candidateUniverseSha256: str = Field(pattern=_SHA256)
+    scheduleOffsetsNs: tuple[int, ...]
+    warmupCount: int = Field(ge=0)
+    timeoutSeconds: float = Field(gt=0)
+    scheduleMode: Literal["closed_loop", "open_loop"]
+    maxInFlight: int = Field(gt=0, le=10_000)
+    conditions: tuple[ConditionSpecV2, ...] = Field(min_length=1)
+
+    @field_validator("endpoint")
+    @classmethod
+    def endpoint_is_loopback(cls, value: HttpUrl) -> HttpUrl:
+        return BenchmarkManifestV1.endpoint_is_loopback(value)
+
+    @model_validator(mode="after")
+    def conditions_share_frozen_inputs(self) -> "BenchmarkManifestV2":
+        if self.warmupCount >= len(self.scheduleOffsetsNs):
+            raise ValueError("warmup count must leave a measured request")
+        names = [condition.name for condition in self.conditions]
+        if len(set(names)) != len(names):
+            raise ValueError("generalized condition identities must be unique")
         for condition in self.conditions:
             if condition.requestCorpusSha256 != self.requestCorpusSha256:
                 raise ValueError("every condition must use the frozen request corpus")
@@ -134,7 +234,9 @@ class CreatedBabelV1(FrozenContract):
     @model_validator(mode="after")
     def is_a_created_synthetic_babel(self) -> "CreatedBabelV1":
         if not (self.createdBySyntheticCreator and self.createdInRun):
-            raise ValueError("candidate universe must contain only a created synthetic Babel")
+            raise ValueError(
+                "candidate universe must contain only a created synthetic Babel"
+            )
         return self
 
 
@@ -152,7 +254,7 @@ class RecommendationResponseV1(FrozenContract):
     runId: UUID
     modelId: UUID
     modelVersion: int = Field(ge=0)
-    retrievalBackend: Literal["pgvector"]
+    retrievalBackend: RetrievalBackendName
     embeddingSpaceId: UUID
     pgvectorSnapshotSha256: str = Field(pattern=_SHA256)
     backendSnapshotSha256: str = Field(pattern=_SHA256)
@@ -164,7 +266,9 @@ class RecommendationResponseV1(FrozenContract):
     @classmethod
     def timings_are_complete(cls, value: dict[str, int]) -> dict[str, int]:
         if set(value) != _STAGES | {"serverTotal"}:
-            raise ValueError("response must contain the seven frozen server timing stages")
+            raise ValueError(
+                "response must contain the seven frozen server timing stages"
+            )
         if any(duration < 0 for duration in value.values()):
             raise ValueError("server timings must be nonnegative")
         if value["serverTotal"] < sum(value[stage] for stage in _STAGES):
@@ -191,7 +295,7 @@ class RequestMeasurementV1(FrozenContract):
     serverTimingsNs: dict[str, int] | None = None
     modelId: UUID | None = None
     modelVersion: int | None = Field(default=None, ge=0)
-    retrievalBackend: Literal["pgvector"] | None = None
+    retrievalBackend: RetrievalBackendName | None = None
     pgvectorSnapshotSha256: str | None = Field(default=None, pattern=_SHA256)
     backendSnapshotSha256: str | None = Field(default=None, pattern=_SHA256)
     queryVectorSha256: str | None = Field(default=None, pattern=_SHA256)
@@ -199,7 +303,10 @@ class RequestMeasurementV1(FrozenContract):
 
     @model_validator(mode="after")
     def timing_and_outcome_are_consistent(self) -> "RequestMeasurementV1":
-        if self.completedAtMonotonicNs - self.startedAtMonotonicNs != self.clientTotalNs:
+        if (
+            self.completedAtMonotonicNs - self.startedAtMonotonicNs
+            != self.clientTotalNs
+        ):
             raise ValueError("client total must use the recorded monotonic timestamps")
         response_fields = (
             self.serverTimingsNs,
@@ -213,14 +320,103 @@ class RequestMeasurementV1(FrozenContract):
         )
         if self.outcome == "success":
             if any(value is None for value in response_fields):
-                raise ValueError("successful measurement requires response identity and timings")
-            checked = RecommendationResponseV1.timings_are_complete(self.serverTimingsNs or {})
+                raise ValueError(
+                    "successful measurement requires response identity and timings"
+                )
+            checked = RecommendationResponseV1.timings_are_complete(
+                self.serverTimingsNs or {}
+            )
             if checked["serverTotal"] > self.clientTotalNs:
                 raise ValueError("server total cannot exceed end-to-end latency")
             if self.clientOverheadNs != self.clientTotalNs - checked["serverTotal"]:
-                raise ValueError("client overhead must equal client total minus server total")
+                raise ValueError(
+                    "client overhead must equal client total minus server total"
+                )
         elif not self.errorType:
             raise ValueError("failed measurement requires an error type")
+        return self
+
+
+class RequestMeasurementV2(FrozenContract):
+    """Raw concurrent request row; failures retain their scheduling evidence."""
+
+    schemaVersion: Literal[2]
+    benchmarkRunId: UUID
+    conditionId: str = Field(min_length=1)
+    requestId: UUID
+    scheduleIndex: int = Field(ge=0)
+    scheduleMode: Literal["closed_loop", "open_loop"]
+    intendedStartMonotonicNs: int = Field(ge=0)
+    actualStartMonotonicNs: int = Field(ge=0)
+    completedAtMonotonicNs: int = Field(ge=0)
+    queueDelayNs: int = Field(ge=0)
+    inFlightAtStart: int = Field(ge=1)
+    clientTotalNs: int = Field(ge=0)
+    clientOverheadNs: int | None = Field(default=None, ge=0)
+    isWarmup: bool = False
+    outcome: Literal["success", "error", "timeout"]
+    httpStatus: int | None = Field(default=None, ge=100, le=599)
+    errorType: str | None = None
+    serverTimingsNs: dict[str, int] | None = None
+    cacheStatus: Literal["hit", "miss", "bypass", "unavailable"] = "unavailable"
+    modelId: UUID | None = None
+    servingModelVersion: int | None = Field(default=None, ge=0)
+    trainerModelVersion: int | None = Field(default=None, ge=0)
+    versionStaleness: int | None = Field(default=None, ge=0)
+    retrievalBackend: RetrievalBackendName | None = None
+    datasetSnapshotSha256: str | None = Field(default=None, pattern=_SHA256)
+    backendSnapshotSha256: str | None = Field(default=None, pattern=_SHA256)
+    queryVectorSha256: str | None = Field(default=None, pattern=_SHA256)
+    candidateCount: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def raw_timing_and_identity_are_consistent(self) -> "RequestMeasurementV2":
+        if self.actualStartMonotonicNs < self.intendedStartMonotonicNs:
+            raise ValueError("actual start cannot precede intended start")
+        if (
+            self.queueDelayNs
+            != self.actualStartMonotonicNs - self.intendedStartMonotonicNs
+        ):
+            raise ValueError("queue delay must equal actual minus intended start")
+        if (
+            self.completedAtMonotonicNs - self.actualStartMonotonicNs
+            != self.clientTotalNs
+        ):
+            raise ValueError("client total must use actual start and completion")
+        if self.versionStaleness is not None:
+            if self.trainerModelVersion is None or self.servingModelVersion is None:
+                raise ValueError(
+                    "version staleness requires trainer and serving versions"
+                )
+            if (
+                self.versionStaleness
+                != self.trainerModelVersion - self.servingModelVersion
+            ):
+                raise ValueError(
+                    "version staleness does not match trainer-serving versions"
+                )
+        if self.outcome == "success":
+            required = (
+                self.serverTimingsNs,
+                self.modelId,
+                self.servingModelVersion,
+                self.retrievalBackend,
+                self.datasetSnapshotSha256,
+                self.backendSnapshotSha256,
+                self.queryVectorSha256,
+                self.candidateCount,
+            )
+            if any(value is None for value in required):
+                raise ValueError("successful concurrent row requires response identity")
+            checked = RecommendationResponseV1.timings_are_complete(
+                self.serverTimingsNs or {}
+            )
+            if checked["serverTotal"] > self.clientTotalNs:
+                raise ValueError("server total cannot exceed end-to-end latency")
+            if self.clientOverheadNs != self.clientTotalNs - checked["serverTotal"]:
+                raise ValueError("client overhead must exclude server total")
+        elif not self.errorType:
+            raise ValueError("failed concurrent row requires an error type")
         return self
 
 
@@ -238,7 +434,8 @@ class ConditionTelemetryV1(FrozenContract):
     @model_validator(mode="after")
     def fields_match_kind(self) -> "ConditionTelemetryV1":
         required = {
-            "trainer_step": self.durationNs is not None and self.trainerStep is not None,
+            "trainer_step": self.durationNs is not None
+            and self.trainerStep is not None,
             "kafka_lag": self.kafkaLag is not None,
             "synchronization": self.durationNs is not None
             and self.synchronizationVersion is not None,
@@ -271,11 +468,21 @@ class ConditionSummaryV1(FrozenContract):
     slowdownRatioP95: float | None = Field(default=None, ge=0)
 
 
+class InterferenceSummaryV1(FrozenContract):
+    Itraining: float = Field(ge=0)
+    Ifull: float = Field(ge=0)
+    IActivationIncrement: float = Field(ge=0)
+    ItrainingPercent: float
+    IfullPercent: float
+    IActivationIncrementPercent: float
+
+
 class PerformanceSummaryV1(FrozenContract):
     schemaVersion: Literal[1]
     benchmarkRunId: UUID
-    baselineCondition: Literal["pgvector_serving_only"]
+    baselineCondition: str
     conditions: tuple[ConditionSummaryV1, ...]
+    interference: InterferenceSummaryV1 | None = None
 
 
 ContractT = TypeVar("ContractT", bound=BaseModel)
@@ -295,24 +502,64 @@ def load_jsonl(path: str | Path, contract: type[ContractT]) -> list[ContractT]:
 
 def dump_jsonl(rows: list[BaseModel] | tuple[BaseModel, ...]) -> str:
     return "".join(
-        json.dumps(row.model_dump(mode="json"), sort_keys=True, separators=(",", ":")) + "\n"
+        json.dumps(row.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+        + "\n"
         for row in rows
     )
 
 
+def load_request_measurements(
+    path: str | Path,
+) -> list[RequestMeasurementV1 | RequestMeasurementV2]:
+    rows: list[RequestMeasurementV1 | RequestMeasurementV2] = []
+    for line_number, line in enumerate(Path(path).read_text().splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            document = json.loads(line)
+            contract = (
+                RequestMeasurementV2
+                if document.get("schemaVersion") == 2
+                else RequestMeasurementV1
+            )
+            rows.append(contract.model_validate(document))
+        except (json.JSONDecodeError, ValueError) as error:
+            raise ValueError(f"invalid {path} line {line_number}: {error}") from error
+    return rows
+
+
+def load_benchmark_manifest(
+    path: str | Path,
+) -> BenchmarkManifestV1 | BenchmarkManifestV2:
+    document = json.loads(Path(path).read_text())
+    contract = (
+        BenchmarkManifestV2
+        if document.get("schemaVersion") == 2
+        else BenchmarkManifestV1
+    )
+    return contract.model_validate(document)
+
+
 __all__ = [
     "BenchmarkManifestV1",
+    "BenchmarkManifestV2",
+    "ConditionIdentityV2",
     "ConditionName",
     "ConditionSpecV1",
+    "ConditionSpecV2",
     "ConditionSummaryV1",
     "ConditionTelemetryV1",
     "CreatedBabelV1",
+    "InterferenceSummaryV1",
     "PerformanceSummaryV1",
     "PercentileSummaryV1",
     "RecommendationRequestV1",
     "RecommendationResponseV1",
     "ReplayRequestV1",
     "RequestMeasurementV1",
+    "RequestMeasurementV2",
     "dump_jsonl",
     "load_jsonl",
+    "load_benchmark_manifest",
+    "load_request_measurements",
 ]

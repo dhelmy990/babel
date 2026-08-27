@@ -3,33 +3,60 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 from pathlib import Path
 from uuid import UUID
 
 from .analysis import analyze, render_markdown
 from .contracts import (
-    BenchmarkManifestV1,
     ConditionTelemetryV1,
     CreatedBabelV1,
     ReplayRequestV1,
-    RequestMeasurementV1,
     dump_jsonl,
+    load_benchmark_manifest,
     load_jsonl,
+    load_request_measurements,
 )
 from .replay import CandidateUniverse, ReplayCorpus
-from .runner import AlreadyConfiguredConditionDriver, HttpxTransport, run_condition
+from .resources import PeriodicResourceCollector, default_resource_sampler
+from .runner import (
+    AlreadyConfiguredConditionDriver,
+    AsyncHttpxTransport,
+    HttpxTransport,
+    run_concurrent_condition,
+    run_condition,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="babel-friday-benchmark")
     commands = parser.add_subparsers(dest="command", required=True)
-    replay = commands.add_parser("replay", help="run one externally configured condition")
+    replay = commands.add_parser(
+        "replay", help="run one externally configured condition"
+    )
     replay.add_argument("--manifest", required=True, type=Path)
     replay.add_argument("--requests", required=True, type=Path)
     replay.add_argument("--candidate-universe", required=True, type=Path)
     replay.add_argument("--condition", required=True)
     replay.add_argument("--measurements", required=True, type=Path)
+
+    concurrent = commands.add_parser(
+        "concurrent-replay", help="run a bounded closed/open-loop async POST schedule"
+    )
+    concurrent.add_argument("--manifest", required=True, type=Path)
+    concurrent.add_argument("--requests", required=True, type=Path)
+    concurrent.add_argument("--candidate-universe", required=True, type=Path)
+    concurrent.add_argument("--condition", required=True)
+    concurrent.add_argument("--measurements", required=True, type=Path)
+    concurrent.add_argument(
+        "--schedule-mode", choices=("closed_loop", "open_loop"), default=None
+    )
+    concurrent.add_argument("--max-in-flight", type=int, default=None)
+    concurrent.add_argument("--resources", type=Path)
+    concurrent.add_argument("--service-pid", action="append", default=[])
+    concurrent.add_argument("--resource-interval-seconds", type=float, default=1.0)
+    concurrent.add_argument("--maximum-resource-samples", type=int, default=100_000)
 
     live = commands.add_parser(
         "live-replay", help="run real Kafka training interference with loopback POSTs"
@@ -64,13 +91,61 @@ def _write(path: Path, content: str) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    if args.command in {"replay", "live-replay"}:
-        manifest = BenchmarkManifestV1.model_validate_json(args.manifest.read_text())
+    if args.command in {"replay", "live-replay", "concurrent-replay"}:
+        manifest = load_benchmark_manifest(args.manifest)
         matches = [row for row in manifest.conditions if row.name == args.condition]
         if len(matches) != 1:
-            raise ValueError(f"condition is not in the frozen manifest: {args.condition}")
+            raise ValueError(
+                f"condition is not in the frozen manifest: {args.condition}"
+            )
         replay = ReplayCorpus.from_jsonl(args.requests, ReplayRequestV1)
         universe = CandidateUniverse.from_jsonl(args.candidate_universe, CreatedBabelV1)
+        if args.command == "concurrent-replay":
+            max_in_flight = args.max_in_flight or getattr(manifest, "maxInFlight", 8)
+            schedule_mode = args.schedule_mode or getattr(
+                manifest, "scheduleMode", "open_loop"
+            )
+            if max_in_flight <= 0:
+                raise ValueError("max-in-flight must be positive")
+            condition_id = matches[0].name
+            collector = None
+            if args.resources is not None:
+                services: dict[str, int] = {}
+                for value in args.service_pid:
+                    try:
+                        service, raw_pid = value.split("=", 1)
+                        pid = int(raw_pid)
+                    except (ValueError, TypeError) as error:
+                        raise ValueError("service PID must use NAME=PID") from error
+                    if not service or pid <= 0 or service in services:
+                        raise ValueError(
+                            "service PID entries must be unique and positive"
+                        )
+                    services[service] = pid
+                collector = PeriodicResourceCollector(
+                    default_resource_sampler(manifest.benchmarkRunId, condition_id),
+                    services=services,
+                    interval_seconds=args.resource_interval_seconds,
+                    maximum_samples=args.maximum_resource_samples,
+                )
+            result = asyncio.run(
+                run_concurrent_condition(
+                    manifest,
+                    matches[0],
+                    replay,
+                    universe,
+                    transport=AsyncHttpxTransport(
+                        str(manifest.endpoint), max_connections=max_in_flight
+                    ),
+                    schedule_mode=schedule_mode,
+                    max_in_flight=max_in_flight,
+                    resource_collector=collector,
+                )
+            )
+            _write(args.measurements, dump_jsonl(result.measurements))
+            if args.resources is not None:
+                _write(args.resources, dump_jsonl(result.resources))
+            return 0
         driver = AlreadyConfiguredConditionDriver()
         if args.command == "live-replay":
             from .live import LiveTrainingDriver, build_atomic_sync_operation
@@ -113,14 +188,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     measurements = [
-        row
-        for path in args.measurements
-        for row in load_jsonl(path, RequestMeasurementV1)
+        row for path in args.measurements for row in load_request_measurements(path)
     ]
     telemetry = [
-        row
-        for path in args.telemetry
-        for row in load_jsonl(path, ConditionTelemetryV1)
+        row for path in args.telemetry for row in load_jsonl(path, ConditionTelemetryV1)
     ]
     summary = analyze(measurements, telemetry)
     _write(

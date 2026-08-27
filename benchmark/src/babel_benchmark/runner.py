@@ -2,19 +2,26 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, ContextManager, Protocol
+from collections.abc import Iterator, Sequence
 
 from .contracts import (
     BenchmarkManifestV1,
+    BenchmarkManifestV2,
     ConditionSpecV1,
+    ConditionSpecV2,
     ConditionTelemetryV1,
     RecommendationResponseV1,
     RequestMeasurementV1,
+    RequestMeasurementV2,
 )
 from .replay import CandidateUniverse, ReplayCorpus
+from .topology import infer_v1_condition_identity
+from .resources import PeriodicResourceCollector, ResourceObservationV1
 
 
 class JsonTransport(Protocol):
@@ -25,9 +32,19 @@ class JsonTransport(Protocol):
     def close(self) -> None: ...
 
 
+class AsyncJsonTransport(Protocol):
+    async def post_json(
+        self, path: str, payload: dict[str, Any], timeout_seconds: float
+    ) -> tuple[int, dict[str, Any]]: ...
+
+    async def close(self) -> None: ...
+
+
 class ConditionDriver(Protocol):
     def activate(
-        self, condition: ConditionSpecV1, telemetry: "ConditionTelemetryRecorder"
+        self,
+        condition: ConditionSpecV1 | ConditionSpecV2,
+        telemetry: "ConditionTelemetryRecorder",
     ) -> ContextManager[None]: ...
 
 
@@ -52,18 +69,54 @@ class HttpxTransport:
         self._client.close()
 
 
+class AsyncHttpxTransport:
+    def __init__(self, endpoint: str, *, max_connections: int) -> None:
+        import httpx
+
+        self._client = httpx.AsyncClient(
+            base_url=endpoint,
+            limits=httpx.Limits(
+                max_connections=max_connections,
+                max_keepalive_connections=max_connections,
+            ),
+        )
+
+    async def post_json(
+        self, path: str, payload: dict[str, Any], timeout_seconds: float
+    ) -> tuple[int, dict[str, Any]]:
+        import httpx
+
+        try:
+            response = await self._client.post(
+                path, json=payload, timeout=timeout_seconds
+            )
+        except httpx.TimeoutException as error:
+            raise TimeoutError("recommendation POST timed out") from error
+        return response.status_code, response.json()
+
+    async def close(self) -> None:
+        await self._client.aclose()
+
+
 class AlreadyConfiguredConditionDriver:
     """CLI seam when the operator has configured the selected condition externally."""
 
     @contextmanager
     def activate(
-        self, condition: ConditionSpecV1, telemetry: "ConditionTelemetryRecorder"
+        self,
+        condition: ConditionSpecV1 | ConditionSpecV2,
+        telemetry: "ConditionTelemetryRecorder",
     ):
         yield
 
 
 class ConditionTelemetryRecorder:
-    def __init__(self, manifest: BenchmarkManifestV1, condition: ConditionSpecV1, clock):
+    def __init__(
+        self,
+        manifest: BenchmarkManifestV1 | BenchmarkManifestV2,
+        condition: ConditionSpecV1 | ConditionSpecV2,
+        clock,
+    ):
         self._manifest = manifest
         self._condition = condition
         self._clock = clock
@@ -145,9 +198,24 @@ class SuiteResult:
     telemetry: tuple[ConditionTelemetryV1, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class ConcurrentConditionResult(Sequence[RequestMeasurementV2]):
+    measurements: tuple[RequestMeasurementV2, ...]
+    resources: tuple[ResourceObservationV1, ...]
+
+    def __getitem__(self, index: int | slice):
+        return self.measurements[index]
+
+    def __len__(self) -> int:
+        return len(self.measurements)
+
+    def __iter__(self) -> Iterator[RequestMeasurementV2]:
+        return iter(self.measurements)
+
+
 def _failed_measurement(
-    manifest: BenchmarkManifestV1,
-    condition: ConditionSpecV1,
+    manifest: BenchmarkManifestV1 | BenchmarkManifestV2,
+    condition: ConditionSpecV1 | ConditionSpecV2,
     replay_row,
     index: int,
     warmup: bool,
@@ -177,7 +245,7 @@ def _failed_measurement(
 
 
 def run_suite(
-    manifest: BenchmarkManifestV1,
+    manifest: BenchmarkManifestV1 | BenchmarkManifestV2,
     replay: ReplayCorpus,
     universe: CandidateUniverse,
     *,
@@ -207,7 +275,7 @@ def run_suite(
 
 
 def _validate_inputs(
-    manifest: BenchmarkManifestV1,
+    manifest: BenchmarkManifestV1 | BenchmarkManifestV2,
     replay: ReplayCorpus,
     universe: CandidateUniverse,
 ) -> None:
@@ -220,8 +288,8 @@ def _validate_inputs(
 
 
 def run_condition(
-    manifest: BenchmarkManifestV1,
-    condition: ConditionSpecV1,
+    manifest: BenchmarkManifestV1 | BenchmarkManifestV2,
+    condition: ConditionSpecV1 | ConditionSpecV2,
     replay: ReplayCorpus,
     universe: CandidateUniverse,
     *,
@@ -239,132 +307,348 @@ def run_condition(
         with condition_driver.activate(condition, recorder):
             base_ns = monotonic_ns()
             for index, replay_row in enumerate(replay.rows):
-                    target_ns = base_ns + replay_row.scheduleOffsetNs
-                    remaining_ns = target_ns - monotonic_ns()
-                    if remaining_ns > 0:
-                        sleep(remaining_ns / 1_000_000_000)
-                    started = monotonic_ns()
-                    queue_delay = max(0, started - target_ns)
-                    try:
-                        status, body = transport.post_json(
-                            manifest.requestPath,
-                            replay_row.request.model_dump(mode="json"),
-                            manifest.timeoutSeconds,
-                        )
-                    except TimeoutError as error:
-                        completed = monotonic_ns()
-                        measurements.append(
-                            _failed_measurement(
-                                manifest,
-                                condition,
-                                replay_row,
-                                index,
-                                index < manifest.warmupCount,
-                                started,
-                                completed,
-                                queue_delay,
-                                "timeout",
-                                type(error).__name__,
-                            )
-                        )
-                        continue
-                    except Exception as error:
-                        completed = monotonic_ns()
-                        measurements.append(
-                            _failed_measurement(
-                                manifest,
-                                condition,
-                                replay_row,
-                                index,
-                                index < manifest.warmupCount,
-                                started,
-                                completed,
-                                queue_delay,
-                                "error",
-                                type(error).__name__,
-                            )
-                        )
-                        continue
+                target_ns = base_ns + replay_row.scheduleOffsetNs
+                remaining_ns = target_ns - monotonic_ns()
+                if remaining_ns > 0:
+                    sleep(remaining_ns / 1_000_000_000)
+                started = monotonic_ns()
+                queue_delay = max(0, started - target_ns)
+                try:
+                    status, body = transport.post_json(
+                        manifest.requestPath,
+                        replay_row.request.model_dump(mode="json"),
+                        manifest.timeoutSeconds,
+                    )
+                except TimeoutError as error:
                     completed = monotonic_ns()
-                    if not 200 <= status < 300:
-                        measurements.append(
-                            _failed_measurement(
-                                manifest,
-                                condition,
-                                replay_row,
-                                index,
-                                index < manifest.warmupCount,
-                                started,
-                                completed,
-                                queue_delay,
-                                "error",
-                                f"http_{status}",
-                                status,
-                            )
+                    measurements.append(
+                        _failed_measurement(
+                            manifest,
+                            condition,
+                            replay_row,
+                            index,
+                            index < manifest.warmupCount,
+                            started,
+                            completed,
+                            queue_delay,
+                            "timeout",
+                            type(error).__name__,
                         )
-                        continue
+                    )
+                    continue
+                except Exception as error:
+                    completed = monotonic_ns()
+                    measurements.append(
+                        _failed_measurement(
+                            manifest,
+                            condition,
+                            replay_row,
+                            index,
+                            index < manifest.warmupCount,
+                            started,
+                            completed,
+                            queue_delay,
+                            "error",
+                            type(error).__name__,
+                        )
+                    )
+                    continue
+                completed = monotonic_ns()
+                if not 200 <= status < 300:
+                    measurements.append(
+                        _failed_measurement(
+                            manifest,
+                            condition,
+                            replay_row,
+                            index,
+                            index < manifest.warmupCount,
+                            started,
+                            completed,
+                            queue_delay,
+                            "error",
+                            f"http_{status}",
+                            status,
+                        )
+                    )
+                    continue
 
-                    response = RecommendationResponseV1.model_validate(body)
+                response = RecommendationResponseV1.model_validate(body)
+                if (
+                    response.requestId != replay_row.request.requestId
+                    or response.runId != replay_row.request.runId
+                ):
+                    raise ValueError("recommendation response identity mismatch")
+                if response.modelId != condition.expectedModelId:
+                    raise ValueError(
+                        "recommendation model identity differs from condition"
+                    )
+                if response.embeddingSpaceId != condition.expectedEmbeddingSpaceId:
+                    raise ValueError(
+                        "recommendation embedding space differs from condition"
+                    )
+                condition_identity = (
+                    condition.identity
+                    if isinstance(condition, ConditionSpecV2)
+                    else infer_v1_condition_identity(condition)
+                )
+                if response.retrievalBackend != condition_identity.retrievalBackend:
+                    raise ValueError("retrieval backend differs from condition")
+                if isinstance(condition, ConditionSpecV2):
                     if (
-                        response.requestId != replay_row.request.requestId
-                        or response.runId != replay_row.request.runId
+                        response.pgvectorSnapshotSha256
+                        != condition.expectedDatasetSnapshotSha256
                     ):
-                        raise ValueError("recommendation response identity mismatch")
-                    if response.modelId != condition.expectedModelId:
-                        raise ValueError("recommendation model identity differs from condition")
-                    if response.embeddingSpaceId != condition.expectedEmbeddingSpaceId:
-                        raise ValueError("recommendation embedding space differs from condition")
+                        raise ValueError("dataset snapshot differs from condition")
                     if (
                         not condition.syncEnabled
-                        and response.pgvectorSnapshotSha256
-                        != condition.expectedPgvectorSnapshotSha256
+                        and response.backendSnapshotSha256
+                        != condition.expectedBackendSnapshotSha256
                     ):
-                        raise ValueError("pgvector snapshot differs from condition")
-                    universe.validate_candidates(
-                        requester=replay_row.request.creatorId,
-                        response_rows=response.candidates,
+                        raise ValueError("backend snapshot differs from condition")
+                elif (
+                    not condition.syncEnabled
+                    and response.pgvectorSnapshotSha256
+                    != condition.expectedPgvectorSnapshotSha256
+                ):
+                    raise ValueError("pgvector snapshot differs from condition")
+                universe.validate_candidates(
+                    requester=replay_row.request.creatorId,
+                    response_rows=response.candidates,
+                )
+                client_total = completed - started
+                server_total = response.timingsNs["serverTotal"]
+                measurements.append(
+                    RequestMeasurementV1(
+                        schemaVersion=1,
+                        benchmarkRunId=manifest.benchmarkRunId,
+                        condition=condition.name,
+                        requestId=replay_row.request.requestId,
+                        scheduleIndex=index,
+                        scheduleOffsetNs=replay_row.scheduleOffsetNs,
+                        isWarmup=index < manifest.warmupCount,
+                        startedAtMonotonicNs=started,
+                        completedAtMonotonicNs=completed,
+                        queueDelayNs=queue_delay,
+                        clientTotalNs=client_total,
+                        clientOverheadNs=client_total - server_total,
+                        outcome="success",
+                        httpStatus=status,
+                        serverTimingsNs=response.timingsNs,
+                        modelId=response.modelId,
+                        modelVersion=response.modelVersion,
+                        retrievalBackend=response.retrievalBackend,
+                        pgvectorSnapshotSha256=response.pgvectorSnapshotSha256,
+                        backendSnapshotSha256=response.backendSnapshotSha256,
+                        queryVectorSha256=response.queryVectorSha256,
+                        candidateCount=len(response.candidates),
                     )
-                    client_total = completed - started
-                    server_total = response.timingsNs["serverTotal"]
-                    measurements.append(
-                        RequestMeasurementV1(
-                            schemaVersion=1,
-                            benchmarkRunId=manifest.benchmarkRunId,
-                            condition=condition.name,
-                            requestId=replay_row.request.requestId,
-                            scheduleIndex=index,
-                            scheduleOffsetNs=replay_row.scheduleOffsetNs,
-                            isWarmup=index < manifest.warmupCount,
-                            startedAtMonotonicNs=started,
-                            completedAtMonotonicNs=completed,
-                            queueDelayNs=queue_delay,
-                            clientTotalNs=client_total,
-                            clientOverheadNs=client_total - server_total,
-                            outcome="success",
-                            httpStatus=status,
-                            serverTimingsNs=response.timingsNs,
-                            modelId=response.modelId,
-                            modelVersion=response.modelVersion,
-                            retrievalBackend=response.retrievalBackend,
-                            pgvectorSnapshotSha256=response.pgvectorSnapshotSha256,
-                            backendSnapshotSha256=response.backendSnapshotSha256,
-                            queryVectorSha256=response.queryVectorSha256,
-                            candidateCount=len(response.candidates),
-                        )
-                    )
+                )
     finally:
         transport.close()
     return SuiteResult(tuple(measurements), tuple(recorder.rows))
+
+
+async def run_concurrent_condition(
+    manifest: BenchmarkManifestV1 | BenchmarkManifestV2,
+    condition: ConditionSpecV1 | ConditionSpecV2,
+    replay: ReplayCorpus,
+    universe: CandidateUniverse,
+    *,
+    transport: AsyncJsonTransport,
+    schedule_mode: str,
+    max_in_flight: int,
+    monotonic_ns: Callable[[], int] = time.monotonic_ns,
+    async_sleep: Callable[[float], Any] = asyncio.sleep,
+    trainer_model_version: int | None = None,
+    resource_collector: PeriodicResourceCollector | None = None,
+) -> ConcurrentConditionResult:
+    """Replay one deterministic bounded concurrent schedule."""
+    _validate_inputs(manifest, replay, universe)
+    if schedule_mode not in {"closed_loop", "open_loop"}:
+        raise ValueError("schedule mode must be closed_loop or open_loop")
+    if max_in_flight <= 0:
+        raise ValueError("max_in_flight must be positive")
+    identity = (
+        condition.identity
+        if isinstance(condition, ConditionSpecV2)
+        else infer_v1_condition_identity(condition)
+    )
+    condition_id = identity.stable_key
+    base_ns = monotonic_ns()
+    semaphore = asyncio.Semaphore(max_in_flight)
+    active = 0
+    active_lock = asyncio.Lock()
+    measurements: list[RequestMeasurementV2] = []
+
+    async def execute(index: int) -> None:
+        nonlocal active
+        replay_row = replay.rows[index]
+        intended = base_ns + replay_row.scheduleOffsetNs
+        remaining = intended - monotonic_ns()
+        if remaining > 0:
+            await async_sleep(remaining / 1_000_000_000)
+        async with semaphore:
+            async with active_lock:
+                active += 1
+                in_flight = active
+            started = monotonic_ns()
+            queue_delay = max(0, started - intended)
+            common: dict[str, Any] = {
+                "schemaVersion": 2,
+                "benchmarkRunId": manifest.benchmarkRunId,
+                "conditionId": condition_id,
+                "requestId": replay_row.request.requestId,
+                "scheduleIndex": index,
+                "scheduleMode": schedule_mode,
+                "intendedStartMonotonicNs": intended,
+                "actualStartMonotonicNs": started,
+                "queueDelayNs": queue_delay,
+                "inFlightAtStart": in_flight,
+                "isWarmup": index < manifest.warmupCount,
+                "trainerModelVersion": trainer_model_version,
+            }
+            try:
+                status, body = await transport.post_json(
+                    manifest.requestPath,
+                    replay_row.request.model_dump(mode="json"),
+                    manifest.timeoutSeconds,
+                )
+                completed = monotonic_ns()
+                if not 200 <= status < 300:
+                    measurements.append(
+                        RequestMeasurementV2(
+                            **common,
+                            completedAtMonotonicNs=completed,
+                            clientTotalNs=completed - started,
+                            outcome="error",
+                            httpStatus=status,
+                            errorType=f"http_{status}",
+                        )
+                    )
+                    return
+                response = RecommendationResponseV1.model_validate(body)
+                if (
+                    response.requestId != replay_row.request.requestId
+                    or response.runId != replay_row.request.runId
+                    or response.modelId != condition.expectedModelId
+                    or response.embeddingSpaceId != condition.expectedEmbeddingSpaceId
+                ):
+                    raise ValueError("recommendation response identity mismatch")
+                if isinstance(condition, ConditionSpecV2):
+                    if (
+                        response.pgvectorSnapshotSha256
+                        != condition.expectedDatasetSnapshotSha256
+                    ):
+                        raise ValueError("dataset snapshot differs from condition")
+                elif (
+                    not condition.syncEnabled
+                    and response.pgvectorSnapshotSha256
+                    != condition.expectedPgvectorSnapshotSha256
+                ):
+                    raise ValueError("candidate snapshot differs from condition")
+                if response.retrievalBackend != identity.retrievalBackend:
+                    raise ValueError("retrieval backend differs from condition")
+                if (
+                    isinstance(condition, ConditionSpecV2)
+                    and not condition.syncEnabled
+                    and response.backendSnapshotSha256
+                    != condition.expectedBackendSnapshotSha256
+                ):
+                    raise ValueError("backend snapshot differs from condition")
+                universe.validate_candidates(
+                    requester=replay_row.request.creatorId,
+                    response_rows=response.candidates,
+                )
+                staleness = None
+                if trainer_model_version is not None:
+                    staleness = max(0, trainer_model_version - response.modelVersion)
+                client_total = completed - started
+                measurements.append(
+                    RequestMeasurementV2(
+                        **common,
+                        completedAtMonotonicNs=completed,
+                        clientTotalNs=client_total,
+                        clientOverheadNs=client_total
+                        - response.timingsNs["serverTotal"],
+                        outcome="success",
+                        httpStatus=status,
+                        serverTimingsNs=response.timingsNs,
+                        cacheStatus=body.get("cacheStatus", "unavailable"),
+                        modelId=response.modelId,
+                        servingModelVersion=response.modelVersion,
+                        versionStaleness=staleness,
+                        retrievalBackend=response.retrievalBackend,
+                        datasetSnapshotSha256=response.pgvectorSnapshotSha256,
+                        backendSnapshotSha256=response.backendSnapshotSha256,
+                        queryVectorSha256=response.queryVectorSha256,
+                        candidateCount=len(response.candidates),
+                    )
+                )
+            except TimeoutError as error:
+                completed = monotonic_ns()
+                measurements.append(
+                    RequestMeasurementV2(
+                        **common,
+                        completedAtMonotonicNs=completed,
+                        clientTotalNs=completed - started,
+                        outcome="timeout",
+                        errorType=type(error).__name__,
+                    )
+                )
+            except Exception as error:
+                completed = monotonic_ns()
+                measurements.append(
+                    RequestMeasurementV2(
+                        **common,
+                        completedAtMonotonicNs=completed,
+                        clientTotalNs=completed - started,
+                        outcome="error",
+                        errorType=type(error).__name__,
+                    )
+                )
+            finally:
+                async with active_lock:
+                    active -= 1
+
+    resource_stop = asyncio.Event()
+    resource_task = (
+        asyncio.create_task(resource_collector.run(resource_stop))
+        if resource_collector is not None
+        else None
+    )
+    try:
+        if schedule_mode == "open_loop":
+            await asyncio.gather(*(execute(index) for index in range(len(replay.rows))))
+        else:
+
+            async def worker(worker_index: int) -> None:
+                for index in range(worker_index, len(replay.rows), max_in_flight):
+                    await execute(index)
+
+            await asyncio.gather(*(worker(index) for index in range(max_in_flight)))
+    finally:
+        await transport.close()
+        resource_stop.set()
+        if resource_task is not None:
+            await resource_task
+    return ConcurrentConditionResult(
+        tuple(sorted(measurements, key=lambda row: row.scheduleIndex)),
+        tuple(resource_collector.rows) if resource_collector is not None else (),
+    )
 
 
 __all__ = [
     "AlreadyConfiguredConditionDriver",
     "ConditionDriver",
     "ConditionTelemetryRecorder",
+    "ConcurrentConditionResult",
     "HttpxTransport",
+    "AsyncHttpxTransport",
+    "AsyncJsonTransport",
     "JsonTransport",
     "MeasuredConditionOperations",
     "SuiteResult",
     "run_condition",
+    "run_concurrent_condition",
     "run_suite",
 ]

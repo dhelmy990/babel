@@ -9,10 +9,45 @@ from collections.abc import Iterable
 from .contracts import (
     ConditionSummaryV1,
     ConditionTelemetryV1,
+    InterferenceSummaryV1,
     PerformanceSummaryV1,
     PercentileSummaryV1,
     RequestMeasurementV1,
+    RequestMeasurementV2,
 )
+
+
+Measurement = RequestMeasurementV1 | RequestMeasurementV2
+
+
+def _condition(row: Measurement) -> str:
+    return row.condition if isinstance(row, RequestMeasurementV1) else row.conditionId
+
+
+def _started(row: Measurement) -> int:
+    return (
+        row.startedAtMonotonicNs
+        if isinstance(row, RequestMeasurementV1)
+        else row.actualStartMonotonicNs
+    )
+
+
+def compute_interference(
+    serving_only_p95: int, training_no_activation_p95: int, full_p95: int
+) -> InterferenceSummaryV1:
+    if serving_only_p95 <= 0 or training_no_activation_p95 <= 0 or full_p95 < 0:
+        raise ValueError("interference ratios require positive baseline latencies")
+    training = training_no_activation_p95 / serving_only_p95
+    full = full_p95 / serving_only_p95
+    activation = full_p95 / training_no_activation_p95
+    return InterferenceSummaryV1(
+        Itraining=training,
+        Ifull=full,
+        IActivationIncrement=activation,
+        ItrainingPercent=round((training - 1) * 100, 10),
+        IfullPercent=round((full - 1) * 100, 10),
+        IActivationIncrementPercent=round((activation - 1) * 100, 10),
+    )
 
 
 def percentiles(values: Iterable[int]) -> PercentileSummaryV1:
@@ -33,7 +68,7 @@ def percentiles(values: Iterable[int]) -> PercentileSummaryV1:
 
 
 def analyze(
-    measurements: Iterable[RequestMeasurementV1],
+    measurements: Iterable[Measurement],
     telemetry: Iterable[ConditionTelemetryV1],
     *,
     baseline_condition: str = "pgvector_serving_only",
@@ -41,12 +76,20 @@ def analyze(
     measured_rows = [row for row in measurements if not row.isWarmup]
     if not measured_rows:
         raise ValueError("analysis needs at least one non-warmup measurement")
-    by_condition: dict[str, list[RequestMeasurementV1]] = defaultdict(list)
+    by_condition: dict[str, list[Measurement]] = defaultdict(list)
     order: list[str] = []
     for row in measured_rows:
-        if row.condition not in by_condition:
-            order.append(row.condition)
-        by_condition[row.condition].append(row)
+        condition = _condition(row)
+        if condition not in by_condition:
+            order.append(condition)
+        by_condition[condition].append(row)
+    if baseline_condition not in by_condition:
+        candidates = sorted(
+            name for name in by_condition if ".serving.no_activation.pgvector" in name
+        )
+        if len(candidates) != 1:
+            raise ValueError("analysis needs one explicit serving-only baseline")
+        baseline_condition = candidates[0]
     telemetry_by_condition: dict[str, list[ConditionTelemetryV1]] = defaultdict(list)
     for row in telemetry:
         telemetry_by_condition[row.condition].append(row)
@@ -63,10 +106,12 @@ def analyze(
         rows = by_condition[condition]
         successes = [row for row in rows if row.outcome == "success"]
         elapsed = max(row.completedAtMonotonicNs for row in rows) - min(
-            row.startedAtMonotonicNs for row in rows
+            _started(row) for row in rows
         )
         rps = len(rows) * 1_000_000_000 / elapsed if elapsed > 0 else 0.0
-        end_to_end = percentiles(row.clientTotalNs for row in successes) if successes else None
+        end_to_end = (
+            percentiles(row.clientTotalNs for row in successes) if successes else None
+        )
         stage_names = sorted(
             {stage for row in successes for stage in (row.serverTimingsNs or {})}
         )
@@ -108,11 +153,40 @@ def analyze(
                 ),
             )
         )
+    by_summary = {row.condition: row for row in summaries}
+    required = (
+        (
+            "pgvector_serving_only",
+            "pgvector_training_no_sync",
+            "pgvector_training_and_sync",
+        )
+        if baseline_condition == "pgvector_serving_only"
+        else (
+            baseline_condition,
+            baseline_condition.replace(
+                ".serving.no_activation.", ".training.no_activation."
+            ),
+            baseline_condition.replace(
+                ".serving.no_activation.", ".training.activation."
+            ),
+        )
+    )
+    interference = None
+    if all(
+        name in by_summary and by_summary[name].endToEndNs is not None
+        for name in required
+    ):
+        interference = compute_interference(
+            by_summary[required[0]].endToEndNs.p95,  # type: ignore[union-attr]
+            by_summary[required[1]].endToEndNs.p95,  # type: ignore[union-attr]
+            by_summary[required[2]].endToEndNs.p95,  # type: ignore[union-attr]
+        )
     return PerformanceSummaryV1(
         schemaVersion=1,
         benchmarkRunId=measured_rows[0].benchmarkRunId,
         baselineCondition=baseline_condition,
         conditions=tuple(summaries),
+        interference=interference,
     )
 
 
@@ -137,12 +211,32 @@ def render_markdown(summary: PerformanceSummaryV1) -> str:
         "|---|---:|---:|---:|---:|---:|",
     ]
     for row in summary.conditions:
-        slowdown = f"{row.slowdownRatioP95:.3f}x" if row.slowdownRatioP95 is not None else "n/a"
+        slowdown = (
+            f"{row.slowdownRatioP95:.3f}x"
+            if row.slowdownRatioP95 is not None
+            else "n/a"
+        )
         lines.append(
             f"| `{row.condition}` | {_distribution_text(row.endToEndNs)} | {row.rps:.3f} | "
             f"{row.errors} | {row.timeouts} | {slowdown} |"
         )
     lines.extend(["", "## Server stages", ""])
+    if summary.interference is not None:
+        value = summary.interference
+        lines.extend(
+            [
+                "",
+                "## Interference",
+                "",
+                "| Calculation | Ratio | Percent change |",
+                "|---|---:|---:|",
+                f"| Itraining | {value.Itraining:.3f}x | {value.ItrainingPercent:.1f}% |",
+                f"| Ifull | {value.Ifull:.3f}x | {value.IfullPercent:.1f}% |",
+                "| IActivationIncrement | "
+                f"{value.IActivationIncrement:.3f}x | "
+                f"{value.IActivationIncrementPercent:.1f}% |",
+            ]
+        )
     for row in summary.conditions:
         lines.extend(
             [
@@ -168,4 +262,4 @@ def render_markdown(summary: PerformanceSummaryV1) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-__all__ = ["analyze", "percentiles", "render_markdown"]
+__all__ = ["analyze", "compute_interference", "percentiles", "render_markdown"]

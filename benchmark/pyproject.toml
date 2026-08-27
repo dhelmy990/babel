@@ -9,6 +9,7 @@ description = "Paired Friday-demo synchronous POST benchmark"
 requires-python = ">=3.10,<3.13"
 dependencies = [
   "httpx>=0.28,<0.29",
+  "psutil>=5.9,<8",
   "pydantic>=2.10,<2.11",
 ]
 
@@ -17,6 +18,7 @@ babel-friday-benchmark = "babel_benchmark.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3,<8.4"]
+hnswlib = ["hnswlib>=0.8,<0.9", "numpy>=2.2,<2.3"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
