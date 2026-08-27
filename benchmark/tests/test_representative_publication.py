@@ -58,7 +58,18 @@ def _write_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
                     "activationEnabled": index % 3 == 0,
                     "retrievalBackend": "pgvector",
                 },
-                "measurements": [{"modelId": "00000000-0000-5000-8000-000000000099"}],
+                "measurements": [
+                    {
+                        "modelId": "00000000-0000-5000-8000-000000000099",
+                        "outcome": "success",
+                        "isWarmup": False,
+                    },
+                    {
+                        "modelId": "00000000-0000-5000-8000-000000000099",
+                        "outcome": "success",
+                        "isWarmup": False,
+                    },
+                ],
                 "finalServingIdentity": {
                     "modelId": f"00000000-0000-5000-8000-{100 + index:012d}",
                     "modelVersion": index,
@@ -70,7 +81,12 @@ def _write_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
                     ["00000000-0000-5000-8000-000000000099", 0, "b" * 64, "b" * 64]
                 ],
                 "feedbackKafka": {
-                    "finalTrainerState": {"available": True, "kafkaLag": 0}
+                    "recordCount": 2,
+                    "finalTrainerState": {
+                        "available": True,
+                        "kafkaLag": 0,
+                        "offsetsCoverPublishedRanges": index % 3 != 1,
+                    },
                 },
             },
         }
@@ -243,6 +259,51 @@ def test_build_rejects_trial_scope_or_parquet_drift(
             trial_id=TRIAL_ID,
             export_root=export,
             evidence_root=evidence,
+            report_path=report,
+        )
+
+
+@pytest.mark.parametrize(
+    ("condition_index", "mutation", "message"),
+    (
+        (
+            1,
+            lambda evidence: evidence["rawEvidence"]["conditionIdentity"].__setitem__(
+                "topology", "same_host_split"
+            ),
+            "ordered 2x3",
+        ),
+        (
+            2,
+            lambda evidence: evidence["rawEvidence"]["feedbackKafka"][
+                "finalTrainerState"
+            ].__setitem__("kafkaLag", 1),
+            "zero final Kafka lag",
+        ),
+        (
+            3,
+            lambda evidence: evidence["rawEvidence"]["measurements"][0].__setitem__(
+                "outcome", "timeout"
+            ),
+            "complete successfully",
+        ),
+    ),
+)
+def test_build_rejects_incomplete_or_misordered_condition_evidence(
+    tmp_path: Path, condition_index: int, mutation, message: str
+) -> None:
+    export, evidence_root, report = _write_inputs(tmp_path)
+    evidence_path = evidence_root / f"{condition_index:02d}" / "live-evidence.json"
+    evidence = json.loads(evidence_path.read_text())
+    mutation(evidence)
+    evidence_path.write_text(json.dumps(evidence) + "\n")
+
+    with pytest.raises(ValueError, match=message):
+        build_representative_run_bundle(
+            tmp_path / "accepted",
+            trial_id=TRIAL_ID,
+            export_root=export,
+            evidence_root=evidence_root,
             report_path=report,
         )
 
