@@ -10,7 +10,18 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 SHA256_PATTERN = r"^[a-f0-9]{64}$"
-REVISION_PATTERN = r"^[a-f0-9]{40,64}$"
+ORIGIN_TRIAL_ID = UUID("ce8e54ff-e317-4a89-b7db-90327e02dc43")
+ORIGIN_RUN_ID = UUID("7f4ad291-e6d0-5bb9-9658-3605c634a3a9")
+SERVING_MODEL_ID = UUID("2c4c48d5-3dcf-5ab9-8191-cd4edc2cbf67")
+EMBEDDING_SPACE_ID = UUID("f3665769-b470-5228-8df4-08004e252aa4")
+MODEL_REPOSITORY = "dhelmy990/babel-qwen-navigation-2016-interview"
+MODEL_REVISION = "57d949cd634b920cc1a46f27c9b21df094b5240e"
+MODEL_ARTIFACT_ID = "3f6b43e574eb2bcac55c4ddf95f624e3f42153f97437cfeba703c9b3b110a1f8"
+BASE_MODEL_REPOSITORY = "Qwen/Qwen3-Embedding-0.6B"
+BASE_MODEL_REVISION = "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
+DATASET_REPOSITORY = "dhelmy990/babel-wikipedia-experiment"
+DATASET_CONFIGURATION = "crosswalk_2026_06_07"
+DATASET_REVISION = "0d1ab2c7f0e2295682288fcf10077d2d776bf559"
 
 EMBEDDINGS_ARROW_SCHEMA: list[dict[str, object]] = [
     {"name": "babel_id", "type": "string", "nullable": False},
@@ -117,31 +128,43 @@ class PayloadMetadataV1(_StrictFrozenModel):
 
 class OriginToFreshRebindingV1(_StrictFrozenModel):
     originRunId: UUID
-    runIdBinding: Literal["allocate_fresh_run_id"]
-    servingModelIdBinding: Literal["allocate_fresh_serving_model_id"]
+    freshTrialIdBinding: Literal["allocate_uuid4"]
+    freshPopulationRunIdBinding: Literal["uuid5(fresh_trial_id,'population')"]
     preserveBabelIds: Literal[True]
     preserveCreatorIds: Literal[True]
-    preserveEmbeddingSpaceId: Literal[True]
-    preserveContentIdentity: Literal[True]
+    preserveSourceIdentity: Literal[True]
+    preserveModelIdentity: Literal[True]
+    preserveArtifactIdentity: Literal[True]
+    preserveEmbeddingSpaceIdentity: Literal[True]
+    preserveContentIdentities: Literal[True]
+    preserveScheduleIdentities: Literal[True]
+    preserveVectorIdentities: Literal[True]
+
+    @field_validator("originRunId")
+    @classmethod
+    def exact_origin_run(cls, value: UUID) -> UUID:
+        if value != ORIGIN_RUN_ID:
+            raise ValueError("originRunId is not the frozen population run")
+        return value
 
 
 class PopulationTransferMetadataV1(_StrictFrozenModel):
     """Source identities needed to build a manifest around payload rows."""
 
-    originTrialId: str = Field(min_length=1)
+    originTrialId: UUID
     originRunId: UUID
-    modelRepository: str = Field(min_length=1)
-    modelRevision: str = Field(pattern=REVISION_PATTERN)
-    modelArtifactId: str = Field(pattern=SHA256_PATTERN)
+    modelRepository: Literal[MODEL_REPOSITORY]
+    modelRevision: Literal[MODEL_REVISION]
+    modelArtifactId: Literal[MODEL_ARTIFACT_ID]
     servingModelId: UUID
-    materializedModelVersion: int = Field(ge=0, le=2_147_483_647)
+    materializedModelVersion: Literal[0]
     embeddingSpaceId: UUID
-    embeddingSpaceVersion: str = Field(min_length=1)
-    baseModelRepository: Literal["Qwen/Qwen3-Embedding-0.6B"]
-    baseModelRevision: str = Field(pattern=r"^[a-f0-9]{40}$")
-    datasetRepository: str = Field(min_length=1)
-    datasetConfiguration: str = Field(min_length=1)
-    datasetRevision: str = Field(pattern=REVISION_PATTERN)
+    embeddingSpaceVersion: Literal["babel-qwen-100d-v1"]
+    baseModelRepository: Literal[BASE_MODEL_REPOSITORY]
+    baseModelRevision: Literal[BASE_MODEL_REVISION]
+    datasetRepository: Literal[DATASET_REPOSITORY]
+    datasetConfiguration: Literal[DATASET_CONFIGURATION]
+    datasetRevision: Literal[DATASET_REVISION]
     frozenPopulationSha256: str = Field(pattern=SHA256_PATTERN)
     orderedPopulationSha256: str = Field(pattern=SHA256_PATTERN)
     snapshotSha256: str = Field(pattern=SHA256_PATTERN)
@@ -149,6 +172,34 @@ class PopulationTransferMetadataV1(_StrictFrozenModel):
     contentSha256: str = Field(pattern=SHA256_PATTERN)
     createdAt: datetime
     rebinding: OriginToFreshRebindingV1
+
+    @field_validator("originTrialId")
+    @classmethod
+    def exact_origin_trial(cls, value: UUID) -> UUID:
+        if value != ORIGIN_TRIAL_ID:
+            raise ValueError("originTrialId is not the frozen production trial")
+        return value
+
+    @field_validator("originRunId")
+    @classmethod
+    def exact_origin_run(cls, value: UUID) -> UUID:
+        if value != ORIGIN_RUN_ID:
+            raise ValueError("originRunId is not the frozen population run")
+        return value
+
+    @field_validator("servingModelId")
+    @classmethod
+    def exact_serving_model(cls, value: UUID) -> UUID:
+        if value != SERVING_MODEL_ID:
+            raise ValueError("servingModelId is not the frozen starting model")
+        return value
+
+    @field_validator("embeddingSpaceId")
+    @classmethod
+    def exact_embedding_space(cls, value: UUID) -> UUID:
+        if value != EMBEDDING_SPACE_ID:
+            raise ValueError("embeddingSpaceId is not the frozen Qwen space")
+        return value
 
     @field_validator("createdAt")
     @classmethod
@@ -168,26 +219,29 @@ class PopulationTransferManifestV1(_StrictFrozenModel):
     """Manifest whose identities and payload properties are closed under import."""
 
     schemaVersion: Literal[1]
-    originTrialId: str = Field(min_length=1)
+    bundleFormatVersion: Literal[1]
+    originTrialId: UUID
     originRunId: UUID
-    rowCount: int = Field(gt=0)
-    creatorCount: int = Field(gt=0)
+    rowCount: Literal[10_000]
+    creatorCount: Literal[50]
     periodCounts: dict[str, int]
     vectorDimension: Literal[100]
-    vectorDtype: Literal["<f4"]
-    vectorEndian: Literal["little"]
-    modelRepository: str = Field(min_length=1)
-    modelRevision: str = Field(pattern=REVISION_PATTERN)
-    modelArtifactId: str = Field(pattern=SHA256_PATTERN)
+    vectorDtype: Literal["float32"]
+    byteOrder: Literal["little"]
+    normalization: Literal["l2"]
+    normalizationTolerance: Literal[1e-5]
+    modelRepository: Literal[MODEL_REPOSITORY]
+    modelRevision: Literal[MODEL_REVISION]
+    modelArtifactId: Literal[MODEL_ARTIFACT_ID]
     servingModelId: UUID
-    materializedModelVersion: int = Field(ge=0, le=2_147_483_647)
+    materializedModelVersion: Literal[0]
     embeddingSpaceId: UUID
-    embeddingSpaceVersion: str = Field(min_length=1)
-    baseModelRepository: Literal["Qwen/Qwen3-Embedding-0.6B"]
-    baseModelRevision: str = Field(pattern=r"^[a-f0-9]{40}$")
-    datasetRepository: str = Field(min_length=1)
-    datasetConfiguration: str = Field(min_length=1)
-    datasetRevision: str = Field(pattern=REVISION_PATTERN)
+    embeddingSpaceVersion: Literal["babel-qwen-100d-v1"]
+    baseModelRepository: Literal[BASE_MODEL_REPOSITORY]
+    baseModelRevision: Literal[BASE_MODEL_REVISION]
+    datasetRepository: Literal[DATASET_REPOSITORY]
+    datasetConfiguration: Literal[DATASET_CONFIGURATION]
+    datasetRevision: Literal[DATASET_REVISION]
     frozenPopulationSha256: str = Field(pattern=SHA256_PATTERN)
     orderedPopulationSha256: str = Field(pattern=SHA256_PATTERN)
     snapshotSha256: str = Field(pattern=SHA256_PATTERN)
@@ -205,6 +259,34 @@ class PopulationTransferManifestV1(_StrictFrozenModel):
     payloads: dict[str, PayloadMetadataV1]
     rebinding: OriginToFreshRebindingV1
 
+    @field_validator("originTrialId")
+    @classmethod
+    def exact_origin_trial(cls, value: UUID) -> UUID:
+        if value != ORIGIN_TRIAL_ID:
+            raise ValueError("originTrialId is not the frozen production trial")
+        return value
+
+    @field_validator("originRunId")
+    @classmethod
+    def exact_origin_run(cls, value: UUID) -> UUID:
+        if value != ORIGIN_RUN_ID:
+            raise ValueError("originRunId is not the frozen population run")
+        return value
+
+    @field_validator("servingModelId")
+    @classmethod
+    def exact_serving_model(cls, value: UUID) -> UUID:
+        if value != SERVING_MODEL_ID:
+            raise ValueError("servingModelId is not the frozen starting model")
+        return value
+
+    @field_validator("embeddingSpaceId")
+    @classmethod
+    def exact_embedding_space(cls, value: UUID) -> UUID:
+        if value != EMBEDDING_SPACE_ID:
+            raise ValueError("embeddingSpaceId is not the frozen Qwen space")
+        return value
+
     @field_validator("createdAt")
     @classmethod
     def timestamp_is_utc(cls, value: datetime) -> datetime:
@@ -215,19 +297,8 @@ class PopulationTransferManifestV1(_StrictFrozenModel):
     @field_validator("periodCounts")
     @classmethod
     def periods_are_exact_and_ordered(cls, value: dict[str, int]) -> dict[str, int]:
-        if not value or list(value) != sorted(value):
-            raise ValueError("periodCounts must be non-empty and lexically ordered")
-        if any(count <= 0 for count in value.values()):
-            raise ValueError("periodCounts must contain positive exact counts")
-        if any(
-            len(period) != 7
-            or period[4] != "-"
-            or not period[:4].isdigit()
-            or not period[5:].isdigit()
-            or not 1 <= int(period[5:]) <= 12
-            for period in value
-        ):
-            raise ValueError("periodCounts keys must be YYYY-MM periods")
+        if value != {"2026-06": 5_000, "2026-07": 5_000}:
+            raise ValueError("periodCounts must be exactly 5,000 June and 5,000 July rows")
         return value
 
     @model_validator(mode="after")

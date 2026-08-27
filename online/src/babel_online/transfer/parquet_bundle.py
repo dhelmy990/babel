@@ -188,15 +188,28 @@ def _checked_rows(
     source: PopulationTransferBundleInput,
 ) -> tuple[list[PopulationTransferRow], list[bytes], list[float]]:
     metadata = source.metadata
+    if len(source.rows) != 10_000:
+        raise PopulationTransferIntegrityError(
+            "population bundle must contain exactly 10,000 rows"
+        )
     rows = sorted(source.rows, key=lambda row: row.babel_id)
-    if not rows:
-        raise PopulationTransferIntegrityError("population bundle must contain rows")
     pairs = [(row.babel_id, row.model_artifact_id) for row in rows]
     if len(set(pairs)) != len(pairs):
         raise PopulationTransferIntegrityError("duplicate embedding pair")
     identifiers = [row.babel_id for row in rows]
     if len(set(identifiers)) != len(identifiers):
         raise PopulationTransferIntegrityError("duplicate Babel ID")
+    if len({row.creator_id for row in rows}) != 50:
+        raise PopulationTransferIntegrityError(
+            "population bundle must contain exactly 50 creators"
+        )
+    if dict(sorted(Counter(row.period for row in rows).items())) != {
+        "2026-06": 5_000,
+        "2026-07": 5_000,
+    }:
+        raise PopulationTransferIntegrityError(
+            "population bundle must contain exactly 5,000 rows per period"
+        )
     vectors: list[bytes] = []
     norms: list[float] = []
     for row in rows:
@@ -342,12 +355,15 @@ def _write_manifest(
     manifest = PopulationTransferManifestV1(
         **metadata,
         schemaVersion=1,
+        bundleFormatVersion=1,
         rowCount=len(rows),
         creatorCount=len({row.creator_id for row in rows}),
         periodCounts=period_counts,
         vectorDimension=100,
-        vectorDtype="<f4",
-        vectorEndian="little",
+        vectorDtype="float32",
+        byteOrder="little",
+        normalization="l2",
+        normalizationTolerance=1e-5,
         vectorNormMin=float(norm_array.min()),
         vectorNormMean=float(norm_array.mean()),
         vectorNormP01=float(np.percentile(norm_array, 1)),
@@ -433,10 +449,23 @@ def _verify_parquet(files: BundleFiles) -> None:
         metadata = pq.ParquetFile(path).metadata
         if metadata.format_version != "2.6":
             raise PopulationTransferIntegrityError("Parquet version mismatch")
+        if (
+            metadata.num_rows != 10_000
+            or metadata.num_row_groups != 1
+            or metadata.row_group(0).num_rows != 10_000
+        ):
+            raise PopulationTransferIntegrityError(
+                "Parquet must contain one exact 10,000-row group"
+            )
+        if (
+            path == files.embeddings
+            and metadata.schema.column(8).path != "vector.list.element"
+        ):
+            raise PopulationTransferIntegrityError(
+                "Parquet compliant nested vector layout mismatch"
+            )
         for group_index in range(metadata.num_row_groups):
             group = metadata.row_group(group_index)
-            if group.num_rows > 10_000:
-                raise PopulationTransferIntegrityError("Parquet row group exceeds 10,000 rows")
             for column_index in range(group.num_columns):
                 column = group.column(column_index)
                 if column.compression != "ZSTD" or column.statistics is None:
