@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
+import shutil
+import stat
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,6 +50,8 @@ IMAGE = re.compile(
     r"[a-z][a-z0-9-]{4,28}[a-z0-9]/"
     r"[a-z0-9._-]+/[a-z0-9._-]+@sha256:[a-f0-9]{64}$"
 )
+IMPORT_STORAGE_ROOT = Path("/var/lib/babel-gpu")
+IMPORT_RECEIPT = IMPORT_STORAGE_ROOT / "evidence" / "import-receipt.json"
 
 
 def canonical_json(value: object) -> bytes:
@@ -85,6 +90,101 @@ def read_runtime_worker_token(path: str | Path) -> str:
             "BABEL_PERFORMANCE_WORKER_TOKEN must be exactly 64 lowercase hex characters"
         )
     return token
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _require_owned_mode(
+    path: Path,
+    *,
+    label: str,
+    expected_mode: int,
+    expected_uid: int,
+    expected_gid: int,
+    directory: bool,
+) -> None:
+    details = path.lstat()
+    expected_type = stat.S_ISDIR if directory else stat.S_ISREG
+    if (
+        not expected_type(details.st_mode)
+        or stat.S_IMODE(details.st_mode) != expected_mode
+        or details.st_uid != expected_uid
+        or details.st_gid != expected_gid
+    ):
+        raise ValueError(
+            f"{label} must be a {'directory' if directory else 'regular file'} "
+            f"owned by {expected_uid}:{expected_gid} with mode {expected_mode:04o}"
+        )
+
+
+def stage_private_import_receipt(
+    destination: Path,
+    *,
+    storage_root: Path = IMPORT_STORAGE_ROOT,
+    source: Path = IMPORT_RECEIPT,
+    expected_uid: int = 0,
+    expected_gid: int = 0,
+) -> str:
+    """Stage a verified readable copy without relaxing the canonical receipt."""
+    if source != storage_root / "evidence" / "import-receipt.json":
+        raise ValueError("canonical import receipt path differs")
+    _require_owned_mode(
+        storage_root,
+        label="import storage root",
+        expected_mode=0o755,
+        expected_uid=expected_uid,
+        expected_gid=expected_gid,
+        directory=True,
+    )
+    _require_owned_mode(
+        source.parent,
+        label="import evidence directory",
+        expected_mode=0o700,
+        expected_uid=expected_uid,
+        expected_gid=expected_gid,
+        directory=True,
+    )
+    _require_owned_mode(
+        source,
+        label="canonical import receipt",
+        expected_mode=0o600,
+        expected_uid=expected_uid,
+        expected_gid=expected_gid,
+        directory=False,
+    )
+    _require_owned_mode(
+        destination.parent,
+        label="release directory",
+        expected_mode=0o700,
+        expected_uid=expected_uid,
+        expected_gid=expected_gid,
+        directory=True,
+    )
+    if destination.exists() or destination.is_symlink():
+        raise ValueError("staged import receipt already exists")
+
+    source_before = file_sha256(source)
+    shutil.copyfile(source, destination, follow_symlinks=False)
+    destination.chmod(0o644)
+    _require_owned_mode(
+        destination,
+        label="staged import receipt",
+        expected_mode=0o644,
+        expected_uid=expected_uid,
+        expected_gid=expected_gid,
+        directory=False,
+    )
+    source_after = file_sha256(source)
+    staged = file_sha256(destination)
+    if source_before != source_after or source_before != staged:
+        raise ValueError("staged import receipt SHA-256 differs from canonical receipt")
+    return staged
 
 
 def validate_release(values: dict[str, str]) -> dict[str, str]:
@@ -317,6 +417,8 @@ def main(argv: list[str] | None = None) -> int:
     newer.add_argument("previous", type=Path)
     runtime_token = commands.add_parser("runtime-token")
     runtime_token.add_argument("runtime_env", type=Path)
+    stage_receipt = commands.add_parser("stage-import-receipt")
+    stage_receipt.add_argument("destination", type=Path)
     arguments = parser.parse_args(argv)
     try:
         if arguments.command in {"validate", "receipt"}:
@@ -354,6 +456,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif arguments.command == "runtime-token":
             print(read_runtime_worker_token(arguments.runtime_env))
+        elif arguments.command == "stage-import-receipt":
+            print(stage_private_import_receipt(arguments.destination))
     except (json.JSONDecodeError, OSError, ValueError) as error:
         print(str(error), file=sys.stderr)
         return 1

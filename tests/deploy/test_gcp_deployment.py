@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tarfile
@@ -118,6 +119,99 @@ def test_runtime_worker_token_is_parsed_without_evaluation_or_release_override(
     )
     with pytest.raises(ValueError, match="repeats"):
         release.read_runtime_worker_token(runtime_env)
+
+
+def _private_receipt_layout(tmp_path: Path) -> tuple[Path, Path, Path]:
+    storage_root = tmp_path / "babel-gpu"
+    evidence = storage_root / "evidence"
+    release_root = tmp_path / "release"
+    storage_root.mkdir(mode=0o755)
+    evidence.mkdir(mode=0o700)
+    release_root.mkdir(mode=0o700)
+    source = evidence / "import-receipt.json"
+    source.write_bytes(b'{"schemaVersion":1,"state":"ready"}\n')
+    source.chmod(0o600)
+    return storage_root, source, release_root / "import-receipt.json"
+
+
+def test_private_import_receipt_staging_preserves_source_and_verifies_copy(
+    tmp_path: Path,
+) -> None:
+    release = _load_release_module()
+    storage_root, source, destination = _private_receipt_layout(tmp_path)
+    source_before = source.read_bytes()
+
+    digest = release.stage_private_import_receipt(
+        destination,
+        storage_root=storage_root,
+        source=source,
+        expected_uid=os.getuid(),
+        expected_gid=os.getgid(),
+    )
+
+    assert source.read_bytes() == source_before
+    assert stat.S_IMODE(source.stat().st_mode) == 0o600
+    assert destination.read_bytes() == source_before
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o644
+    assert digest == release.file_sha256(source) == release.file_sha256(destination)
+
+
+@pytest.mark.parametrize(
+    ("target", "mode", "owner_delta", "message"),
+    [
+        ("storage", 0o775, 0, "storage root"),
+        ("evidence", 0o770, 0, "evidence directory"),
+        ("release", 0o750, 0, "release directory"),
+        ("storage", 0o755, 1, "storage root"),
+    ],
+)
+def test_private_import_receipt_staging_rejects_unsafe_parent_chain(
+    tmp_path: Path,
+    target: str,
+    mode: int,
+    owner_delta: int,
+    message: str,
+) -> None:
+    release = _load_release_module()
+    storage_root, source, destination = _private_receipt_layout(tmp_path)
+    paths = {
+        "storage": storage_root,
+        "evidence": source.parent,
+        "release": destination.parent,
+    }
+    paths[target].chmod(mode)
+
+    with pytest.raises(ValueError, match=message):
+        release.stage_private_import_receipt(
+            destination,
+            storage_root=storage_root,
+            source=source,
+            expected_uid=os.getuid() + owner_delta,
+            expected_gid=os.getgid(),
+        )
+    assert not destination.exists()
+
+
+def test_private_import_receipt_staging_rejects_mismatched_copy(
+    tmp_path: Path, monkeypatch
+) -> None:
+    release = _load_release_module()
+    storage_root, source, destination = _private_receipt_layout(tmp_path)
+
+    def corrupt_copy(_source, target, *, follow_symlinks):
+        assert follow_symlinks is False
+        Path(target).write_bytes(b"corrupt\n")
+
+    monkeypatch.setattr(release.shutil, "copyfile", corrupt_copy)
+    with pytest.raises(ValueError, match="SHA-256"):
+        release.stage_private_import_receipt(
+            destination,
+            storage_root=storage_root,
+            source=source,
+            expected_uid=os.getuid(),
+            expected_gid=os.getgid(),
+        )
+    assert source.read_bytes() != destination.read_bytes()
 
 
 def test_receipt_is_canonical_and_records_exact_image_digests() -> None:
@@ -529,21 +623,18 @@ def test_rollout_installs_predeploy_readable_by_non_root_trainer() -> None:
 
 def test_rollout_mounts_private_import_receipt_through_release_copy() -> None:
     script = (DEPLOY / "rollout.sh").read_text()
+    release_source = (DEPLOY / "release.py").read_text()
     canonical = "/var/lib/babel-gpu/evidence/import-receipt.json"
     mounted = '"$NEW_RELEASE/import-receipt.json:/opt/babel-import-receipt.json:ro"'
 
-    assert f"IMPORT_RECEIPT={canonical}" in script
-    assert '[[ ! -f "$IMPORT_RECEIPT" || -L "$IMPORT_RECEIPT" ]]' in script
-    assert 'stat -c \'%a:%u:%g\' -- "$IMPORT_RECEIPT"' in script
-    assert '"600:0:0"' in script
-    assert (
-        'install -o root -g root -m 0644 "$IMPORT_RECEIPT" '
-        '"$NEW_RELEASE/import-receipt.json"'
-    ) in script
+    assert 'IMPORT_STORAGE_ROOT = Path("/var/lib/babel-gpu")' in release_source
+    assert 'IMPORT_RECEIPT = IMPORT_STORAGE_ROOT / "evidence"' in release_source
+    assert 'python3 "$NEW_RELEASE/release.py" stage-import-receipt' in script
+    assert '>"$NEW_RELEASE/import-receipt.sha256"' in script
     assert f"--volume {mounted}" in script
     assert f"--volume {canonical}:{canonical}:ro" not in script
     assert "--reuse-import-receipt /opt/babel-import-receipt.json" in script
-    assert f"chmod 0644 {canonical}" not in script
+    assert canonical not in script
 
 
 def test_condition3_operator_is_bounded_and_never_auto_continues_matrix() -> None:
