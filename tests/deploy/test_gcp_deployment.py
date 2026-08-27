@@ -527,6 +527,25 @@ def test_rollout_installs_predeploy_readable_by_non_root_trainer() -> None:
     )
 
 
+def test_rollout_mounts_private_import_receipt_through_release_copy() -> None:
+    script = (DEPLOY / "rollout.sh").read_text()
+    canonical = "/var/lib/babel-gpu/evidence/import-receipt.json"
+    mounted = '"$NEW_RELEASE/import-receipt.json:/opt/babel-import-receipt.json:ro"'
+
+    assert f"IMPORT_RECEIPT={canonical}" in script
+    assert '[[ ! -f "$IMPORT_RECEIPT" || -L "$IMPORT_RECEIPT" ]]' in script
+    assert 'stat -c \'%a:%u:%g\' -- "$IMPORT_RECEIPT"' in script
+    assert '"600:0:0"' in script
+    assert (
+        'install -o root -g root -m 0644 "$IMPORT_RECEIPT" '
+        '"$NEW_RELEASE/import-receipt.json"'
+    ) in script
+    assert f"--volume {mounted}" in script
+    assert f"--volume {canonical}:{canonical}:ro" not in script
+    assert "--reuse-import-receipt /opt/babel-import-receipt.json" in script
+    assert f"chmod 0644 {canonical}" not in script
+
+
 def test_condition3_operator_is_bounded_and_never_auto_continues_matrix() -> None:
     script = (DEPLOY / "condition3_gate.sh").read_text()
     worker_source = (
@@ -568,8 +587,8 @@ def test_condition3_operator_is_bounded_and_never_auto_continues_matrix() -> Non
 def test_rollout_predeploy_argv_is_accepted_end_to_end(monkeypatch, capsys) -> None:
     script = (DEPLOY / "rollout.sh").read_text()
     assert (
-        "--volume /var/lib/babel-gpu/evidence/import-receipt.json:"
-        "/var/lib/babel-gpu/evidence/import-receipt.json:ro"
+        '--volume "$NEW_RELEASE/import-receipt.json:'
+        '/opt/babel-import-receipt.json:ro"'
     ) in script
     command = script.split(
         '--entrypoint python "$BABEL_TRAINER_IMAGE" /opt/babel-predeploy.py', 1
@@ -598,7 +617,7 @@ def test_rollout_predeploy_argv_is_accepted_end_to_end(monkeypatch, capsys) -> N
         "--run-id": _valid_release()["BABEL_GCP_RUN_ID"],
         "--population-vector-sha256": "4" * 64,
         "--population-snapshot-sha256": "5" * 64,
-        "--reuse-import-receipt": "/var/lib/babel-gpu/evidence/import-receipt.json",
+        "--reuse-import-receipt": "/opt/babel-import-receipt.json",
     }
     argv = [part for flag in flags for part in (flag, values[flag])]
     assert predeploy.main(argv) == 0

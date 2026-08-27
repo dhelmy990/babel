@@ -14,6 +14,7 @@ RELEASE_NAME="$(basename "$PACKAGE_DIR")"
 RELEASE_ROOT=/opt/babel/releases
 CURRENT_LINK=/opt/babel/current
 RUNTIME_ENV=/etc/babel/runtime.env
+IMPORT_RECEIPT=/var/lib/babel-gpu/evidence/import-receipt.json
 READY_PATH=/var/lib/babel-online/trainer-ready.json
 PROJECT=babel-gcp-demo
 PROMOTION_STARTED=false
@@ -197,15 +198,24 @@ docker run --rm --gpus all --entrypoint python "$BABEL_SERVING_IMAGE" \
 # Demo CD permits only the unchanged 326b840 migration set. These forward-only,
 # idempotent migrations run before promotion; CI rejects migration-file changes.
 compose run --rm --no-deps backend migrate
+if [[ ! -f "$IMPORT_RECEIPT" || -L "$IMPORT_RECEIPT" ]]; then
+  echo "canonical import receipt must be a regular non-symlink file" >&2
+  exit 1
+fi
+if [[ "$(stat -c '%a:%u:%g' -- "$IMPORT_RECEIPT")" != "600:0:0" ]]; then
+  echo "canonical import receipt must remain root-owned mode 0600" >&2
+  exit 1
+fi
+install -o root -g root -m 0644 "$IMPORT_RECEIPT" "$NEW_RELEASE/import-receipt.json"
 docker run --rm --network host --env-file "$RUNTIME_ENV" \
   --volume "$NEW_RELEASE/predeploy.py:/opt/babel-predeploy.py:ro" \
-  --volume /var/lib/babel-gpu/evidence/import-receipt.json:/var/lib/babel-gpu/evidence/import-receipt.json:ro \
+  --volume "$NEW_RELEASE/import-receipt.json:/opt/babel-import-receipt.json:ro" \
   --entrypoint python "$BABEL_TRAINER_IMAGE" /opt/babel-predeploy.py \
   --trial-id "$BABEL_GCP_TRIAL_ID" \
   --run-id "$BABEL_GCP_RUN_ID" \
   --population-vector-sha256 "$BABEL_POPULATION_VECTOR_SHA256" \
   --population-snapshot-sha256 "$BABEL_POPULATION_SNAPSHOT_SHA256" \
-  --reuse-import-receipt /var/lib/babel-gpu/evidence/import-receipt.json \
+  --reuse-import-receipt /opt/babel-import-receipt.json \
   >"$NEW_RELEASE/predeploy-evidence.json"
 
 PROMOTION_STARTED=true
