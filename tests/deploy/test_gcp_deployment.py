@@ -404,6 +404,23 @@ def test_multistage_image_and_compose_preserve_compute_boundary() -> None:
     assert "BABEL_PERFORMANCE_WORKER_ENDPOINT: http://127.0.0.1:8792" in compose
 
 
+def test_performance_worker_build_context_includes_only_benchmark_package() -> None:
+    dockerignore = (ROOT / ".dockerignore").read_text().splitlines()
+    benchmark_rules = [
+        rule
+        for rule in dockerignore
+        if rule.lstrip("!").startswith("benchmark")
+    ]
+
+    assert benchmark_rules == [
+        "benchmark/**",
+        "!benchmark/pyproject.toml",
+        "!benchmark/src/",
+        "!benchmark/src/babel_benchmark/",
+        "!benchmark/src/babel_benchmark/**",
+    ]
+
+
 def test_rollout_validates_before_migration_and_rolls_back_on_failed_health() -> None:
     script = (DEPLOY / "rollout.sh").read_text()
     supervisor = (DEPLOY / "rollout_supervisor.sh").read_text()
