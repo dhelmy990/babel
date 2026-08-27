@@ -15,6 +15,7 @@ from babel_online.transfer.database import (
     _import_verified_bundle,
     _load_verified_transfer_rows,
     _ready_database_state_matches,
+    _validate_import_presence,
     _validate_quarantined_catalog_rows,
     import_population,
 )
@@ -104,6 +105,66 @@ def test_import_rejects_invalid_fresh_identity_before_bundle_or_database(
         )
 
 
+@pytest.mark.parametrize(
+    ("origin_trial", "origin_run", "message"),
+    [
+        ("fresh_trial", "different_run", "trial ID reuses bundle origin"),
+        ("different_trial", "fresh_run", "run ID reuses bundle origin"),
+    ],
+)
+def test_import_rejects_origin_identity_after_trust_verification_before_adapter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    origin_trial: str,
+    origin_run: str,
+    message: str,
+) -> None:
+    digest = "a" * 64
+    root = _bundle(tmp_path, digest)
+    operator_receipt = _operator_receipt(root, digest)
+    fresh_trial = uuid4()
+    fresh_run = uuid5(fresh_trial, "population")
+    verified = SimpleNamespace(
+        manifest_contract=SimpleNamespace(
+            originTrialId=(fresh_trial if origin_trial == "fresh_trial" else uuid4()),
+            originRunId=(fresh_run if origin_run == "fresh_run" else uuid4()),
+        )
+    )
+    monkeypatch.setattr(
+        "babel_online.transfer.database.verify_bundle", lambda *_args: verified
+    )
+    monkeypatch.setattr(
+        "babel_online.transfer.database._import_verified_bundle",
+        lambda **_values: pytest.fail("origin reuse must fail before adapter"),
+    )
+
+    with pytest.raises(PopulationTransferIntegrityError, match=message):
+        import_population(
+            "postgresql://unused",
+            root,
+            digest,
+            operator_receipt,
+            fresh_trial,
+            fresh_run,
+            tmp_path / "artifact_manifest.json",
+            tmp_path / "checkpoint",
+            tmp_path / "frozen",
+            tmp_path / "import.json",
+        )
+
+
+def test_preexisting_database_identity_requires_preexisting_matching_receipt() -> None:
+    with pytest.raises(
+        PopulationTransferIntegrityError, match="without a pre-existing import receipt"
+    ):
+        _validate_import_presence((True, True), receipt_preexisted=False)
+
+    assert _validate_import_presence((False, False), receipt_preexisted=False) is False
+    assert _validate_import_presence((True, True), receipt_preexisted=True) is True
+    with pytest.raises(PopulationTransferIntegrityError, match="partial quarantined"):
+        _validate_import_presence((True, False), receipt_preexisted=True)
+
+
 def test_import_rejects_operator_receipt_or_downloaded_object_drift(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -148,7 +209,14 @@ def test_import_verifies_trust_root_before_calling_database_adapter(
     destination_receipt = tmp_path / "receipts" / "import.json"
     trial_id = uuid4()
     run_id = uuid5(trial_id, "population")
-    verified = SimpleNamespace(root=root, digest=digest)
+    verified = SimpleNamespace(
+        root=root,
+        digest=digest,
+        manifest_contract=SimpleNamespace(
+            originTrialId=UUID("ce8e54ff-e317-4a89-b7db-90327e02dc43"),
+            originRunId=UUID("7f4ad291-e6d0-5bb9-9658-3605c634a3a9"),
+        ),
+    )
     observed = {}
 
     monkeypatch.setattr(

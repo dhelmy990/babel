@@ -1266,6 +1266,23 @@ def _ready_database_state_matches(
     return normalized == expected
 
 
+def _validate_import_presence(
+    present: Sequence[object], *, receipt_preexisted: bool
+) -> bool:
+    """Allow adoption only when a protected receipt predates this invocation."""
+
+    normalized = tuple(bool(value) for value in present)
+    if normalized not in {(False, False), (True, True)}:
+        raise PopulationTransferIntegrityError(
+            "partial quarantined import identity exists"
+        )
+    if normalized == (True, True) and not receipt_preexisted:
+        raise PopulationTransferIntegrityError(
+            "fresh import identity exists without a pre-existing import receipt"
+        )
+    return normalized == (True, True)
+
+
 def _import_verified_bundle(
     *,
     database_url: str,
@@ -1321,7 +1338,10 @@ def _import_verified_bundle(
         )
 
     existing_state: Literal["planned", "quarantined", "ready"] | None = None
-    if import_receipt_path.exists() or import_receipt_path.is_symlink():
+    receipt_preexisted = (
+        import_receipt_path.exists() or import_receipt_path.is_symlink()
+    )
+    if receipt_preexisted:
         try:
             existing = ImportReceiptV1.model_validate(
                 _read_regular_json(import_receipt_path, "import receipt")
@@ -1407,11 +1427,14 @@ def _import_verified_bundle(
                     (fresh_trial_id, fresh_run_id),
                 )
                 present = cursor.fetchone()
-                if present not in {(False, False), (True, True)}:
+                if present is None:
                     raise PopulationTransferIntegrityError(
-                        "partial quarantined import identity exists"
+                        "fresh import identity presence query returned no row"
                     )
-                if present == (False, False):
+                import_exists = _validate_import_presence(
+                    present, receipt_preexisted=receipt_preexisted
+                )
+                if not import_exists:
                     cursor.execute(
                         """
                         INSERT INTO recommender_models(
@@ -1919,6 +1942,14 @@ def import_population(
     root = Path(bundle_root).resolve()
     _validate_operator_receipt(Path(operator_receipt), root, trusted_digest)
     verified = verify_bundle(root, trusted_digest)
+    if fresh_trial_id == verified.manifest_contract.originTrialId:
+        raise PopulationTransferIntegrityError(
+            "fresh trial ID reuses bundle origin trial ID"
+        )
+    if fresh_run_id == verified.manifest_contract.originRunId:
+        raise PopulationTransferIntegrityError(
+            "fresh run ID reuses bundle origin run ID"
+        )
     receipt = _import_verified_bundle(
         database_url=database_url,
         verified=verified,
