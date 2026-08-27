@@ -608,6 +608,8 @@ def test_database_persists_and_loads_exact_traversal_roll_evidence() -> None:
 
     query, parameters = write_cursor.queries[0]
     assert "INSERT INTO experiment_traversal_rolls" in query
+    assert "ON CONFLICT" in query and "DO NOTHING" in query
+    assert "DO UPDATE" not in query
     assert parameters == (
         run_id, session_id, 0, "start", UUID(int=3), None, None, 0,
         0.91, 0.4, False, "start_skipped",
@@ -619,6 +621,26 @@ def test_database_persists_and_loads_exact_traversal_roll_evidence() -> None:
     ).RuntimeDatabase("unused", connect=lambda: RecordingConnection(read_cursor))
 
     assert reader.load_traversal_rolls(run_id, session_id) == evidence
+
+    exact_retry_cursor = RecordingCursor(rows=[parameters[3:]])
+    exact_retry_cursor.rowcount = 0
+    exact_retry = __import__(
+        "babel_online.runtime.database", fromlist=["RuntimeDatabase"]
+    ).RuntimeDatabase(
+        "unused", connect=lambda: RecordingConnection(exact_retry_cursor)
+    )
+    exact_retry.persist_traversal_rolls(run_id, session_id, evidence)
+    assert "SELECT kind,source_babel_id" in exact_retry_cursor.queries[1][0]
+
+    conflicting_cursor = RecordingCursor(rows=[("continuation", *parameters[4:])])
+    conflicting_cursor.rowcount = 0
+    conflicting = __import__(
+        "babel_online.runtime.database", fromlist=["RuntimeDatabase"]
+    ).RuntimeDatabase(
+        "unused", connect=lambda: RecordingConnection(conflicting_cursor)
+    )
+    with pytest.raises(PopulationIntegrityError, match="traversal roll retry"):
+        conflicting.persist_traversal_rolls(run_id, session_id, evidence)
 
 
 def test_database_registers_and_reloads_real_qwen_child_descriptor(

@@ -1221,6 +1221,7 @@ class RuntimeDatabase:
                       target_babel_id,target_rank,source_depth,draw_value,
                       probability,roll_succeeded,outcome
                     ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (run_id,traversal_session_id,draw_index) DO NOTHING
                     """,
                     (
                         run_id,
@@ -1237,6 +1238,33 @@ class RuntimeDatabase:
                         row.outcome,
                     ),
                 )
+                if cursor.rowcount == 1:
+                    continue
+                cursor.execute(
+                    """
+                    SELECT kind,source_babel_id,target_babel_id,target_rank,
+                           source_depth,draw_value,probability,roll_succeeded,outcome
+                    FROM experiment_traversal_rolls
+                    WHERE run_id=%s AND traversal_session_id=%s AND draw_index=%s
+                    """,
+                    (run_id, traversal_session_id, row.draw_index),
+                )
+                existing = cursor.fetchone()
+                expected = (
+                    row.kind,
+                    row.source_babel_id,
+                    row.target_babel_id,
+                    row.target_rank,
+                    row.source_depth,
+                    row.draw_value,
+                    row.probability,
+                    row.roll_succeeded,
+                    row.outcome,
+                )
+                if existing != expected:
+                    raise PopulationIntegrityError(
+                        "traversal roll retry differs from persisted evidence"
+                    )
 
     def load_traversal_rolls(
         self, run_id: UUID, traversal_session_id: UUID
