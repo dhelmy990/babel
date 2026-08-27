@@ -13,6 +13,9 @@ from babel_online.contracts import (
     RunConfigV1,
 )
 from babel_online.model.source_vector_cache import VectorCacheKey
+from babel_online.model.registry import ModelRegistry
+from babel_online.model.state_distributor import KnownVectorProbeV1, export_real_qwen_child
+from babel_online.model.candidate_index import MaterializedServingState
 from babel_online.runtime.database import (
     ArtifactConfigurationError,
     canonical_json_sha256,
@@ -281,3 +284,72 @@ def test_database_persists_and_loads_exact_traversal_roll_evidence() -> None:
     ).RuntimeDatabase("unused", connect=lambda: RecordingConnection(read_cursor))
 
     assert reader.load_traversal_rolls(run_id, session_id) == evidence
+
+
+def test_database_registers_and_reloads_real_qwen_child_descriptor(
+    tmp_path, real_model_manifest
+) -> None:
+    registry = ModelRegistry()
+    registry.register_real_original(real_model_manifest)
+    child = export_real_qwen_child(
+        tmp_path,
+        parent=real_model_manifest,
+        run_id=UUID(int=71),
+        child_model_id=UUID(int=72),
+        label="real child",
+        online_state=b'{"state":"real"}\n',
+        processed_feedback_events=9,
+        model_version=3,
+        vector_snapshot_sha256="b" * 64,
+        probe=KnownVectorProbeV1(
+            schemaVersion=1,
+            inputVector=[1.0] + [0.0] * 99,
+            expectedSemanticSha256="c" * 64,
+        ),
+        registry=registry,
+    )
+    cursor = RecordingCursor(rows=[(
+        child.descriptor.childManifest.parentModelId,
+        child.descriptor.childManifest.encoderRevision,
+        child.descriptor.childManifest.embeddingSpace.model_dump(mode="json"),
+        child.descriptor_sha256,
+    )])
+    database = __import__(
+        "babel_online.runtime.database", fromlist=["RuntimeDatabase"]
+    ).RuntimeDatabase("unused", connect=lambda: RecordingConnection(cursor))
+
+    database.register_real_child(child.descriptor, child.descriptor_path)
+
+    insert, parameters = cursor.queries[0]
+    assert "INSERT INTO recommender_models" in insert
+    assert child.descriptor.childManifest.parentModelId in parameters
+    assert str(child.descriptor_path) in parameters
+    assert child.descriptor_sha256 in parameters
+
+    loader_cursor = RecordingCursor(rows=[(
+        str(child.descriptor_path), child.descriptor_sha256,
+    )])
+    loader = __import__(
+        "babel_online.runtime.database", fromlist=["RuntimeDatabase"]
+    ).RuntimeDatabase("unused", connect=lambda: RecordingConnection(loader_cursor))
+    loaded = loader.load_real_child_descriptor(child.descriptor.childManifest.modelId)
+    assert loaded == child.descriptor
+
+
+def test_database_loads_exact_active_embedding_state() -> None:
+    run_id, model_id, space_id = UUID(int=1), UUID(int=2), UUID(int=3)
+    cursor = RecordingCursor(rows=[(model_id, 7, space_id, "a" * 64, "b" * 64)])
+    database = __import__(
+        "babel_online.runtime.database", fromlist=["RuntimeDatabase"]
+    ).RuntimeDatabase("unused", connect=lambda: RecordingConnection(cursor))
+
+    state = database.load_active_embedding_state(run_id)
+
+    assert state == MaterializedServingState(
+        run_id=run_id,
+        model_id=model_id,
+        model_version=7,
+        embedding_space_id=space_id,
+        pgvector_snapshot_sha256="a" * 64,
+        backend_snapshot_sha256="b" * 64,
+    )

@@ -22,19 +22,13 @@ SELECT eb.babel_id,
        eb.creator_id,
        xb.source_article_key,
        1 - (eb.embedding <=> %(query)s::public.vector) AS score
-FROM run_embedding_states AS rs
-JOIN babel_embeddings AS eb
-  ON eb.run_id = rs.run_id
- AND eb.serving_model_id = rs.active_model_id
- AND eb.materialized_model_version = rs.active_model_version
- AND eb.embedding_space_id = rs.embedding_space_id
+FROM babel_embeddings AS eb
 JOIN experiment_babels AS xb
   ON xb.run_id = eb.run_id AND xb.babel_id = eb.babel_id
-WHERE rs.run_id = %(run_id)s
-  AND rs.active_model_id = %(model_id)s
-  AND rs.active_model_version = %(model_version)s
-  AND rs.embedding_space_id = %(embedding_space_id)s
-  AND rs.pgvector_snapshot_sha256 = %(snapshot_sha256)s
+WHERE eb.run_id = %(run_id)s
+  AND eb.serving_model_id = %(model_id)s
+  AND eb.materialized_model_version = %(model_version)s
+  AND eb.embedding_space_id = %(embedding_space_id)s
   AND eb.creator_id <> %(exclude_creator_id)s
 ORDER BY eb.embedding <=> %(query)s::public.vector, eb.babel_id
 LIMIT %(limit)s

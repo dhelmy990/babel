@@ -91,9 +91,10 @@ def test_fixture_index_returns_only_other_creators_created_babels() -> None:
 def test_pgvector_query_joins_created_babels_not_catalog_candidates() -> None:
     lowered = " ".join(PGVECTOR_CREATED_BABEL_QUERY.casefold().split())
     assert "join experiment_babels" in lowered
-    assert "from run_embedding_states" in lowered
-    assert "active_model_version" in lowered
-    assert "pgvector_snapshot_sha256" in lowered
+    assert "run_embedding_states" not in lowered
+    assert "eb.serving_model_id = %(model_id)s" in lowered
+    assert "eb.materialized_model_version = %(model_version)s" in lowered
+    assert "eb.embedding_space_id = %(embedding_space_id)s" in lowered
     assert "any(%(babel_ids)s::uuid[])" not in lowered
     assert "catalog_embeddings" not in lowered
     assert "eb.creator_id <>" in lowered

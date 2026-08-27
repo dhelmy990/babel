@@ -105,6 +105,20 @@ def test_post_recommends_only_current_run_created_babels_with_timings() -> None:
     assert len(http.headers["X-Babel-Model-Manifest-Sha256"]) == 64
 
 
+def test_serving_health_reports_last_valid_model_without_trainer_dependency() -> None:
+    state, _registry, _created_ids, _created_sources = serving_state()
+    client = TestClient(create_app(state))
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "modelId": "00000000-0000-5000-8000-000000000002",
+        "modelVersion": 0,
+    }
+
+
 def test_fixture_smoke_also_keeps_one_long_lived_item_tower() -> None:
     state, _registry, _created_ids, _created_sources = serving_state()
     tower = state.snapshot().item_tower

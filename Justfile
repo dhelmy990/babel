@@ -6,6 +6,21 @@ export VCPKG_ROOT := env_var_or_default("VCPKG_ROOT", env_var("HOME") + "/.cache
 db-up:
     docker compose up -d postgres
 
+online-split:
+    #!/usr/bin/env bash
+    : "${BABEL_ONLINE_WORKER_TOKEN:?set the 64-hex dashboard worker token}"
+    BABEL_RUNTIME_TOPOLOGY=same_host_split \
+      online/.venv/bin/python -m babel_online.runtime.cli supervise
+
+online-isolated:
+    #!/usr/bin/env bash
+    : "${BABEL_ONLINE_WORKER_TOKEN:?set the 64-hex dashboard worker token}"
+    BABEL_RUNTIME_TOPOLOGY=same_host_isolated \
+      online/.venv/bin/python -m babel_online.runtime.cli supervise
+
+online-monolith:
+    BABEL_RUNTIME_TOPOLOGY=same_process online/.venv/bin/python -m babel_online.runtime.cli serve
+
 build:
     cmake --preset dev
     cmake --build --preset dev

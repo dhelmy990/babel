@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import urllib.request
 from uuid import UUID
 
 from ..model.artifact import (
@@ -27,6 +28,15 @@ from .dataset_bundle import (
     load_scale_dataset_bundle,
 )
 from .worker import FridayDemoRuntime, WorkerManager
+from .coordinator import coordinator_from_environment
+from .supervisor import PerRunTopologyManager, build_service_commands
+from .topology import (
+    PlacementManifestV1,
+    ResourceRequest,
+    ServiceCommand,
+    Topology,
+    TopologySupervisor,
+)
 
 
 REAL_ONLINE_MODEL_ID = UUID("2c4c48d5-3dcf-5ab9-8191-cd4edc2cbf67")
@@ -74,8 +84,65 @@ def _load_real_launch(
     return LoadedRealArtifact(manifest, artifact), encoder
 
 
+def _load_real_lineage(
+    database: RuntimeDatabase,
+    original: LoadedRealArtifact,
+    selected_model_id: UUID,
+) -> list[LoadedRealArtifact]:
+    if selected_model_id == original.manifest.modelId:
+        return [original]
+    reverse = []
+    current = selected_model_id
+    while current != original.manifest.modelId:
+        descriptor, descriptor_path = database.load_real_child_artifact(current)
+        reverse.append(
+            LoadedRealArtifact(
+                descriptor.childManifest,
+                original.distilled_artifact,
+                descriptor_path.parent / descriptor.onlineStatePath,
+            )
+        )
+        current = descriptor.childManifest.parentModelId
+    return [original, *reversed(reverse)]
+
+
+def record_same_process_placement(
+    *,
+    state_root: str | Path,
+    serving_version: str,
+    trainer_version: str,
+) -> PlacementManifestV1:
+    """Persist truthful monolith placement before accepting dashboard runs."""
+    running = TopologySupervisor(state_root=state_root).launch(
+        topology=Topology.SAME_PROCESS,
+        commands={
+            "serving": ServiceCommand(
+                role="serving",
+                argv=("in-process-recommendation-serving",),
+                version=serving_version,
+            ),
+            "trainer": ServiceCommand(
+                role="trainer",
+                argv=("in-process-online-training",),
+                version=trainer_version,
+            ),
+        },
+        serving_probe=lambda: 200,
+    )
+    return running.manifest
+
+
 def _serve() -> None:
     import uvicorn
+
+    record_same_process_placement(
+        state_root=(
+            Path(os.environ.get("BABEL_ONLINE_STATE_ROOT", "state/online/topology"))
+            / "same-process"
+        ),
+        serving_version=os.environ.get("BABEL_ONLINE_SERVING_VERSION", "unknown"),
+        trainer_version=os.environ.get("BABEL_ONLINE_TRAINER_VERSION", "unknown"),
+    )
 
     database = RuntimeDatabase(_required("BABEL_DATABASE_URL"))
     model_mode = os.environ.get("BABEL_ONLINE_MODEL_MODE", "fixture")
@@ -135,11 +202,9 @@ def _serve() -> None:
 
     def runtime_factory(config, stop_event):
         if real_launch is not None:
-            if config.startingModelId != real_launch.manifest.modelId:
-                raise RuntimeError(
-                    "scale launch selected a model other than the loaded Qwen original"
-                )
-            lineage = [real_launch]
+            lineage = _load_real_lineage(
+                database, real_launch, config.startingModelId
+            )
         else:
             lineage = database.load_model_lineage(config.startingModelId)
         return FridayDemoRuntime(
@@ -167,12 +232,105 @@ def _serve() -> None:
     )
 
 
+def _cpu_affinity(name: str) -> tuple[int, ...]:
+    raw = os.environ.get(name, "").strip()
+    return tuple(int(value) for value in raw.split(",") if value.strip())
+
+
+def _memory_limit(name: str) -> int | None:
+    raw = os.environ.get(name, "").strip()
+    return int(raw) if raw else None
+
+
+def _gpu_devices(name: str) -> tuple[str, ...]:
+    return tuple(
+        value.strip()
+        for value in os.environ.get(name, "").split(",")
+        if value.strip()
+    )
+
+
+def _supervise() -> None:
+    """Launch the default genuine same-host split from explicit role commands."""
+    import uvicorn
+    from .database import RuntimeDatabase
+
+    topology = Topology.parse(os.environ.get("BABEL_RUNTIME_TOPOLOGY"))
+    if topology is Topology.SAME_PROCESS:
+        _serve()
+        return
+    commands = build_service_commands(
+        serving_command=os.environ.get(
+            "BABEL_ONLINE_SERVING_COMMAND",
+            "babel-recommendation-server --run-id {run_id}",
+        ),
+        trainer_command=os.environ.get(
+            "BABEL_ONLINE_TRAINER_COMMAND",
+            "babel-online-trainer --run-id {run_id}",
+        ),
+        serving_version=os.environ.get("BABEL_ONLINE_SERVING_VERSION", "unknown"),
+        trainer_version=os.environ.get("BABEL_ONLINE_TRAINER_VERSION", "unknown"),
+    )
+    resources = {
+        "serving": ResourceRequest(
+            cpuAffinity=_cpu_affinity("BABEL_SERVING_CPU_AFFINITY"),
+            memoryLimitBytes=_memory_limit("BABEL_SERVING_MEMORY_LIMIT_BYTES"),
+            gpuDevices=_gpu_devices("BABEL_SERVING_GPU_DEVICES"),
+        ),
+        "trainer": ResourceRequest(
+            cpuAffinity=_cpu_affinity("BABEL_TRAINER_CPU_AFFINITY"),
+            memoryLimitBytes=_memory_limit("BABEL_TRAINER_MEMORY_LIMIT_BYTES"),
+            gpuDevices=_gpu_devices("BABEL_TRAINER_GPU_DEVICES"),
+        ),
+    }
+    serving_health = os.environ.get(
+        "BABEL_ONLINE_SERVING_HEALTH_URL", "http://127.0.0.1:8791/health"
+    )
+
+    def serving_probe() -> int:
+        with urllib.request.urlopen(serving_health, timeout=2) as response:
+            return int(response.status)
+
+    topology_database = RuntimeDatabase(_required("BABEL_DATABASE_URL"))
+    manager = PerRunTopologyManager(
+        topology=topology,
+        commands=commands,
+        resources=resources,
+        state_root=os.environ.get("BABEL_ONLINE_STATE_ROOT", "state/online/topology"),
+        serving_probe=serving_probe,
+        coordinator_factory=coordinator_from_environment,
+        starting_reporter=lambda run_id: topology_database.transition(
+            run_id, "starting"
+        ),
+        running_reporter=lambda run_id: topology_database.transition(run_id, "running"),
+        stopped_reporter=lambda run_id: topology_database.transition(run_id, "completed"),
+        failure_reporter=lambda run_id, error: topology_database.transition(
+            run_id, "failed", failure=str(error)
+        ),
+    )
+    app = create_control_app(manager, token=_required("BABEL_ONLINE_WORKER_TOKEN"))
+    try:
+        uvicorn.run(
+            app,
+            host="127.0.0.1",
+            port=int(os.environ.get("BABEL_ONLINE_WORKER_PORT", "8790")),
+            log_level="info",
+        )
+    finally:
+        if manager.active_run_id is not None:
+            manager.request_stop(manager.active_run_id)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="babel-online")
-    parser.add_argument("command", choices=["serve"])
+    parser.add_argument(
+        "command", nargs="?", default="supervise", choices=["serve", "supervise"]
+    )
     arguments = parser.parse_args(argv)
     if arguments.command == "serve":
         _serve()
+    elif arguments.command == "supervise":
+        _supervise()
     return 0
 
 

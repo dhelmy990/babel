@@ -27,7 +27,9 @@ from ..model.population import (
     PopulationIntegrityError,
     PopulationSource,
 )
+from ..model.candidate_index import MaterializedServingState
 from ..model.source_vector_cache import VectorCacheKey
+from ..model.state_distributor import RealQwenChildStateV1
 from ..observable import CreatedBabel, VectorRecord, reject_hidden_fields
 from ..simulation.scheduler import ScheduledSession
 from ..simulation.walk import WalkRollEvidence
@@ -213,6 +215,102 @@ class RuntimeDatabase:
     def register_child(self, model: ModelManifestV1, checkpoint_path: Path) -> None:
         artifact = LoadedArtifact(manifest=model, checkpoint_path=checkpoint_path)
         self.bootstrap_model(artifact)
+
+    def register_real_child(
+        self, descriptor: RealQwenChildStateV1, descriptor_path: Path
+    ) -> None:
+        """Register a V2 child without pretending its online state is Qwen weights."""
+        model = descriptor.childManifest
+        if not isinstance(model, ModelManifestV2) or model.parentModelId is None:
+            raise TypeError("real child registration requires V2 child lineage")
+        path = Path(descriptor_path).resolve()
+        if not path.is_file():
+            raise ArtifactConfigurationError("real child descriptor path is missing")
+        parsed = RealQwenChildStateV1.model_validate_json(
+            path.read_text(encoding="utf-8")
+        )
+        if parsed != descriptor:
+            raise ArtifactConfigurationError("real child descriptor bytes differ")
+        descriptor_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+        embedding = model.embeddingSpace.model_dump(mode="json")
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO recommender_models(
+                  id,label,parent_model_id,producing_run_id,encoder_repo,
+                  encoder_revision,dataset_repo,dataset_revision,
+                  environment_sequence,training_examples,checkpoint_path,
+                  checkpoint_sha256,embedding_space,immutable
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'[]'::jsonb,%s,%s,%s,%s::jsonb,true)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                (
+                    model.modelId,
+                    model.label,
+                    model.parentModelId,
+                    model.producingRunId,
+                    model.encoderRepo,
+                    model.encoderRevision,
+                    model.datasetRepo,
+                    model.datasetRevision,
+                    model.trainingExamples,
+                    str(path),
+                    descriptor_sha,
+                    json.dumps(embedding, sort_keys=True, separators=(",", ":")),
+                ),
+            )
+            cursor.execute(
+                """
+                SELECT parent_model_id,encoder_revision,embedding_space,
+                       checkpoint_sha256
+                FROM recommender_models WHERE id=%s
+                """,
+                (model.modelId,),
+            )
+            row = cursor.fetchone()
+            registered_embedding = (
+                row[2] if row is not None and isinstance(row[2], Mapping) else None
+            )
+            if row is None or (
+                row[0] != model.parentModelId
+                or str(row[1]) != model.encoderRevision
+                or registered_embedding != embedding
+                or str(row[3]) != descriptor_sha
+            ):
+                raise ArtifactConfigurationError(
+                    "registered real child differs from immutable descriptor"
+                )
+
+    def load_real_child_descriptor(self, model_id: UUID) -> RealQwenChildStateV1:
+        descriptor, _path = self.load_real_child_artifact(model_id)
+        return descriptor
+
+    def load_real_child_artifact(
+        self, model_id: UUID
+    ) -> tuple[RealQwenChildStateV1, Path]:
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT checkpoint_path,checkpoint_sha256 "
+                "FROM recommender_models WHERE id=%s AND parent_model_id IS NOT NULL",
+                (model_id,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise KeyError(f"real recommender child does not exist: {model_id}")
+        path = Path(row[0]).resolve()
+        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != str(
+            row[1]
+        ):
+            raise ArtifactConfigurationError("real child descriptor checksum differs")
+        try:
+            descriptor = RealQwenChildStateV1.model_validate_json(
+                path.read_text(encoding="utf-8")
+            )
+        except Exception as error:
+            raise ArtifactConfigurationError("real child descriptor is invalid") from error
+        if descriptor.childManifest.modelId != model_id:
+            raise ArtifactConfigurationError("real child descriptor resolves to another model")
+        return descriptor, path
 
     def load_model_artifact(self, model_id: UUID) -> LoadedArtifact:
         with self._connect() as connection, connection.cursor() as cursor:
@@ -638,6 +736,28 @@ class RuntimeDatabase:
                     backend_sha256,
                 ),
             )
+
+    def load_active_embedding_state(self, run_id: UUID) -> MaterializedServingState:
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT active_model_id,active_model_version,embedding_space_id,
+                       pgvector_snapshot_sha256,backend_snapshot_sha256
+                FROM run_embedding_states WHERE run_id=%s
+                """,
+                (run_id,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise KeyError(f"run has no active embedding state: {run_id}")
+        return MaterializedServingState(
+            run_id=run_id,
+            model_id=row[0],
+            model_version=int(row[1]),
+            embedding_space_id=row[2],
+            pgvector_snapshot_sha256=str(row[3]),
+            backend_snapshot_sha256=str(row[4]),
+        )
 
     def created_babels(self, run_id: UUID) -> list[CreatedBabel]:
         with self._connect() as connection, connection.cursor() as cursor:

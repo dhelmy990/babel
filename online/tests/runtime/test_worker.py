@@ -197,6 +197,51 @@ def test_worker_sync_uses_one_locked_training_capture_for_version_vectors_and_st
     assert model_state == {"captured": 11}
 
 
+def test_scale_worker_exports_v2_child_descriptor_not_fixture_manifest(
+    tmp_path, real_model_manifest
+) -> None:
+    run_id = uuid4()
+    babel = CreatedBabel(
+        babelId=uuid4(), runId=run_id, creatorId=uuid4(),
+        sourceArticleKey="enwiki:12", title="Twelve", text="Twelve lead", createdAtNs=1,
+    )
+    vector = np.eye(100, dtype=np.float32)[2]
+    runtime = object.__new__(FridayDemoRuntime)
+    runtime.scale_run = True
+    runtime.starting_model = real_model_manifest
+    runtime.config = SimpleNamespace(runId=run_id, artifactRoot=str(tmp_path))
+    runtime.model = SimpleNamespace(
+        state_dict=lambda: {
+            "learningRate": 0.1,
+            "transferState": {"queryVector": vector.tolist()},
+            "residuals": {str(babel.babelId): [0.0] * 100},
+        }
+    )
+    runtime.trainer = SimpleNamespace(processed_events=7)
+    runtime._records = [SimpleNamespace(
+        babel=babel,
+        catalogContentHash="d" * 64,
+    )]
+    runtime._serving_vectors = {babel.babelId: vector}
+    runtime.registry = __import__(
+        "babel_online.model.registry", fromlist=["ModelRegistry"]
+    ).ModelRegistry()
+    runtime.registry.register_real_original(real_model_manifest)
+    registered = []
+    runtime.database = SimpleNamespace(
+        register_real_child=lambda descriptor, path: registered.append((descriptor, path))
+    )
+
+    child, child_records = runtime._export_child_model(version=4)
+
+    assert child.schemaVersion == 2
+    assert child.parentModelId == real_model_manifest.modelId
+    assert child.embeddingSpace == real_model_manifest.embeddingSpace
+    assert all(record.servingModelId == child.modelId for record in child_records)
+    assert all(record.materializedModelVersion == 4 for record in child_records)
+    assert registered[0][0].childManifest == child
+
+
 def test_v2_runtime_requires_qwen_and_selects_real_monthly_bundle(
     real_model_manifest, accepted_qwen_factory
 ) -> None:

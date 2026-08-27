@@ -40,6 +40,8 @@ qwen = [
 
 [project.scripts]
 babel-online = "babel_online.runtime.cli:main"
+babel-recommendation-server = "babel_online.runtime.services:serving_main"
+babel-online-trainer = "babel_online.runtime.services:trainer_main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

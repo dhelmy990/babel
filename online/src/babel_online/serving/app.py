@@ -50,6 +50,15 @@ def create_app(
     app = FastAPI(title="Babel online recommendations", version="1")
     semaphore = BoundedSemaphore(max_concurrent_requests)
 
+    @app.get("/health")
+    def health() -> dict[str, str | int]:
+        snapshot = state.snapshot()
+        return {
+            "status": "ok",
+            "modelId": str(snapshot.model.modelId),
+            "modelVersion": snapshot.materialized_state.model_version,
+        }
+
     def recommend_document(
         request: RecommendationRequestV1 | RecommendationRequestV2,
     ) -> Response:

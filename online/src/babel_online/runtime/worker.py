@@ -42,6 +42,11 @@ from ..model.pgvector_index import PgvectorCandidateIndex
 from ..model.qwen_encoder import Qwen100Encoder, format_article_input
 from ..model.registry import ModelRegistry
 from ..model.source_vector_cache import SourceVectorResolver
+from ..model.state_distributor import (
+    KnownVectorProbeV1,
+    export_real_qwen_child,
+    semantic_vector_sha256,
+)
 from ..observable import CreatedBabel, VectorRecord
 from ..serving import ServingState, create_app
 from ..simulation.client import RecommendationClient
@@ -1157,7 +1162,78 @@ class FridayDemoRuntime:
         finally:
             client.close()
 
-    def _finalize(self) -> ModelManifestV1:
+    def _export_child_model(
+        self, *, version: int
+    ) -> tuple[ModelManifestV1 | ModelManifestV2, list[VectorRecord]]:
+        child_id = uuid5(self.config.runId, "immutable-child-model")
+        if not self.scale_run:
+            child = export_immutable_child(
+                Path(self.config.artifactRoot) / str(self.config.runId) / "models",
+                model=self.model,
+                parent=self.starting_model,
+                registry=self.registry,
+                run_id=self.config.runId,
+                child_model_id=child_id,
+                label=f"Post-run model {str(self.config.runId)[:8]}",
+                training_examples=self.trainer.processed_events,
+            )
+            child_root = (
+                Path(self.config.artifactRoot)
+                / str(self.config.runId)
+                / "models"
+                / f"model-{child_id}"
+            )
+            self.database.register_child(child, child_root / child.checkpointPath)
+            return child, []
+        if not isinstance(self.starting_model, ModelManifestV2):
+            raise TypeError("scale child requires a ModelManifestV2 parent")
+        child_records = [
+            VectorRecord(
+                babel=record.babel,
+                catalogContentHash=record.catalogContentHash,
+                embeddingSpaceId=self.starting_model.embeddingSpace.embeddingSpaceId,
+                servingModelId=child_id,
+                materializedModelVersion=version,
+                vector=tuple(
+                    float(value) for value in self._serving_vectors[record.babel.babelId]
+                ),
+            )
+            for record in self._records
+        ]
+        snapshot_sha = _snapshot_sha(child_records)
+        state_bytes = (
+            json.dumps(
+                self.model.state_dict(),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+        transfer = self.model.state_dict().get("transferState", {})
+        probe_vector = transfer.get("queryVector", [1.0] + [0.0] * 99)
+        exported = export_real_qwen_child(
+            Path(self.config.artifactRoot) / str(self.config.runId) / "models",
+            parent=self.starting_model,
+            run_id=self.config.runId,
+            child_model_id=child_id,
+            label=f"Post-run real Qwen model {str(self.config.runId)[:8]}",
+            online_state=state_bytes,
+            processed_feedback_events=self.trainer.processed_events,
+            model_version=version,
+            vector_snapshot_sha256=snapshot_sha,
+            probe=KnownVectorProbeV1(
+                schemaVersion=1,
+                inputVector=probe_vector,
+                expectedSemanticSha256=semantic_vector_sha256(probe_vector),
+            ),
+            registry=self.registry,
+        )
+        self.database.register_real_child(exported.descriptor, exported.descriptor_path)
+        return exported.descriptor.childManifest, child_records
+
+    def _finalize(self) -> ModelManifestV1 | ModelManifestV2:
         self.database.transition(self.config.runId, "draining_feedback")
         self._trainer_stop.set()
         if self._trainer_thread is not None:
@@ -1187,19 +1263,34 @@ class FridayDemoRuntime:
         version = self.trainer.training_version
         if version > self._last_sync_version:
             self._persist_and_activate(synchronize=True)
-        child_id = uuid5(self.config.runId, "immutable-child-model")
-        child = export_immutable_child(
-            Path(self.config.artifactRoot) / str(self.config.runId) / "models",
-            model=self.model,
-            parent=self.starting_model,
-            registry=self.registry,
-            run_id=self.config.runId,
-            child_model_id=child_id,
-            label=f"Post-run model {str(self.config.runId)[:8]}",
-            training_examples=self.trainer.processed_events,
-        )
-        child_root = Path(self.config.artifactRoot) / str(self.config.runId) / "models" / f"model-{child_id}"
-        self.database.register_child(child, child_root / child.checkpointPath)
+        child_version = max(1, version) if self.scale_run else version
+        child, child_records = self._export_child_model(version=child_version)
+        if child_records:
+            child_sha = _snapshot_sha(child_records)
+            self.database.insert_vectors(child_records)
+            self.database.activate_embedding_state(
+                run_id=self.config.runId,
+                model_id=child.modelId,
+                model_version=child_version,
+                embedding_space_id=child.embeddingSpace.embeddingSpaceId,
+                pgvector_sha256=child_sha,
+                backend_sha256=child_sha,
+            )
+            child_state = MaterializedServingState(
+                run_id=self.config.runId,
+                model_id=child.modelId,
+                model_version=child_version,
+                embedding_space_id=child.embeddingSpace.embeddingSpaceId,
+                pgvector_snapshot_sha256=child_sha,
+                backend_snapshot_sha256=child_sha,
+            )
+            self.serving.apply_sync(
+                selected_model_id=child.modelId,
+                materialized_state=child_state,
+                candidate_index=self.index,
+                vector_records=child_records,
+            )
+            self._records = child_records
         self.database.update_metrics(
             self.config.runId,
             kafka_lag=0,
@@ -1209,7 +1300,7 @@ class FridayDemoRuntime:
             checkpoint_sha256=loaded_checkpoint.manifest_sha256,
             serving_synced=True,
             active_model_id=child.modelId,
-            active_model_version=version,
+            active_model_version=child_version,
         )
         self.database.transition(self.config.runId, "completed")
         self.database.append_activity(
@@ -1217,14 +1308,14 @@ class FridayDemoRuntime:
                 self.config.runId,
                 "run_completed",
                 f"Run completed; immutable child {child.modelId} is selectable.",
-                metrics={"feedbackCount": self.trainer.processed_events, "modelVersion": version},
+                metrics={"feedbackCount": self.trainer.processed_events, "modelVersion": child_version},
             )
         )
         self.producer.close()
         self.scoped_consumer.close()
         return child
 
-    def run(self) -> ModelManifestV1:
+    def run(self) -> ModelManifestV1 | ModelManifestV2:
         self.database.append_activity(
             lifecycle_activity(
                 self.config.runId,
@@ -1239,7 +1330,14 @@ class FridayDemoRuntime:
         query = np.mean(np.stack(list(frozen.values())), axis=0)
         self.model = NumpyWorkingModel(frozen, query_vector=query, learning_rate=0.05)
         starting_state = {}
-        if not self.scale_run:
+        if self.scale_run and self.starting_artifact.online_state_path is not None:
+            try:
+                starting_state = json.loads(
+                    self.starting_artifact.online_state_path.read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError) as error:
+                raise RuntimeError("selected real child online state is invalid") from error
+        elif not self.scale_run:
             try:
                 starting_state = json.loads(
                     self.starting_artifact.checkpoint_path.read_text()

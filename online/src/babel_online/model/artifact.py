@@ -28,6 +28,7 @@ class LoadedRealArtifact:
 
     manifest: ModelManifestV2
     distilled_artifact: DistilledArtifactV1
+    online_state_path: Path | None = None
 
 
 def load_artifact(root: Path) -> LoadedArtifact:

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from threading import RLock
 from types import MappingProxyType
-from typing import Mapping
+from typing import Callable, Mapping
 from uuid import UUID
 
 import numpy as np
@@ -151,6 +151,7 @@ class ServingState:
         candidate_index: CandidateIndex,
         vector_records: list[VectorRecord],
         qwen_encoder: Qwen100Encoder | None = None,
+        activation_commit: Callable[[], None] | None = None,
     ) -> None:
         if qwen_encoder is None:
             current = self.snapshot().item_tower
@@ -164,6 +165,8 @@ class ServingState:
             qwen_encoder,
         )
         with self._lock:
+            if activation_commit is not None:
+                activation_commit()
             self._snapshot = replacement
 
     def source_is_available(

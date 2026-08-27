@@ -36,12 +36,23 @@ from .source_vector_cache import (
     SourceVectorResolver,
     VectorCacheKey,
 )
+from .state_distributor import (
+    ActivationError,
+    ActivationReceipt,
+    KnownVectorProbeV1,
+    ModelStateDistributor,
+    RealQwenChildStateV1,
+    export_real_qwen_child,
+    semantic_vector_sha256,
+)
 
 __all__ = [
     "CreatorContextTower",
     "EncoderExecutionIdentity",
     "ArtifactIntegrityError",
     "ArtifactAcceptanceError",
+    "ActivationError",
+    "ActivationReceipt",
     "build_real_original_manifest",
     "CandidateIndex",
     "DuplicateModel",
@@ -54,6 +65,8 @@ __all__ = [
     "MaterializedServingState",
     "LoadedArtifact",
     "LoadedRealArtifact",
+    "KnownVectorProbeV1",
+    "ModelStateDistributor",
     "ModelRegistry",
     "PopulationIdentity",
     "PopulationActivationEvidence",
@@ -61,6 +74,7 @@ __all__ = [
     "PopulationReceipt",
     "PopulationSource",
     "Qwen100Encoder",
+    "RealQwenChildStateV1",
     "ResolvedSourceVector",
     "RetrievedCandidate",
     "SourceVectorResolver",
@@ -69,4 +83,6 @@ __all__ = [
     "model_manifest_sha256",
     "populate_created_babel_vectors",
     "format_article_input",
+    "export_real_qwen_child",
+    "semantic_vector_sha256",
 ]

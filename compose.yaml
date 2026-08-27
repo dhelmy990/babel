@@ -40,5 +40,44 @@ services:
       retries: 20
       start_period: 10s
 
+  # The topology image is built from the installable online/ package by the
+  # operator.  Its two role commands must be the real recommendation and
+  # trainer executables; the supervisor refuses an identical command pair.
+  online-topology-supervisor:
+    profiles: ["online-topology"]
+    image: ${BABEL_ONLINE_IMAGE:-babel-online:local}
+    network_mode: host
+    command: ["babel-online", "supervise"]
+    environment:
+      BABEL_RUNTIME_TOPOLOGY: ${BABEL_RUNTIME_TOPOLOGY:-same_host_split}
+      BABEL_ONLINE_SERVING_COMMAND: ${BABEL_ONLINE_SERVING_COMMAND:-babel-recommendation-server --run-id {run_id}}
+      BABEL_ONLINE_TRAINER_COMMAND: ${BABEL_ONLINE_TRAINER_COMMAND:-babel-online-trainer --run-id {run_id}}
+      BABEL_ONLINE_SERVING_VERSION: ${BABEL_ONLINE_SERVING_VERSION:-unknown}
+      BABEL_ONLINE_TRAINER_VERSION: ${BABEL_ONLINE_TRAINER_VERSION:-unknown}
+      BABEL_ONLINE_SERVING_HEALTH_URL: ${BABEL_ONLINE_SERVING_HEALTH_URL:-http://127.0.0.1:8791/health}
+      BABEL_ONLINE_WORKER_TOKEN: ${BABEL_ONLINE_WORKER_TOKEN:-}
+      BABEL_ONLINE_STATE_ROOT: /var/lib/babel-online/topology
+      BABEL_DATABASE_URL: ${BABEL_DATABASE_URL:-postgresql://babel:babel-local-dev@127.0.0.1:54329/babel}
+      BABEL_KAFKA_BOOTSTRAP_SERVERS: ${BABEL_KAFKA_BOOTSTRAP_SERVERS:-127.0.0.1:29092}
+      HF_TOKEN: ${HF_TOKEN:-}
+      HF_HOME: /var/lib/babel-online/huggingface
+      BABEL_ONLINE_HF_CACHE: /var/lib/babel-online/cache/dataset
+      BABEL_ONLINE_MODEL_ARTIFACT_CACHE: /var/lib/babel-online/cache/model-artifact
+      BABEL_ONLINE_QWEN_CACHE: /var/lib/babel-online/cache/qwen-base
+      BABEL_SERVING_CPU_AFFINITY: ${BABEL_SERVING_CPU_AFFINITY:-}
+      BABEL_TRAINER_CPU_AFFINITY: ${BABEL_TRAINER_CPU_AFFINITY:-}
+      BABEL_SERVING_MEMORY_LIMIT_BYTES: ${BABEL_SERVING_MEMORY_LIMIT_BYTES:-}
+      BABEL_TRAINER_MEMORY_LIMIT_BYTES: ${BABEL_TRAINER_MEMORY_LIMIT_BYTES:-}
+      BABEL_SERVING_GPU_DEVICES: ${BABEL_SERVING_GPU_DEVICES:-}
+      BABEL_TRAINER_GPU_DEVICES: ${BABEL_TRAINER_GPU_DEVICES:-}
+    volumes:
+      - babel_online_state:/var/lib/babel-online
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
 volumes:
   babel_postgres_data:
+  babel_online_state:
