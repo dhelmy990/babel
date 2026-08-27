@@ -259,8 +259,9 @@ Result<PerformanceExperimentDto> ExperimentService::createPerformanceExperiment(
   if (performance_worker_ == nullptr) return created;
   auto launched = performance_worker_->start(created->experiment_id);
   if (!launched) {
-    (void)repository_.markPerformanceLaunchFailed(created->experiment_id,
-                                                  launched.error().message);
+    const auto recorded = repository_.markPerformanceLaunchFailed(
+        created->experiment_id, launched.error().message);
+    if (!recorded) return tl::make_unexpected(recorded.error());
     return tl::make_unexpected(launched.error());
   }
   return created;

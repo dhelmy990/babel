@@ -332,6 +332,25 @@ TEST_CASE_METHOD(ExperimentPostgresFixture,
   REQUIRE(approved.has_value());
   CHECK(approved->operator_approved);
   CHECK(approved->status == babel::PerformanceExperimentStatus::approved);
+  const auto approval_retry =
+      repository_.approvePerformanceNextScale(created->experiment_id);
+  REQUIRE(approval_retry.has_value());
+  CHECK(approval_retry->status == babel::PerformanceExperimentStatus::approved);
+  {
+    pqxx::connection approval_connection(schemaUrl());
+    pqxx::read_transaction approval_read(approval_connection);
+    CHECK(approval_read.exec(
+        "SELECT count(*) FROM performance_approvals WHERE experiment_id=$1",
+        pqxx::params{created->experiment_id}).one_field().as<int>() == 1);
+  }
+
+  const auto stopped =
+      repository_.requestPerformanceGracefulStop(created->experiment_id);
+  REQUIRE(stopped.has_value());
+  const auto stop_retry =
+      repository_.requestPerformanceGracefulStop(created->experiment_id);
+  REQUIRE(stop_retry.has_value());
+  CHECK(stop_retry->status == babel::PerformanceExperimentStatus::stop_requested);
 
   const auto attached = repository_.attachPerformanceArtifact(
       created->experiment_id,
@@ -389,6 +408,21 @@ TEST_CASE_METHOD(ExperimentPostgresFixture,
       pqxx::params{trial.experiment_id, condition_id, population_run.run_id.value});
   transaction.commit();
 
+  {
+    pqxx::connection retry_connection(schemaUrl());
+    pqxx::work retry(retry_connection);
+    retry.exec(
+        "UPDATE performance_experiments SET run_id=$2, "
+        "population_manifest_sha256=$3, population_bundle_path=$4 WHERE id=$1",
+        pqxx::params{trial.experiment_id, population_run.run_id.value,
+                     std::string(64, 'a'), "runs/population"});
+    retry.exec(
+        "UPDATE performance_conditions SET run_id=$3 "
+        "WHERE experiment_id=$1 AND id=$2",
+        pqxx::params{trial.experiment_id, condition_id, population_run.run_id.value});
+    retry.commit();
+  }
+
   const auto conflict = [&] {
     pqxx::connection changed_connection(schemaUrl());
     pqxx::work changed(changed_connection);
@@ -398,6 +432,35 @@ TEST_CASE_METHOD(ExperimentPostgresFixture,
     changed.commit();
   };
   CHECK_THROWS(conflict());
+
+  const auto duplicate_condition_run = [&] {
+    pqxx::connection duplicate_connection(schemaUrl());
+    pqxx::work duplicate(duplicate_connection);
+    duplicate.exec(
+        "UPDATE performance_conditions SET run_id=$2 WHERE experiment_id=$1 "
+        "AND id<>$3",
+        pqxx::params{trial.experiment_id, population_run.run_id.value, condition_id});
+    duplicate.commit();
+  };
+  CHECK_THROWS(duplicate_condition_run());
+
+  {
+    pqxx::connection completed_connection(schemaUrl());
+    pqxx::work completed(completed_connection);
+    completed.exec("UPDATE experiment_runs SET status='completed' WHERE id=$1",
+                   pqxx::params{population_run.run_id.value});
+    completed.commit();
+  }
+  const auto other_run = repository_.createRun(launch()).value();
+  const auto conflicting_condition_run = [&] {
+    pqxx::connection changed_connection(schemaUrl());
+    pqxx::work changed(changed_connection);
+    changed.exec(
+        "UPDATE performance_conditions SET run_id=$2 WHERE id=$1",
+        pqxx::params{condition_id, other_run.run_id.value});
+    changed.commit();
+  };
+  CHECK_THROWS(conflicting_condition_run());
 
   REQUIRE(repository_.markPerformanceLaunchFailed(
       trial.experiment_id, "performance worker unavailable").has_value());

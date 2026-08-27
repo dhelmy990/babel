@@ -134,6 +134,9 @@ class FakeRepository final : public ExperimentRepository {
   Result<void> markPerformanceLaunchFailed(std::string_view,
                                            std::string_view message) override {
     events.push_back("persist-failed");
+    if (performance_failure_error) {
+      return tl::make_unexpected(*performance_failure_error);
+    }
     performance.status = PerformanceExperimentStatus::failed;
     performance.failure = std::string(message);
     return {};
@@ -183,6 +186,7 @@ class FakeRepository final : public ExperimentRepository {
   };
   std::optional<ExperimentLaunchSnapshot> created;
   std::optional<ApplicationError> create_error;
+  std::optional<ApplicationError> performance_failure_error;
   std::string failure;
   int create_calls{0};
   int failed_calls{0};
@@ -238,6 +242,11 @@ class FakePerformanceWorker final : public PerformanceExperimentWorker {
     ++stop_calls;
     stopped = experiment_id;
     if (events) events->push_back("command-stop");
+    if (stop_failures_remaining > 0) {
+      --stop_failures_remaining;
+      return tl::make_unexpected(ApplicationError{
+          ErrorCode::database_unavailable, "performance stop dispatch failed"});
+    }
     return {};
   }
   Result<void> approveNextScale(std::string_view experiment_id) override {
@@ -254,6 +263,7 @@ class FakePerformanceWorker final : public PerformanceExperimentWorker {
   std::string approved;
   int start_calls{0};
   int stop_calls{0};
+  int stop_failures_remaining{0};
   int approval_calls{0};
 };
 
@@ -397,6 +407,43 @@ TEST_CASE("performance launch failure is durable and returns the dispatch error"
                                  "persist-create", "command-start", "persist-failed"});
 }
 
+TEST_CASE("performance launch returns failure persistence error when durability fails") {
+  FakeRepository repository;
+  repository.performance_failure_error = ApplicationError{
+      ErrorCode::internal, "could not persist performance failure"};
+  FakeWorker worker;
+  FakePerformanceWorker performance_worker(&repository.events);
+  performance_worker.start_error = ApplicationError{
+      ErrorCode::database_unavailable, "performance worker unavailable"};
+  ExperimentService service(repository, worker, sourcePin(), &performance_worker);
+
+  const auto created = service.createPerformanceExperiment(
+      PerformanceLaunchRequest{.starting_model_id = repository.model.model_id});
+
+  REQUIRE_FALSE(created.has_value());
+  CHECK(created.error().code == ErrorCode::internal);
+  CHECK(created.error().message == "could not persist performance failure");
+}
+
+TEST_CASE("performance graceful stop redispatches the same durable request after failure") {
+  FakeRepository repository;
+  repository.performance.status = PerformanceExperimentStatus::approved;
+  FakeWorker worker;
+  FakePerformanceWorker performance_worker(&repository.events);
+  performance_worker.stop_failures_remaining = 1;
+  ExperimentService service(repository, worker, sourcePin(), &performance_worker);
+
+  const auto first = service.requestPerformanceGracefulStop(
+      repository.performance.experiment_id);
+  const auto retried = service.requestPerformanceGracefulStop(
+      repository.performance.experiment_id);
+
+  REQUIRE_FALSE(first.has_value());
+  REQUIRE(retried.has_value());
+  CHECK(retried->status == PerformanceExperimentStatus::stop_requested);
+  CHECK(performance_worker.stop_calls == 2);
+}
+
 TEST_CASE("performance stop and approval signal only after durable mutation") {
   FakeRepository repository;
   repository.performance.population_ready = true;
@@ -421,12 +468,16 @@ TEST_CASE("performance stop and approval signal only after durable mutation") {
   repository.performance.status = PerformanceExperimentStatus::population_ready;
   REQUIRE(service.approvePerformanceNextScale(
               repository.performance.experiment_id).has_value());
+  REQUIRE(service.approvePerformanceNextScale(
+              repository.performance.experiment_id).has_value());
 
   CHECK(repository.events == std::vector<std::string>{
                                  "persist-stop", "command-stop",
+                                 "persist-approval", "command-approval",
                                  "persist-approval", "command-approval"});
   CHECK(performance_worker.stop_calls == 1);
-  CHECK(performance_worker.approval_calls == 1);
+  CHECK(performance_worker.approval_calls == 2);
+  CHECK(performance_worker.approved == repository.performance.experiment_id);
 }
 
 TEST_CASE("formal performance approval is blocked until exact population evidence exists") {

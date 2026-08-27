@@ -801,15 +801,29 @@ PostgresExperimentRepository::requestPerformanceGracefulStop(
   try {
     auto connection = database_.connect();
     pqxx::work transaction(*connection);
-    const auto rows = transaction.exec(
-        std::string{"UPDATE performance_experiments SET status = 'stop_requested' "}
-            + "WHERE id = $1 AND status IN ('approved', 'running') RETURNING " +
-            kPerformanceColumns,
+    const auto existing_rows = transaction.exec(
+        std::string{"SELECT "} + kPerformanceColumns +
+            " FROM performance_experiments WHERE id = $1 FOR UPDATE",
         pqxx::params{experiment_id});
-    if (rows.empty()) {
+    if (existing_rows.empty()) {
+      return tl::make_unexpected(
+          ApplicationError{ErrorCode::not_found, "performance experiment not found"});
+    }
+    const auto existing = performanceFromRow(existing_rows.one_row());
+    if (existing.status == PerformanceExperimentStatus::stop_requested) {
+      transaction.commit();
+      return existing;
+    }
+    if (existing.status != PerformanceExperimentStatus::approved &&
+        existing.status != PerformanceExperimentStatus::running) {
       return tl::make_unexpected(ApplicationError{
           ErrorCode::conflict, "performance experiment cannot be gracefully stopped"});
     }
+    const auto rows = transaction.exec(
+        std::string{"UPDATE performance_experiments SET status = 'stop_requested' "}
+            + "WHERE id = $1 RETURNING " +
+            kPerformanceColumns,
+        pqxx::params{experiment_id});
     transaction.commit();
     return performanceFromRow(rows.one_row());
   } catch (const std::exception& exception) {
@@ -838,6 +852,11 @@ PostgresExperimentRepository::approvePerformanceNextScale(
         !existing.population_dataset_sha256) {
       return tl::make_unexpected(
           ApplicationError{ErrorCode::conflict, "population evidence is not ready"});
+    }
+    if (existing.operator_approved &&
+        existing.status == PerformanceExperimentStatus::approved) {
+      transaction.commit();
+      return existing;
     }
     transaction.exec(R"(
       INSERT INTO performance_approvals(
