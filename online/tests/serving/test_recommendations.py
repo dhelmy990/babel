@@ -7,13 +7,18 @@ from uuid import UUID
 
 from fastapi.testclient import TestClient
 
-from babel_online.contracts import ModelManifestV1, RecommendationResponseV1
+from babel_online.contracts import (
+    ModelManifestV1,
+    RecommendationResponseV1,
+    RecommendationResponseV2,
+)
 from babel_online.model.candidate_index import (
     InMemoryCreatedBabelIndex,
     MaterializedServingState,
 )
 from babel_online.model.item_tower import ItemTower
 from babel_online.model.registry import ModelRegistry
+from babel_online.model.source_vector_cache import SourceVectorResolver
 from babel_online.observable import CreatedBabel, VectorRecord, reject_hidden_fields
 from babel_online.serving.app import create_app
 from babel_online.serving.state import ServingState
@@ -225,3 +230,134 @@ def test_apply_sync_selects_child_without_replacing_original() -> None:
     assert held_snapshot.model.modelId == original.modelId
     assert held_snapshot.materialized_state.model_version == 0
     assert registry.original.modelId == original.modelId
+
+
+def test_v2_resolves_root_and_existing_sources_and_filters_source_itself(
+    real_model_manifest, accepted_qwen_factory
+) -> None:
+    run_id = UUID("00000000-0000-5000-8000-000000000001")
+    acting_creator = UUID("00000000-0000-5000-8000-000000000090")
+    owner = UUID("00000000-0000-5000-8000-000000000091")
+    source = CreatedBabel(
+        babelId=UUID("00000000-0000-5000-8000-000000000092"),
+        runId=run_id,
+        creatorId=owner,
+        sourceArticleKey="enwiki:92",
+        title="Existing source",
+        text="Existing source lead",
+        createdAtNs=1,
+    )
+    other = CreatedBabel(
+        babelId=UUID("00000000-0000-5000-8000-000000000093"),
+        runId=run_id,
+        creatorId=owner,
+        sourceArticleKey="enwiki:93",
+        title="Other source",
+        text="Other source lead",
+        createdAtNs=2,
+    )
+    encoder = accepted_qwen_factory()
+    vectors = encoder.encode([source.title + "\n\n" + source.text, other.title + "\n\n" + other.text])
+    records = [
+        VectorRecord(
+            babel=babel,
+            catalogContentHash="a" * 64,
+            embeddingSpaceId=real_model_manifest.embeddingSpace.embeddingSpaceId,
+            servingModelId=real_model_manifest.modelId,
+            materializedModelVersion=0,
+            vector=tuple(float(value) for value in vector),
+        )
+        for babel, vector in zip([source, other], vectors, strict=True)
+    ]
+    registry = ModelRegistry()
+    registry.register_real_original(real_model_manifest)
+    materialized = MaterializedServingState(
+        run_id=run_id,
+        model_id=real_model_manifest.modelId,
+        model_version=0,
+        embedding_space_id=real_model_manifest.embeddingSpace.embeddingSpaceId,
+        pgvector_snapshot_sha256="b" * 64,
+        backend_snapshot_sha256="b" * 64,
+    )
+    state = ServingState(
+        registry=registry,
+        selected_model_id=real_model_manifest.modelId,
+        materialized_state=materialized,
+        candidate_index=InMemoryCreatedBabelIndex(records),
+        vector_records=records,
+        qwen_encoder=encoder,
+        scale_run=True,
+    )
+    stored = {source.babelId: vectors[0], other.babelId: vectors[1]}
+    resolver = SourceVectorResolver(
+        encoder, load_active=lambda key: stored[key.babel_id], capacity=8
+    )
+    client = TestClient(create_app(state, source_vector_resolver=resolver))
+    base = {
+        "schemaVersion": 2,
+        "requestId": "00000000-0000-5000-8000-000000000094",
+        "runId": str(run_id),
+        "creatorId": str(acting_creator),
+        "sourceBabelId": str(source.babelId),
+        "sourceArticleKey": source.sourceArticleKey,
+        "traversalSessionId": "00000000-0000-5000-8000-000000000095",
+        "parentRequestId": "00000000-0000-5000-8000-000000000096",
+        "traversalDepth": 1,
+        "title": None,
+        "text": None,
+        "historyBabelIds": [],
+        "candidateCount": 2,
+    }
+
+    first = client.post("/api/v2/recommendations", json=base)
+    second = client.post(
+        "/api/v2/recommendations",
+        json={**base, "requestId": "00000000-0000-5000-8000-000000000097"},
+    )
+    root = client.post(
+        "/api/v2/recommendations",
+        json={
+            **base,
+            "requestId": "00000000-0000-5000-8000-000000000098",
+            "sourceBabelId": "00000000-0000-5000-8000-000000000099",
+            "sourceArticleKey": "enwiki:99",
+            "parentRequestId": None,
+            "traversalDepth": 0,
+            "title": "New root",
+            "text": "New root lead",
+        },
+    )
+    spoofed_existing = client.post(
+        "/api/v2/recommendations",
+        json={**base, "sourceArticleKey": "enwiki:999"},
+    )
+    duplicate_root = client.post(
+        "/api/v2/recommendations",
+        json={
+            **base,
+            "requestId": "00000000-0000-5000-8000-000000000100",
+            "creatorId": str(owner),
+            "sourceBabelId": "00000000-0000-5000-8000-000000000100",
+            "parentRequestId": None,
+            "traversalDepth": 0,
+            "title": "Duplicate",
+            "text": "Duplicate source",
+        },
+    )
+
+    assert first.status_code == second.status_code == root.status_code == 200
+    first_response = RecommendationResponseV2.model_validate(first.json())
+    second_response = RecommendationResponseV2.model_validate(second.json())
+    root_response = RecommendationResponseV2.model_validate(root.json())
+    assert first_response.sourceVectorOrigin == "pgvector_load"
+    assert second_response.sourceVectorOrigin == "cache_hit"
+    assert root_response.sourceVectorOrigin == "qwen_encode"
+    assert source.babelId not in {row.babelId for row in first_response.candidates}
+    assert spoofed_existing.status_code == 422
+    assert duplicate_root.status_code == 409
+    assert resolver.telemetry().as_dict() == {
+        "qwen_encode": 1,
+        "cache_hit": 1,
+        "pgvector_load": 1,
+        "evictions": 0,
+    }

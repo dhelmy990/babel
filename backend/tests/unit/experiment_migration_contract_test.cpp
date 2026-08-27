@@ -41,3 +41,26 @@ TEST_CASE("online runtime migration gives pgvector and the worker durable state"
   CHECK(migration.find("finalized_at") != std::string::npos);
   CHECK(migration.find("INSERT INTO recommender_models") == std::string::npos);
 }
+
+TEST_CASE("scaled experiment migration persists schedules and directed canonical edges") {
+  const auto migration_path =
+      std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
+      "migrations/007_scaled_experiment.sql";
+  std::ifstream migration_file(migration_path);
+  REQUIRE(migration_file.good());
+
+  const std::string migration{std::istreambuf_iterator<char>{migration_file}, {}};
+  CHECK(migration.find("CREATE TABLE experiment_work_schedule") != std::string::npos);
+  CHECK(migration.find("CREATE TABLE experiment_edges") != std::string::npos);
+  CHECK(migration.find("feedback_occurred_at_ns bigint NOT NULL") != std::string::npos);
+  CHECK(migration.find("PRIMARY KEY (run_id, source_babel_id, target_babel_id)") !=
+        std::string::npos);
+  CHECK(migration.find("FOREIGN KEY (run_id, source_babel_id)") != std::string::npos);
+  CHECK(migration.find("FOREIGN KEY (run_id, target_babel_id)") != std::string::npos);
+  CHECK(migration.find("REFERENCES users") == std::string::npos);
+  CHECK(migration.find("NEW.concurrent_users IS DISTINCT FROM OLD.concurrent_users") !=
+        std::string::npos);
+  CHECK(migration.find("NEW.continuation_probability IS DISTINCT FROM OLD.continuation_probability") !=
+        std::string::npos);
+  CHECK(migration.find("experiment_work_schedule_immutable") != std::string::npos);
+}

@@ -223,7 +223,7 @@ Result<void> Application::verifySchemaReady() {
       });
     }
     if (transaction.exec(
-            "SELECT count(*) = 6 FROM schema_migrations "
+            "SELECT count(*) = 7 FROM schema_migrations "
             "WHERE version IN ('1', '2', '3', '4', '5', '6')")
             .one_field()
             .as<bool>() == false) {

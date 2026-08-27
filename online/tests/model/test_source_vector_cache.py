@@ -78,6 +78,25 @@ def test_existing_miss_loads_pgvector_and_lru_evicts_oldest() -> None:
     assert resolver.resolve_existing(key(BABEL_B)).origin == "pgvector_load"
     assert resolver.resolve_existing(key(BABEL_A)).origin == "pgvector_load"
     assert [item.babel_id for item in calls] == [BABEL_A, BABEL_B, BABEL_A]
+    assert resolver.telemetry().as_dict() == {
+        "qwen_encode": 0,
+        "cache_hit": 1,
+        "pgvector_load": 3,
+        "evictions": 2,
+    }
+    assert resolver.telemetry().existing_source_hit_ratio == 0.25
+
+
+def test_root_encodes_do_not_enter_existing_source_hit_ratio() -> None:
+    resolver = SourceVectorResolver(
+        FakeQwen(), load_active=lambda _key: raw(1), capacity=2
+    )
+    resolver.resolve_new_root(key(BABEL_A), title="A", lead_text="Lead")
+    resolver.resolve_new_root(key(BABEL_B), title="B", lead_text="Lead")
+
+    telemetry = resolver.telemetry()
+    assert telemetry.qwen_encode == 2
+    assert telemetry.existing_source_hit_ratio is None
 
 
 def test_cache_identity_includes_run_model_version_and_space() -> None:

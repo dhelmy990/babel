@@ -34,6 +34,27 @@ class ResolvedSourceVector:
     origin: Literal["qwen_encode", "cache_hit", "pgvector_load"]
 
 
+@dataclass(frozen=True, slots=True)
+class SourceVectorTelemetry:
+    qwen_encode: int
+    cache_hit: int
+    pgvector_load: int
+    evictions: int
+
+    @property
+    def existing_source_hit_ratio(self) -> float | None:
+        total = self.cache_hit + self.pgvector_load
+        return self.cache_hit / total if total else None
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "qwen_encode": self.qwen_encode,
+            "cache_hit": self.cache_hit,
+            "pgvector_load": self.pgvector_load,
+            "evictions": self.evictions,
+        }
+
+
 LoadActiveVector = Callable[[VectorCacheKey], NDArray[np.float32]]
 
 
@@ -64,6 +85,12 @@ class SourceVectorResolver:
         self._capacity = capacity
         self._cache: OrderedDict[VectorCacheKey, NDArray[np.float32]] = OrderedDict()
         self._cache_lock = RLock()
+        self._telemetry = {
+            "qwen_encode": 0,
+            "cache_hit": 0,
+            "pgvector_load": 0,
+            "evictions": 0,
+        }
 
     def _remember(
         self, key: VectorCacheKey, vector: NDArray[np.float32]
@@ -76,6 +103,7 @@ class SourceVectorResolver:
             self._cache.move_to_end(key)
             while len(self._cache) > self._capacity:
                 self._cache.popitem(last=False)
+                self._telemetry["evictions"] += 1
         return exact
 
     def resolve_new_root(
@@ -90,6 +118,8 @@ class SourceVectorResolver:
         ):
             raise ValueError("Qwen root encoding must contain finite float32 bytes")
         vector = self._remember(key, encoded[0])
+        with self._cache_lock:
+            self._telemetry["qwen_encode"] += 1
         return ResolvedSourceVector(vector=vector, origin="qwen_encode")
 
     def resolve_existing(self, key: VectorCacheKey) -> ResolvedSourceVector:
@@ -97,15 +127,23 @@ class SourceVectorResolver:
             cached = self._cache.get(key)
             if cached is not None:
                 self._cache.move_to_end(key)
+                self._telemetry["cache_hit"] += 1
                 return ResolvedSourceVector(vector=cached, origin="cache_hit")
         # Keep database I/O outside the cache lock; only mutation is atomic.
         vector = self._remember(key, self._load_active(key))
+        with self._cache_lock:
+            self._telemetry["pgvector_load"] += 1
         return ResolvedSourceVector(vector=vector, origin="pgvector_load")
+
+    def telemetry(self) -> SourceVectorTelemetry:
+        with self._cache_lock:
+            return SourceVectorTelemetry(**self._telemetry)
 
 
 __all__ = [
     "LoadActiveVector",
     "ResolvedSourceVector",
     "SourceVectorResolver",
+    "SourceVectorTelemetry",
     "VectorCacheKey",
 ]

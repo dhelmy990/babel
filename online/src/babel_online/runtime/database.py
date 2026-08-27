@@ -11,7 +11,14 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from ..contracts import ActivityLogV1, ModelManifestV1, ModelManifestV2, RunConfigV1
+from ..contracts import (
+    ActivityLogV1,
+    FeedbackEventV2,
+    ModelManifestV1,
+    ModelManifestV2,
+    RunConfigV1,
+    RunConfigV2,
+)
 from ..model.artifact import LoadedArtifact, load_artifact
 from ..model.population import (
     PopulationActivationEvidence,
@@ -21,6 +28,7 @@ from ..model.population import (
 )
 from ..model.source_vector_cache import VectorCacheKey
 from ..observable import CreatedBabel, VectorRecord, reject_hidden_fields
+from ..simulation.scheduler import ScheduledSession
 
 
 class ArtifactConfigurationError(ValueError):
@@ -65,7 +73,7 @@ def _connect_psycopg(dsn: str):
 
 @dataclass(frozen=True, slots=True)
 class PersistedRun:
-    config: RunConfigV1
+    config: RunConfigV1 | RunConfigV2
     status: str
     launch_sha256: str
 
@@ -94,7 +102,9 @@ class RuntimeDatabase:
         digest = canonical_json_sha256(document)
         if digest != row[1]:
             raise LaunchIntegrityError("persisted launch checksum does not match")
-        return PersistedRun(RunConfigV1.model_validate(document), str(row[2]), digest)
+        version = document.get("schemaVersion")
+        config_type = RunConfigV2 if version == 2 else RunConfigV1
+        return PersistedRun(config_type.model_validate(document), str(row[2]), digest)
 
     def bootstrap_model(self, artifact: LoadedArtifact) -> None:
         model = artifact.manifest
@@ -267,6 +277,10 @@ class RuntimeDatabase:
             "serving_synced",
             "active_model_id",
             "active_model_version",
+            "source_vector_qwen_encode_count",
+            "source_vector_cache_hit_count",
+            "source_vector_pgvector_load_count",
+            "source_vector_eviction_count",
         }
         if not values or not set(values) <= allowed:
             raise ValueError("unsupported experiment metric")
@@ -338,7 +352,9 @@ class RuntimeDatabase:
                 ),
             )
 
-    def finalize_babel(self, run_id: UUID, babel_id: UUID, request_id: UUID) -> None:
+    def finalize_babel(
+        self, run_id: UUID, babel_id: UUID, request_id: UUID | None
+    ) -> None:
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute(
                 "UPDATE experiment_babels SET request_id=%s, finalized_at=now() "
@@ -347,6 +363,119 @@ class RuntimeDatabase:
             )
             if cursor.rowcount != 1:
                 raise RuntimeError("staged Babel could not be finalized")
+
+    def persist_work_schedule(
+        self, rows: Sequence[ScheduledSession]
+    ) -> None:
+        """Freeze the topology-independent creation/walk work for one run."""
+        if not rows:
+            raise ValueError("work schedule cannot be empty")
+        run_id = rows[0].run_id
+        if any(row.run_id != run_id for row in rows):
+            raise ValueError("work schedule cannot cross runs")
+        if [row.schedule_index for row in rows] != list(range(len(rows))):
+            raise ValueError("work schedule indexes must be contiguous")
+        with self._connect() as connection, connection.cursor() as cursor:
+            for row in rows:
+                cursor.execute(
+                    """
+                    INSERT INTO experiment_work_schedule(
+                      run_id,schedule_index,creator_id,creator_event_number,period,
+                      source_article_key,root_babel_id,traversal_session_id,work_id,
+                      workload_sha256
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    (
+                        row.run_id,
+                        row.schedule_index,
+                        row.creator_id,
+                        row.creator_event_number,
+                        row.period,
+                        row.source_article_key,
+                        row.root_babel_id,
+                        row.traversal_session_id,
+                        row.work_id,
+                        row.workload_sha256,
+                    ),
+                )
+
+    def persist_feedback_edges(self, event: FeedbackEventV2) -> None:
+        """Upsert only includes, selecting canonical event-time provenance."""
+        if not isinstance(event, FeedbackEventV2):
+            raise TypeError("scaled experiment edges require FeedbackEventV2")
+        includes = [
+            action
+            for action in event.candidateActions
+            if action.action == "include" and action.babelId != event.sourceBabelId
+        ]
+        if not includes:
+            return
+        with self._connect() as connection, connection.cursor() as cursor:
+            for action in includes:
+                cursor.execute(
+                    """
+                    INSERT INTO experiment_edges(
+                      run_id,source_babel_id,target_babel_id,acting_creator_id,
+                      request_id,feedback_event_id,feedback_occurred_at_ns,
+                      traversal_session_id,traversal_depth
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (run_id,source_babel_id,target_babel_id) DO UPDATE SET
+                      acting_creator_id=EXCLUDED.acting_creator_id,
+                      request_id=EXCLUDED.request_id,
+                      feedback_event_id=EXCLUDED.feedback_event_id,
+                      feedback_occurred_at_ns=EXCLUDED.feedback_occurred_at_ns,
+                      traversal_session_id=EXCLUDED.traversal_session_id,
+                      traversal_depth=EXCLUDED.traversal_depth
+                    WHERE EXCLUDED.feedback_occurred_at_ns <
+                            experiment_edges.feedback_occurred_at_ns
+                       OR (EXCLUDED.feedback_occurred_at_ns =
+                            experiment_edges.feedback_occurred_at_ns
+                           AND EXCLUDED.feedback_event_id <
+                            experiment_edges.feedback_event_id)
+                    """,
+                    (
+                        event.runId,
+                        event.sourceBabelId,
+                        action.babelId,
+                        event.creatorId,
+                        event.requestId,
+                        event.eventId,
+                        event.occurredAtNs,
+                        event.traversalSessionId,
+                        event.traversalDepth + 1,
+                    ),
+                )
+
+    def canonical_edges(self, run_id: UUID):
+        from ..feedback.export import CanonicalExperimentEdge
+
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT source_babel_id,target_babel_id,acting_creator_id,
+                       request_id,feedback_event_id,feedback_occurred_at_ns,
+                       traversal_session_id,traversal_depth
+                FROM experiment_edges
+                WHERE run_id=%s
+                ORDER BY source_babel_id,target_babel_id
+                """,
+                (run_id,),
+            )
+            rows = cursor.fetchall()
+        return tuple(
+            CanonicalExperimentEdge(
+                run_id=run_id,
+                source_babel_id=row[0],
+                target_babel_id=row[1],
+                acting_creator_id=row[2],
+                request_id=row[3],
+                feedback_event_id=row[4],
+                feedback_occurred_at_ns=int(row[5]),
+                traversal_session_id=row[6],
+                traversal_depth=int(row[7]),
+            )
+            for row in rows
+        )
 
     def insert_vectors(self, records: Sequence[VectorRecord]) -> None:
         if not records:
@@ -778,22 +907,17 @@ class RuntimeDatabase:
         )
 
     def load_active_source_vector(self, key: VectorCacheKey):
-        """Load one exact active pgvector row without normalization or conversion."""
+        """Load the exact immutable snapshot key without following a moving pointer."""
         import numpy as np
 
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT eb.embedding::text
-                FROM run_embedding_states AS rs
-                JOIN babel_embeddings AS eb
-                  ON eb.run_id=rs.run_id
-                 AND eb.serving_model_id=rs.active_model_id
-                 AND eb.materialized_model_version=rs.active_model_version
-                 AND eb.embedding_space_id=rs.embedding_space_id
-                WHERE rs.run_id=%s AND eb.babel_id=%s
-                  AND rs.active_model_id=%s AND rs.active_model_version=%s
-                  AND rs.embedding_space_id=%s
+                SELECT embedding::text
+                FROM babel_embeddings
+                WHERE run_id=%s AND babel_id=%s
+                  AND serving_model_id=%s AND materialized_model_version=%s
+                  AND embedding_space_id=%s
                 """,
                 (
                     key.run_id,

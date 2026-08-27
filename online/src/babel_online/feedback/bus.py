@@ -73,13 +73,20 @@ class FeedbackConsumer(Protocol):
 
 def validate_feedback_event(event: Any) -> Any:
     """Validate through Lane A's production contract without duplicating it."""
-    from babel_online.contracts import FeedbackEventV1
+    from babel_online.contracts import FeedbackEventV1, FeedbackEventV2
 
-    if isinstance(event, FeedbackEventV1):
+    if isinstance(event, (FeedbackEventV1, FeedbackEventV2)):
         return event
     if hasattr(event, "model_dump"):
         event = event.model_dump(mode="json")
-    return FeedbackEventV1.model_validate(event)
+    if not isinstance(event, Mapping):
+        raise ValueError("feedback event must be an object")
+    version = event.get("schemaVersion")
+    if version == 1:
+        return FeedbackEventV1.model_validate(event)
+    if version == 2:
+        return FeedbackEventV2.model_validate(event)
+    raise ValueError("feedback event schemaVersion must be 1 or 2")
 
 
 class InMemoryFeedbackBus:

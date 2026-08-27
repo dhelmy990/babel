@@ -117,6 +117,30 @@ class RunConfigV1(FrozenContract):
         return self
 
 
+class RunConfigV2(RunConfigV1):
+    """Scaled-run settings; V1 remains the frozen smoke/demo contract."""
+
+    schemaVersion: Literal[2]
+    sourceArticlesPerMonth: int = Field(default=5_000, ge=1, le=1_000_000)
+    targetCreatedBabels: int = Field(ge=1, le=1_000_000)
+    concurrentUsers: int = Field(default=50, ge=1, le=10_000)
+    recommendationStartProbability: float = Field(default=0.4, ge=0.0, le=1.0)
+    continuationProbability: float = Field(default=0.4, ge=0.0, le=1.0)
+    maximumTraversalDepth: Literal[2] = 2
+    maximumRequestsPerTraversal: int = Field(default=10, ge=1, le=10)
+    interleaveCreationAndRecommendations: bool = True
+
+    @model_validator(mode="after")
+    def concurrency_is_bounded_by_creators(self) -> "RunConfigV2":
+        if self.concurrentUsers > self.creatorCount:
+            raise ValueError("concurrentUsers cannot exceed creatorCount")
+        if self.targetCreatedBabels != sum(self.perMonthEventBudget.values()):
+            raise ValueError(
+                "targetCreatedBabels must equal the scheduled per-month event total"
+            )
+        return self
+
+
 class RecommendationRequestV1(FrozenContract):
     schemaVersion: Literal[1]
     requestId: UUID
@@ -128,6 +152,38 @@ class RecommendationRequestV1(FrozenContract):
     text: str = Field(min_length=1)
     historyBabelIds: list[UUID]
     candidateCount: int = Field(gt=0, le=100)
+
+
+class RecommendationRequestV2(FrozenContract):
+    schemaVersion: Literal[2]
+    requestId: UUID
+    runId: UUID
+    creatorId: UUID
+    sourceBabelId: UUID
+    sourceArticleKey: str = Field(pattern=ARTICLE_KEY_PATTERN)
+    traversalSessionId: UUID
+    parentRequestId: UUID | None
+    traversalDepth: Literal[0, 1]
+    title: str | None = None
+    text: str | None = None
+    historyBabelIds: list[UUID]
+    candidateCount: int = Field(gt=0, le=100)
+
+    @model_validator(mode="after")
+    def root_and_existing_source_fields_are_unambiguous(
+        self,
+    ) -> "RecommendationRequestV2":
+        if self.traversalDepth == 0:
+            if self.parentRequestId is not None:
+                raise ValueError("root request cannot have a parent request")
+            if not self.title or not self.text:
+                raise ValueError("root request must carry observable title and text")
+        else:
+            if self.parentRequestId is None:
+                raise ValueError("depth-one request must identify its parent request")
+            if self.title is not None or self.text is not None:
+                raise ValueError("existing-source request loads persisted observable content")
+        return self
 
 
 class RecommendationCandidateV1(FrozenContract):
@@ -196,6 +252,11 @@ class RecommendationResponseV1(FrozenContract):
         return value
 
 
+class RecommendationResponseV2(RecommendationResponseV1):
+    schemaVersion: Literal[2]
+    sourceVectorOrigin: Literal["qwen_encode", "cache_hit", "pgvector_load"]
+
+
 class FeedbackEventV1(FrozenContract):
     schemaVersion: Literal[1]
     eventId: UUID
@@ -210,6 +271,31 @@ class FeedbackEventV1(FrozenContract):
     retrievalBackend: RetrievalBackend
     candidateActions: list[CandidateActionV1]
     occurredAtNs: int = Field(ge=0)
+
+
+class FeedbackEventV2(FrozenContract):
+    schemaVersion: Literal[2]
+    eventId: UUID
+    requestId: UUID
+    runId: UUID
+    creatorId: UUID
+    sourceBabelId: UUID
+    sourceArticleKey: str = Field(pattern=ARTICLE_KEY_PATTERN)
+    traversalSessionId: UUID
+    parentRequestId: UUID | None
+    traversalDepth: Literal[0, 1]
+    modelId: UUID
+    modelVersion: int = Field(ge=0)
+    embeddingSpaceId: UUID
+    retrievalBackend: RetrievalBackend
+    candidateActions: list[CandidateActionV1]
+    occurredAtNs: int = Field(ge=0, le=9_223_372_036_854_775_807)
+
+    @model_validator(mode="after")
+    def parent_matches_depth(self) -> "FeedbackEventV2":
+        if (self.traversalDepth == 0) != (self.parentRequestId is None):
+            raise ValueError("feedback parentRequestId must match traversalDepth")
+        return self
 
 
 class LifecycleActivityV1(FrozenContract):
@@ -396,6 +482,10 @@ _CONTRACT_MODELS: dict[str, type[FrozenContract]] = {
     "model-manifest-v1": ModelManifestV1,
     "embedding-space-v1": EmbeddingSpaceV1,
     "hnsw-snapshot-v1": HnswSnapshotV1,
+    "experiment-run-v2": RunConfigV2,
+    "recommendation-request-v2": RecommendationRequestV2,
+    "recommendation-response-v2": RecommendationResponseV2,
+    "feedback-event-v2": FeedbackEventV2,
 }
 
 
@@ -497,6 +587,7 @@ __all__ = [
     "EmbeddingSpaceV1",
     "DistilledServingArtifactV1",
     "FeedbackEventV1",
+    "FeedbackEventV2",
     "FeedbackActivityV1",
     "HnswSnapshotV1",
     "ModelManifestV1",
@@ -506,8 +597,11 @@ __all__ = [
     "RecommendationActivityV1",
     "RecommendationCandidateV1",
     "RecommendationRequestV1",
+    "RecommendationRequestV2",
     "RecommendationResponseV1",
+    "RecommendationResponseV2",
     "RunConfigV1",
+    "RunConfigV2",
     "SynchronizationActivityV1",
     "TrainingActivityV1",
     "validate_contract",

@@ -20,7 +20,13 @@ class RecommendationClient:
         self.timeout_seconds = timeout_seconds
 
     def recommend(self, request: Any) -> Any:
-        from babel_online.contracts import RecommendationResponseV1
+        from babel_online.contracts import (
+            RecommendationRequestV2,
+            RecommendationResponseV1,
+            RecommendationResponseV2,
+        )
+
+        is_v2 = isinstance(request, RecommendationRequestV2)
 
         client = self._client
         if client is None:
@@ -29,12 +35,13 @@ class RecommendationClient:
             client = httpx.Client()
             self._client = client
         response = client.post(
-            f"{self.endpoint}/api/v1/recommendations",
+            f"{self.endpoint}/api/v{2 if is_v2 else 1}/recommendations",
             json=request.model_dump(mode="json"),
             timeout=self.timeout_seconds,
         )
         response.raise_for_status()
-        return RecommendationResponseV1.model_validate(response.json())
+        response_type = RecommendationResponseV2 if is_v2 else RecommendationResponseV1
+        return response_type.model_validate(response.json())
 
     def close(self) -> None:
         if self._client is not None and hasattr(self._client, "close"):

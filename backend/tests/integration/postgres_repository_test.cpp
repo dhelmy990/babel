@@ -961,7 +961,7 @@ TEST_CASE_METHOD(PostgresFixture, "migrations are idempotent and track every ver
                  "[postgres_repository]") {
   REQUIRE(migration_runner_.run().has_value());
   REQUIRE(migration_runner_.run().has_value());
-  REQUIRE(countRows("schema_migrations") == 6);
+  REQUIRE(countRows("schema_migrations") == 7);
 }
 
 TEST_CASE_METHOD(PostgresFixture, "default migration path resolves outside the source tree",
@@ -972,7 +972,7 @@ TEST_CASE_METHOD(PostgresFixture, "default migration path resolves outside the s
   const auto result = defaults.run();
   INFO((result ? "migration succeeded" : result.error().message));
   REQUIRE(result.has_value());
-  REQUIRE(countRows("schema_migrations") == 6);
+  REQUIRE(countRows("schema_migrations") == 7);
 }
 
 TEST_CASE_METHOD(PostgresFixture, "migration discovery rejects duplicate numeric versions",

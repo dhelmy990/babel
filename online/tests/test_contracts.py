@@ -15,13 +15,17 @@ from babel_online.contracts import (
     CandidateActionV1,
     EmbeddingSpaceV1,
     FeedbackEventV1,
+    FeedbackEventV2,
     HnswSnapshotV1,
     ModelManifestV1,
     RecommendationActivityV1,
     RecommendationCandidateV1,
     RecommendationRequestV1,
+    RecommendationRequestV2,
     RecommendationResponseV1,
+    RecommendationResponseV2,
     RunConfigV1,
+    RunConfigV2,
     validate_contract,
     contract_schema_documents,
     canonical_pgvector_snapshot_sha256,
@@ -140,7 +144,7 @@ def test_run_defaults_and_request_contract_are_closed_and_frozen() -> None:
         dimension=100,
         distance="cosine",
         distilledEncoderArtifact="hf://model/original@abc",
-        datasetRevision="e1acc648fcace8820dd5ee70bae9216ea4334555",
+        datasetRevision="0d1ab2c7f0e2295682288fcf10077d2d776bf559",
         compatibilityVersion="babel-online-v1",
     )
     assert space.dimension == 100
@@ -180,6 +184,16 @@ def test_feedback_and_response_expose_only_observable_closed_fields() -> None:
         "queue", "encode", "context", "ann", "filtering", "serialization",
         "serverTotal",
     }
+    with pytest.raises(ValidationError):
+        RecommendationResponseV1.model_validate(
+            {
+                **response.model_dump(mode="json"),
+                "candidates": [
+                    candidate.model_dump(mode="json"),
+                    {**candidate.model_dump(mode="json"), "rank": 2},
+                ],
+            }
+        )
 
     feedback = FeedbackEventV1(
         schemaVersion=1,
@@ -296,6 +310,10 @@ def test_checked_in_json_schemas_match_typed_contracts() -> None:
         "model-manifest-v1",
         "embedding-space-v1",
         "hnsw-snapshot-v1",
+        "experiment-run-v2",
+        "recommendation-request-v2",
+        "recommendation-response-v2",
+        "feedback-event-v2",
     }
     for name, schema in schemas.items():
         checked_in = json.loads(
@@ -303,6 +321,120 @@ def test_checked_in_json_schemas_match_typed_contracts() -> None:
         )
         assert checked_in == schema
         assert checked_in["additionalProperties"] is False
+
+
+def valid_request_v2(*, depth: int = 0) -> dict[str, object]:
+    return {
+        "schemaVersion": 2,
+        "requestId": "00000000-0000-5000-8000-000000000011",
+        "runId": str(RUN_ID),
+        "creatorId": "00000000-0000-5000-8000-000000000020",
+        "sourceBabelId": "00000000-0000-5000-8000-000000000030",
+        "sourceArticleKey": "enwiki:593",
+        "traversalSessionId": "00000000-0000-5000-8000-000000000031",
+        "parentRequestId": None if depth == 0 else "00000000-0000-5000-8000-000000000010",
+        "traversalDepth": depth,
+        "title": "Animation notes" if depth == 0 else None,
+        "text": "A short observable note about animation." if depth == 0 else None,
+        "historyBabelIds": [],
+        "candidateCount": 3,
+    }
+
+
+def test_scaled_v2_contracts_close_walk_identity_and_preserve_v1() -> None:
+    run = RunConfigV2(
+        schemaVersion=2,
+        runId=RUN_ID,
+        datasetRepo="dhelmy990/babel-wikipedia-experiment",
+        datasetConfig="crosswalk_2026_06_07",
+        datasetRevision="0d1ab2c7f0e2295682288fcf10077d2d776bf559",
+        startingModelId=MODEL_ID,
+        creatorCount=50,
+        environmentSequence=["2026-06", "2026-07"],
+        perMonthEventBudget={"2026-06": 5_000, "2026-07": 5_000},
+        runSeed=7,
+        sourceArticlesPerMonth=5_000,
+        targetCreatedBabels=10_000,
+        concurrentUsers=50,
+    )
+    assert run.recommendationStartProbability == 0.4
+    assert run.continuationProbability == 0.4
+    assert run.maximumTraversalDepth == 2
+    assert run.maximumRequestsPerTraversal == 10
+    assert run.interleaveCreationAndRecommendations is True
+    disabled_interleave = RunConfigV2.model_validate(
+        {**run.model_dump(mode="json"), "interleaveCreationAndRecommendations": False}
+    )
+    assert disabled_interleave.interleaveCreationAndRecommendations is False
+    with pytest.raises(ValidationError):
+        RunConfigV2.model_validate(
+            {**run.model_dump(mode="json"), "targetCreatedBabels": 9_999}
+        )
+
+    root = RecommendationRequestV2.model_validate(valid_request_v2(depth=0))
+    existing = RecommendationRequestV2.model_validate(valid_request_v2(depth=1))
+    assert root.sourceBabelId == existing.sourceBabelId
+    with pytest.raises(ValidationError):
+        RecommendationRequestV2.model_validate(
+            {**valid_request_v2(depth=1), "parentRequestId": None}
+        )
+    with pytest.raises(ValidationError):
+        RecommendationRequestV2.model_validate(
+            {**valid_request_v2(depth=0), "hiddenGraphScore": 1.0}
+        )
+
+    candidate = RecommendationCandidateV1(
+        babelId="00000000-0000-5000-8000-000000000040",
+        creatorId="00000000-0000-5000-8000-000000000041",
+        sourceArticleKey="enwiki:594",
+        rank=1,
+        modelScore=0.75,
+    )
+    response = RecommendationResponseV2(
+        schemaVersion=2,
+        requestId=root.requestId,
+        runId=RUN_ID,
+        modelId=MODEL_ID,
+        modelVersion=0,
+        retrievalBackend="pgvector",
+        embeddingSpaceId="00000000-0000-5000-8000-000000000003",
+        pgvectorSnapshotSha256="a" * 64,
+        backendSnapshotSha256="a" * 64,
+        queryVectorSha256="b" * 64,
+        sourceVectorOrigin="qwen_encode",
+        candidates=[candidate],
+        timingsNs={
+            "queue": 1, "encode": 2, "context": 3, "ann": 4,
+            "filtering": 5, "serialization": 6, "serverTotal": 21,
+        },
+    )
+    feedback = FeedbackEventV2(
+        schemaVersion=2,
+        eventId="00000000-0000-5000-8000-000000000050",
+        requestId=root.requestId,
+        runId=RUN_ID,
+        creatorId=root.creatorId,
+        sourceBabelId=root.sourceBabelId,
+        sourceArticleKey=root.sourceArticleKey,
+        traversalSessionId=root.traversalSessionId,
+        parentRequestId=root.parentRequestId,
+        traversalDepth=root.traversalDepth,
+        modelId=response.modelId,
+        modelVersion=response.modelVersion,
+        embeddingSpaceId=response.embeddingSpaceId,
+        retrievalBackend=response.retrievalBackend,
+        candidateActions=[CandidateActionV1(
+            babelId=candidate.babelId,
+            sourceArticleKey=candidate.sourceArticleKey,
+            rank=1,
+            modelScore=0.75,
+            action="include",
+        )],
+        occurredAtNs=1_725_000_000_000_000_123,
+    )
+    assert response.sourceVectorOrigin == "qwen_encode"
+    assert feedback.occurredAtNs == 1_725_000_000_000_000_123
+    assert RecommendationRequestV1.model_validate(valid_request()).model_dump(mode="json") == valid_request()
 
 
 def test_vector_and_pgvector_snapshot_checksums_are_canonical() -> None:

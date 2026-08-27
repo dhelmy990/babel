@@ -258,7 +258,12 @@ class SimulationEngine:
 
 def reconstruct_accepted_edges(events: list[Any]) -> tuple[tuple[UUID, UUID], ...]:
     return tuple(
-        (event.newBabelId, action.babelId)
+        (
+            event.sourceBabelId
+            if getattr(event, "schemaVersion", 1) == 2
+            else event.newBabelId,
+            action.babelId,
+        )
         for event in events
         for action in event.candidateActions
         if action.action == "include"

@@ -28,6 +28,8 @@ class ServingSnapshot:
     candidate_index: CandidateIndex
     item_tower: ItemTower | QwenItemTower
     vectors_by_babel_id: Mapping[UUID, NDArray[np.float32]]
+    source_keys_by_babel_id: Mapping[UUID, str]
+    owners_by_babel_id: Mapping[UUID, UUID]
     creator_sources: frozenset[tuple[UUID, UUID, str]]
 
 
@@ -109,6 +111,14 @@ class ServingState:
             record.babel.babelId: np.asarray(record.vector, dtype="<f4")
             for record in vector_records
         }
+        source_keys = {
+            record.babel.babelId: record.babel.sourceArticleKey
+            for record in vector_records
+        }
+        owners = {
+            record.babel.babelId: record.babel.creatorId
+            for record in vector_records
+        }
         sources = frozenset(
             (
                 record.babel.runId,
@@ -124,6 +134,8 @@ class ServingState:
             candidate_index=candidate_index,
             item_tower=item_tower,
             vectors_by_babel_id=MappingProxyType(vectors),
+            source_keys_by_babel_id=MappingProxyType(source_keys),
+            owners_by_babel_id=MappingProxyType(owners),
             creator_sources=sources,
         )
 

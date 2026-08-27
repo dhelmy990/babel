@@ -17,12 +17,14 @@ from babel_online.runtime.dataset_bundle import (
     DEMO_DATASET_REVISION,
 )
 from babel_online.config import default_run_config
-from babel_online.contracts import FeedbackEventV1
+from babel_online.contracts import FeedbackEventV1, FeedbackEventV2
 from babel_online.contracts import ModelManifestV1
 from babel_online.model.candidate_index import MaterializedServingState
 from babel_online.model.item_tower import QwenItemTower
 from babel_online.model.pgvector_index import PgvectorCandidateIndex
 from babel_online.training.consumer import SyncTrainingState
+from babel_online.simulation.scheduler import ScheduledWork, deterministic_schedule
+from babel_online.simulation.walk import WalkNode
 import numpy as np
 import threading
 
@@ -450,3 +452,266 @@ def test_start_claims_run_before_return_so_immediate_stop_finishes_gracefully() 
     assert finished.wait(1.0)
     assert observed_stop == [True]
     assert "failed" not in database.transitions
+
+
+def test_v2_worker_freezes_period_source_root_and_creator_order_before_execution() -> None:
+    run_id = uuid4()
+    first_creator, second_creator = uuid4(), uuid4()
+    captured = []
+    runtime = object.__new__(FridayDemoRuntime)
+    runtime.config = SimpleNamespace(runId=run_id)
+    runtime.database = SimpleNamespace(
+        persist_work_schedule=lambda rows: captured.append(tuple(rows))
+    )
+    plan = [
+        ("2026-06", first_creator, {"article_key": "enwiki:1"}, uuid4()),
+        ("2026-06", second_creator, {"article_key": "enwiki:2"}, uuid4()),
+        ("2026-07", first_creator, {"article_key": "enwiki:3"}, uuid4()),
+    ]
+
+    schedule = runtime._persist_scaled_schedule(plan)
+
+    assert captured == [schedule]
+    assert [row.schedule_index for row in schedule] == [0, 1, 2]
+    assert [
+        row.creator_event_number for row in schedule if row.creator_id == first_creator
+    ] == [0, 1]
+    assert [row.period for row in schedule] == ["2026-06", "2026-06", "2026-07"]
+    assert [row.source_article_key for row in schedule] == [
+        "enwiki:1", "enwiki:2", "enwiki:3"
+    ]
+    assert [row.root_babel_id for row in schedule] == [row[3] for row in plan]
+
+
+def test_failed_v2_start_roll_finalizes_and_materializes_without_a_request() -> None:
+    run_id = uuid4()
+    creator_id = uuid4()
+    babel_id = uuid4()
+    scheduled = __import__(
+        "babel_online.simulation.scheduler", fromlist=["deterministic_schedule", "ScheduledWork"]
+    ).deterministic_schedule(
+        run_id,
+        [__import__(
+            "babel_online.simulation.scheduler", fromlist=["ScheduledWork"]
+        ).ScheduledWork(
+            creator_id=creator_id,
+            creator_event_number=0,
+            period="2026-06",
+            source_article_key="enwiki:1",
+            root_babel_id=babel_id,
+        )],
+    )[0]
+    finalized = []
+    materialized = []
+    runtime = object.__new__(FridayDemoRuntime)
+    runtime.config = SimpleNamespace(
+        runId=run_id,
+        recommendationStartProbability=0.0,
+        continuationProbability=0.4,
+        maximumTraversalDepth=2,
+        maximumRequestsPerTraversal=10,
+        runSeed=7,
+        recommendationK=10,
+    )
+    runtime.stop_event = threading.Event()
+    runtime._simulation_lock = threading.RLock()
+    runtime._created = []
+    runtime.database = SimpleNamespace(
+        stop_requested=lambda _run_id: False,
+        stage_babel=lambda **_values: None,
+        finalize_babel=lambda *values: finalized.append(values),
+        update_metrics=lambda *_args, **_values: None,
+    )
+    runtime.recommendation_endpoint = "http://127.0.0.1:8791"
+    runtime._materialize_scaled_root = lambda babel, article: materialized.append((babel, article))
+
+    runtime._execute_scaled_session(
+        scheduled,
+        {
+            "canonical_title": "Root",
+            "lead_text": "Lead",
+            "article_text": "Lead",
+            "content_hash": "a" * 64,
+        },
+        {"2026-06": set(), "2026-07": set()},
+    )
+
+    assert finalized == [(run_id, babel_id, None)]
+    assert materialized[0][0].babelId == babel_id
+
+
+def test_scaled_decision_draw_identity_includes_session_source_and_depth() -> None:
+    run_id = uuid4()
+    creator_id = uuid4()
+    first = deterministic_schedule(
+        run_id,
+        [ScheduledWork(
+            creator_id=creator_id,
+            creator_event_number=0,
+            period="2026-06",
+            source_article_key="enwiki:1",
+            root_babel_id=uuid4(),
+        )],
+    )[0]
+    second = first.__class__(
+        **{
+            field: getattr(first, field)
+            for field in first.__dataclass_fields__
+            if field != "traversal_session_id"
+        },
+        traversal_session_id=uuid4(),
+    )
+    runtime = object.__new__(FridayDemoRuntime)
+    runtime.config = SimpleNamespace(runSeed=7, runId=run_id)
+    candidate = SimpleNamespace(
+        babelId=uuid4(), sourceArticleKey="enwiki:2", rank=1
+    )
+    source = WalkNode(first.root_babel_id, first.source_article_key)
+
+    baseline = runtime._scaled_decision_draw("action", first, source, 0, candidate)
+
+    assert baseline != runtime._scaled_decision_draw(
+        "action", second, source, 0, candidate
+    )
+    assert baseline != runtime._scaled_decision_draw(
+        "action", first, WalkNode(uuid4(), "enwiki:3"), 0, candidate
+    )
+    assert baseline != runtime._scaled_decision_draw(
+        "action", first, source, 1, candidate
+    )
+
+
+def test_scaled_feedback_keeps_training_lag_loss_and_sync_path() -> None:
+    run_id = uuid4()
+    metrics = []
+    activities = []
+    synchronized = []
+    runtime = object.__new__(FridayDemoRuntime)
+    runtime.config = SimpleNamespace(runId=run_id, syncEverySteps=10)
+    runtime._simulation_lock = threading.RLock()
+    runtime._feedback_count = 0
+    runtime._kafka_offset = 0
+    runtime._scaled_started = __import__("time").monotonic() - 1
+    runtime._last_logged_training_step = 0
+    runtime._last_sync_version = 0
+    runtime.source_vector_resolver = SimpleNamespace(
+        telemetry=lambda: SimpleNamespace(
+            qwen_encode=1, cache_hit=2, pgvector_load=3, evictions=4
+        )
+    )
+    runtime.trainer = SimpleNamespace(
+        metrics={
+            "optimizerSteps": 10,
+            "processedEvents": 0,
+            "rollingRankLoss": 0.25,
+        },
+        last_step_time_ms=3.0,
+    )
+    runtime.database = SimpleNamespace(
+        update_metrics=lambda _run_id, **values: metrics.append(values),
+        append_activity=lambda activity: activities.append(activity),
+    )
+    runtime._persist_and_activate = lambda *, synchronize: synchronized.append(synchronize)
+
+    runtime._after_scaled_feedback(SimpleNamespace(offset=7))
+
+    assert metrics[0]["trainer_steps"] == 10
+    assert metrics[0]["rolling_rank_loss"] == 0.25
+    assert metrics[0]["kafka_lag"] == 1
+    assert metrics[0]["event_rate"] > 0
+    assert {row.event for row in activities} == {
+        "online_training_progress", "feedback_acknowledged"
+    }
+    assert synchronized == [True]
+
+
+def test_disabled_interleave_finishes_all_creation_work_before_any_walk() -> None:
+    run_id = uuid4()
+    creators = [uuid4(), uuid4()]
+    plan = [
+        ("2026-06", creator, {
+            "article_key": f"enwiki:{index + 1}",
+            "canonical_title": f"Root {index}",
+            "lead_text": "Lead",
+            "article_text": "Lead",
+            "content_hash": "a" * 64,
+        }, uuid4())
+        for index, creator in enumerate(creators)
+    ]
+    operations = []
+    runtime = object.__new__(FridayDemoRuntime)
+    runtime.config = SimpleNamespace(
+        runId=run_id,
+        concurrentUsers=2,
+        interleaveCreationAndRecommendations=False,
+    )
+    runtime.database = SimpleNamespace(
+        persist_work_schedule=lambda _rows: None,
+        stage_babel=lambda **values: operations.append(("stage", values["babel"].babelId)),
+        finalize_babel=lambda _run, babel, _request: operations.append(("finalize", babel)),
+    )
+    runtime._materialize_scaled_root = lambda babel, _article: operations.append(("materialize", babel.babelId))
+    runtime._execute_scaled_session = lambda row, _article, _hidden, **_kwargs: operations.append(("walk", row.root_babel_id))
+
+    runtime._simulate_scaled(plan, {"2026-06": set(), "2026-07": set()})
+
+    first_walk = next(index for index, row in enumerate(operations) if row[0] == "walk")
+    assert all(row[0] != "walk" for row in operations[:first_walk])
+    assert sum(row[0] == "materialize" for row in operations[:first_walk]) == 2
+
+
+def test_v2_activity_identifies_actual_walk_source_and_acting_creator() -> None:
+    run_id = uuid4()
+    acting_creator = uuid4()
+    source_owner = uuid4()
+    source_id = uuid4()
+    captured = []
+    runtime = object.__new__(FridayDemoRuntime)
+    runtime.config = SimpleNamespace(runId=run_id)
+    runtime.database = SimpleNamespace(
+        append_activity=lambda activity: captured.append(activity)
+    )
+    source = CreatedBabel(
+        babelId=source_id,
+        runId=run_id,
+        creatorId=source_owner,
+        sourceArticleKey="enwiki:1",
+        title="Accepted source",
+        text="Lead",
+        createdAtNs=1,
+    )
+    event = FeedbackEventV2(
+        schemaVersion=2,
+        eventId=uuid4(),
+        requestId=uuid4(),
+        runId=run_id,
+        creatorId=acting_creator,
+        sourceBabelId=source_id,
+        sourceArticleKey=source.sourceArticleKey,
+        traversalSessionId=uuid4(),
+        parentRequestId=uuid4(),
+        traversalDepth=1,
+        modelId=uuid4(),
+        modelVersion=0,
+        embeddingSpaceId=uuid4(),
+        retrievalBackend="pgvector",
+        candidateActions=[],
+        occurredAtNs=1,
+    )
+    response = SimpleNamespace(
+        timingsNs={
+            "queue": 0, "encode": 1, "context": 1, "ann": 1,
+            "filtering": 1, "serialization": 1, "serverTotal": 5,
+        },
+        candidates=[],
+        modelId=event.modelId,
+        modelVersion=0,
+    )
+
+    runtime._record_recommendation(source, response, event, 8)
+
+    activity = captured[0]
+    assert activity.details.creatorId == acting_creator
+    assert activity.details.newBabelId == source_id
+    assert activity.details.newBabelTitle == "Accepted source"
+    assert activity.metrics["traversalDepth"] == 1

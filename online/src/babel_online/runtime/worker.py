@@ -17,10 +17,13 @@ from ..contracts import (
     ActivityLogV1,
     CandidateActionV1,
     FeedbackEventV1,
+    FeedbackEventV2,
     ModelManifestV1,
     ModelManifestV2,
     RecommendationActivityV1,
     RecommendationRequestV1,
+    RecommendationRequestV2,
+    RunConfigV2,
     canonical_pgvector_snapshot_sha256,
 )
 from ..feedback import (
@@ -35,6 +38,7 @@ from ..model.item_tower import ItemTower
 from ..model.pgvector_index import PgvectorCandidateIndex
 from ..model.qwen_encoder import Qwen100Encoder, format_article_input
 from ..model.registry import ModelRegistry
+from ..model.source_vector_cache import SourceVectorResolver
 from ..observable import CreatedBabel, VectorRecord
 from ..serving import ServingState, create_app
 from ..simulation.client import RecommendationClient
@@ -43,6 +47,18 @@ from ..simulation.decisions import (
     combined_relevance,
     decide_candidate,
     deterministic_draw,
+)
+from ..simulation.scheduler import (
+    BoundedCreatorScheduler,
+    ScheduledSession,
+    ScheduledWork,
+    deterministic_schedule,
+)
+from ..simulation.walk import (
+    IncludedWalkTarget,
+    RecommendationWalk,
+    WalkExpansion,
+    WalkNode,
 )
 from ..training.checkpoint import CheckpointIdentity, load_latest_checkpoint
 from ..training.consumer import OnlineTrainer
@@ -205,6 +221,10 @@ class FridayDemoRuntime:
         self._serving_version = 0
         self._last_logged_training_step = 0
         self._serving_vectors: dict[UUID, np.ndarray] = {}
+        self._babel_by_id: dict[UUID, CreatedBabel] = {}
+        self._simulation_lock = threading.RLock()
+        self._feedback_count = 0
+        self._kafka_offset = 0
 
     def request_stop(self) -> None:
         self.stop_event.set()
@@ -270,6 +290,27 @@ class FridayDemoRuntime:
                 plan.append((period, creator, chosen, babel_id))
                 sequence += 1
         return plan
+
+    def _persist_scaled_schedule(
+        self, plan: list[tuple[str, UUID, dict[str, Any], UUID]]
+    ) -> tuple[ScheduledSession, ...]:
+        creator_events: dict[UUID, int] = {}
+        work = []
+        for period, creator_id, article, babel_id in plan:
+            event_number = creator_events.get(creator_id, 0)
+            creator_events[creator_id] = event_number + 1
+            work.append(
+                ScheduledWork(
+                    creator_id=creator_id,
+                    creator_event_number=event_number,
+                    period=period,
+                    source_article_key=article["article_key"],
+                    root_babel_id=babel_id,
+                )
+            )
+        schedule = deterministic_schedule(self.config.runId, work)
+        self.database.persist_work_schedule(schedule)
+        return schedule
 
     def _encode_plan_vectors(
         self,
@@ -467,7 +508,13 @@ class FridayDemoRuntime:
             vector_records=self._records,
         )
 
-    def _record_recommendation(self, babel: CreatedBabel, response: Any, event: FeedbackEventV1, client_ns: int) -> None:
+    def _record_recommendation(
+        self,
+        babel: CreatedBabel,
+        response: Any,
+        event: FeedbackEventV1 | FeedbackEventV2,
+        client_ns: int,
+    ) -> None:
         actions = {"include": [], "exclude": [], "ignore": []}
         for action in event.candidateActions:
             actions[action.action].append(action.babelId)
@@ -477,16 +524,28 @@ class FridayDemoRuntime:
                 self.config.runId,
                 component="serving",
                 event="recommendation_completed",
-                message=f'Creator {str(babel.creatorId)[:8]} created "{babel.title}".',
+                message=(
+                    f'Creator {str(event.creatorId)[:8]} requested recommendations '
+                    f'for "{babel.title}".'
+                ),
                 metrics={
                     **{f"{name}Ns": value for name, value in response.timingsNs.items()},
                     "clientTotalNs": client_ns,
                     "clientOverheadNs": max(0, client_ns - server_ns),
+                    **(
+                        {"traversalDepth": event.traversalDepth}
+                        if isinstance(event, FeedbackEventV2)
+                        else {}
+                    ),
                 },
                 details=RecommendationActivityV1(
                     kind="recommendation",
-                    creatorId=babel.creatorId,
-                    newBabelId=babel.babelId,
+                    creatorId=event.creatorId,
+                    newBabelId=(
+                        event.sourceBabelId
+                        if isinstance(event, FeedbackEventV2)
+                        else babel.babelId
+                    ),
                     newBabelTitle=babel.title,
                     candidateBabelIds=[row.babelId for row in response.candidates],
                     includeBabelIds=actions["include"],
@@ -497,6 +556,332 @@ class FridayDemoRuntime:
                     modelVersion=response.modelVersion,
                 ),
             )
+        )
+
+    def _scaled_decision_draw(
+        self,
+        kind: str,
+        scheduled: ScheduledSession,
+        source: WalkNode,
+        source_depth: int,
+        candidate: Any,
+    ) -> float:
+        return deterministic_draw(
+            self.config.runSeed,
+            kind,
+            self.config.runId,
+            scheduled.creator_id,
+            scheduled.traversal_session_id,
+            source.babel_id,
+            source_depth,
+            candidate.babelId,
+            candidate.sourceArticleKey,
+            candidate.rank,
+        )
+
+    def _after_scaled_feedback(self, record: Any) -> None:
+        """Preserve the online training/sync path under concurrent callbacks."""
+        with self._simulation_lock:
+            self._feedback_count += 1
+            self._kafka_offset = max(self._kafka_offset, record.offset + 1)
+            vector_telemetry = self.source_vector_resolver.telemetry()
+            trainer_metrics = self.trainer.metrics
+            current_version = int(trainer_metrics["optimizerSteps"])
+            lag = max(
+                0, self._feedback_count - int(trainer_metrics["processedEvents"])
+            )
+            self.database.update_metrics(
+                self.config.runId,
+                feedback_count=self._feedback_count,
+                event_rate=self._feedback_count
+                / max(time.monotonic() - self._scaled_started, 1e-6),
+                kafka_offset=self._kafka_offset,
+                kafka_lag=lag,
+                trainer_steps=current_version,
+                rolling_rank_loss=trainer_metrics["rollingRankLoss"],
+                source_vector_qwen_encode_count=vector_telemetry.qwen_encode,
+                source_vector_cache_hit_count=vector_telemetry.cache_hit,
+                source_vector_pgvector_load_count=vector_telemetry.pgvector_load,
+                source_vector_eviction_count=vector_telemetry.evictions,
+            )
+            if current_version > self._last_logged_training_step:
+                self._last_logged_training_step = current_version
+                self.database.append_activity(
+                    _activity(
+                        self.config.runId,
+                        component="training",
+                        event="online_training_progress",
+                        message=f"Online trainer reached step {current_version}.",
+                        metrics={
+                            "stepTimeMs": self.trainer.last_step_time_ms or 0.0
+                        },
+                        details={
+                            "kind": "training",
+                            "trainerStep": current_version,
+                            "rollingRankLoss": trainer_metrics["rollingRankLoss"],
+                        },
+                    )
+                )
+            self.database.append_activity(
+                _activity(
+                    self.config.runId,
+                    component="feedback",
+                    event="feedback_acknowledged",
+                    message=f"Feedback acknowledged at Kafka offset {record.offset}.",
+                    metrics={"kafkaLag": lag},
+                    details={
+                        "kind": "feedback",
+                        "kafkaOffset": record.offset,
+                        "kafkaLag": lag,
+                    },
+                )
+            )
+            if current_version >= self._last_sync_version + self.config.syncEverySteps:
+                self._persist_and_activate(synchronize=True)
+
+    def _materialize_scaled_root(
+        self, babel: CreatedBabel, article: Mapping[str, Any]
+    ) -> None:
+        """Make one finalized root visible with a consistent serving snapshot."""
+        with self._simulation_lock:
+            self._created.append(babel)
+            self._babel_by_id[babel.babelId] = babel
+            self._content_hashes[babel.babelId] = str(article["content_hash"])
+            self._histories.setdefault(babel.creatorId, []).append(babel.babelId)
+            self._serving_vectors[babel.babelId] = self._frozen_vectors[babel.babelId]
+            self._materialize_new_babel()
+
+    def _execute_scaled_session(
+        self,
+        scheduled: ScheduledSession,
+        article: Mapping[str, Any],
+        hidden: Mapping[str, set[tuple[str, str]]],
+        *,
+        precreated: bool = False,
+    ) -> None:
+        if self.stop_event.is_set() or self.database.stop_requested(self.config.runId):
+            return
+        text = str(article.get("lead_text") or article["article_text"])
+        babel = CreatedBabel(
+            babelId=scheduled.root_babel_id,
+            runId=self.config.runId,
+            creatorId=scheduled.creator_id,
+            sourceArticleKey=scheduled.source_article_key,
+            title=str(article["canonical_title"]),
+            text=text,
+            createdAtNs=time.time_ns(),
+        )
+        if not precreated:
+            self.database.stage_babel(
+                babel=babel,
+                content_hash=str(article["content_hash"]),
+                event_number=scheduled.schedule_index,
+            )
+        client = RecommendationClient(self.recommendation_endpoint)
+        request_events: dict[UUID, tuple[Any, FeedbackEventV2, int, WalkNode]] = {}
+
+        def recommend(
+            source: WalkNode,
+            session_id: UUID,
+            parent_request_id: UUID | None,
+            source_depth: int,
+        ) -> WalkExpansion:
+            request_id = uuid5(
+                self.config.runId,
+                f"request:v2:{session_id}:{source.babel_id}:{source_depth}",
+            )
+            event_id = uuid5(
+                self.config.runId,
+                f"feedback:v2:{session_id}:{source.babel_id}:{source_depth}",
+            )
+            request = RecommendationRequestV2(
+                schemaVersion=2,
+                requestId=request_id,
+                runId=self.config.runId,
+                creatorId=scheduled.creator_id,
+                sourceBabelId=source.babel_id,
+                sourceArticleKey=source.source_article_key,
+                traversalSessionId=session_id,
+                parentRequestId=parent_request_id,
+                traversalDepth=source_depth,
+                title=babel.title if source_depth == 0 else None,
+                text=babel.text if source_depth == 0 else None,
+                historyBabelIds=[
+                    value
+                    for value in self._histories.setdefault(
+                        scheduled.creator_id, []
+                    )
+                    if value != source.babel_id
+                ],
+                candidateCount=self.config.recommendationK,
+            )
+            client_started = time.perf_counter_ns()
+            response = client.recommend(request)
+            client_ns = time.perf_counter_ns() - client_started
+            if (
+                response.requestId != request_id
+                or response.runId != self.config.runId
+                or response.modelId != self.starting_model.modelId
+            ):
+                raise RuntimeError("scaled recommendation response identity differs")
+            actions = []
+            included = []
+            for candidate in response.candidates:
+                related = (
+                    0.95
+                    if (source.source_article_key, candidate.sourceArticleKey)
+                    in hidden[scheduled.period]
+                    else 0.55
+                )
+                preference = (
+                    0.7
+                    if self._scaled_decision_draw(
+                        "preference", scheduled, source, source_depth, candidate
+                    )
+                    < 0.5
+                    else 0.4
+                )
+                probabilities = action_probabilities(
+                    relevance=combined_relevance(
+                        relatedness_rank=related, preference_rank=preference
+                    ),
+                    epsilon=0.2,
+                    exclusion_propensity=0.25,
+                )
+                action = decide_candidate(
+                    probabilities,
+                    draw=self._scaled_decision_draw(
+                        "action", scheduled, source, source_depth, candidate
+                    ),
+                )
+                candidate_action = CandidateActionV1(
+                    babelId=candidate.babelId,
+                    sourceArticleKey=candidate.sourceArticleKey,
+                    rank=candidate.rank,
+                    modelScore=candidate.modelScore,
+                    action=action,
+                )
+                actions.append(candidate_action)
+                if action == "include":
+                    included.append(
+                        IncludedWalkTarget(
+                            WalkNode(
+                                babel_id=candidate.babelId,
+                                source_article_key=candidate.sourceArticleKey,
+                            ),
+                            candidate.rank,
+                        )
+                    )
+            event = FeedbackEventV2(
+                schemaVersion=2,
+                eventId=event_id,
+                requestId=request_id,
+                runId=self.config.runId,
+                creatorId=scheduled.creator_id,
+                sourceBabelId=source.babel_id,
+                sourceArticleKey=source.source_article_key,
+                traversalSessionId=session_id,
+                parentRequestId=parent_request_id,
+                traversalDepth=source_depth,
+                modelId=response.modelId,
+                modelVersion=response.modelVersion,
+                embeddingSpaceId=response.embeddingSpaceId,
+                retrievalBackend=response.retrievalBackend,
+                candidateActions=actions,
+                occurredAtNs=time.time_ns(),
+            )
+            record = self.producer.publish(
+                key=str(scheduled.creator_id), event=event
+            )
+            self.database.persist_feedback_edges(event)
+            request_events[request_id] = (response, event, client_ns, source)
+            self._after_scaled_feedback(record)
+            return WalkExpansion(request_id=request_id, included=tuple(included))
+
+        try:
+            walk = RecommendationWalk(
+                start_probability=self.config.recommendationStartProbability,
+                continuation_probability=self.config.continuationProbability,
+                max_depth=self.config.maximumTraversalDepth,
+                max_requests=self.config.maximumRequestsPerTraversal,
+                draw=lambda *identity: deterministic_draw(
+                    self.config.runSeed, *identity
+                ),
+            )
+            trace = walk.run(
+                run_id=self.config.runId,
+                creator_id=scheduled.creator_id,
+                session_id=scheduled.traversal_session_id,
+                root=WalkNode(
+                    babel_id=babel.babelId,
+                    source_article_key=babel.sourceArticleKey,
+                ),
+                recommend=recommend,
+            )
+            root_request_id = trace.requests[0].request_id if trace.requests else None
+            if not precreated:
+                self.database.finalize_babel(
+                    self.config.runId, babel.babelId, root_request_id
+                )
+                self._materialize_scaled_root(babel, article)
+            for request in trace.requests:
+                response, event, client_ns, source = request_events[request.request_id]
+                with self._simulation_lock:
+                    source_babel = self._babel_by_id.get(source.babel_id, babel)
+                self._record_recommendation(
+                    source_babel, response, event, client_ns
+                )
+            with self._simulation_lock:
+                self.database.update_metrics(
+                    self.config.runId,
+                    created_babel_count=len(self._created),
+                )
+        finally:
+            client.close()
+
+    def _simulate_scaled(
+        self,
+        plan: list[tuple[str, UUID, dict[str, Any], UUID]],
+        hidden: Mapping[str, set[tuple[str, str]]],
+    ) -> None:
+        schedule = self._persist_scaled_schedule(plan)
+        articles = {
+            row[3]: row[2]
+            for row in plan
+        }
+        self._scaled_started = time.monotonic()
+        if not self.config.interleaveCreationAndRecommendations:
+            for row in schedule:
+                article = articles[row.root_babel_id]
+                text = str(article.get("lead_text") or article["article_text"])
+                babel = CreatedBabel(
+                    babelId=row.root_babel_id,
+                    runId=self.config.runId,
+                    creatorId=row.creator_id,
+                    sourceArticleKey=row.source_article_key,
+                    title=str(article["canonical_title"]),
+                    text=text,
+                    createdAtNs=time.time_ns(),
+                )
+                self.database.stage_babel(
+                    babel=babel,
+                    content_hash=str(article["content_hash"]),
+                    event_number=row.schedule_index,
+                )
+                self.database.finalize_babel(
+                    self.config.runId, babel.babelId, None
+                )
+                self._materialize_scaled_root(babel, article)
+        BoundedCreatorScheduler(
+            concurrent_users=self.config.concurrentUsers
+        ).run(
+            schedule,
+            lambda row: self._execute_scaled_session(
+                row,
+                articles[row.root_babel_id],
+                hidden,
+                precreated=not self.config.interleaveCreationAndRecommendations,
+            ),
         )
 
     def _simulate(self, plan: list[tuple[str, UUID, dict[str, Any], UUID]], hidden: dict[str, set[tuple[str, str]]]) -> None:
@@ -674,7 +1059,16 @@ class FridayDemoRuntime:
             for partition, end in sorted(end_offsets.items())
         ]
         self.database.transition(self.config.runId, "exporting_interactions")
-        export_offset_ranges(self.scoped_consumer, ranges, Path(self.config.artifactRoot) / str(self.config.runId) / "feedback")
+        export_offset_ranges(
+            self.scoped_consumer,
+            ranges,
+            Path(self.config.artifactRoot) / str(self.config.runId) / "feedback",
+            expected_edges=(
+                self.database.canonical_edges(self.config.runId)
+                if isinstance(self.config, RunConfigV2)
+                else None
+            ),
+        )
         version = self.trainer.training_version
         if version > self._last_sync_version:
             self._persist_and_activate(synchronize=True)
@@ -762,12 +1156,26 @@ class FridayDemoRuntime:
             backend_sha256=empty_sha,
         )
         self.serving = self._create_serving_state(initial_state, [])
+        self.source_vector_resolver = (
+            SourceVectorResolver(
+                self.qwen_encoder,
+                load_active=self.database.load_active_source_vector,
+                capacity=max(512, min(10_000, self.config.creatorCount * 10)),
+            )
+            if self.scale_run
+            else None
+        )
         self.synchronizer = AtomicSynchronizer(
             Path(self.config.stateRoot) / str(self.config.runId) / "sync",
             serving_state=self.serving,
         )
         self._server = _UvicornThread(
-            create_app(self.serving), host="127.0.0.1", port=self.recommendation_port
+            create_app(
+                self.serving,
+                source_vector_resolver=self.source_vector_resolver,
+            ),
+            host="127.0.0.1",
+            port=self.recommendation_port,
         )
         self._server.start()
         self.producer = KafkaFeedbackProducer(self.kafka_bootstrap_servers)
@@ -796,7 +1204,18 @@ class FridayDemoRuntime:
             daemon=True,
         )
         self._trainer_thread.start()
-        self._simulate(plan, self._hidden_edges())
+        if isinstance(self.config, RunConfigV2):
+            self._simulate_scaled(plan, self._hidden_edges())
+            telemetry = self.source_vector_resolver.telemetry()
+            self.database.update_metrics(
+                self.config.runId,
+                source_vector_qwen_encode_count=telemetry.qwen_encode,
+                source_vector_cache_hit_count=telemetry.cache_hit,
+                source_vector_pgvector_load_count=telemetry.pgvector_load,
+                source_vector_eviction_count=telemetry.evictions,
+            )
+        else:
+            self._simulate(plan, self._hidden_edges())
         return self._finalize()
 
 

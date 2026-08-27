@@ -12,9 +12,12 @@ from fastapi import FastAPI, HTTPException, Response
 from ..contracts import (
     RecommendationCandidateV1,
     RecommendationRequestV1,
+    RecommendationRequestV2,
     RecommendationResponseV1,
+    RecommendationResponseV2,
 )
 from ..model.context_tower import CreatorContextTower
+from ..model.source_vector_cache import SourceVectorResolver, VectorCacheKey
 from .state import ServingState
 from .timings import server_timing_header
 
@@ -36,14 +39,20 @@ def _replace_timing_token(
     return payload.replace(token, replacement, 1)
 
 
-def create_app(state: ServingState, *, max_concurrent_requests: int = 8) -> FastAPI:
+def create_app(
+    state: ServingState,
+    *,
+    max_concurrent_requests: int = 8,
+    source_vector_resolver: SourceVectorResolver | None = None,
+) -> FastAPI:
     if max_concurrent_requests <= 0:
         raise ValueError("max_concurrent_requests must be positive")
     app = FastAPI(title="Babel online recommendations", version="1")
     semaphore = BoundedSemaphore(max_concurrent_requests)
 
-    @app.post("/api/v1/recommendations")
-    def recommend(request: RecommendationRequestV1) -> Response:
+    def recommend_document(
+        request: RecommendationRequestV1 | RecommendationRequestV2,
+    ) -> Response:
         request_started = perf_counter_ns()
         queued_at = request_started
         semaphore.acquire()
@@ -53,18 +62,65 @@ def create_app(state: ServingState, *, max_concurrent_requests: int = 8) -> Fast
             materialized = snapshot.materialized_state
             if request.runId != materialized.run_id:
                 raise HTTPException(status_code=409, detail="request run is not active")
-            if (
-                request.runId,
-                request.creatorId,
-                request.newSourceArticleKey,
+            is_v2 = isinstance(request, RecommendationRequestV2)
+            source_article_key = (
+                request.sourceArticleKey if is_v2 else request.newSourceArticleKey
+            )
+            is_new_root = not is_v2 or request.traversalDepth == 0
+            if is_new_root and (
+                request.runId, request.creatorId, source_article_key
             ) in snapshot.creator_sources:
-                raise HTTPException(
-                    status_code=409,
-                    detail="creator already used this source article in the run",
+                is_same_persisted_root = (
+                    is_v2
+                    and snapshot.source_keys_by_babel_id.get(request.sourceBabelId)
+                    == request.sourceArticleKey
+                    and snapshot.owners_by_babel_id.get(request.sourceBabelId)
+                    == request.creatorId
                 )
+                if not is_same_persisted_root:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="creator already used this source article in the run",
+                    )
+            if is_v2 and request.traversalDepth == 1:
+                persisted_key = snapshot.source_keys_by_babel_id.get(
+                    request.sourceBabelId
+                )
+                if persisted_key is None:
+                    raise HTTPException(
+                        status_code=422, detail="unknown existing source Babel"
+                    )
+                if persisted_key != request.sourceArticleKey:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="existing source Babel and article key differ",
+                    )
 
             started = perf_counter_ns()
-            new_vector = snapshot.item_tower.encode_article(request.title, request.text)
+            source_origin = None
+            if is_v2:
+                if source_vector_resolver is None:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="V2 source-vector resolver is unavailable",
+                    )
+                key = VectorCacheKey(
+                    run_id=request.runId,
+                    babel_id=request.sourceBabelId,
+                    model_id=snapshot.model.modelId,
+                    model_version=materialized.model_version,
+                    embedding_space_id=materialized.embedding_space_id,
+                )
+                if request.traversalDepth == 0:
+                    resolved = source_vector_resolver.resolve_new_root(
+                        key, title=request.title or "", lead_text=request.text or ""
+                    )
+                else:
+                    resolved = source_vector_resolver.resolve_existing(key)
+                new_vector = resolved.vector
+                source_origin = resolved.origin
+            else:
+                new_vector = snapshot.item_tower.encode_article(request.title, request.text)
             encode_ns = perf_counter_ns() - started
             encoder_identity = snapshot.item_tower.execution_identity(batch_size=1)
 
@@ -92,7 +148,7 @@ def create_app(state: ServingState, *, max_concurrent_requests: int = 8) -> Fast
                 run_id=request.runId,
                 state=materialized,
                 exclude_creator_id=request.creatorId,
-                k=request.candidateCount,
+                k=min(100, request.candidateCount + (1 if is_v2 else 0)),
             )
             ann_ns = perf_counter_ns() - started
 
@@ -100,7 +156,11 @@ def create_app(state: ServingState, *, max_concurrent_requests: int = 8) -> Fast
             filtered = []
             seen = set()
             for row in retrieved:
-                if row.creator_id == request.creatorId or row.babel_id in seen:
+                if (
+                    row.creator_id == request.creatorId
+                    or row.babel_id in seen
+                    or (is_v2 and row.babel_id == request.sourceBabelId)
+                ):
                     continue
                 seen.add(row.babel_id)
                 filtered.append(row)
@@ -122,7 +182,7 @@ def create_app(state: ServingState, *, max_concurrent_requests: int = 8) -> Fast
                 np.asarray(query, dtype="<f4").tobytes(order="C")
             ).hexdigest()
             base = {
-                "schemaVersion": 1,
+                "schemaVersion": 2 if is_v2 else 1,
                 "requestId": request.requestId,
                 "runId": request.runId,
                 "modelId": snapshot.model.modelId,
@@ -134,6 +194,8 @@ def create_app(state: ServingState, *, max_concurrent_requests: int = 8) -> Fast
                 "queryVectorSha256": query_sha,
                 "candidates": candidates,
             }
+            if is_v2:
+                base["sourceVectorOrigin"] = source_origin
             # Timing values are part of the JSON they measure, so ordinary
             # serialize-then-update would require a second, unmeasured JSON
             # encoding.  Encode the actual wire template once with unique
@@ -150,7 +212,8 @@ def create_app(state: ServingState, *, max_concurrent_requests: int = 8) -> Fast
                 "serialization": _SERIALIZATION_PLACEHOLDER_NS,
                 "serverTotal": _SERVER_TOTAL_PLACEHOLDER_NS,
             }
-            response = RecommendationResponseV1(**base, timingsNs=template_timings)
+            response_type = RecommendationResponseV2 if is_v2 else RecommendationResponseV1
+            response = response_type(**base, timingsNs=template_timings)
             payload = response.model_dump_json().encode("utf-8")
             serialization_ns = perf_counter_ns() - serialization_started
             timings = {**template_timings, "serialization": serialization_ns}
@@ -185,6 +248,14 @@ def create_app(state: ServingState, *, max_concurrent_requests: int = 8) -> Fast
             )
         finally:
             semaphore.release()
+
+    @app.post("/api/v1/recommendations")
+    def recommend_v1(request: RecommendationRequestV1) -> Response:
+        return recommend_document(request)
+
+    @app.post("/api/v2/recommendations")
+    def recommend_v2(request: RecommendationRequestV2) -> Response:
+        return recommend_document(request)
 
     return app
 
