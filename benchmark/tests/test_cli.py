@@ -5,9 +5,16 @@ import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from uuid import UUID
 
-from babel_benchmark.cli import _parser, main
+from babel_benchmark.cli import (
+    _attach_backend_artifact_receipt,
+    _parser,
+    _publication_receipt_json,
+    main,
+)
 from babel_benchmark.contracts import RequestMeasurementV1, load_jsonl
+from babel_benchmark.hub import RunBundleReceipt
 from babel_benchmark.resources import ResourceObservationV1
 
 
@@ -185,6 +192,97 @@ def test_trial_bundle_cli_closes_build_and_publish_inputs() -> None:
     assert len(build.evidence) == 9
     assert publish.command == "trial-bundle-publish"
     assert publish.token_env == "HF_TOKEN"
+
+
+def test_trial_bundle_publish_retains_full_receipt_and_adds_backend_payload() -> None:
+    receipt = RunBundleReceipt(
+        repository="owner/dataset",
+        commit_sha="b" * 40,
+        bundle_path="runs/00000000-0000-5000-8000-000000000130",
+        artifact_sha256="a" * 64,
+        verified_parquet_rows={"requests.parquet": 1},
+        model_artifact_path="runs/trial/model-artifact/state-descriptor.json",
+        verified_model_files={"weights.safetensors": "c" * 64},
+    )
+
+    published = _publication_receipt_json(receipt)
+
+    assert published["repository"] == "owner/dataset"
+    assert published["verified_parquet_rows"] == {"requests.parquet": 1}
+    assert published["backendArtifactReceipt"] == {
+        "artifactSha256": "a" * 64,
+        "remoteHfCommitSha": "b" * 40,
+        "remoteHfBundlePath": "runs/00000000-0000-5000-8000-000000000130",
+    }
+
+
+def test_trial_bundle_attach_posts_backend_payload_with_loopback_admin_headers() -> None:
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json() -> dict[str, object]:
+            return {
+                "trial": {
+                    "experimentId": "00000000-0000-5000-8000-000000000130"
+                }
+            }
+
+    class Transport:
+        def __init__(self) -> None:
+            self.request_args: tuple[object, ...] | None = None
+            self.request_kwargs: dict[str, object] | None = None
+
+        def request(self, *args: object, **kwargs: object) -> Response:
+            self.request_args = args
+            self.request_kwargs = kwargs
+            return Response()
+
+    transport = Transport()
+    payload = {
+        "artifactSha256": "a" * 64,
+        "remoteHfCommitSha": "b" * 40,
+        "remoteHfBundlePath": "runs/00000000-0000-5000-8000-000000000130",
+    }
+
+    attached = _attach_backend_artifact_receipt(
+        base_url="http://127.0.0.1:8787",
+        trial_id=UUID("00000000-0000-5000-8000-000000000130"),
+        receipt=payload,
+        admin_nonce="nonce",
+        transport=transport,
+    )
+
+    assert attached == Response.json()
+    assert transport.request_args == (
+        "POST",
+        "http://127.0.0.1:8787/admin/api/v1/performance/"
+        "00000000-0000-5000-8000-000000000130/artifact",
+    )
+    assert transport.request_kwargs == {
+        "headers": {
+            "Origin": "http://127.0.0.1:8787",
+            "X-Babel-Admin-Nonce": "nonce",
+        },
+        "json": payload,
+        "timeout": 10.0,
+    }
+
+
+def test_trial_bundle_attach_parser_requires_saved_receipt_and_trial_identity() -> None:
+    attach = _parser().parse_args(
+        [
+            "trial-bundle-attach",
+            "--receipt",
+            "receipt.json",
+            "--trial-id",
+            "00000000-0000-5000-8000-000000000130",
+        ]
+    )
+
+    assert attach.command == "trial-bundle-attach"
+    assert attach.base_url == "http://127.0.0.1:8787"
+    assert attach.nonce_env == "BABEL_ADMIN_NONCE"
 
 
 def test_v2_concurrent_replays_feed_the_three_ratio_report(tmp_path: Path) -> None:

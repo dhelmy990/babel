@@ -8,6 +8,8 @@ import json
 import os
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from .analysis import analyze, render_markdown
@@ -107,6 +109,15 @@ def _parser() -> argparse.ArgumentParser:
     publish.add_argument("--repo-id", required=True)
     publish.add_argument("--revision", default="main")
     publish.add_argument("--token-env", default="HF_TOKEN")
+
+    attach = commands.add_parser(
+        "trial-bundle-attach",
+        help="attach a remotely verified bundle receipt to its saved trial",
+    )
+    attach.add_argument("--receipt", required=True, type=Path)
+    attach.add_argument("--trial-id", required=True, type=UUID)
+    attach.add_argument("--base-url", default="http://127.0.0.1:8787")
+    attach.add_argument("--nonce-env", default="BABEL_ADMIN_NONCE")
     return parser
 
 
@@ -115,8 +126,93 @@ def _write(path: Path, content: str) -> None:
     path.write_text(content)
 
 
+def _publication_receipt_json(receipt: Any) -> dict[str, object]:
+    document = asdict(receipt)
+    document["backendArtifactReceipt"] = {
+        "artifactSha256": receipt.artifact_sha256,
+        "remoteHfCommitSha": receipt.commit_sha,
+        "remoteHfBundlePath": receipt.bundle_path,
+    }
+    return document
+
+
+def _attach_backend_artifact_receipt(
+    *,
+    base_url: str,
+    trial_id: UUID,
+    receipt: dict[str, object],
+    admin_nonce: str,
+    transport: Any | None = None,
+) -> dict[str, object]:
+    normalized = base_url.rstrip("/")
+    parsed = urlsplit(normalized)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    if normalized != origin or origin not in {
+        "http://127.0.0.1:8787",
+        "http://localhost:8787",
+    }:
+        raise ValueError("dashboard artifact endpoint must be loopback port 8787")
+    if not admin_nonce:
+        raise ValueError("dashboard admin nonce is required")
+    required = {
+        "artifactSha256",
+        "remoteHfCommitSha",
+        "remoteHfBundlePath",
+    }
+    if set(receipt) != required or any(
+        not isinstance(receipt[field], str) or not receipt[field]
+        for field in required
+    ):
+        raise ValueError("backend artifact receipt fields differ")
+    if transport is None:
+        import httpx
+
+        transport = httpx
+    response = transport.request(
+        "POST",
+        f"{normalized}/admin/api/v1/performance/{trial_id}/artifact",
+        headers={
+            "Origin": origin,
+            "X-Babel-Admin-Nonce": admin_nonce,
+        },
+        json=receipt,
+        timeout=10.0,
+    )
+    if int(response.status_code) != 200:
+        raise RuntimeError(
+            f"dashboard artifact attachment failed: HTTP {response.status_code}"
+        )
+    document = response.json()
+    if (
+        not isinstance(document, dict)
+        or not isinstance(document.get("trial"), dict)
+        or document["trial"].get("experimentId") != str(trial_id)
+    ):
+        raise RuntimeError("dashboard artifact attachment returned another trial")
+    return document
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.command == "trial-bundle-attach":
+        try:
+            publication = json.loads(args.receipt.read_text(encoding="utf-8"))
+            receipt = publication["backendArtifactReceipt"]
+        except (OSError, KeyError, TypeError, json.JSONDecodeError) as error:
+            raise ValueError("saved publication receipt is invalid") from error
+        if not isinstance(receipt, dict):
+            raise ValueError("saved publication receipt is invalid")
+        admin_nonce = os.environ.get(args.nonce_env)
+        if not admin_nonce:
+            raise ValueError(f"admin nonce environment is unset: {args.nonce_env}")
+        attached = _attach_backend_artifact_receipt(
+            base_url=args.base_url,
+            trial_id=args.trial_id,
+            receipt=receipt,
+            admin_nonce=admin_nonce,
+        )
+        print(json.dumps(attached, sort_keys=True))
+        return 0
     if args.command == "trial-bundle-build":
         from .trial_bundle import FormalPins, build_formal_trial_bundle
 
@@ -173,7 +269,7 @@ def main(argv: list[str] | None = None) -> int:
             token=token,
             revision=args.revision,
         )
-        print(json.dumps(asdict(receipt), sort_keys=True))
+        print(json.dumps(_publication_receipt_json(receipt), sort_keys=True))
         return 0
     if args.command in {"replay", "live-replay", "concurrent-replay"}:
         manifest = load_benchmark_manifest(args.manifest)
