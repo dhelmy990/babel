@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from babel_online.runtime import performance_condition as condition_module
 from babel_online.runtime.performance_condition import (
     LatencyTraceSink,
     RealWorkloadFreezer,
@@ -72,6 +73,77 @@ def test_isolated_plan_assigns_disjoint_cpu_sets_and_serving_only_idle_role(tmp_
     serving = set(plan.resources["serving"].cpuAffinity)
     trainer = set(plan.resources["trainer"].cpuAffinity)
     assert serving and trainer and serving.isdisjoint(trainer)
+
+
+def test_isolated_plan_uses_actual_affinity_cpu_ids(tmp_path, monkeypatch):
+    monkeypatch.setattr(condition_module.os, "sched_getaffinity", lambda _pid: {2, 4, 7, 9})
+
+    plan = build_live_condition_plan(
+        _condition("same_host_isolated", True, False),
+        run_id=UUID(int=2),
+        state_root=tmp_path,
+        serving_port=8791,
+        python_executable="/venv/bin/python",
+        cpu_count=64,
+    )
+
+    serving = set(plan.resources["serving"].cpuAffinity)
+    trainer = set(plan.resources["trainer"].cpuAffinity)
+    assert serving | trainer == {2, 4, 7, 9}
+    assert serving.isdisjoint(trainer)
+
+
+def test_host_lifecycle_stops_partially_started_host():
+    calls = []
+
+    class Host:
+        def start(self):
+            calls.append("start")
+            raise RuntimeError("partial startup")
+
+        def stop(self):
+            calls.append("stop")
+
+    with pytest.raises(RuntimeError, match="partial startup"):
+        with condition_module._host_lifecycle(Host(), lambda host: host.stop()):
+            pytest.fail("partially started host must not enter the condition body")
+
+    assert calls == ["start", "stop"]
+
+
+def test_feedback_publisher_abort_is_safe_before_start():
+    publisher = condition_module._OrderedFeedbackPublisher(
+        {}, {}, SimpleNamespace(), SimpleNamespace()
+    )
+
+    publisher.abort()
+
+
+def test_split_host_rejects_stale_activation_receipt(tmp_path, monkeypatch):
+    activation_dir = tmp_path / "activations"
+    activation_dir.mkdir()
+    (activation_dir / "receipt-v00000003.json").write_text(
+        json.dumps({"modelId": str(UUID(int=3)), "modelVersion": 3})
+    )
+    stopped = []
+    running = SimpleNamespace(
+        graceful_stop_trainer=lambda **_values: stopped.append("trainer"),
+        stop_serving=lambda: stopped.append("serving"),
+    )
+    host = condition_module._SplitProcessHost(
+        SimpleNamespace(state_root=tmp_path / "topology"),
+        activation_dir=activation_dir,
+        starting_model_version=3,
+    )
+    host.running = running
+    moments = iter((0.0, 31.0))
+    monkeypatch.setattr(condition_module.time, "monotonic", lambda: next(moments))
+    monkeypatch.setattr(condition_module.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(TimeoutError, match="acknowledge model activation"):
+        host.stop(wait_for_activation=True)
+
+    assert stopped == ["trainer", "serving"]
 
 
 def test_latency_sink_records_real_response_boundary_and_reports_nearest_rank_p95():

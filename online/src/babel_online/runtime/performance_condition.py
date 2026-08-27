@@ -10,6 +10,7 @@ import os
 import threading
 import time
 import urllib.request
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -80,12 +81,16 @@ def build_live_condition_plan(
     )
     resources = {"serving": ResourceRequest(), "trainer": ResourceRequest()}
     if topology is Topology.SAME_HOST_ISOLATED:
-        if cpu_count < 2:
+        try:
+            available_cpus = tuple(sorted(os.sched_getaffinity(0)))
+        except (AttributeError, OSError):
+            available_cpus = tuple(range(cpu_count))
+        if len(available_cpus) < 2:
             raise RuntimeError("isolated topology requires at least two logical CPUs")
-        midpoint = max(1, cpu_count // 2)
+        midpoint = max(1, len(available_cpus) // 2)
         resources = {
-            "serving": ResourceRequest(cpuAffinity=tuple(range(0, midpoint))),
-            "trainer": ResourceRequest(cpuAffinity=tuple(range(midpoint, cpu_count))),
+            "serving": ResourceRequest(cpuAffinity=available_cpus[:midpoint]),
+            "trainer": ResourceRequest(cpuAffinity=available_cpus[midpoint:]),
         }
     return LiveConditionPlan(
         topology=topology,
@@ -467,7 +472,11 @@ class _SplitProcessHost:
     """Own one real serving/trainer process pair for a replay condition."""
 
     def __init__(
-        self, plan: LiveConditionPlan, *, activation_dir: str | Path | None = None
+        self,
+        plan: LiveConditionPlan,
+        *,
+        activation_dir: str | Path | None = None,
+        starting_model_version: int = 0,
     ) -> None:
         from .topology import TopologySupervisor
 
@@ -475,6 +484,7 @@ class _SplitProcessHost:
         self._supervisor = TopologySupervisor(state_root=plan.state_root)
         self.running = None
         self.activation_dir = None if activation_dir is None else Path(activation_dir)
+        self.starting_model_version = int(starting_model_version)
 
     def _probe(self) -> int:
         with urllib.request.urlopen(
@@ -514,12 +524,25 @@ class _SplitProcessHost:
                 if self.activation_dir is None:
                     raise RuntimeError("activation directory is required for full mode")
                 deadline = time.monotonic() + 30
-                while not tuple(self.activation_dir.glob("receipt-v*.json")):
+                while not self._has_new_activation_receipt():
                     if time.monotonic() >= deadline:
                         raise TimeoutError("serving did not acknowledge model activation")
                     time.sleep(0.25)
         finally:
             self.running.stop_serving()
+
+    def _has_new_activation_receipt(self) -> bool:
+        if self.activation_dir is None:
+            return False
+        for path in self.activation_dir.glob("receipt-v*.json"):
+            try:
+                document = json.loads(path.read_text(encoding="utf-8"))
+                version = int(document["modelVersion"])
+            except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if version > self.starting_model_version:
+                return True
+        return False
 
     @property
     def services(self) -> dict[str, int]:
@@ -616,7 +639,19 @@ class _OrderedFeedbackPublisher:
         with self._condition:
             self._aborted = True
             self._condition.notify_all()
+        if self._thread.ident is None:
+            return
         self._thread.join(timeout=5)
+
+
+@contextmanager
+def _host_lifecycle(host: Any, stop: Callable[[Any], None]):
+    """Always stop a host, including when startup only partially succeeds."""
+    try:
+        host.start()
+        yield host
+    finally:
+        stop(host)
 
 
 class RealWorkloadFreezer:
@@ -783,9 +818,9 @@ class RealWorkloadFreezer:
             def is_set(self) -> bool:
                 return bool(stop_requested())
 
-        host.start()
         producer = None
         try:
+            host.start()
             coordinator_type = self.coordinator_factory or StandaloneCoordinator
             producer = (
                 self.producer_factory(self.kafka_bootstrap_servers)
@@ -966,6 +1001,7 @@ def execute_live_condition(
         host = _SplitProcessHost(
             plan,
             activation_dir=Path(config.stateRoot) / str(run_id) / "activations",
+            starting_model_version=active.model_version,
         )
     producer = (
         producer_factory(kafka_bootstrap_servers)
@@ -995,8 +1031,6 @@ def execute_live_condition(
         producer,
         database,
     )
-    host.start()
-    feedback_publisher.start()
     last_health = {"time": time.monotonic(), "steps": 0}
 
     def health() -> dict[str, int | float | None]:
@@ -1017,35 +1051,38 @@ def execute_live_condition(
     )
     result = None
     try:
-        result = asyncio.run(
-            runner(
-                manifest,
-                spec,
-                replay,
-                universe,
-                transport=transport,
-                schedule_mode="open_loop",
-                max_in_flight=trial.concurrent_users,
-                resource_collector=resource_collector,
-                live_identity_validator=None if ledger is None else ledger.validate,
-                success_callback=feedback_publisher.callback,
+        with _host_lifecycle(
+            host,
+            lambda value: (
+                value.stop(wait_for_activation=condition.activation_enabled)
+                if isinstance(value, _SplitProcessHost)
+                else value.stop()
+            ),
+        ):
+            feedback_publisher.start()
+            result = asyncio.run(
+                runner(
+                    manifest,
+                    spec,
+                    replay,
+                    universe,
+                    transport=transport,
+                    schedule_mode="open_loop",
+                    max_in_flight=trial.concurrent_users,
+                    resource_collector=resource_collector,
+                    live_identity_validator=None if ledger is None else ledger.validate,
+                    success_callback=feedback_publisher.callback,
+                )
             )
-        )
-        if any(row.outcome != "success" for row in result.measurements):
-            feedback_publisher.abort()
-        else:
-            feedback_publisher.finish(len(replay.rows))
+            if any(row.outcome != "success" for row in result.measurements):
+                feedback_publisher.abort()
+            else:
+                feedback_publisher.finish(len(replay.rows))
     except BaseException:
         feedback_publisher.abort()
         raise
     finally:
-        try:
-            producer.close()
-        finally:
-            if isinstance(host, _SplitProcessHost):
-                host.stop(wait_for_activation=condition.activation_enabled)
-            else:
-                host.stop()
+        producer.close()
     final_active = database.load_active_embedding_state(run_id)
     if condition.activation_enabled:
         if (

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import signal
 import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -467,3 +469,42 @@ def test_condition_runner_invokes_concrete_live_command_and_loads_evidence(
     assert retried == evidence
     assert len(calls) == 1
     assert evidence.raw_evidence["driver"] == "real_live_condition"
+
+
+def test_condition_runner_stops_the_entire_process_group(tmp_path, monkeypatch):
+    condition = _conditions()[0]
+    run_id = uuid5(EXPERIMENT_ID, "condition:1")
+    process = type(
+        "Process",
+        (),
+        {
+            "pid": 4321,
+            "returncode": None,
+            "poll": lambda self: None,
+            "terminate": lambda self: setattr(self, "returncode", -15),
+            "wait": lambda self, timeout: setattr(self, "returncode", -15),
+        },
+    )()
+    popen_calls = []
+    signals = []
+
+    def popen(argv, **options):
+        popen_calls.append((argv, options))
+        return process
+
+    monkeypatch.setattr("babel_online.runtime.performance_worker.subprocess.Popen", popen)
+    monkeypatch.setattr(os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(os, "killpg", lambda pgid, selected: signals.append((pgid, selected)))
+    runner = PerformanceConditionCommandRunner(output_root=tmp_path)
+
+    with pytest.raises(InterruptedError, match="stopped"):
+        runner(
+            _trial(),
+            condition,
+            run_id,
+            type("Frozen", (), {"path": tmp_path / "workload"})(),
+            lambda: True,
+        )
+
+    assert popen_calls[0][1]["start_new_session"] is True
+    assert signals == [(4321, signal.SIGTERM)]

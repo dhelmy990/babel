@@ -6,6 +6,8 @@ import hashlib
 import hmac
 import json
 import math
+import os
+import signal
 import subprocess
 import threading
 import time
@@ -393,14 +395,21 @@ class PerformanceConditionCommandRunner:
             if int(completed.returncode) != 0:
                 raise RuntimeError("live performance condition command failed")
         else:
-            process = subprocess.Popen(argv)
+            process = subprocess.Popen(argv, start_new_session=True)
             while process.poll() is None:
                 if stop_requested():
-                    process.terminate()
+                    process_group = os.getpgid(process.pid)
+                    try:
+                        os.killpg(process_group, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
                     try:
                         process.wait(timeout=30)
                     except subprocess.TimeoutExpired:
-                        process.kill()
+                        try:
+                            os.killpg(process_group, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
                         process.wait(timeout=10)
                     raise InterruptedError("live performance condition stopped")
                 time.sleep(0.1)
