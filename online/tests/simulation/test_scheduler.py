@@ -28,7 +28,7 @@ def work(creators, sessions=3):
             period="2026-06" if event < 2 else "2026-07",
             source_article_key=f"enwiki:{value.int % 1000 + event + 1}",
             root_babel_id=UUID(
-                f"00000000-0000-5000-8000-{100 + slot * 10 + event:012d}"
+                f"00000000-0000-5000-8000-{100 + slot * 1000 + event:012d}"
             ),
         )
         for event in range(sessions)
@@ -115,3 +115,41 @@ def test_completion_timing_does_not_change_later_dispatch_order() -> None:
 
     assert run_with_delays(False) == list(range(6))
     assert run_with_delays(True) == list(range(6))
+
+
+def test_wave_boundary_runs_after_every_member_and_before_next_dispatch() -> None:
+    schedule = deterministic_schedule(
+        RUN, work([creator(1), creator(2), creator(3)], sessions=2)
+    )
+    lock = threading.Lock()
+    events: list[tuple[str, int]] = []
+
+    def execute(row: ScheduledSession) -> None:
+        time.sleep((row.schedule_index % 2) * 0.002)
+        with lock:
+            events.append(("complete", row.schedule_index))
+
+    def after_wave(wave: tuple[ScheduledSession, ...]) -> None:
+        with lock:
+            completed = {index for kind, index in events if kind == "complete"}
+            assert {row.schedule_index for row in wave} <= completed
+            events.append(("publish", wave[0].schedule_index))
+
+    BoundedCreatorScheduler(concurrent_users=2).run(
+        schedule, execute, after_wave=after_wave
+    )
+
+    first_publish = events.index(("publish", 0))
+    assert {value for kind, value in events[:first_publish] if kind == "complete"} == {0, 1}
+    assert [value for kind, value in events if kind == "publish"] == [0, 2, 4]
+
+
+def test_ten_thousand_sessions_need_only_two_hundred_wave_publications() -> None:
+    creators = [creator(index + 1) for index in range(50)]
+    schedule = deterministic_schedule(RUN, work(creators, sessions=200))
+
+    waves = deterministic_waves(schedule, concurrent_users=50)
+
+    assert len(schedule) == 10_000
+    assert len(waves) == 200
+    assert all(len(wave) == 50 for wave in waves)

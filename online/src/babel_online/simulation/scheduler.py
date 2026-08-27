@@ -103,6 +103,8 @@ class BoundedCreatorScheduler:
         self,
         schedule: Sequence[ScheduledSession],
         execute: Callable[[ScheduledSession], None],
+        *,
+        after_wave: Callable[[tuple[ScheduledSession, ...]], None] | None = None,
     ) -> tuple[ScheduledSession, ...]:
         waves = deterministic_waves(
             schedule, concurrent_users=self.concurrent_users
@@ -114,6 +116,8 @@ class BoundedCreatorScheduler:
                 dispatched.extend(wave)
                 for future in futures:
                     future.result()
+                if after_wave is not None:
+                    after_wave(wave)
         return tuple(dispatched)
 
 
@@ -132,20 +136,18 @@ def deterministic_waves(
             raise ValueError("creator-local event numbers must be contiguous")
         next_event[row.creator_id] = expected + 1
 
-    remaining = list(schedule)
     waves: list[tuple[ScheduledSession, ...]] = []
-    while remaining:
-        wave: list[ScheduledSession] = []
-        deferred: list[ScheduledSession] = []
-        creators: set[UUID] = set()
-        for row in remaining:
-            if len(wave) < concurrent_users and row.creator_id not in creators:
-                wave.append(row)
-                creators.add(row.creator_id)
-            else:
-                deferred.append(row)
+    wave: list[ScheduledSession] = []
+    creators: set[UUID] = set()
+    for row in schedule:
+        if len(wave) == concurrent_users or row.creator_id in creators:
+            waves.append(tuple(wave))
+            wave = []
+            creators = set()
+        wave.append(row)
+        creators.add(row.creator_id)
+    if wave:
         waves.append(tuple(wave))
-        remaining = deferred
     return tuple(waves)
 
 

@@ -6,6 +6,7 @@ from pathlib import Path
 import json
 
 import pytest
+import babel_online.runtime.worker as worker_module
 
 from babel_online.feedback import InMemoryFeedbackBus
 from babel_online.runtime.worker import RunScopedConsumer, WorkerManager, isolate_new_run_offsets
@@ -61,6 +62,7 @@ def test_new_run_starts_at_current_high_watermark_and_rejects_cross_run_feedback
     bus.publish(key=str(target.creatorId), event=target)
     scoped = RunScopedConsumer(consumer, run_id=target.runId)
     assert scoped.poll().event.runId == target.runId
+    assert scoped.position() == consumer.position()
     wrong = target.model_copy(update={"runId": uuid4(), "eventId": uuid4()})
     bus.publish(key=str(wrong.creatorId), event=wrong)
     with pytest.raises(RuntimeError, match="cross-run"):
@@ -530,7 +532,7 @@ def test_v2_worker_reuses_and_validates_the_persisted_schedule() -> None:
         runtime._persist_scaled_schedule(plan)
 
 
-def test_failed_v2_start_roll_finalizes_and_materializes_without_a_request() -> None:
+def test_failed_v2_start_roll_returns_unpublished_root_without_a_request() -> None:
     run_id = uuid4()
     creator_id = uuid4()
     babel_id = uuid4()
@@ -548,8 +550,6 @@ def test_failed_v2_start_roll_finalizes_and_materializes_without_a_request() -> 
             root_babel_id=babel_id,
         )],
     )[0]
-    finalized = []
-    materialized = []
     persisted_rolls = []
     runtime = object.__new__(FridayDemoRuntime)
     runtime.config = SimpleNamespace(
@@ -567,14 +567,12 @@ def test_failed_v2_start_roll_finalizes_and_materializes_without_a_request() -> 
     runtime.database = SimpleNamespace(
         stop_requested=lambda _run_id: False,
         stage_babel=lambda **_values: None,
-        finalize_babel=lambda *values: finalized.append(values),
         persist_traversal_rolls=lambda *values: persisted_rolls.append(values),
         update_metrics=lambda *_args, **_values: None,
     )
     runtime.recommendation_endpoint = "http://127.0.0.1:8791"
-    runtime._materialize_scaled_root = lambda babel, article: materialized.append((babel, article))
 
-    runtime._execute_scaled_session(
+    completed = runtime._execute_scaled_session(
         scheduled,
         {
             "canonical_title": "Root",
@@ -585,11 +583,148 @@ def test_failed_v2_start_roll_finalizes_and_materializes_without_a_request() -> 
         {"2026-06": set(), "2026-07": set()},
     )
 
-    assert finalized == [(run_id, babel_id, None)]
-    assert materialized[0][0].babelId == babel_id
+    assert completed.babel.babelId == babel_id
+    assert completed.root_request_id is None
     assert persisted_rolls[0][:2] == (run_id, scheduled.traversal_session_id)
     assert len(persisted_rolls[0][2]) == 1
     assert persisted_rolls[0][2][0].outcome == "start_skipped"
+
+
+def test_scaled_root_batch_hashes_activates_and_rebuilds_once(monkeypatch) -> None:
+    run_id = uuid4()
+    creators = [uuid4(), uuid4()]
+    schedule = deterministic_schedule(
+        run_id,
+        [
+            ScheduledWork(
+                creator_id=creator,
+                creator_event_number=0,
+                period="2026-06",
+                source_article_key=f"enwiki:{index + 1}",
+                root_babel_id=uuid4(),
+            )
+            for index, creator in enumerate(creators)
+        ],
+    )
+    articles = [
+        {"content_hash": character * 64}
+        for character in ("a", "b")
+    ]
+    completions = [
+        worker_module._CompletedScaledRoot(
+            scheduled=row,
+            babel=CreatedBabel(
+                babelId=row.root_babel_id,
+                runId=run_id,
+                creatorId=row.creator_id,
+                sourceArticleKey=row.source_article_key,
+                title=f"Root {row.schedule_index}",
+                text="Lead",
+                createdAtNs=row.schedule_index + 1,
+            ),
+            article=articles[row.schedule_index],
+            root_request_id=None,
+        )
+        for row in schedule
+    ]
+    inserted, activated, applied, finalized, hashed = [], [], [], [], []
+    runtime = object.__new__(FridayDemoRuntime)
+    runtime.config = SimpleNamespace(runId=run_id)
+    runtime.starting_model = SimpleNamespace(
+        modelId=uuid4(),
+        embeddingSpace=SimpleNamespace(embeddingSpaceId=uuid4()),
+    )
+    runtime._serving_version = 0
+    runtime._simulation_lock = threading.RLock()
+    runtime._created = []
+    runtime._records = []
+    runtime._babel_by_id = {}
+    runtime._content_hashes = {}
+    runtime._histories = {}
+    runtime._serving_vectors = {}
+    runtime._frozen_vectors = {
+        row.root_babel_id: np.eye(100, dtype=np.float32)[index]
+        for index, row in enumerate(schedule)
+    }
+    runtime.database = SimpleNamespace(
+        finalize_babel=lambda *values: finalized.append(values),
+        insert_vectors=lambda records: inserted.append(tuple(records)),
+        activate_embedding_state=lambda **values: activated.append(values),
+        update_metrics=lambda *_args, **_values: None,
+    )
+    runtime.serving = SimpleNamespace(
+        apply_sync=lambda **values: applied.append(values)
+    )
+    runtime.index = object()
+    monkeypatch.setattr(
+        worker_module,
+        "_snapshot_sha",
+        lambda records: hashed.append(tuple(records)) or "c" * 64,
+    )
+
+    runtime._publish_scaled_root_batch(tuple(reversed(completions)))
+
+    assert [babel.babelId for babel in runtime._created] == [
+        row.root_babel_id for row in schedule
+    ]
+    assert len(finalized) == 2
+    assert len(inserted) == len(activated) == len(applied) == len(hashed) == 1
+    assert len(inserted[0]) == 2
+
+
+def test_interleaved_wave_hides_completed_roots_until_boundary() -> None:
+    run_id = uuid4()
+    plan = [
+        ("2026-06", uuid4(), {
+            "article_key": f"enwiki:{index + 1}",
+            "canonical_title": f"Root {index}",
+            "lead_text": "Lead",
+            "article_text": "Lead",
+            "content_hash": "a" * 64,
+        }, uuid4())
+        for index in range(4)
+    ]
+    visible: set[UUID] = set()
+    observed: dict[int, set[UUID]] = {}
+    runtime = object.__new__(FridayDemoRuntime)
+    runtime.config = SimpleNamespace(
+        runId=run_id,
+        concurrentUsers=2,
+        interleaveCreationAndRecommendations=True,
+    )
+    runtime.database = SimpleNamespace(
+        load_work_schedule=lambda _run_id: (),
+        persist_work_schedule=lambda _rows: None,
+    )
+
+    def execute(row, article, _hidden, **_kwargs):
+        observed[row.schedule_index] = set(visible)
+        return worker_module._CompletedScaledRoot(
+            scheduled=row,
+            babel=CreatedBabel(
+                babelId=row.root_babel_id,
+                runId=run_id,
+                creatorId=row.creator_id,
+                sourceArticleKey=row.source_article_key,
+                title=article["canonical_title"],
+                text="Lead",
+                createdAtNs=1,
+            ),
+            article=article,
+            root_request_id=None,
+        )
+
+    def publish(completed):
+        visible.update(value.babel.babelId for value in completed)
+
+    runtime._execute_scaled_session = execute
+    runtime._publish_scaled_root_batch = publish
+
+    runtime._simulate_scaled(plan, {"2026-06": set(), "2026-07": set()})
+
+    assert observed[0] == observed[1] == set()
+    first_wave = {plan[0][3], plan[1][3]}
+    assert observed[2] == observed[3] == first_wave
 
 
 def test_scaled_decision_draw_identity_includes_session_source_and_depth() -> None:
@@ -701,16 +836,18 @@ def test_disabled_interleave_finishes_all_creation_work_before_any_walk() -> Non
         load_work_schedule=lambda _run_id: (),
         persist_work_schedule=lambda _rows: None,
         stage_babel=lambda **values: operations.append(("stage", values["babel"].babelId)),
-        finalize_babel=lambda _run, babel, _request: operations.append(("finalize", babel)),
     )
-    runtime._materialize_scaled_root = lambda babel, _article: operations.append(("materialize", babel.babelId))
+    runtime._publish_scaled_root_batch = lambda completed: operations.append(
+        ("publish_batch", tuple(value.babel.babelId for value in completed))
+    )
     runtime._execute_scaled_session = lambda row, _article, _hidden, **_kwargs: operations.append(("walk", row.root_babel_id))
 
     runtime._simulate_scaled(plan, {"2026-06": set(), "2026-07": set()})
 
     first_walk = next(index for index, row in enumerate(operations) if row[0] == "walk")
     assert all(row[0] != "walk" for row in operations[:first_walk])
-    assert sum(row[0] == "materialize" for row in operations[:first_walk]) == 2
+    assert sum(row[0] == "publish_batch" for row in operations[:first_walk]) == 1
+    assert operations[first_walk - 1][1] == tuple(row[3] for row in plan)
 
 
 def test_v2_activity_identifies_actual_walk_source_and_acting_creator() -> None:

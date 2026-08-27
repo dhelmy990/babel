@@ -7,6 +7,7 @@ import json
 import threading
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid5
@@ -98,6 +99,14 @@ class RunScopedConsumer:
         if any(record.event.runId != self.run_id for record in records):
             raise RuntimeError("cross-run Kafka export contamination detected")
         return records
+
+
+@dataclass(frozen=True, slots=True)
+class _CompletedScaledRoot:
+    scheduled: ScheduledSession
+    babel: CreatedBabel
+    article: Mapping[str, Any]
+    root_request_id: UUID | None
 
 
 class _UvicornThread:
@@ -666,17 +675,64 @@ class FridayDemoRuntime:
             if current_version >= self._last_sync_version + self.config.syncEverySteps:
                 self._persist_and_activate(synchronize=True)
 
-    def _materialize_scaled_root(
-        self, babel: CreatedBabel, article: Mapping[str, Any]
+    def _publish_scaled_root_batch(
+        self,
+        completed: tuple[_CompletedScaledRoot, ...],
+        *,
+        finalize: bool = True,
     ) -> None:
-        """Make one finalized root visible with a consistent serving snapshot."""
+        """Publish one deterministic wave through a single vector/state boundary."""
+        if not completed:
+            return
+        ordered = tuple(
+            sorted(completed, key=lambda value: value.scheduled.schedule_index)
+        )
         with self._simulation_lock:
-            self._created.append(babel)
-            self._babel_by_id[babel.babelId] = babel
-            self._content_hashes[babel.babelId] = str(article["content_hash"])
-            self._histories.setdefault(babel.creatorId, []).append(babel.babelId)
-            self._serving_vectors[babel.babelId] = self._frozen_vectors[babel.babelId]
-            self._materialize_new_babel()
+            for value in ordered:
+                babel = value.babel
+                if finalize:
+                    self.database.finalize_babel(
+                        self.config.runId, babel.babelId, value.root_request_id
+                    )
+                self._created.append(babel)
+                self._babel_by_id[babel.babelId] = babel
+                self._content_hashes[babel.babelId] = str(
+                    value.article["content_hash"]
+                )
+                self._histories.setdefault(babel.creatorId, []).append(
+                    babel.babelId
+                )
+                self._serving_vectors[babel.babelId] = self._frozen_vectors[
+                    babel.babelId
+                ]
+            new_records = [
+                self._materialized_record(value.babel, self._serving_version)
+                for value in ordered
+            ]
+            self.database.insert_vectors(new_records)
+            self._records.extend(new_records)
+            sha = _snapshot_sha(self._records)
+            state = self._state(self._serving_version, sha)
+            self.database.activate_embedding_state(
+                run_id=self.config.runId,
+                model_id=self.starting_model.modelId,
+                model_version=self._serving_version,
+                embedding_space_id=(
+                    self.starting_model.embeddingSpace.embeddingSpaceId
+                ),
+                pgvector_sha256=sha,
+                backend_sha256=sha,
+            )
+            self.serving.apply_sync(
+                selected_model_id=self.starting_model.modelId,
+                materialized_state=state,
+                candidate_index=self.index,
+                vector_records=self._records,
+            )
+            self.database.update_metrics(
+                self.config.runId,
+                created_babel_count=len(self._created),
+            )
 
     def _execute_scaled_session(
         self,
@@ -685,7 +741,7 @@ class FridayDemoRuntime:
         hidden: Mapping[str, set[tuple[str, str]]],
         *,
         precreated: bool = False,
-    ) -> None:
+    ) -> _CompletedScaledRoot | None:
         if self.stop_event.is_set() or self.database.stop_requested(self.config.runId):
             return
         text = str(article.get("lead_text") or article["article_text"])
@@ -852,11 +908,6 @@ class FridayDemoRuntime:
                 trace.rolls,
             )
             root_request_id = trace.requests[0].request_id if trace.requests else None
-            if not precreated:
-                self.database.finalize_babel(
-                    self.config.runId, babel.babelId, root_request_id
-                )
-                self._materialize_scaled_root(babel, article)
             for request in trace.requests:
                 response, event, client_ns, source = request_events[request.request_id]
                 with self._simulation_lock:
@@ -864,11 +915,14 @@ class FridayDemoRuntime:
                 self._record_recommendation(
                     source_babel, response, event, client_ns
                 )
-            with self._simulation_lock:
-                self.database.update_metrics(
-                    self.config.runId,
-                    created_babel_count=len(self._created),
+            if not precreated:
+                return _CompletedScaledRoot(
+                    scheduled=scheduled,
+                    babel=babel,
+                    article=article,
+                    root_request_id=root_request_id,
                 )
+            return None
         finally:
             client.close()
 
@@ -884,6 +938,7 @@ class FridayDemoRuntime:
         }
         self._scaled_started = time.monotonic()
         if not self.config.interleaveCreationAndRecommendations:
+            precreated = []
             for row in schedule:
                 article = articles[row.root_babel_id]
                 text = str(article.get("lead_text") or article["article_text"])

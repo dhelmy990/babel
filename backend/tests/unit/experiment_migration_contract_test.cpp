@@ -75,3 +75,17 @@ TEST_CASE("scaled experiment migration persists schedules and directed canonical
   CHECK(migration.find("experiment_traversal_rolls_immutable") !=
         std::string::npos);
 }
+
+TEST_CASE("runtime readiness requires every migration through scaled experiment version seven") {
+  const auto application_path =
+      std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
+      "src/runtime/application.cpp";
+  std::ifstream application_file(application_path);
+  REQUIRE(application_file.good());
+
+  const std::string source{std::istreambuf_iterator<char>{application_file}, {}};
+  CHECK(source.find("SELECT count(*) = 7 FROM schema_migrations") !=
+        std::string::npos);
+  CHECK(source.find("version IN ('1', '2', '3', '4', '5', '6', '7')") !=
+        std::string::npos);
+}

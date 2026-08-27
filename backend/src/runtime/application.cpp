@@ -224,7 +224,7 @@ Result<void> Application::verifySchemaReady() {
     }
     if (transaction.exec(
             "SELECT count(*) = 7 FROM schema_migrations "
-            "WHERE version IN ('1', '2', '3', '4', '5', '6')")
+            "WHERE version IN ('1', '2', '3', '4', '5', '6', '7')")
             .one_field()
             .as<bool>() == false) {
       return tl::make_unexpected(ApplicationError{
