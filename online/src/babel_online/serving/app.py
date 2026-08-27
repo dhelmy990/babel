@@ -20,6 +20,20 @@ from .timings import server_timing_header
 
 
 SERVING_HOST = "127.0.0.1"
+_SERIALIZATION_PLACEHOLDER_NS = 7_000_000_000_000_000_001
+_SERVER_TOTAL_PLACEHOLDER_NS = 9_000_000_000_000_000_001
+_SERIALIZATION_MEASUREMENT = "wire-json-template-with-timing-token-patch"
+
+
+def _replace_timing_token(
+    payload: bytes, *, name: str, placeholder: int, value: int
+) -> bytes:
+    """Replace one already-encoded timing number without JSON re-encoding."""
+    token = f'"{name}":{placeholder}'.encode("ascii")
+    if payload.count(token) != 1:
+        raise RuntimeError(f"wire payload does not contain one {name} timing token")
+    replacement = f'"{name}":{value}'.encode("ascii")
+    return payload.replace(token, replacement, 1)
 
 
 def create_app(state: ServingState, *, max_concurrent_requests: int = 8) -> FastAPI:
@@ -120,24 +134,42 @@ def create_app(state: ServingState, *, max_concurrent_requests: int = 8) -> Fast
                 "queryVectorSha256": query_sha,
                 "candidates": candidates,
             }
+            # Timing values are part of the JSON they measure, so ordinary
+            # serialize-then-update would require a second, unmeasured JSON
+            # encoding.  Encode the actual wire template once with unique
+            # valid integer sentinels, measure that operation, then patch only
+            # the two numeric tokens in the encoded bytes.  Response receives
+            # bytes and therefore performs no second UTF-8/JSON encoding.
             serialization_started = perf_counter_ns()
-            timings = {
+            template_timings = {
                 "queue": queue_ns,
                 "encode": encode_ns,
                 "context": context_ns,
                 "ann": ann_ns,
                 "filtering": filtering_ns,
-                "serialization": 0,
-                "serverTotal": perf_counter_ns() - request_started,
+                "serialization": _SERIALIZATION_PLACEHOLDER_NS,
+                "serverTotal": _SERVER_TOTAL_PLACEHOLDER_NS,
             }
-            response = RecommendationResponseV1(**base, timingsNs=timings)
-            timings["serialization"] = perf_counter_ns() - serialization_started
+            response = RecommendationResponseV1(**base, timingsNs=template_timings)
+            payload = response.model_dump_json().encode("utf-8")
+            serialization_ns = perf_counter_ns() - serialization_started
+            timings = {**template_timings, "serialization": serialization_ns}
+            payload = _replace_timing_token(
+                payload,
+                name="serialization",
+                placeholder=_SERIALIZATION_PLACEHOLDER_NS,
+                value=serialization_ns,
+            )
             timings["serverTotal"] = max(
                 perf_counter_ns() - request_started,
                 sum(value for name, value in timings.items() if name != "serverTotal"),
             )
-            response = response.model_copy(update={"timingsNs": timings})
-            payload = response.model_dump_json()
+            payload = _replace_timing_token(
+                payload,
+                name="serverTotal",
+                placeholder=_SERVER_TOTAL_PLACEHOLDER_NS,
+                value=timings["serverTotal"],
+            )
             return Response(
                 content=payload,
                 media_type="application/json",
@@ -148,6 +180,7 @@ def create_app(state: ServingState, *, max_concurrent_requests: int = 8) -> Fast
                     "X-Babel-Encoder-Device": encoder_identity.device,
                     "X-Babel-Encoder-Batch-Size": str(encoder_identity.batch_size),
                     "X-Babel-Encoder-Cache-Identity": encoder_identity.cache_identity,
+                    "X-Babel-Serialization-Measurement": _SERIALIZATION_MEASUREMENT,
                 },
             )
         finally:

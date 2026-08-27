@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import time
 from uuid import UUID
 
 from fastapi.testclient import TestClient
@@ -128,6 +129,36 @@ def test_post_serializes_the_wire_payload_once(monkeypatch) -> None:
 
     assert http.status_code == 200
     assert calls == 1
+
+
+def test_post_includes_wire_json_encoding_in_serialization_timing(monkeypatch) -> None:
+    state, _registry, _created_ids, _created_sources = serving_state()
+    request = json.loads((FIXTURE / "observable/request.json").read_text())
+    original = RecommendationResponseV1.model_dump_json
+
+    def deliberately_slow_json_encoding(self, *args, **kwargs):
+        time.sleep(0.02)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        RecommendationResponseV1,
+        "model_dump_json",
+        deliberately_slow_json_encoding,
+    )
+
+    http = TestClient(create_app(state)).post(
+        "/api/v1/recommendations", json=request
+    )
+
+    assert http.status_code == 200
+    timings = RecommendationResponseV1.model_validate(http.json()).timingsNs
+    assert timings["serialization"] >= 20_000_000
+    assert timings["serverTotal"] >= sum(
+        value for name, value in timings.items() if name != "serverTotal"
+    )
+    assert http.headers["X-Babel-Serialization-Measurement"] == (
+        "wire-json-template-with-timing-token-patch"
+    )
 
 
 def test_post_rejects_duplicate_source_for_same_creator() -> None:
