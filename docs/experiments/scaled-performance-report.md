@@ -140,6 +140,51 @@ real configured micro-batching, trainable creator context/fusion, sparse item
 residuals, complete checkpoint state, and serving activation. The corrective
 run must reuse the frozen population and workload under a new trial identity.
 
+### Corrective representative 2×3 result
+
+Trial `0367346d-98f9-4419-b2db-9194c4c868f7` completed on 27 August 2026.
+It reused the checksum-identical 10,000-Babel population and the first 75
+request-aligned rows of the frozen workload. It compared `same_process` with
+`same_host_split` across serving-only, training-without-activation, and
+training-with-activation modes. Every condition processed 75 requests (12
+warm-up and 63 measured): 450 of 450 succeeded. All four training conditions
+covered their published Kafka ranges and ended at lag zero.
+
+| Topology | Serving p95 | Training p95 | Full p95 | `Itraining` | `Ifull` | `IActivationIncrement` |
+|---|---:|---:|---:|---:|---:|---:|
+| `same_process` | 6,320.46 ms | 81,449.70 ms | 16,842.64 ms | 12.8867 | 2.6648 | 0.2068 |
+| `same_host_split` | 6,940.73 ms | 5,988.61 ms | 84,844.64 ms | 0.8628 | 12.2242 | 14.1677 |
+
+The useful engineering result is not that every ratio must exceed one. These
+are sequential, short, same-host runs, so warmed model and OS caches affect the
+ordered rows. The result does show a sharp architectural distinction:
+
+- separating the trainer kept training-without-activation p95 near the split
+  serving baseline, while same-process training produced severe contention;
+- split activation remained extremely expensive, demonstrating that process
+  separation alone does not isolate shared pgvector/model-state materialization;
+- the next optimization target is activation: batch or stage residual writes,
+  reduce full snapshot materialization, and atomically switch a prepared child
+  after the serving path is no longer competing with PostgreSQL insertion;
+- a counterbalanced repeat is required before treating cross-topology latency
+  differences as a stable performance estimate.
+
+The activation modes produced compatible immutable children while preserving
+the selectable original: monolith child
+`dd56b030-a76e-5b51-b690-7790b56b140b` at version 11 and split child
+`fac749ba-2395-5868-81b0-8fa7a309d376` at version 10. Raw condition evidence
+is beneath
+`state/performance/0367346d-98f9-4419-b2db-9194c4c868f7/conditions/`.
+The representative export contains 450 feedback rows and 2,682 canonical edge
+rows beneath
+`runs/0367346d-98f9-4419-b2db-9194c4c868f7/representative-export/` and is
+permanently labelled `formalPerformanceClaim=false`.
+
+An earlier 150-request representative attempt
+(`418a3a44-dcb8-42ee-be72-0706e4b30c35`) completed conditions 1–5 but failed
+closed when one final split-activation request crossed the 120-second timeout.
+It remains diagnostic load-limit evidence and is not an accepted result.
+
 ## Retrieval
 
 Status: **formal pgvector/HNSW evidence pending**.
@@ -201,7 +246,7 @@ are reported above and must not be presented as a completed topology result.
 | Tiny 3×3 smoke | Live passed; 9 requests; non-formal | `state/live-smoke-actual-v5/receipt.json` |
 | Frozen 10,000-Babel population | Passed | `state/performance/ce8e54ff-e317-4a89-b7db-90327e02dc43/population/manifest.json` |
 | First cohort-50 control attempt | Failed closed at condition 3; non-formal | `state/performance/ce8e54ff-e317-4a89-b7db-90327e02dc43/conditions/` |
-| Corrective cohort-50 topology run | Pending | — |
+| Representative cohort-50 2×3 | Passed; 450/450 requests; non-formal | `runs/0367346d-98f9-4419-b2db-9194c4c868f7/representative-export/` |
 | pgvector/HNSW comparison | Pending | — |
 | Cohort 100/500 scale | Pending | — |
 | Live fault campaign | Pending | — |
