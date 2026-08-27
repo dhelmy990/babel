@@ -30,9 +30,13 @@ class RetrievalQuery:
 
 @dataclass(frozen=True, slots=True)
 class BackendMemory:
-    """Truthfully labelled footprint; PostgreSQL relation bytes are not process RSS."""
+    """Truthfully scoped footprint; RSS delta is signed and may be negative."""
 
     measurement: Literal["index_footprint", "postgres_relation_storage"]
+    scope: Literal[
+        "shared_database_relation_all_runs",
+        "current_process_net_rss_and_serialized_index",
+    ]
     indexFootprintBytes: int
     processRssDeltaBytes: int | None
     tableFootprintBytes: int | None = None
@@ -224,26 +228,19 @@ def validate_formal_pgvector_result(
     evidence_path = Path(path)
     try:
         raw_bytes = evidence_path.read_bytes()
-        document = json.loads(raw_bytes)
-        raw = document["rawEvidence"]
-        identity = raw["conditionIdentity"]
-        final = raw["finalServingIdentity"]
-        measurements = raw["measurements"]
-    except (OSError, KeyError, TypeError, json.JSONDecodeError) as error:
+        from .trial_bundle import _load_condition
+
+        evidence = _load_condition(evidence_path)
+    except (OSError, UnicodeError, ValueError, TypeError) as error:
         raise ValueError("formal pgvector evidence is invalid") from error
+    identity = evidence.identity
+    final = evidence.final_serving_identity
     if (
-        identity.get("retrievalBackend") != "pgvector"
-        or identity.get("trainingEnabled") is not False
-        or identity.get("activationEnabled") is not False
+        identity.retrievalBackend != "pgvector"
+        or identity.trainingEnabled is not False
+        or identity.activationEnabled is not False
     ):
         raise ValueError("comparison requires a formal serving-only pgvector result")
-    measured = [row for row in measurements if not row.get("isWarmup", False)]
-    if (
-        not measured
-        or int(document.get("requestCount", -1)) != len(measured)
-        or any(row.get("outcome") != "success" for row in measurements)
-    ):
-        raise ValueError("formal pgvector result is incomplete or unsuccessful")
     if (
         final.get("pgvectorSnapshotSha256") != snapshot.snapshot_sha256
         or final.get("backendSnapshotSha256") != snapshot.snapshot_sha256
@@ -252,9 +249,18 @@ def validate_formal_pgvector_result(
         or UUID(str(final.get("embeddingSpaceId"))) != snapshot.embedding_space_id
     ):
         raise ValueError("formal pgvector result differs from frozen snapshot")
+    if any(
+        row.retrievalBackend != "pgvector"
+        or row.modelId != snapshot.model_id
+        or row.servingModelVersion != snapshot.model_version
+        or row.pgvectorSnapshotSha256 != snapshot.snapshot_sha256
+        or row.backendSnapshotSha256 != snapshot.snapshot_sha256
+        for row in evidence.measurements
+    ):
+        raise ValueError("formal pgvector requests differ from frozen snapshot")
     return FormalPgvectorResult(
-        run_id=UUID(str(document["runId"])),
-        topology=str(identity["topology"]),
+        run_id=evidence.run_id,
+        topology=str(identity.topology),
         snapshot_sha256=snapshot.snapshot_sha256,
         model_id=snapshot.model_id,
         model_version=snapshot.model_version,
@@ -266,6 +272,10 @@ def validate_formal_pgvector_result(
 def _nearest_rank(values: Sequence[int], percentile: float) -> int:
     ordered = sorted(values)
     return ordered[max(0, math.ceil(percentile * len(ordered)) - 1)]
+
+
+def _net_rss_delta(*, before: int, after: int) -> int:
+    return after - before
 
 
 def _measure_backend(
@@ -284,9 +294,11 @@ def _measure_backend(
     preparation_ns = monotonic_ns() - preparation_started
     if session.backend != backend:
         raise ValueError("retrieval factory returned the wrong backend")
+    warmup_started = monotonic_ns()
     for _ in range(warmup_passes):
         for query in queries:
             session.search(query, 50)
+    warmup_ns = monotonic_ns() - warmup_started
     latencies: list[int] = []
     observed: list[tuple[str, ...]] | None = None
     steady_started = monotonic_ns()
@@ -322,6 +334,11 @@ def _measure_backend(
             ),
             "durationNs": preparation_ns,
             "evidence": getattr(session, "preparation_evidence", None),
+        },
+        "warmup": {
+            "passCount": warmup_passes,
+            "requestCount": warmup_passes * len(queries),
+            "durationNs": warmup_ns,
         },
         "steadyState": {
             "requestCount": len(latencies),
@@ -417,7 +434,12 @@ def run_retrieval_comparison(
 class _PgvectorSession:
     backend: Literal["pgvector"] = "pgvector"
 
-    def __init__(self, snapshot: FrozenRetrievalSnapshot, database: Any) -> None:
+    def __init__(
+        self,
+        snapshot: FrozenRetrievalSnapshot,
+        database: Any,
+        plan_query: RetrievalQuery,
+    ) -> None:
         from babel_online.model.candidate_index import MaterializedServingState
         from babel_online.model.pgvector_index import PgvectorCandidateIndex
 
@@ -438,7 +460,10 @@ class _PgvectorSession:
                 model_id=snapshot.model_id,
                 model_version=snapshot.model_version,
                 embedding_space_id=snapshot.embedding_space_id,
-            )
+            ),
+            query_vector=plan_query.vector,
+            exclude_creator_id=UUID(plan_query.exclude_creator_id),
+            limit=50,
         )
         from babel_online.model.population import _plan_names_hnsw
 
@@ -446,6 +471,9 @@ class _PgvectorSession:
             raise ValueError("formal pgvector query did not observe PostgreSQL HNSW")
         self.preparation_evidence = {
             "hnswObserved": True,
+            "queryId": plan_query.query_id,
+            "limit": 50,
+            "explainPlan": plan,
             "explainPlanSha256": hashlib.sha256(
                 json.dumps(plan, sort_keys=True, separators=(",", ":")).encode("utf-8")
             ).hexdigest(),
@@ -453,6 +481,7 @@ class _PgvectorSession:
         storage = database.population_storage_bytes()
         self.memory = BackendMemory(
             measurement="postgres_relation_storage",
+            scope="shared_database_relation_all_runs",
             indexFootprintBytes=int(storage["index_bytes"]),
             tableFootprintBytes=int(storage["table_bytes"]),
             processRssDeltaBytes=None,
@@ -499,8 +528,11 @@ class _HnswlibSession:
         }
         self.memory = BackendMemory(
             measurement="index_footprint",
+            scope="current_process_net_rss_and_serialized_index",
             indexFootprintBytes=serialized_bytes,
-            processRssDeltaBytes=max(0, process.memory_info().rss - rss_before),
+            processRssDeltaBytes=_net_rss_delta(
+                before=rss_before, after=process.memory_info().rss
+            ),
         )
 
     def search(self, query: RetrievalQuery, k: int) -> tuple[str, ...]:
@@ -532,7 +564,9 @@ def run_live_retrieval_comparison(
     return run_retrieval_comparison(
         snapshot=snapshot,
         formal_pgvector_result=formal,
-        pgvector_factory=lambda value: _PgvectorSession(value, database),
+        pgvector_factory=lambda value: _PgvectorSession(
+            value, database, value.audit_queries(query_count)[0]
+        ),
         hnswlib_factory=_HnswlibSession,
         query_count=query_count,
         warmup_passes=warmup_passes,

@@ -219,12 +219,19 @@ The command selects a deterministic ordered set of query vectors from the
 checksum-verified `vectors.f32le` population. Both backends consume those same
 ordered IDs, exact float32 bytes, snapshot checksum, creator exclusions, and
 queries. Exact cosine search audits Recall@10 and Recall@50. Warmups and index
-preparation are excluded from p50/p95/p99 and throughput.
+preparation are excluded from p50/p95/p99 and throughput; their pass count,
+request count, and duration remain separately reported. The PostgreSQL
+preparation evidence retains the full `EXPLAIN (ANALYZE, BUFFERS)` plan for the
+first measured limit-50 query, including its real creator exclusion, and the
+command refuses the comparison unless that plan names the configured HNSW
+index.
 
 The JSON result is explicitly `retrieval_only` with
 `topologyConclusionEligible=false`. PostgreSQL memory is labelled as total
 shared relation storage (table/index), while hnswlib reports its serialized
-index footprint and observed local RSS delta; those differently scoped values
+index footprint and observed signed net local RSS delta. The JSON carries explicit
+`shared_database_relation_all_runs` and
+`current_process_net_rss_and_serialized_index` scopes; those differently scoped values
 must not be presented as an apples-to-apples RAM comparison. This microbenchmark
 does not change pgvector as the formal/default backend and cannot support a
 serving/training topology conclusion.

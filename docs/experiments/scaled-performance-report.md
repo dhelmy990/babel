@@ -108,7 +108,9 @@ The implemented comparison consumes the canonical frozen population and a
 deterministic ordered query selection. Its formal pgvector condition gate must
 match the snapshot/model identity and contain only successful measured requests.
 The result records p50/p95/p99, sequential retrieval throughput, Recall@10/50,
-preparation duration, index footprint, and the exact-audit checksum. It is
+separate warmup duration, preparation duration, index footprint, and the
+exact-audit checksum. PostgreSQL preparation retains the actual HNSW
+`EXPLAIN (ANALYZE, BUFFERS)` plan for a measured limit-50 query. It is
 labelled `retrieval_only` and `topologyConclusionEligible=false`. PostgreSQL
 relation storage and hnswlib serialized/RSS footprints retain their distinct
 measurement labels rather than being treated as equivalent RAM values.

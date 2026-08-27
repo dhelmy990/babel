@@ -4,6 +4,7 @@ import hashlib
 import json
 import struct
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -671,3 +672,37 @@ def test_database_loads_exact_active_embedding_state() -> None:
         pgvector_snapshot_sha256="a" * 64,
         backend_snapshot_sha256="b" * 64,
     )
+
+
+def test_database_explains_the_measured_retrieval_query_shape() -> None:
+    run_id, model_id, space_id, creator_id = (
+        UUID(int=1),
+        UUID(int=2),
+        UUID(int=3),
+        UUID(int=4),
+    )
+    plan = [{"Plan": {"Index Name": "babel_embeddings_cosine_hnsw"}}]
+    cursor = RecordingCursor(rows=[("[1,0]", "a" * 64), (plan,)])
+    database = __import__(
+        "babel_online.runtime.database", fromlist=["RuntimeDatabase"]
+    ).RuntimeDatabase("unused", connect=lambda: RecordingConnection(cursor))
+    vector = [1.0] + [0.0] * 99
+
+    observed = database.explain_population_query(
+        SimpleNamespace(
+            run_id=run_id,
+            model_id=model_id,
+            model_version=0,
+            embedding_space_id=space_id,
+        ),
+        query_vector=vector,
+        exclude_creator_id=creator_id,
+        limit=50,
+    )
+
+    assert observed == plan
+    explain_sql, parameters = cursor.queries[-1]
+    assert "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)" in explain_sql
+    assert parameters["query"].startswith("[1,")
+    assert parameters["exclude_creator_id"] == creator_id
+    assert parameters["limit"] == 50

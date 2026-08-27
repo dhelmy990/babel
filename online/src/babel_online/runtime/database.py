@@ -2119,8 +2119,18 @@ class RuntimeDatabase:
             row = cursor.fetchone()
         return {"table_bytes": int(row[0]), "index_bytes": int(row[1])}
 
-    def explain_population_query(self, expected: PopulationIdentity) -> object:
+    def explain_population_query(
+        self,
+        expected: PopulationIdentity,
+        *,
+        query_vector: object | None = None,
+        exclude_creator_id: UUID | None = None,
+        limit: int = 10,
+    ) -> object:
         from ..model.pgvector_index import PGVECTOR_CREATED_BABEL_QUERY
+
+        if limit <= 0:
+            raise ValueError("population EXPLAIN limit must be positive")
 
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute(
@@ -2140,15 +2150,25 @@ class RuntimeDatabase:
             row = cursor.fetchone()
             if row is None:
                 return None
+            query = row[0]
+            if query_vector is not None:
+                import numpy as np
+
+                values = np.asarray(query_vector, dtype="<f4")
+                if values.shape != (100,) or not np.isfinite(values).all():
+                    raise ValueError("population EXPLAIN query must be finite 100d")
+                query = "[" + ",".join(
+                    format(float(value), ".9g") for value in values
+                ) + "]"
             parameters = {
-                "query": row[0],
+                "query": query,
                 "run_id": expected.run_id,
                 "model_id": expected.model_id,
                 "model_version": expected.model_version,
                 "embedding_space_id": expected.embedding_space_id,
                 "snapshot_sha256": row[1],
-                "exclude_creator_id": UUID(int=0),
-                "limit": 10,
+                "exclude_creator_id": exclude_creator_id or UUID(int=0),
+                "limit": limit,
             }
             cursor.execute("SET LOCAL hnsw.ef_search = 100")
             cursor.execute("SET LOCAL hnsw.iterative_scan = strict_order")
