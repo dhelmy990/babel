@@ -52,6 +52,15 @@ TEST_CASE("scaled experiment migration persists schedules and directed canonical
   const std::string migration{std::istreambuf_iterator<char>{migration_file}, {}};
   CHECK(migration.find("CREATE TABLE experiment_work_schedule") != std::string::npos);
   CHECK(migration.find("CREATE TABLE experiment_edges") != std::string::npos);
+  CHECK(migration.find("CREATE TABLE experiment_traversal_rolls") !=
+        std::string::npos);
+  CHECK(migration.find("ADD COLUMN schema_version integer NOT NULL DEFAULT 1") !=
+        std::string::npos);
+  CHECK(migration.find("draw_value double precision NOT NULL") !=
+        std::string::npos);
+  CHECK(migration.find("roll_succeeded boolean NOT NULL") !=
+        std::string::npos);
+  CHECK(migration.find("outcome text NOT NULL") != std::string::npos);
   CHECK(migration.find("feedback_occurred_at_ns bigint NOT NULL") != std::string::npos);
   CHECK(migration.find("PRIMARY KEY (run_id, source_babel_id, target_babel_id)") !=
         std::string::npos);
@@ -63,4 +72,6 @@ TEST_CASE("scaled experiment migration persists schedules and directed canonical
   CHECK(migration.find("NEW.continuation_probability IS DISTINCT FROM OLD.continuation_probability") !=
         std::string::npos);
   CHECK(migration.find("experiment_work_schedule_immutable") != std::string::npos);
+  CHECK(migration.find("experiment_traversal_rolls_immutable") !=
+        std::string::npos);
 }

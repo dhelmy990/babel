@@ -205,7 +205,8 @@ TEST_CASE_METHOD(ExperimentPostgresFixture,
   pqxx::work transaction(connection);
   transaction.exec(R"(
     INSERT INTO experiment_activity_logs(
-      run_id, sequence, occurred_at_ns, level, component, event, message, metrics, details
+      run_id, sequence, occurred_at_ns, level, component, event, message, metrics, details,
+      schema_version
     ) VALUES
       ($1, 1, 1787686757789485714, 'info', 'serving',
        'recommendation_completed', 'Creator created a Babel.',
@@ -216,11 +217,14 @@ TEST_CASE_METHOD(ExperimentPostgresFixture,
        '"candidateBabelIds":["55555555-5555-5555-8555-555555555555"],'
        '"includeBabelIds":["55555555-5555-5555-8555-555555555555"],'
        '"excludeBabelIds":[],"ignoreBabelIds":[],"acceptedEdgeCount":1,'
-       '"modelId":"11111111-1111-5111-8111-111111111111","modelVersion":10}'::jsonb),
+       '"modelId":"11111111-1111-5111-8111-111111111111","modelVersion":10,'
+       '"requestId":"66666666-6666-5666-8666-666666666666",'
+       '"traversalSessionId":"77777777-7777-5777-8777-777777777777",'
+       '"sourceVectorOrigin":"pgvector_load"}'::jsonb, 2),
       ($1, 2, 1787686757808909079, 'info', 'training',
        'online_training_progress', 'Online trainer reached step 10.',
        '{"stepTimeMs":1.174327}'::jsonb,
-       '{"kind":"training","trainerStep":10,"rollingRankLoss":0.6905}'::jsonb)
+       '{"kind":"training","trainerStep":10,"rollingRankLoss":0.6905}'::jsonb, 1)
   )",
                    pqxx::params{run.run_id.value});
   transaction.commit();
@@ -230,10 +234,15 @@ TEST_CASE_METHOD(ExperimentPostgresFixture,
   REQUIRE(activity.has_value());
   REQUIRE(activity->size() == 2);
   CHECK(activity->at(0).metrics.at("clientTotalNs") == 42690337.0);
+  CHECK(activity->at(0).schema_version == 2);
   const auto& recommendation =
       std::get<babel::ExperimentRecommendationActivityDto>(activity->at(0).details);
   CHECK(recommendation.model_version == 10);
   CHECK(recommendation.accepted_edge_count == 1);
+  CHECK(recommendation.request_id == "66666666-6666-5666-8666-666666666666");
+  CHECK(recommendation.traversal_session_id ==
+        "77777777-7777-5777-8777-777777777777");
+  CHECK(recommendation.source_vector_origin == "pgvector_load");
   CHECK(activity->at(1).metrics.at("stepTimeMs") == 1.174327);
   const auto& training =
       std::get<babel::ExperimentTrainingActivityDto>(activity->at(1).details);

@@ -198,6 +198,12 @@ std::vector<BabelId> babelIds(const Json& values) {
   return result;
 }
 
+std::optional<std::string> optionalString(const Json& value, std::string_view key) {
+  const auto found = value.find(key);
+  if (found == value.end() || !found->is_string()) return std::nullopt;
+  return found->get<std::string>();
+}
+
 ExperimentActivityDetails activityDetails(const Json& details) {
   const auto kind = details.at("kind").get<std::string>();
   if (kind == "recommendation") {
@@ -212,6 +218,9 @@ ExperimentActivityDetails activityDetails(const Json& details) {
         .accepted_edge_count = details.at("acceptedEdgeCount").get<std::size_t>(),
         .model_id = RecommenderModelId::parse(details.at("modelId").get<std::string>()).value(),
         .model_version = details.at("modelVersion").get<std::uint64_t>(),
+        .request_id = optionalString(details, "requestId"),
+        .traversal_session_id = optionalString(details, "traversalSessionId"),
+        .source_vector_origin = optionalString(details, "sourceVectorOrigin"),
     };
   }
   if (kind == "feedback") {
@@ -435,7 +444,8 @@ Result<std::vector<ExperimentActivityDto>> PostgresExperimentRepository::activit
     auto connection = database_.connect();
     pqxx::read_transaction transaction(*connection);
     const auto rows = transaction.exec(R"(
-      SELECT sequence, occurred_at_ns, level, component, event, message, metrics, details
+      SELECT sequence, occurred_at_ns, level, component, event, message, metrics, details,
+             schema_version
       FROM experiment_activity_logs
       WHERE run_id = $1 AND sequence > $2
       ORDER BY sequence
@@ -451,7 +461,7 @@ Result<std::vector<ExperimentActivityDto>> PostgresExperimentRepository::activit
         metrics.emplace(name, value.get<double>());
       }
       result.push_back(ExperimentActivityDto{
-          .schema_version = 1,
+          .schema_version = row["schema_version"].as<int>(),
           .run_id = run_id,
           .sequence = row["sequence"].as<std::uint64_t>(),
           .occurred_at_ns = row["occurred_at_ns"].as<std::uint64_t>(),

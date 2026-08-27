@@ -19,6 +19,7 @@ from babel_online.runtime.database import (
     load_configured_model_artifact,
 )
 from babel_online.simulation.scheduler import ScheduledWork, deterministic_schedule
+from babel_online.simulation.walk import WalkRollEvidence
 
 from babel_online.contracts import CandidateActionV1, FeedbackEventV2
 
@@ -43,6 +44,7 @@ def feedback_event_v2(*, event_number: int = 1) -> FeedbackEventV2:
         modelVersion=0,
         embeddingSpaceId=UUID(int=4),
         retrievalBackend="pgvector",
+        sourceVectorOrigin="qwen_encode",
         candidateActions=[CandidateActionV1(
             babelId=f"30000000-0000-5000-8000-{suffix}",
             sourceArticleKey=f"enwiki:{event_number + 100}",
@@ -207,3 +209,75 @@ def test_database_persists_full_schedule_identity_and_canonical_include_only() -
     assert len(edge_queries) == 1
     assert "feedback_occurred_at_ns" in edge_queries[0]
     assert "EXCLUDED.feedback_event_id" in edge_queries[0]
+
+
+def test_database_loads_the_exact_persisted_work_schedule() -> None:
+    run_id = UUID(int=1)
+    expected = deterministic_schedule(
+        run_id,
+        [ScheduledWork(
+            creator_id=UUID(int=2),
+            creator_event_number=0,
+            period="2026-07",
+            source_article_key="enwiki:7",
+            root_babel_id=UUID(int=3),
+        )],
+    )[0]
+    cursor = RecordingCursor(rows=[(
+        expected.schedule_index,
+        expected.creator_id,
+        expected.creator_event_number,
+        expected.period,
+        expected.source_article_key,
+        expected.root_babel_id,
+        expected.traversal_session_id,
+        expected.work_id,
+        expected.workload_sha256,
+    )])
+    database = __import__(
+        "babel_online.runtime.database", fromlist=["RuntimeDatabase"]
+    ).RuntimeDatabase("unused", connect=lambda: RecordingConnection(cursor))
+
+    loaded = database.load_work_schedule(run_id)
+
+    assert loaded == (expected,)
+    assert "ORDER BY schedule_index" in cursor.queries[0][0]
+    assert cursor.queries[0][1] == (run_id,)
+
+
+def test_database_persists_and_loads_exact_traversal_roll_evidence() -> None:
+    run_id, session_id = UUID(int=1), UUID(int=2)
+    evidence = (
+        WalkRollEvidence(
+            draw_index=0,
+            kind="start",
+            source_babel_id=UUID(int=3),
+            target_babel_id=None,
+            target_rank=None,
+            source_depth=0,
+            draw_value=0.91,
+            probability=0.4,
+            roll_succeeded=False,
+            outcome="start_skipped",
+        ),
+    )
+    write_cursor = RecordingCursor()
+    database = __import__(
+        "babel_online.runtime.database", fromlist=["RuntimeDatabase"]
+    ).RuntimeDatabase("unused", connect=lambda: RecordingConnection(write_cursor))
+
+    database.persist_traversal_rolls(run_id, session_id, evidence)
+
+    query, parameters = write_cursor.queries[0]
+    assert "INSERT INTO experiment_traversal_rolls" in query
+    assert parameters == (
+        run_id, session_id, 0, "start", UUID(int=3), None, None, 0,
+        0.91, 0.4, False, "start_skipped",
+    )
+
+    read_cursor = RecordingCursor(rows=[parameters[2:]])
+    reader = __import__(
+        "babel_online.runtime.database", fromlist=["RuntimeDatabase"]
+    ).RuntimeDatabase("unused", connect=lambda: RecordingConnection(read_cursor))
+
+    assert reader.load_traversal_rolls(run_id, session_id) == evidence

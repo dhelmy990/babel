@@ -122,6 +122,9 @@ struct ExperimentRecommendationActivityDto {
   std::size_t accepted_edge_count{0};
   RecommenderModelId model_id;
   std::uint64_t model_version{0};
+  std::optional<std::string> request_id{};
+  std::optional<std::string> traversal_session_id{};
+  std::optional<std::string> source_vector_origin{};
 };
 
 struct ExperimentFeedbackActivityDto {

@@ -55,6 +55,7 @@ def feedback_event_v2(*, event_number: int = 1) -> FeedbackEventV2:
         modelVersion=0,
         embeddingSpaceId="00000000-0000-5000-8000-000000000003",
         retrievalBackend="pgvector",
+        sourceVectorOrigin="qwen_encode",
         candidateActions=[CandidateActionV1(
             babelId=f"30000000-0000-5000-8000-{suffix}",
             sourceArticleKey=f"enwiki:{event_number + 100}",

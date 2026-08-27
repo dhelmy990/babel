@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from collections import defaultdict, deque
 from collections.abc import Callable, Iterable, Sequence
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import hashlib
 import json
@@ -104,30 +103,50 @@ class BoundedCreatorScheduler:
         self,
         schedule: Sequence[ScheduledSession],
         execute: Callable[[ScheduledSession], None],
-    ) -> None:
-        if [row.schedule_index for row in schedule] != list(range(len(schedule))):
-            raise ValueError("persisted schedule indexes must be contiguous")
-        by_creator: dict[UUID, deque[ScheduledSession]] = defaultdict(deque)
-        for row in schedule:
-            queue = by_creator[row.creator_id]
-            if row.creator_event_number != len(queue):
-                raise ValueError("creator-local event numbers must be contiguous")
-            queue.append(row)
-
-        ready = deque(sorted(by_creator, key=str))
-        futures: dict[Future[None], UUID] = {}
+    ) -> tuple[ScheduledSession, ...]:
+        waves = deterministic_waves(
+            schedule, concurrent_users=self.concurrent_users
+        )
+        dispatched: list[ScheduledSession] = []
         with ThreadPoolExecutor(max_workers=self.concurrent_users) as pool:
-            while ready or futures:
-                while ready and len(futures) < self.concurrent_users:
-                    creator_id = ready.popleft()
-                    row = by_creator[creator_id].popleft()
-                    futures[pool.submit(execute, row)] = creator_id
-                done, _pending = wait(futures, return_when=FIRST_COMPLETED)
-                for future in sorted(done, key=lambda item: str(futures[item])):
-                    creator_id = futures.pop(future)
+            for wave in waves:
+                futures = [pool.submit(execute, row) for row in wave]
+                dispatched.extend(wave)
+                for future in futures:
                     future.result()
-                    if by_creator[creator_id]:
-                        ready.append(creator_id)
+        return tuple(dispatched)
+
+
+def deterministic_waves(
+    schedule: Sequence[ScheduledSession], *, concurrent_users: int
+) -> tuple[tuple[ScheduledSession, ...], ...]:
+    """Freeze dispatch batches without making completion timing part of the schedule."""
+    if concurrent_users <= 0:
+        raise ValueError("concurrent users must be positive")
+    if [row.schedule_index for row in schedule] != list(range(len(schedule))):
+        raise ValueError("persisted schedule indexes must be contiguous")
+    next_event: dict[UUID, int] = {}
+    for row in schedule:
+        expected = next_event.get(row.creator_id, 0)
+        if row.creator_event_number != expected:
+            raise ValueError("creator-local event numbers must be contiguous")
+        next_event[row.creator_id] = expected + 1
+
+    remaining = list(schedule)
+    waves: list[tuple[ScheduledSession, ...]] = []
+    while remaining:
+        wave: list[ScheduledSession] = []
+        deferred: list[ScheduledSession] = []
+        creators: set[UUID] = set()
+        for row in remaining:
+            if len(wave) < concurrent_users and row.creator_id not in creators:
+                wave.append(row)
+                creators.add(row.creator_id)
+            else:
+                deferred.append(row)
+        waves.append(tuple(wave))
+        remaining = deferred
+    return tuple(waves)
 
 
 __all__ = [
@@ -135,4 +154,5 @@ __all__ = [
     "ScheduledSession",
     "ScheduledWork",
     "deterministic_schedule",
+    "deterministic_waves",
 ]

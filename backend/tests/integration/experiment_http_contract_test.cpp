@@ -104,7 +104,7 @@ class Repository final : public ExperimentRepository {
                                                        std::uint64_t,
                                                        std::size_t) override {
     return std::vector<ExperimentActivityDto>{ExperimentActivityDto{
-        .schema_version = 1,
+        .schema_version = 2,
         .run_id = id,
         .sequence = 7,
         .occurred_at_ns = 99,
@@ -128,6 +128,9 @@ class Repository final : public ExperimentRepository {
             .accepted_edge_count = 1,
             .model_id = modelId(),
             .model_version = 4,
+            .request_id = "66666666-6666-5666-8666-666666666666",
+            .traversal_session_id = "77777777-7777-5777-8777-777777777777",
+            .source_vector_origin = "cache_hit",
         },
     }};
   }
@@ -229,10 +232,16 @@ TEST_CASE("experiment read DTOs expose health and typed observable activity only
   });
   REQUIRE(logs->getStatusCode() == drogon::k200OK);
   const auto row = body(logs).at("activity").at(0);
+  CHECK(row.at("schemaVersion") == 2);
   CHECK(row.at("details").at("kind") == "recommendation");
   CHECK(row.at("details").at("newBabelTitle") == "Virtual memory");
   CHECK(row.at("details").at("includeBabelIds").size() == 1);
   CHECK(row.at("details").at("acceptedEdgeCount") == 1);
+  CHECK(row.at("details").at("requestId") ==
+        "66666666-6666-5666-8666-666666666666");
+  CHECK(row.at("details").at("traversalSessionId") ==
+        "77777777-7777-5777-8777-777777777777");
+  CHECK(row.at("details").at("sourceVectorOrigin") == "cache_hit");
   CHECK(row.at("metrics").at("eventRate") == 3.5);
   CHECK(row.at("metrics").find("pprScore") == row.at("metrics").end());
   CHECK(row.at("metrics").find("randomDraw") == row.at("metrics").end());

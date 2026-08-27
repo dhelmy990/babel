@@ -314,6 +314,7 @@ def test_checked_in_json_schemas_match_typed_contracts() -> None:
         "recommendation-request-v2",
         "recommendation-response-v2",
         "feedback-event-v2",
+        "activity-log-v2",
     }
     for name, schema in schemas.items():
         checked_in = json.loads(
@@ -423,6 +424,7 @@ def test_scaled_v2_contracts_close_walk_identity_and_preserve_v1() -> None:
         modelVersion=response.modelVersion,
         embeddingSpaceId=response.embeddingSpaceId,
         retrievalBackend=response.retrievalBackend,
+        sourceVectorOrigin=response.sourceVectorOrigin,
         candidateActions=[CandidateActionV1(
             babelId=candidate.babelId,
             sourceArticleKey=candidate.sourceArticleKey,
@@ -433,6 +435,7 @@ def test_scaled_v2_contracts_close_walk_identity_and_preserve_v1() -> None:
         occurredAtNs=1_725_000_000_000_000_123,
     )
     assert response.sourceVectorOrigin == "qwen_encode"
+    assert feedback.sourceVectorOrigin == "qwen_encode"
     assert feedback.occurredAtNs == 1_725_000_000_000_000_123
     assert RecommendationRequestV1.model_validate(valid_request()).model_dump(mode="json") == valid_request()
 

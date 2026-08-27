@@ -123,6 +123,55 @@ def test_failed_start_roll_makes_no_post_and_replay_is_identical() -> None:
     assert first == second
     assert first.request_count == 0
     assert calls == []
+    assert len(first.rolls) == 1
+    assert first.rolls[0].kind == "start"
+    assert first.rolls[0].draw_value == 0.9
+    assert first.rolls[0].probability == 0.4
+    assert first.rolls[0].roll_succeeded is False
+    assert first.rolls[0].outcome == "start_skipped"
+
+
+def test_walk_records_each_continuation_roll_and_why_it_did_not_expand() -> None:
+    root, queued, skipped, duplicate = node(1), node(2), node(3), node(2)
+    draws = iter((0.1, 0.1, 0.8, 0.1, 0.1))
+    calls = []
+
+    def recommend(source, _session, _parent, _depth):
+        calls.append(source)
+        return WalkExpansion(
+            request_id=UUID(
+                f"00000000-0000-5000-8000-{400 + len(calls):012d}"
+            ),
+            included=(
+                IncludedWalkTarget(queued, 1),
+                IncludedWalkTarget(skipped, 2),
+                IncludedWalkTarget(duplicate, 3),
+            ) if source == root else (IncludedWalkTarget(node(4), 1),),
+        )
+
+    trace = RecommendationWalk(
+        start_probability=0.4,
+        continuation_probability=0.4,
+        draw=lambda *_identity: next(draws),
+    ).run(
+        run_id=RUN,
+        creator_id=CREATOR,
+        session_id=SESSION,
+        root=root,
+        recommend=recommend,
+    )
+
+    assert [roll.draw_index for roll in trace.rolls] == list(range(5))
+    assert [roll.kind for roll in trace.rolls] == [
+        "start", "continuation", "continuation", "continuation", "continuation"
+    ]
+    assert [roll.outcome for roll in trace.rolls] == [
+        "started", "enqueued", "continuation_skipped", "already_visited", "depth_limit"
+    ]
+    assert trace.rolls[1].target_babel_id == queued.babel_id
+    assert trace.rolls[1].target_rank == 1
+    assert trace.rolls[1].source_depth == 0
+    assert trace.rolls[-1].source_depth == 1
 
 
 def test_start_and_continuation_probabilities_are_independent_settings() -> None:

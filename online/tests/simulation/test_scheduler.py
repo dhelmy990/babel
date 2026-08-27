@@ -9,6 +9,7 @@ from babel_online.simulation.scheduler import (
     ScheduledWork,
     ScheduledSession,
     deterministic_schedule,
+    deterministic_waves,
 )
 
 
@@ -80,3 +81,37 @@ def test_scheduler_bounds_global_and_per_creator_concurrency() -> None:
             for row in sorted(completed, key=lambda item: item.schedule_index)
             if row.creator_id == value
         ] == [0, 1, 2]
+
+
+def test_scheduler_dispatches_persisted_work_in_deterministic_waves() -> None:
+    schedule = deterministic_schedule(
+        RUN, work([creator(1), creator(2), creator(3)], sessions=2)
+    )
+
+    waves = deterministic_waves(schedule, concurrent_users=2)
+
+    assert [[row.schedule_index for row in wave] for wave in waves] == [
+        [0, 1], [2, 3], [4, 5]
+    ]
+    assert all(
+        len({row.creator_id for row in wave}) == len(wave) for wave in waves
+    )
+
+
+def test_completion_timing_does_not_change_later_dispatch_order() -> None:
+    schedule = deterministic_schedule(
+        RUN, work([creator(1), creator(2), creator(3)], sessions=2)
+    )
+
+    def run_with_delays(reverse: bool) -> list[int]:
+        def execute(row: ScheduledSession) -> None:
+            delay_slot = 5 - row.schedule_index if reverse else row.schedule_index
+            time.sleep(delay_slot * 0.001)
+
+        dispatched = BoundedCreatorScheduler(concurrent_users=2).run(
+            schedule, execute
+        )
+        return [row.schedule_index for row in dispatched]
+
+    assert run_with_delays(False) == list(range(6))
+    assert run_with_delays(True) == list(range(6))

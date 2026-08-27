@@ -288,6 +288,7 @@ class FeedbackEventV2(FrozenContract):
     modelVersion: int = Field(ge=0)
     embeddingSpaceId: UUID
     retrievalBackend: RetrievalBackend
+    sourceVectorOrigin: Literal["qwen_encode", "cache_hit", "pgvector_load"]
     candidateActions: list[CandidateActionV1]
     occurredAtNs: int = Field(ge=0, le=9_223_372_036_854_775_807)
 
@@ -314,6 +315,12 @@ class RecommendationActivityV1(FrozenContract):
     acceptedEdgeCount: int = Field(ge=0)
     modelId: UUID
     modelVersion: int = Field(ge=0)
+
+
+class RecommendationActivityV2(RecommendationActivityV1):
+    requestId: UUID
+    traversalSessionId: UUID
+    sourceVectorOrigin: Literal["qwen_encode", "cache_hit", "pgvector_load"]
 
 
 class FeedbackActivityV1(FrozenContract):
@@ -368,6 +375,11 @@ class ActivityLogV1(FrozenContract):
         if any(part in key.casefold() for key in value for part in forbidden):
             raise ValueError("activity metrics contain a hidden field")
         return value
+
+
+class ActivityLogV2(ActivityLogV1):
+    schemaVersion: Literal[2]
+    details: RecommendationActivityV2
 
 
 class ModelManifestV1(FrozenContract):
@@ -486,6 +498,7 @@ _CONTRACT_MODELS: dict[str, type[FrozenContract]] = {
     "recommendation-request-v2": RecommendationRequestV2,
     "recommendation-response-v2": RecommendationResponseV2,
     "feedback-event-v2": FeedbackEventV2,
+    "activity-log-v2": ActivityLogV2,
 }
 
 
@@ -579,6 +592,7 @@ def canonical_pgvector_snapshot_sha256(
 
 __all__ = [
     "ActivityLogV1",
+    "ActivityLogV2",
     "ActivityDetailsV1",
     "CandidateActionV1",
     "canonical_pgvector_snapshot_sha256",
@@ -595,6 +609,7 @@ __all__ = [
     "ModelManifest",
     "LifecycleActivityV1",
     "RecommendationActivityV1",
+    "RecommendationActivityV2",
     "RecommendationCandidateV1",
     "RecommendationRequestV1",
     "RecommendationRequestV2",

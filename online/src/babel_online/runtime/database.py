@@ -13,6 +13,7 @@ from uuid import UUID
 
 from ..contracts import (
     ActivityLogV1,
+    ActivityLogV2,
     FeedbackEventV2,
     ModelManifestV1,
     ModelManifestV2,
@@ -29,6 +30,7 @@ from ..model.population import (
 from ..model.source_vector_cache import VectorCacheKey
 from ..observable import CreatedBabel, VectorRecord, reject_hidden_fields
 from ..simulation.scheduler import ScheduledSession
+from ..simulation.walk import WalkRollEvidence
 
 
 class ArtifactConfigurationError(ValueError):
@@ -291,7 +293,7 @@ class RuntimeDatabase:
                 (*values.values(), run_id),
             )
 
-    def append_activity(self, activity: ActivityLogV1) -> int:
+    def append_activity(self, activity: ActivityLogV1 | ActivityLogV2) -> int:
         reject_hidden_fields(activity.model_dump(mode="json"))
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute(
@@ -308,8 +310,8 @@ class RuntimeDatabase:
                 """
                 INSERT INTO experiment_activity_logs(
                   run_id, sequence, occurred_at_ns, level, component, event,
-                  message, metrics, details
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb)
+                  message, metrics, details, schema_version
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s)
                 """,
                 (
                     document.runId,
@@ -321,6 +323,7 @@ class RuntimeDatabase:
                     document.message,
                     json.dumps(document.metrics),
                     json.dumps(document.details.model_dump(mode="json")),
+                    document.schemaVersion,
                 ),
             )
         return sequence
@@ -398,6 +401,105 @@ class RuntimeDatabase:
                         row.workload_sha256,
                     ),
                 )
+
+    def load_work_schedule(self, run_id: UUID) -> tuple[ScheduledSession, ...]:
+        """Load the frozen topology-independent work in its intended order."""
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT schedule_index,creator_id,creator_event_number,period,
+                       source_article_key,root_babel_id,traversal_session_id,
+                       work_id,workload_sha256
+                FROM experiment_work_schedule
+                WHERE run_id=%s
+                ORDER BY schedule_index
+                """,
+                (run_id,),
+            )
+            rows = cursor.fetchall()
+        return tuple(
+            ScheduledSession(
+                run_id=run_id,
+                schedule_index=int(row[0]),
+                creator_id=row[1],
+                creator_event_number=int(row[2]),
+                period=row[3],
+                source_article_key=row[4],
+                root_babel_id=row[5],
+                traversal_session_id=row[6],
+                work_id=row[7],
+                workload_sha256=row[8],
+            )
+            for row in rows
+        )
+
+    def persist_traversal_rolls(
+        self,
+        run_id: UUID,
+        traversal_session_id: UUID,
+        rolls: Sequence[WalkRollEvidence],
+    ) -> None:
+        """Persist the exact deterministic rolls and expansion outcomes for one walk."""
+        if not rolls or [row.draw_index for row in rolls] != list(range(len(rolls))):
+            raise ValueError("traversal roll indexes must be contiguous from zero")
+        if rolls[0].kind != "start":
+            raise ValueError("traversal evidence must begin with the start roll")
+        with self._connect() as connection, connection.cursor() as cursor:
+            for row in rolls:
+                cursor.execute(
+                    """
+                    INSERT INTO experiment_traversal_rolls(
+                      run_id,traversal_session_id,draw_index,kind,source_babel_id,
+                      target_babel_id,target_rank,source_depth,draw_value,
+                      probability,roll_succeeded,outcome
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    (
+                        run_id,
+                        traversal_session_id,
+                        row.draw_index,
+                        row.kind,
+                        row.source_babel_id,
+                        row.target_babel_id,
+                        row.target_rank,
+                        row.source_depth,
+                        row.draw_value,
+                        row.probability,
+                        row.roll_succeeded,
+                        row.outcome,
+                    ),
+                )
+
+    def load_traversal_rolls(
+        self, run_id: UUID, traversal_session_id: UUID
+    ) -> tuple[WalkRollEvidence, ...]:
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT draw_index,kind,source_babel_id,target_babel_id,target_rank,
+                       source_depth,draw_value,probability,roll_succeeded,outcome
+                FROM experiment_traversal_rolls
+                WHERE run_id=%s AND traversal_session_id=%s
+                ORDER BY draw_index
+                """,
+                (run_id, traversal_session_id),
+            )
+            rows = cursor.fetchall()
+        return tuple(
+            WalkRollEvidence(
+                draw_index=int(row[0]),
+                kind=row[1],
+                source_babel_id=row[2],
+                target_babel_id=row[3],
+                target_rank=None if row[4] is None else int(row[4]),
+                source_depth=int(row[5]),
+                draw_value=float(row[6]),
+                probability=float(row[7]),
+                roll_succeeded=bool(row[8]),
+                outcome=row[9],
+            )
+            for row in rows
+        )
 
     def persist_feedback_edges(self, event: FeedbackEventV2) -> None:
         """Upsert only includes, selecting canonical event-time provenance."""

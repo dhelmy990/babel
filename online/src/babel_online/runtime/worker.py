@@ -15,12 +15,14 @@ import numpy as np
 
 from ..contracts import (
     ActivityLogV1,
+    ActivityLogV2,
     CandidateActionV1,
     FeedbackEventV1,
     FeedbackEventV2,
     ModelManifestV1,
     ModelManifestV2,
     RecommendationActivityV1,
+    RecommendationActivityV2,
     RecommendationRequestV1,
     RecommendationRequestV2,
     RunConfigV2,
@@ -148,9 +150,10 @@ def _activity(
     message: str,
     metrics: Mapping[str, int | float],
     details: object,
-) -> ActivityLogV1:
-    return ActivityLogV1(
-        schemaVersion=1,
+) -> ActivityLogV1 | ActivityLogV2:
+    contract = ActivityLogV2 if isinstance(details, RecommendationActivityV2) else ActivityLogV1
+    return contract(
+        schemaVersion=2 if contract is ActivityLogV2 else 1,
         runId=run_id,
         sequence=1,
         occurredAtNs=time.time_ns(),
@@ -309,6 +312,13 @@ class FridayDemoRuntime:
                 )
             )
         schedule = deterministic_schedule(self.config.runId, work)
+        persisted = self.database.load_work_schedule(self.config.runId)
+        if persisted:
+            if persisted != schedule:
+                raise RuntimeError(
+                    "persisted work schedule differs from the current launch plan"
+                )
+            return persisted
         self.database.persist_work_schedule(schedule)
         return schedule
 
@@ -519,6 +529,39 @@ class FridayDemoRuntime:
         for action in event.candidateActions:
             actions[action.action].append(action.babelId)
         server_ns = response.timingsNs["serverTotal"]
+        if isinstance(event, FeedbackEventV2):
+            if event.sourceVectorOrigin != response.sourceVectorOrigin:
+                raise RuntimeError("feedback and response source-vector origins differ")
+            details = RecommendationActivityV2(
+                kind="recommendation",
+                requestId=event.requestId,
+                traversalSessionId=event.traversalSessionId,
+                sourceVectorOrigin=event.sourceVectorOrigin,
+                creatorId=event.creatorId,
+                newBabelId=event.sourceBabelId,
+                newBabelTitle=babel.title,
+                candidateBabelIds=[row.babelId for row in response.candidates],
+                includeBabelIds=actions["include"],
+                excludeBabelIds=actions["exclude"],
+                ignoreBabelIds=actions["ignore"],
+                acceptedEdgeCount=len(actions["include"]),
+                modelId=response.modelId,
+                modelVersion=response.modelVersion,
+            )
+        else:
+            details = RecommendationActivityV1(
+                kind="recommendation",
+                creatorId=event.creatorId,
+                newBabelId=babel.babelId,
+                newBabelTitle=babel.title,
+                candidateBabelIds=[row.babelId for row in response.candidates],
+                includeBabelIds=actions["include"],
+                excludeBabelIds=actions["exclude"],
+                ignoreBabelIds=actions["ignore"],
+                acceptedEdgeCount=len(actions["include"]),
+                modelId=response.modelId,
+                modelVersion=response.modelVersion,
+            )
         self.database.append_activity(
             _activity(
                 self.config.runId,
@@ -538,23 +581,7 @@ class FridayDemoRuntime:
                         else {}
                     ),
                 },
-                details=RecommendationActivityV1(
-                    kind="recommendation",
-                    creatorId=event.creatorId,
-                    newBabelId=(
-                        event.sourceBabelId
-                        if isinstance(event, FeedbackEventV2)
-                        else babel.babelId
-                    ),
-                    newBabelTitle=babel.title,
-                    candidateBabelIds=[row.babelId for row in response.candidates],
-                    includeBabelIds=actions["include"],
-                    excludeBabelIds=actions["exclude"],
-                    ignoreBabelIds=actions["ignore"],
-                    acceptedEdgeCount=len(actions["include"]),
-                    modelId=response.modelId,
-                    modelVersion=response.modelVersion,
-                ),
+                details=details,
             )
         )
 
@@ -787,6 +814,7 @@ class FridayDemoRuntime:
                 modelVersion=response.modelVersion,
                 embeddingSpaceId=response.embeddingSpaceId,
                 retrievalBackend=response.retrievalBackend,
+                sourceVectorOrigin=response.sourceVectorOrigin,
                 candidateActions=actions,
                 occurredAtNs=time.time_ns(),
             )
@@ -817,6 +845,11 @@ class FridayDemoRuntime:
                     source_article_key=babel.sourceArticleKey,
                 ),
                 recommend=recommend,
+            )
+            self.database.persist_traversal_rolls(
+                self.config.runId,
+                scheduled.traversal_session_id,
+                trace.rolls,
             )
             root_request_id = trace.requests[0].request_id if trace.requests else None
             if not precreated:

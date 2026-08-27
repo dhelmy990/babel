@@ -1,3 +1,7 @@
+ALTER TABLE experiment_activity_logs
+  ADD COLUMN schema_version integer NOT NULL DEFAULT 1
+    CHECK (schema_version IN (1, 2));
+
 ALTER TABLE experiment_runs
   ADD COLUMN contract_version integer NOT NULL DEFAULT 1
     CHECK (contract_version IN (1, 2)),
@@ -69,6 +73,42 @@ CREATE INDEX experiment_edges_target
 CREATE INDEX experiment_edges_feedback_order
   ON experiment_edges (run_id, feedback_occurred_at_ns, feedback_event_id);
 
+CREATE TABLE experiment_traversal_rolls (
+  run_id uuid NOT NULL REFERENCES experiment_runs(id) ON DELETE RESTRICT,
+  traversal_session_id uuid NOT NULL,
+  draw_index integer NOT NULL CHECK (draw_index >= 0),
+  kind text NOT NULL CHECK (kind IN ('start', 'continuation')),
+  source_babel_id uuid NOT NULL,
+  target_babel_id uuid,
+  target_rank integer CHECK (target_rank > 0),
+  source_depth integer NOT NULL CHECK (source_depth IN (0, 1)),
+  draw_value double precision NOT NULL
+    CHECK (draw_value >= 0 AND draw_value < 1),
+  probability double precision NOT NULL
+    CHECK (probability >= 0 AND probability <= 1),
+  roll_succeeded boolean NOT NULL,
+  outcome text NOT NULL CHECK (
+    outcome IN (
+      'started', 'start_skipped', 'enqueued', 'continuation_skipped',
+      'depth_limit', 'already_visited'
+    )
+  ),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (run_id, traversal_session_id, draw_index),
+  FOREIGN KEY (run_id, source_babel_id)
+    REFERENCES experiment_babels(run_id, babel_id) ON DELETE RESTRICT,
+  FOREIGN KEY (run_id, target_babel_id)
+    REFERENCES experiment_babels(run_id, babel_id) ON DELETE RESTRICT,
+  CHECK (
+    (kind = 'start' AND draw_index = 0 AND target_babel_id IS NULL AND
+      target_rank IS NULL AND outcome IN ('started', 'start_skipped')) OR
+    (kind = 'continuation' AND draw_index > 0 AND target_babel_id IS NOT NULL AND
+      target_rank IS NOT NULL AND outcome IN (
+        'enqueued', 'continuation_skipped', 'depth_limit', 'already_visited'
+      ))
+  )
+);
+
 CREATE FUNCTION prevent_experiment_work_schedule_mutation()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -78,6 +118,10 @@ $$;
 
 CREATE TRIGGER experiment_work_schedule_immutable
 BEFORE UPDATE OR DELETE ON experiment_work_schedule
+FOR EACH ROW EXECUTE FUNCTION prevent_experiment_work_schedule_mutation();
+
+CREATE TRIGGER experiment_traversal_rolls_immutable
+BEFORE UPDATE OR DELETE ON experiment_traversal_rolls
 FOR EACH ROW EXECUTE FUNCTION prevent_experiment_work_schedule_mutation();
 
 CREATE OR REPLACE FUNCTION prevent_experiment_launch_mutation()

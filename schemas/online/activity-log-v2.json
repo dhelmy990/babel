@@ -1,0 +1,199 @@
+{
+  "$defs": {
+    "RecommendationActivityV2": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "recommendation",
+          "title": "Kind",
+          "type": "string"
+        },
+        "creatorId": {
+          "format": "uuid",
+          "title": "Creatorid",
+          "type": "string"
+        },
+        "newBabelId": {
+          "format": "uuid",
+          "title": "Newbabelid",
+          "type": "string"
+        },
+        "newBabelTitle": {
+          "minLength": 1,
+          "title": "Newbabeltitle",
+          "type": "string"
+        },
+        "candidateBabelIds": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "title": "Candidatebabelids",
+          "type": "array"
+        },
+        "includeBabelIds": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "title": "Includebabelids",
+          "type": "array"
+        },
+        "excludeBabelIds": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "title": "Excludebabelids",
+          "type": "array"
+        },
+        "ignoreBabelIds": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "title": "Ignorebabelids",
+          "type": "array"
+        },
+        "acceptedEdgeCount": {
+          "minimum": 0,
+          "title": "Acceptededgecount",
+          "type": "integer"
+        },
+        "modelId": {
+          "format": "uuid",
+          "title": "Modelid",
+          "type": "string"
+        },
+        "modelVersion": {
+          "minimum": 0,
+          "title": "Modelversion",
+          "type": "integer"
+        },
+        "requestId": {
+          "format": "uuid",
+          "title": "Requestid",
+          "type": "string"
+        },
+        "traversalSessionId": {
+          "format": "uuid",
+          "title": "Traversalsessionid",
+          "type": "string"
+        },
+        "sourceVectorOrigin": {
+          "enum": [
+            "qwen_encode",
+            "cache_hit",
+            "pgvector_load"
+          ],
+          "title": "Sourcevectororigin",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "creatorId",
+        "newBabelId",
+        "newBabelTitle",
+        "candidateBabelIds",
+        "includeBabelIds",
+        "excludeBabelIds",
+        "ignoreBabelIds",
+        "acceptedEdgeCount",
+        "modelId",
+        "modelVersion",
+        "requestId",
+        "traversalSessionId",
+        "sourceVectorOrigin"
+      ],
+      "title": "RecommendationActivityV2",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "const": 2,
+      "title": "Schemaversion",
+      "type": "integer"
+    },
+    "runId": {
+      "format": "uuid",
+      "title": "Runid",
+      "type": "string"
+    },
+    "sequence": {
+      "exclusiveMinimum": 0,
+      "title": "Sequence",
+      "type": "integer"
+    },
+    "occurredAtNs": {
+      "minimum": 0,
+      "title": "Occurredatns",
+      "type": "integer"
+    },
+    "level": {
+      "enum": [
+        "debug",
+        "info",
+        "warning",
+        "error"
+      ],
+      "title": "Level",
+      "type": "string"
+    },
+    "component": {
+      "enum": [
+        "supervisor",
+        "serving",
+        "training",
+        "feedback"
+      ],
+      "title": "Component",
+      "type": "string"
+    },
+    "event": {
+      "minLength": 1,
+      "title": "Event",
+      "type": "string"
+    },
+    "message": {
+      "minLength": 1,
+      "title": "Message",
+      "type": "string"
+    },
+    "metrics": {
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "number"
+          }
+        ]
+      },
+      "title": "Metrics",
+      "type": "object"
+    },
+    "details": {
+      "$ref": "#/$defs/RecommendationActivityV2"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "runId",
+    "sequence",
+    "occurredAtNs",
+    "level",
+    "component",
+    "event",
+    "message",
+    "metrics",
+    "details"
+  ],
+  "title": "ActivityLogV2",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://babel.local/schemas/online/activity-log-v2.json"
+}

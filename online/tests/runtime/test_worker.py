@@ -461,6 +461,7 @@ def test_v2_worker_freezes_period_source_root_and_creator_order_before_execution
     runtime = object.__new__(FridayDemoRuntime)
     runtime.config = SimpleNamespace(runId=run_id)
     runtime.database = SimpleNamespace(
+        load_work_schedule=lambda _run_id: (),
         persist_work_schedule=lambda rows: captured.append(tuple(rows))
     )
     plan = [
@@ -483,6 +484,52 @@ def test_v2_worker_freezes_period_source_root_and_creator_order_before_execution
     assert [row.root_babel_id for row in schedule] == [row[3] for row in plan]
 
 
+def test_v2_worker_reuses_and_validates_the_persisted_schedule() -> None:
+    run_id = uuid4()
+    creator_id = uuid4()
+    plan = [
+        ("2026-06", creator_id, {"article_key": "enwiki:1"}, uuid4()),
+        ("2026-07", creator_id, {"article_key": "enwiki:2"}, uuid4()),
+    ]
+    expected = deterministic_schedule(
+        run_id,
+        [
+            ScheduledWork(
+                creator_id=creator_id,
+                creator_event_number=index,
+                period=period,
+                source_article_key=article["article_key"],
+                root_babel_id=babel_id,
+            )
+            for index, (period, _creator, article, babel_id) in enumerate(plan)
+        ],
+    )
+    persisted = []
+    runtime = object.__new__(FridayDemoRuntime)
+    runtime.config = SimpleNamespace(runId=run_id)
+    runtime.database = SimpleNamespace(
+        load_work_schedule=lambda _run_id: expected,
+        persist_work_schedule=lambda rows: persisted.append(tuple(rows)),
+    )
+
+    assert runtime._persist_scaled_schedule(plan) == expected
+    assert persisted == []
+
+    runtime.database.load_work_schedule = lambda _run_id: (
+        expected[0].__class__(
+            **{
+                field: getattr(expected[0], field)
+                for field in expected[0].__dataclass_fields__
+                if field != "source_article_key"
+            },
+            source_article_key="enwiki:999",
+        ),
+        expected[1],
+    )
+    with pytest.raises(RuntimeError, match="persisted work schedule"):
+        runtime._persist_scaled_schedule(plan)
+
+
 def test_failed_v2_start_roll_finalizes_and_materializes_without_a_request() -> None:
     run_id = uuid4()
     creator_id = uuid4()
@@ -503,6 +550,7 @@ def test_failed_v2_start_roll_finalizes_and_materializes_without_a_request() -> 
     )[0]
     finalized = []
     materialized = []
+    persisted_rolls = []
     runtime = object.__new__(FridayDemoRuntime)
     runtime.config = SimpleNamespace(
         runId=run_id,
@@ -520,6 +568,7 @@ def test_failed_v2_start_roll_finalizes_and_materializes_without_a_request() -> 
         stop_requested=lambda _run_id: False,
         stage_babel=lambda **_values: None,
         finalize_babel=lambda *values: finalized.append(values),
+        persist_traversal_rolls=lambda *values: persisted_rolls.append(values),
         update_metrics=lambda *_args, **_values: None,
     )
     runtime.recommendation_endpoint = "http://127.0.0.1:8791"
@@ -538,6 +587,9 @@ def test_failed_v2_start_roll_finalizes_and_materializes_without_a_request() -> 
 
     assert finalized == [(run_id, babel_id, None)]
     assert materialized[0][0].babelId == babel_id
+    assert persisted_rolls[0][:2] == (run_id, scheduled.traversal_session_id)
+    assert len(persisted_rolls[0][2]) == 1
+    assert persisted_rolls[0][2][0].outcome == "start_skipped"
 
 
 def test_scaled_decision_draw_identity_includes_session_source_and_depth() -> None:
@@ -646,6 +698,7 @@ def test_disabled_interleave_finishes_all_creation_work_before_any_walk() -> Non
         interleaveCreationAndRecommendations=False,
     )
     runtime.database = SimpleNamespace(
+        load_work_schedule=lambda _run_id: (),
         persist_work_schedule=lambda _rows: None,
         stage_babel=lambda **values: operations.append(("stage", values["babel"].babelId)),
         finalize_babel=lambda _run, babel, _request: operations.append(("finalize", babel)),
@@ -695,6 +748,7 @@ def test_v2_activity_identifies_actual_walk_source_and_acting_creator() -> None:
         modelVersion=0,
         embeddingSpaceId=uuid4(),
         retrievalBackend="pgvector",
+        sourceVectorOrigin="cache_hit",
         candidateActions=[],
         occurredAtNs=1,
     )
@@ -706,6 +760,7 @@ def test_v2_activity_identifies_actual_walk_source_and_acting_creator() -> None:
         candidates=[],
         modelId=event.modelId,
         modelVersion=0,
+        sourceVectorOrigin="cache_hit",
     )
 
     runtime._record_recommendation(source, response, event, 8)
@@ -714,4 +769,8 @@ def test_v2_activity_identifies_actual_walk_source_and_acting_creator() -> None:
     assert activity.details.creatorId == acting_creator
     assert activity.details.newBabelId == source_id
     assert activity.details.newBabelTitle == "Accepted source"
+    assert activity.schemaVersion == 2
+    assert activity.details.requestId == event.requestId
+    assert activity.details.traversalSessionId == event.traversalSessionId
+    assert activity.details.sourceVectorOrigin == "cache_hit"
     assert activity.metrics["traversalDepth"] == 1

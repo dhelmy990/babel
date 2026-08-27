@@ -102,7 +102,7 @@ Json detailsJson(const ExperimentActivityDetails& details) {
       [](const auto& value) -> Json {
         using Detail = std::decay_t<decltype(value)>;
         if constexpr (std::is_same_v<Detail, ExperimentRecommendationActivityDto>) {
-          return Json{{"kind", "recommendation"},
+          Json result{{"kind", "recommendation"},
                       {"creatorId", value.creator_id.value},
                       {"newBabelId", value.new_babel_id.value},
                       {"newBabelTitle", value.new_babel_title},
@@ -113,6 +113,14 @@ Json detailsJson(const ExperimentActivityDetails& details) {
                       {"acceptedEdgeCount", value.accepted_edge_count},
                       {"modelId", value.model_id.value},
                       {"modelVersion", value.model_version}};
+          if (value.request_id) result["requestId"] = *value.request_id;
+          if (value.traversal_session_id) {
+            result["traversalSessionId"] = *value.traversal_session_id;
+          }
+          if (value.source_vector_origin) {
+            result["sourceVectorOrigin"] = *value.source_vector_origin;
+          }
+          return result;
         } else if constexpr (std::is_same_v<Detail, ExperimentFeedbackActivityDto>) {
           return Json{{"kind", "feedback"},
                       {"kafkaOffset", value.kafka_offset},

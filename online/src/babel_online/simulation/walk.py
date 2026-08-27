@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Literal
 from uuid import UUID
 
 
@@ -47,10 +48,32 @@ class WalkEdge:
 
 
 @dataclass(frozen=True, slots=True)
+class WalkRollEvidence:
+    draw_index: int
+    kind: Literal["start", "continuation"]
+    source_babel_id: UUID
+    target_babel_id: UUID | None
+    target_rank: int | None
+    source_depth: int
+    draw_value: float
+    probability: float
+    roll_succeeded: bool
+    outcome: Literal[
+        "started",
+        "start_skipped",
+        "enqueued",
+        "continuation_skipped",
+        "depth_limit",
+        "already_visited",
+    ]
+
+
+@dataclass(frozen=True, slots=True)
 class WalkTrace:
     started: bool
     requests: tuple[WalkRequest, ...]
     edges: tuple[WalkEdge, ...]
+    rolls: tuple[WalkRollEvidence, ...]
 
     @property
     def request_count(self) -> int:
@@ -101,8 +124,23 @@ class RecommendationWalk:
         )
         if not 0.0 <= start < 1.0:
             raise ValueError("walk draw must be in [0, 1)")
+        start_succeeded = start < self.start_probability
+        rolls = [
+            WalkRollEvidence(
+                draw_index=0,
+                kind="start",
+                source_babel_id=root.babel_id,
+                target_babel_id=None,
+                target_rank=None,
+                source_depth=0,
+                draw_value=start,
+                probability=self.start_probability,
+                roll_succeeded=start_succeeded,
+                outcome="started" if start_succeeded else "start_skipped",
+            )
+        ]
         if start >= self.start_probability:
-            return WalkTrace(started=False, requests=(), edges=())
+            return WalkTrace(started=False, requests=(), edges=(), rolls=tuple(rolls))
 
         pending = deque([(root, 0, None)])
         visited = {root.babel_id}
@@ -149,14 +187,37 @@ class RecommendationWalk:
                 )
                 if not 0.0 <= continuation < 1.0:
                     raise ValueError("walk draw must be in [0, 1)")
-                if (
-                    continuation < self.continuation_probability
-                    and target_depth < self.max_depth
-                    and target.babel_id not in visited
-                ):
+                roll_succeeded = continuation < self.continuation_probability
+                if not roll_succeeded:
+                    outcome = "continuation_skipped"
+                elif target_depth >= self.max_depth:
+                    outcome = "depth_limit"
+                elif target.babel_id in visited:
+                    outcome = "already_visited"
+                else:
+                    outcome = "enqueued"
                     visited.add(target.babel_id)
                     pending.append((target, target_depth, expansion.request_id))
-        return WalkTrace(started=True, requests=tuple(requests), edges=tuple(edges))
+                rolls.append(
+                    WalkRollEvidence(
+                        draw_index=len(rolls),
+                        kind="continuation",
+                        source_babel_id=source.babel_id,
+                        target_babel_id=target.babel_id,
+                        target_rank=included.rank,
+                        source_depth=source_depth,
+                        draw_value=continuation,
+                        probability=self.continuation_probability,
+                        roll_succeeded=roll_succeeded,
+                        outcome=outcome,
+                    )
+                )
+        return WalkTrace(
+            started=True,
+            requests=tuple(requests),
+            edges=tuple(edges),
+            rolls=tuple(rolls),
+        )
 
 
 __all__ = [
@@ -166,5 +227,6 @@ __all__ = [
     "WalkExpansion",
     "WalkNode",
     "WalkRequest",
+    "WalkRollEvidence",
     "WalkTrace",
 ]
