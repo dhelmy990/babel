@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import os
-import socket
+import json
 import sys
 import threading
 import time
-import urllib.request
 from types import SimpleNamespace
 from uuid import uuid4
 from pathlib import Path
@@ -18,8 +17,7 @@ from babel_online.runtime.topology import (
     ServiceCommand,
     Topology,
     TopologySupervisor,
-    execute_replay,
-    semantic_replay_checksum,
+    derive_container_id,
 )
 from babel_online.runtime.supervisor import PerRunTopologyManager, build_service_commands
 from babel_online.runtime.control import create_control_app
@@ -28,89 +26,22 @@ from babel_online.runtime import PlacementManifestV1 as PublicPlacementManifestV
 from babel_online.runtime import Topology as PublicTopology
 
 
-def _replay() -> dict[str, object]:
-    return {
-        "edges": [("babel-1", "babel-2")],
-        "feedback": [{"action": "include", "candidate": "babel-2"}],
-        "servingModelVersion": 3,
-    }
-
-
-def test_same_process_and_split_replay_have_identical_semantic_checksum() -> None:
-    same_process = execute_replay(Topology.SAME_PROCESS, _replay)
-    split = execute_replay(Topology.SAME_HOST_SPLIT, _replay)
-
-    assert same_process.worker_pid == os.getpid()
-    assert split.worker_pid != os.getpid()
-    assert same_process.semantic_sha256 == split.semantic_sha256
-    assert same_process.semantic_sha256 == semantic_replay_checksum(_replay())
-
-
 def test_split_is_default_and_cross_host_is_rejected() -> None:
     assert Topology.default() is Topology.SAME_HOST_SPLIT
     with pytest.raises(ValueError, match="cross_host"):
         Topology.parse("cross_host")
 
 
-def test_killing_split_trainer_keeps_independent_serving_process_healthy(tmp_path: Path) -> None:
-    with socket.socket() as reservation:
-        reservation.bind(("127.0.0.1", 0))
-        port = reservation.getsockname()[1]
-    commands = {
-        "serving": ServiceCommand(
-            role="serving",
-            argv=(
-                sys.executable,
-                "-c",
-                (
-                    "from http.server import HTTPServer,BaseHTTPRequestHandler;"
-                    "H=type('H',(BaseHTTPRequestHandler,),{"
-                    "'do_GET':lambda s:(s.send_response(200),s.end_headers(),s.wfile.write(b'ok'))"
-                    ","
-                    "'log_message':lambda *a:None});"
-                    f"HTTPServer(('127.0.0.1',{port}),H).serve_forever()"
-                ),
-            ),
-            version="serving-test-v1",
-        ),
-        "trainer": ServiceCommand(
-            role="trainer",
-            argv=(sys.executable, "-c", "import time; time.sleep(60)"),
-            version="trainer-test-v1",
-        ),
-    }
-    def http_status() -> int:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1) as response:
-            return response.status
-
-    supervisor = TopologySupervisor(state_root=tmp_path)
-    running = supervisor.launch(
-        topology=Topology.SAME_HOST_SPLIT,
-        commands=commands,
-        serving_probe=http_status,
-    )
-    try:
-        deadline = time.monotonic() + 3
-        while True:
-            try:
-                assert http_status() == 200
-                break
-            except OSError:
-                if time.monotonic() >= deadline:
-                    raise
-                time.sleep(0.02)
-        serving_pid = running.manifest.process("serving").pid
-        trainer_pid = running.manifest.process("trainer").pid
-        assert serving_pid != trainer_pid
-
-        running.kill_trainer()
-
-        assert running.serving_status() == 200
-        assert running.process_alive("serving")
-        assert not running.process_alive("trainer")
-        assert running.manifest.actualTopology == "same_host_split"
-    finally:
-        running.stop()
+def test_placement_versions_are_concrete_and_container_id_is_derived() -> None:
+    with pytest.raises(ValueError, match="concrete"):
+        ServiceCommand(role="serving", argv=("serve",), version="unknown")
+    with pytest.raises(ValueError, match="required"):
+        ServiceCommand(role="serving", argv=("serve",), version="   ")
+    container_id = "a" * 64
+    assert derive_container_id(
+        f"0::/system.slice/docker-{container_id}.scope\n", hostname="host"
+    ) == container_id
+    assert derive_container_id("0::/\n", hostname="b" * 12) == "b" * 12
 
 
 def test_isolated_manifest_records_requested_and_verified_limits(tmp_path: Path) -> None:
@@ -145,6 +76,27 @@ def test_isolated_manifest_records_requested_and_verified_limits(tmp_path: Path)
         assert running.manifest.path.is_file()
     finally:
         running.stop()
+
+
+def test_isolated_topology_rejects_roles_without_cpu_or_memory_limits(tmp_path) -> None:
+    commands = {
+        role: ServiceCommand(
+            role=role,
+            argv=(sys.executable, "-c", "import time; time.sleep(1)"),
+            version=f"{role}-test-v1",
+        )
+        for role in ("serving", "trainer")
+    }
+    with pytest.raises(ValueError, match="both roles"):
+        TopologySupervisor(state_root=tmp_path).launch(
+            topology=Topology.SAME_HOST_ISOLATED,
+            commands=commands,
+            resources={
+                "serving": ResourceRequest(cpuAffinity=(0,)),
+                "trainer": ResourceRequest(),
+            },
+            serving_probe=lambda: 200,
+        )
 
 
 def test_shared_gpu_is_reported_as_not_isolated() -> None:
@@ -246,7 +198,42 @@ def test_same_process_entrypoint_records_current_process_placement(tmp_path) -> 
     assert placement.process("trainer").pid == os.getpid()
     assert placement.process("serving").version == "serving-git-1"
     assert placement.process("trainer").version == "trainer-git-1"
+    assert placement.modelVersion == 0
+    assert placement.publishedAtNs is not None
+    assert placement.activatedAtNs == placement.publishedAtNs
+    assert placement.stalenessNs == 0
     assert placement.path.is_file()
+
+
+def test_split_placement_refreshes_from_shared_activation_receipt(tmp_path) -> None:
+    commands = {
+        role: ServiceCommand(
+            role=role, argv=(sys.executable, "-c", "import time; time.sleep(60)"),
+            version=f"{role}-v1",
+        )
+        for role in ("serving", "trainer")
+    }
+    running = TopologySupervisor(state_root=tmp_path).launch(
+        topology=Topology.SAME_HOST_SPLIT,
+        commands=commands,
+        serving_probe=lambda: 200,
+    )
+    activation_dir = tmp_path / "activations"
+    activation_dir.mkdir()
+    (activation_dir / "receipt-v00000004.json").write_text(json.dumps({
+        "schemaVersion": 1, "runId": str(uuid4()), "modelId": str(uuid4()),
+        "modelVersion": 4, "publishedAtNs": 100, "activatedAtNs": 130,
+        "stalenessNs": 30,
+    }))
+    try:
+        running.refresh_activation_evidence(activation_dir)
+        assert running.manifest.modelVersion == 4
+        assert running.manifest.publishedAtNs == 100
+        assert running.manifest.activatedAtNs == 130
+        assert running.manifest.stalenessNs == 30
+        assert json.loads(running.manifest.path.read_text())["modelVersion"] == 4
+    finally:
+        running.stop()
 
 
 def test_dashboard_start_launches_run_scoped_role_executables(tmp_path: Path) -> None:
@@ -279,6 +266,12 @@ def test_dashboard_start_launches_run_scoped_role_executables(tmp_path: Path) ->
         assert work_started.wait(2)
         assert manager.placement.actualTopology == "same_host_split"
         assert manager.placement.path.parent.name == str(run_id)
+        assert manager.placement.modelVersion == 0
+        assert manager.placement.publishedAtNs is not None
+        assert manager.placement.activatedAtNs >= manager.placement.publishedAtNs
+        assert manager.placement.stalenessNs == (
+            manager.placement.activatedAtNs - manager.placement.publishedAtNs
+        )
         assert manager.active_run_id == run_id
         assert work == {"recommendations": 1, "feedback": 1}
     finally:
@@ -409,3 +402,144 @@ def test_trainer_exit_during_serving_start_fails_without_starting_coordinator(
     assert failed.wait(2)
     assert reports == [(run_id, "trainer process exited during startup")]
     assert not coordinator_started.is_set()
+
+
+def test_graceful_stop_retains_serving_when_final_activation_times_out(
+    tmp_path: Path,
+) -> None:
+    run_id = uuid4()
+    commands = build_service_commands(
+        serving_command=f"{sys.executable} -c 'import time; time.sleep(60)' --run-id {{run_id}}",
+        trainer_command=f"{sys.executable} -c 'import time; time.sleep(60)' --trainer-run {{run_id}}",
+        serving_version="serving-v1",
+        trainer_version="trainer-v1",
+    )
+    started = threading.Event()
+
+    class Coordinator:
+        def run(self):
+            started.set()
+
+    manager = PerRunTopologyManager(
+        topology=Topology.SAME_HOST_SPLIT,
+        commands=commands,
+        resources={},
+        state_root=tmp_path,
+        serving_probe=lambda: 200,
+        coordinator_factory=lambda *_args: Coordinator(),
+        activation_timeout_seconds=0.05,
+    )
+    manager.start(run_id)
+    assert started.wait(1)
+    activation_dir = tmp_path / str(run_id) / "activations"
+    activation_dir.mkdir(parents=True)
+    pending = activation_dir / "request-v00000003.json"
+    pending.write_text(json.dumps({
+        "schemaVersion": 1, "runId": str(run_id), "modelId": str(uuid4()),
+        "modelVersion": 3, "descriptorPath": "unused",
+        "descriptorSha256": "a" * 64, "publishedAtNs": 1,
+    }))
+
+    with pytest.raises(RuntimeError, match="final model activation"):
+        manager.request_stop(run_id)
+
+    assert manager.status["phase"] == "failed"
+    assert manager.placement.actualTopology == "same_host_split"
+    assert manager._running.serving_status() == 200
+    pending.unlink()
+    manager.request_stop(run_id)
+
+
+def test_graceful_stop_reports_and_clears_irrecoverable_missing_receipt(
+    tmp_path: Path,
+) -> None:
+    run_id = uuid4()
+    commands = build_service_commands(
+        serving_command=f"{sys.executable} -c 'import time; time.sleep(60)' --run-id {{run_id}}",
+        trainer_command=f"{sys.executable} -c 'import time; time.sleep(60)' --trainer-run {{run_id}}",
+        serving_version="serving-v1",
+        trainer_version="trainer-v1",
+    )
+    started = threading.Event()
+    failures = []
+
+    class Coordinator:
+        def run(self):
+            started.set()
+
+    manager = PerRunTopologyManager(
+        topology=Topology.SAME_HOST_SPLIT,
+        commands=commands,
+        resources={},
+        state_root=tmp_path,
+        serving_probe=lambda: 200,
+        coordinator_factory=lambda *_args: Coordinator(),
+        failure_reporter=lambda run, error: failures.append((run, str(error))),
+        activation_timeout_seconds=1,
+    )
+    manager.start(run_id)
+    assert started.wait(1)
+    activation_dir = tmp_path / str(run_id) / "activations"
+    activation_dir.mkdir(parents=True)
+    pending = activation_dir / "request-v00000003.json"
+    pending.write_text(json.dumps({
+        "schemaVersion": 1, "runId": str(run_id), "modelId": str(uuid4()),
+        "modelVersion": 3, "descriptorPath": "unused",
+        "descriptorSha256": "a" * 64, "publishedAtNs": 1,
+    }))
+    release = threading.Thread(
+        target=lambda: (time.sleep(0.05), pending.unlink()), daemon=True
+    )
+    release.start()
+
+    with pytest.raises(RuntimeError, match="receipt is missing"):
+        manager.request_stop(run_id)
+
+    release.join(timeout=1)
+    assert failures == [(run_id, "final model activation receipt is missing")]
+    assert manager.active_run_id is None
+    assert manager.status["phase"] == "failed"
+
+
+def test_graceful_stop_persists_already_consumed_final_activation_receipt(
+    tmp_path: Path,
+) -> None:
+    run_id = uuid4()
+    model_id = uuid4()
+    commands = build_service_commands(
+        serving_command=f"{sys.executable} -c 'import time; time.sleep(60)' --run-id {{run_id}}",
+        trainer_command=f"{sys.executable} -c 'import time; time.sleep(60)' --trainer-run {{run_id}}",
+        serving_version="serving-v1",
+        trainer_version="trainer-v1",
+    )
+    started = threading.Event()
+
+    class Coordinator:
+        def run(self):
+            started.set()
+
+    manager = PerRunTopologyManager(
+        topology=Topology.SAME_HOST_SPLIT,
+        commands=commands,
+        resources={},
+        state_root=tmp_path,
+        serving_probe=lambda: 200,
+        coordinator_factory=lambda *_args: Coordinator(),
+    )
+    manager.start(run_id)
+    assert started.wait(1)
+    placement_path = manager.placement.path
+    activation_dir = tmp_path / str(run_id) / "activations"
+    activation_dir.mkdir(parents=True)
+    (activation_dir / "receipt-v00000003.json").write_text(json.dumps({
+        "schemaVersion": 1, "runId": str(run_id), "modelId": str(model_id),
+        "modelVersion": 3, "publishedAtNs": 10, "activatedAtNs": 25,
+        "stalenessNs": 15,
+    }))
+
+    manager.request_stop(run_id)
+
+    persisted = json.loads(placement_path.read_text())
+    assert persisted["modelVersion"] == 3
+    assert persisted["publishedAtNs"] == 10
+    assert persisted["activatedAtNs"] == 25

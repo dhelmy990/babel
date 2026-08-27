@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import shlex
 import time
@@ -64,6 +65,7 @@ class PerRunTopologyManager:
         stopped_reporter: Callable[[UUID], None] | None = None,
         failure_reporter: Callable[[UUID, BaseException], None] | None = None,
         serving_start_timeout_seconds: float = 300.0,
+        activation_timeout_seconds: float = 60.0,
     ) -> None:
         self.topology = Topology.parse(topology)
         if self.topology is Topology.SAME_PROCESS:
@@ -82,6 +84,9 @@ class PerRunTopologyManager:
         if serving_start_timeout_seconds <= 0:
             raise ValueError("serving start timeout must be positive")
         self.serving_start_timeout_seconds = serving_start_timeout_seconds
+        if activation_timeout_seconds <= 0:
+            raise ValueError("activation timeout must be positive")
+        self.activation_timeout_seconds = activation_timeout_seconds
         self._running: RunningTopology | None = None
         self._run_id: UUID | None = None
         self._lock = Lock()
@@ -98,6 +103,10 @@ class PerRunTopologyManager:
     def placement(self) -> PlacementManifestV1:
         if self._running is None:
             raise RuntimeError("no run topology has been launched")
+        if self._run_id is not None:
+            self._running.refresh_activation_evidence(
+                self.state_root / str(self._run_id) / "activations"
+            )
         return self._running.manifest
 
     @property
@@ -131,6 +140,7 @@ class PerRunTopologyManager:
         running: RunningTopology | None = None
         try:
             self.starting_reporter(run_id)
+            starting_model_published_at_ns = time.time_ns()
             running = TopologySupervisor(
                 state_root=self.state_root / str(run_id)
             ).launch(
@@ -138,6 +148,8 @@ class PerRunTopologyManager:
                 commands=self._commands_for(run_id),
                 resources=self.resources,
                 serving_probe=self.serving_probe,
+                published_at_ns=starting_model_published_at_ns,
+                model_version=0,
             )
             with self._lock:
                 self._running = running
@@ -157,6 +169,11 @@ class PerRunTopologyManager:
                 return
             if not running.process_alive("trainer"):
                 raise RuntimeError("trainer process exited during startup")
+            running.record_model_evidence(
+                published_at_ns=starting_model_published_at_ns,
+                activated_at_ns=time.time_ns(),
+                model_version=0,
+            )
             coordinator = self.coordinator_factory(run_id, stop_event)
             self.running_reporter(run_id)
             with self._lock:
@@ -206,16 +223,73 @@ class PerRunTopologyManager:
         with self._lock:
             running = self._running
         if running is not None:
-            # Trainer first: drain Kafka, checkpoint, publish immutable child.
-            # Serving remains available while it observes/activates that file.
-            running.graceful_stop_trainer()
-            activation_dir = self.state_root / str(run_id) / "activations"
-            deadline = time.monotonic() + 5.0
-            while any(activation_dir.glob("request-v*.json")):
-                if time.monotonic() >= deadline:
-                    break
-                time.sleep(0.05)
-            running.stop_serving()
+            retain_serving = False
+            try:
+                # Trainer first: drain Kafka, checkpoint, publish immutable child.
+                # Serving remains available while it observes/activates that file.
+                running.graceful_stop_trainer()
+                activation_dir = self.state_root / str(run_id) / "activations"
+                pending = sorted(activation_dir.glob("request-v*.json"))
+                expected = None
+                if pending:
+                    expected = max(
+                        (
+                            json.loads(path.read_text(encoding="utf-8"))
+                            for path in pending
+                        ),
+                        key=lambda document: int(document["modelVersion"]),
+                    )
+                else:
+                    # A fast serving watcher may consume the final request
+                    # before shutdown observes it. In that case the newest
+                    # immutable receipt is the final activation evidence.
+                    receipts = sorted(activation_dir.glob("receipt-v*.json"))
+                    if receipts:
+                        expected = json.loads(
+                            receipts[-1].read_text(encoding="utf-8")
+                        )
+                deadline = time.monotonic() + self.activation_timeout_seconds
+                while any(activation_dir.glob("request-v*.json")):
+                    if time.monotonic() >= deadline:
+                        retain_serving = True
+                        raise RuntimeError(
+                            "final model activation did not complete before timeout; "
+                            "serving retained its last valid version"
+                        )
+                    if not running.process_alive("serving"):
+                        raise RuntimeError(
+                            "serving exited while awaiting final activation"
+                        )
+                    time.sleep(0.05)
+                if expected is not None:
+                    receipt_path = activation_dir / (
+                        f"receipt-v{int(expected['modelVersion']):08d}.json"
+                    )
+                    if not receipt_path.is_file():
+                        raise RuntimeError("final model activation receipt is missing")
+                    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+                    if (
+                        receipt.get("runId") != str(run_id)
+                        or receipt.get("modelId") != expected.get("modelId")
+                        or int(receipt.get("modelVersion", -1))
+                        != int(expected["modelVersion"])
+                    ):
+                        raise RuntimeError("final model activation receipt differs")
+                    running.refresh_activation_evidence(activation_dir)
+                running.stop_serving()
+            except BaseException as error:
+                with self._lock:
+                    self._coordinator_error = error
+                    self._phase = "failed"
+                self.failure_reporter(run_id, error)
+                if not retain_serving:
+                    running.stop()
+                    with self._lock:
+                        self._running = None
+                        self._run_id = None
+                        self._coordinator_stop = None
+                        self._lifecycle_thread = None
+                raise
         with self._lock:
             completed_cleanly = self._coordinator_error is None
             self._running = None

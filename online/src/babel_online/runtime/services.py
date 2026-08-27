@@ -241,6 +241,21 @@ class ServingRole:
             # current serving snapshot remains active.
             self.last_rejection = str(error)
             return None
+        receipt_path = self.activation_request_path.with_name(
+            self.activation_request_path.name.replace("request-v", "receipt-v", 1)
+        )
+        _atomic_request(
+            receipt_path,
+            {
+                "schemaVersion": 1,
+                "runId": str(self.expected_run_id),
+                "modelId": str(receipt.modelId),
+                "modelVersion": receipt.modelVersion,
+                "publishedAtNs": int(request["publishedAtNs"]),
+                "activatedAtNs": receipt.activatedAtNs,
+                "stalenessNs": receipt.stalenessNs,
+            },
+        )
         self.activation_request_path.unlink()
         self.last_rejection = None
         return receipt
@@ -283,6 +298,22 @@ def scope_split_consumer(consumer: Any, *, run_id: UUID) -> Any:
 
     isolate_new_run_offsets(consumer)
     return RunScopedConsumer(consumer, run_id=run_id)
+
+
+def active_model_descends_from(
+    registry: ModelRegistry,
+    *,
+    active_model_id: UUID,
+    starting_model_id: UUID,
+) -> bool:
+    """Accept restart state only on the configured immutable lineage branch."""
+    current = registry.get(active_model_id)
+    while True:
+        if current.modelId == starting_model_id:
+            return True
+        if current.parentModelId is None:
+            return False
+        current = registry.get(current.parentModelId)
 
 
 def _load_role_context(run_id: UUID, *, load_encoder: bool):
@@ -336,8 +367,12 @@ def _load_role_context(run_id: UUID, *, load_encoder: bool):
             registry.register_child(descriptor.childManifest)
         selected_descriptor, selected_descriptor_path = lineage[0]
         selected = selected_descriptor.childManifest
-    if persisted.config.startingModelId != selected.modelId:
-        raise RuntimeError("run starting model differs from active population model")
+    if not active_model_descends_from(
+        registry,
+        active_model_id=selected.modelId,
+        starting_model_id=persisted.config.startingModelId,
+    ):
+        raise RuntimeError("active population is outside the configured model lineage")
     identity = PopulationIdentity.from_real_model(
         run_id=run_id,
         dataset_revision=persisted.config.datasetRevision,
@@ -731,6 +766,7 @@ def serving_main(argv: list[str] | None = None) -> int:
 
 __all__ = [
     "PublishedUpdate",
+    "active_model_descends_from",
     "ServingRole",
     "TrainerRole",
     "run_periodic_training",

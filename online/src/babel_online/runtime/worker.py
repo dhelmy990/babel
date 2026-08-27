@@ -1315,6 +1315,39 @@ class FridayDemoRuntime:
         self.scoped_consumer.close()
         return child
 
+    def _load_starting_online_state(self) -> dict[str, Any]:
+        if self.scale_run:
+            path = self.starting_artifact.online_state_path
+            if path is None:
+                return {}
+            try:
+                state = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as error:
+                raise RuntimeError("selected real child online state is invalid") from error
+            if not isinstance(state, dict):
+                raise RuntimeError("selected real child online state is invalid")
+            return state
+        try:
+            state = json.loads(self.starting_artifact.checkpoint_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return state if isinstance(state, dict) else {}
+
+    def _build_model_registry(self) -> ModelRegistry:
+        registry = ModelRegistry()
+        if self.scale_run:
+            original = self.model_lineage[0].manifest
+            if not isinstance(original, ModelManifestV2):
+                raise TypeError("V2 lineage must begin with the real Qwen original")
+            registry.register_real_original(original)
+        else:
+            registry.register_original(self.model_lineage[0].manifest)
+        for artifact in self.model_lineage[1:]:
+            registry.register_child(artifact.manifest)
+        if registry.get(self.starting_model.modelId) != self.starting_model:
+            raise ValueError("selected model is not the final immutable lineage member")
+        return registry
+
     def run(self) -> ModelManifestV1 | ModelManifestV2:
         self.database.append_activity(
             lifecycle_activity(
@@ -1329,34 +1362,12 @@ class FridayDemoRuntime:
         self._frozen_vectors = {key: value.copy() for key, value in frozen.items()}
         query = np.mean(np.stack(list(frozen.values())), axis=0)
         self.model = NumpyWorkingModel(frozen, query_vector=query, learning_rate=0.05)
-        starting_state = {}
-        if self.scale_run and self.starting_artifact.online_state_path is not None:
-            try:
-                starting_state = json.loads(
-                    self.starting_artifact.online_state_path.read_text(encoding="utf-8")
-                )
-            except (OSError, json.JSONDecodeError) as error:
-                raise RuntimeError("selected real child online state is invalid") from error
-        elif not self.scale_run:
-            try:
-                starting_state = json.loads(
-                    self.starting_artifact.checkpoint_path.read_text()
-                )
-            except (OSError, json.JSONDecodeError):
-                starting_state = {}
+        starting_state = self._load_starting_online_state()
         if isinstance(starting_state, dict) and isinstance(
             starting_state.get("transferState"), dict
         ):
             self.model.load_transfer_state(starting_state["transferState"])
-        self.registry = ModelRegistry()
-        if self.scale_run:
-            if len(self.model_lineage) != 1:
-                raise ValueError("V2 child lineage is owned by the model-state slice")
-            self.registry.register_real_original(self.starting_model)
-        else:
-            self.registry.register_original(self.model_lineage[0].manifest)
-        for artifact in self.model_lineage[1:]:
-            self.registry.register_child(artifact.manifest)
+        self.registry = self._build_model_registry()
         self.index = PgvectorCandidateIndex(self.database.query_candidates)
         empty_sha = _snapshot_sha([])
         initial_state = self._state(0, empty_sha)
@@ -1441,15 +1452,20 @@ class WorkerManager:
         database: RuntimeDatabase,
         dataset_bundle: DatasetBundle,
         runtime_factory: Callable[[Any, threading.Event], FridayDemoRuntime],
+        placement_factory: Callable[[UUID], Any] | None = None,
     ) -> None:
         self.database = database
         self.dataset_bundle = dataset_bundle
         self.runtime_factory = runtime_factory
+        self.placement_factory = placement_factory
         self._lock = threading.Lock()
         self._run_id: UUID | None = None
         self._runtime: FridayDemoRuntime | None = None
         self._stop_event: threading.Event | None = None
         self._thread: threading.Thread | None = None
+        self._placement: Any | None = None
+        self._phase = "idle"
+        self._failure: str | None = None
 
     def start(self, run_id: UUID) -> None:
         persisted = self.database.load_run(run_id)
@@ -1480,13 +1496,25 @@ class WorkerManager:
             # Claim synchronously so the dashboard cannot receive Start success
             # before the persisted run is ready to accept graceful stop.
             self.database.claim_run(run_id)
+            self._placement = (
+                None if self.placement_factory is None else self.placement_factory(run_id)
+            )
+            self._phase = "starting"
+            self._failure = None
 
             def execute() -> None:
                 try:
                     runtime = self.runtime_factory(persisted.config, stop_event)
                     self._runtime = runtime
+                    with self._lock:
+                        self._phase = "running"
                     runtime.run()
+                    with self._lock:
+                        self._phase = "completed"
                 except Exception as error:
+                    with self._lock:
+                        self._phase = "failed"
+                        self._failure = str(error)
                     self.database.transition(run_id, "failed", failure=str(error)[:1000])
                     try:
                         self.database.append_activity(
@@ -1503,12 +1531,28 @@ class WorkerManager:
             if self._run_id != run_id or self._stop_event is None:
                 raise KeyError(run_id)
             self._stop_event.set()
+            self._phase = "stopping"
             if self._runtime is not None:
                 self._runtime.request_stop()
 
     @property
     def active_runtime(self) -> FridayDemoRuntime | None:
         return self._runtime
+
+    @property
+    def placement(self) -> Any:
+        if self._placement is None:
+            raise RuntimeError("no run-scoped same-process placement is available")
+        return self._placement
+
+    @property
+    def status(self) -> dict[str, str | None]:
+        with self._lock:
+            return {
+                "runId": None if self._run_id is None else str(self._run_id),
+                "phase": self._phase,
+                "failure": self._failure,
+            }
 
 
 __all__ = [

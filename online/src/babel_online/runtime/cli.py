@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import os
+import time
 from pathlib import Path
 import urllib.request
 from uuid import UUID
@@ -113,6 +115,7 @@ def record_same_process_placement(
     trainer_version: str,
 ) -> PlacementManifestV1:
     """Persist truthful monolith placement before accepting dashboard runs."""
+    activated_at_ns = time.time_ns()
     running = TopologySupervisor(state_root=state_root).launch(
         topology=Topology.SAME_PROCESS,
         commands={
@@ -128,21 +131,26 @@ def record_same_process_placement(
             ),
         },
         serving_probe=lambda: 200,
+        published_at_ns=activated_at_ns,
+        activated_at_ns=activated_at_ns,
+        model_version=0,
     )
     return running.manifest
 
 
+def _service_version(environment_name: str, role: str) -> str:
+    configured = os.environ.get(environment_name, "").strip()
+    if configured and configured.casefold() != "unknown":
+        return configured
+    try:
+        package = importlib.metadata.version("babel-online")
+    except importlib.metadata.PackageNotFoundError:
+        package = "source-tree"
+    return f"{role}:babel-online/{package}"
+
+
 def _serve() -> None:
     import uvicorn
-
-    record_same_process_placement(
-        state_root=(
-            Path(os.environ.get("BABEL_ONLINE_STATE_ROOT", "state/online/topology"))
-            / "same-process"
-        ),
-        serving_version=os.environ.get("BABEL_ONLINE_SERVING_VERSION", "unknown"),
-        trainer_version=os.environ.get("BABEL_ONLINE_TRAINER_VERSION", "unknown"),
-    )
 
     database = RuntimeDatabase(_required("BABEL_DATABASE_URL"))
     model_mode = os.environ.get("BABEL_ONLINE_MODEL_MODE", "fixture")
@@ -218,10 +226,22 @@ def _serve() -> None:
             qwen_encoder=qwen_encoder,
         )
 
+    placement_root = Path(
+        os.environ.get("BABEL_ONLINE_STATE_ROOT", "state/online/topology")
+    )
     manager = WorkerManager(
         database=database,
         dataset_bundle=bundle,
         runtime_factory=runtime_factory,
+        placement_factory=lambda run_id: record_same_process_placement(
+            state_root=placement_root / str(run_id),
+            serving_version=_service_version(
+                "BABEL_ONLINE_SERVING_VERSION", "serving"
+            ),
+            trainer_version=_service_version(
+                "BABEL_ONLINE_TRAINER_VERSION", "trainer"
+            ),
+        ),
     )
     app = create_control_app(manager, token=_required("BABEL_ONLINE_WORKER_TOKEN"))
     uvicorn.run(
@@ -268,8 +288,8 @@ def _supervise() -> None:
             "BABEL_ONLINE_TRAINER_COMMAND",
             "babel-online-trainer --run-id {run_id}",
         ),
-        serving_version=os.environ.get("BABEL_ONLINE_SERVING_VERSION", "unknown"),
-        trainer_version=os.environ.get("BABEL_ONLINE_TRAINER_VERSION", "unknown"),
+        serving_version=_service_version("BABEL_ONLINE_SERVING_VERSION", "serving"),
+        trainer_version=_service_version("BABEL_ONLINE_TRAINER_VERSION", "trainer"),
     )
     resources = {
         "serving": ResourceRequest(
@@ -306,6 +326,9 @@ def _supervise() -> None:
         stopped_reporter=lambda run_id: topology_database.transition(run_id, "completed"),
         failure_reporter=lambda run_id, error: topology_database.transition(
             run_id, "failed", failure=str(error)
+        ),
+        activation_timeout_seconds=float(
+            os.environ.get("BABEL_ONLINE_ACTIVATION_TIMEOUT_SECONDS", "60")
         ),
     )
     app = create_control_app(manager, token=_required("BABEL_ONLINE_WORKER_TOKEN"))

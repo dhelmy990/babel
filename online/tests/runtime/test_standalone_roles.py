@@ -18,6 +18,7 @@ from babel_online.runtime.services import (
     trainer_runtime_metrics,
     resolve_role_state_root,
     scope_split_consumer,
+    active_model_descends_from,
     run_periodic_training,
 )
 import pytest
@@ -114,6 +115,13 @@ def test_standalone_trainer_publishes_file_handoff_and_serving_explicitly_activa
     assert receipt.modelVersion == 2
     assert selected["state"] == str(published.child.descriptor.childManifest.modelId)
     assert not published.activation_request_path.exists()
+    receipt_path = published.activation_request_path.with_name(
+        "receipt-v00000002.json"
+    )
+    receipt_document = json.loads(receipt_path.read_text())
+    assert receipt_document["modelId"] == str(receipt.modelId)
+    assert receipt_document["modelVersion"] == 2
+    assert receipt_document["activatedAtNs"] >= receipt_document["publishedAtNs"]
 
 
 def test_serving_role_stays_on_last_valid_state_when_no_trainer_update(tmp_path) -> None:
@@ -239,3 +247,30 @@ def test_split_consumer_starts_at_run_watermark_and_rejects_other_runs() -> None
     assert seeks == [{partition: 12}]
     with pytest.raises(RuntimeError, match="cross-run"):
         scoped.poll()
+
+
+def test_role_restart_accepts_active_child_of_configured_starting_model(
+    real_model_manifest,
+) -> None:
+    child_document = real_model_manifest.model_dump(mode="json")
+    child_document.update(
+        modelId=uuid4(), parentModelId=real_model_manifest.modelId,
+        producingRunId=uuid4(), label="active child",
+    )
+    child = type(real_model_manifest).model_validate(child_document)
+    registry = ModelRegistry()
+    registry.register_real_original(real_model_manifest)
+    registry.register_child(child)
+
+    assert active_model_descends_from(
+        registry,
+        active_model_id=child.modelId,
+        starting_model_id=real_model_manifest.modelId,
+    )
+    assert active_model_descends_from(
+        registry, active_model_id=child.modelId, starting_model_id=child.modelId
+    )
+    assert not active_model_descends_from(
+        registry, active_model_id=real_model_manifest.modelId,
+        starting_model_id=child.modelId,
+    )

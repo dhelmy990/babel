@@ -13,10 +13,11 @@ import json
 import multiprocessing
 import os
 import resource
+import re
 import signal
 import subprocess
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Mapping
@@ -91,8 +92,10 @@ class ServiceCommand:
     def __post_init__(self) -> None:
         if self.role not in {"serving", "trainer"}:
             raise ValueError("service role must be serving or trainer")
-        if not self.argv or not self.version:
+        if not self.argv or not self.version.strip():
             raise ValueError("service command and version are required")
+        if self.version.strip().casefold() == "unknown":
+            raise ValueError("service version must be concrete")
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +120,7 @@ class PlacementManifestV1:
     publishedAtNs: int | None
     activatedAtNs: int | None
     stalenessNs: int | None
+    modelVersion: int | None
     createdAtNs: int
     path: Path = field(compare=False, repr=False)
 
@@ -204,6 +208,22 @@ def _expand_cpu_list(value: str) -> tuple[int, ...]:
         elif part:
             result.append(int(part))
     return tuple(result)
+
+
+def derive_container_id(cgroup_text: str, *, hostname: str) -> str | None:
+    """Return a truthful container identity when cgroups/hostname expose one."""
+    candidates = re.findall(r"(?<![0-9a-f])([0-9a-f]{12,64})(?![0-9a-f])", cgroup_text)
+    if candidates:
+        return max(candidates, key=len)
+    return hostname if re.fullmatch(r"[0-9a-f]{12,64}", hostname) else None
+
+
+def _container_id(pid: int) -> str | None:
+    try:
+        cgroup = Path(f"/proc/{pid}/cgroup").read_text(encoding="utf-8")
+    except OSError:
+        cgroup = ""
+    return derive_container_id(cgroup, hostname=os.environ.get("HOSTNAME", ""))
 
 
 def _verified_resources(pid: int, requested: ResourceRequest) -> VerifiedResources:
@@ -300,6 +320,45 @@ class RunningTopology:
             raise RuntimeError("serving process is not alive")
         return int(self._serving_probe())
 
+    def record_model_evidence(
+        self, *, published_at_ns: int, activated_at_ns: int, model_version: int
+    ) -> None:
+        if published_at_ns < 0 or activated_at_ns < published_at_ns:
+            raise ValueError("model evidence timestamps are invalid")
+        if model_version < 0:
+            raise ValueError("model version must be nonnegative")
+        self.manifest = replace(
+            self.manifest,
+            publishedAtNs=published_at_ns,
+            activatedAtNs=activated_at_ns,
+            stalenessNs=activated_at_ns - published_at_ns,
+            modelVersion=model_version,
+        )
+        self.manifest.path.write_bytes(
+            _canonical_json(self.manifest.as_document()) + b"\n"
+        )
+
+    def refresh_activation_evidence(self, activation_dir: str | Path) -> None:
+        receipts = sorted(Path(activation_dir).glob("receipt-v*.json"))
+        if not receipts:
+            return
+        document = json.loads(receipts[-1].read_text(encoding="utf-8"))
+        required = {
+            "schemaVersion", "runId", "modelId", "modelVersion",
+            "publishedAtNs", "activatedAtNs", "stalenessNs",
+        }
+        if set(document) != required or document["schemaVersion"] != 1:
+            raise ValueError("activation receipt contract is invalid")
+        published = int(document["publishedAtNs"])
+        activated = int(document["activatedAtNs"])
+        if int(document["stalenessNs"]) != activated - published:
+            raise ValueError("activation receipt staleness is inconsistent")
+        self.record_model_evidence(
+            published_at_ns=published,
+            activated_at_ns=activated,
+            model_version=int(document["modelVersion"]),
+        )
+
     def stop(self) -> None:
         for process in self._processes.values():
             if process.poll() is None:
@@ -326,11 +385,24 @@ class TopologySupervisor:
         serving_probe: Callable[[], int],
         published_at_ns: int | None = None,
         activated_at_ns: int | None = None,
+        model_version: int | None = None,
     ) -> RunningTopology:
         selected = Topology.parse(topology)
         if set(commands) != {"serving", "trainer"}:
             raise ValueError("serving and trainer commands are both required")
         requested = dict(resources or {})
+        if selected is Topology.SAME_HOST_ISOLATED:
+            unconstrained = [
+                role
+                for role in ("serving", "trainer")
+                if not requested.get(role, ResourceRequest()).cpuAffinity
+                and requested.get(role, ResourceRequest()).memoryLimitBytes is None
+            ]
+            if unconstrained:
+                raise ValueError(
+                    "same_host_isolated requires CPU affinity and/or a memory "
+                    "limit for both roles"
+                )
         created = time.time_ns()
         processes: dict[str, subprocess.Popen[bytes]] = {}
         placements: list[ProcessPlacementV1] = []
@@ -341,7 +413,7 @@ class TopologySupervisor:
                     ProcessPlacementV1(
                         role=role,
                         pid=os.getpid(),
-                        containerId=os.environ.get("HOSTNAME"),
+                        containerId=_container_id(os.getpid()),
                         version=commands[role].version,
                         startedAtNs=created,
                         requestedResources=request,
@@ -376,7 +448,7 @@ class TopologySupervisor:
                         ProcessPlacementV1(
                             role=role,
                             pid=process.pid,
-                            containerId=None,
+                            containerId=_container_id(process.pid),
                             version=command.version,
                             startedAtNs=created,
                             requestedResources=request,
@@ -406,6 +478,7 @@ class TopologySupervisor:
                 if published_at_ns is None or activated_at_ns is None
                 else max(0, activated_at_ns - published_at_ns)
             ),
+            modelVersion=model_version,
             createdAtNs=created,
             path=manifest_path,
         )
@@ -424,5 +497,6 @@ __all__ = [
     "TopologySupervisor",
     "VerifiedResources",
     "execute_replay",
+    "derive_container_id",
     "semantic_replay_checksum",
 ]

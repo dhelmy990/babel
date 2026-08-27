@@ -128,6 +128,61 @@ def test_worker_rejects_loaded_bundle_identity_mismatch_before_claim(bundle_upda
     assert database.claimed is False
 
 
+def test_same_process_worker_exposes_run_scoped_placement_and_status(tmp_path) -> None:
+    run_id = uuid4()
+    config = default_run_config(
+        run_id=run_id,
+        dataset_revision=DEMO_DATASET_REVISION,
+        starting_model_id=UUID("00000000-0000-5000-8000-000000000002"),
+    )
+    running = threading.Event()
+    stop = threading.Event()
+    placements = []
+
+    class Database:
+        def load_run(self, _run_id):
+            return SimpleNamespace(config=config, status="starting")
+
+        def claim_run(self, _run_id):
+            pass
+
+        def transition(self, *_args, **_kwargs):
+            pass
+
+        def append_activity(self, *_args, **_kwargs):
+            pass
+
+    class Runtime:
+        def run(self):
+            running.set()
+            stop.wait(2)
+
+        def request_stop(self):
+            stop.set()
+
+        def stop_serving(self):
+            stop.set()
+
+    placement = SimpleNamespace(
+        actualTopology="same_process", path=tmp_path / str(run_id) / "placement.json"
+    )
+    manager = WorkerManager(
+        database=Database(),
+        dataset_bundle=bundle_identity(),
+        runtime_factory=lambda *_args: Runtime(),
+        placement_factory=lambda requested: (placements.append(requested), placement)[1],
+    )
+
+    manager.start(run_id)
+    assert running.wait(1)
+    assert manager.placement is placement
+    assert manager.status == {
+        "runId": str(run_id), "phase": "running", "failure": None
+    }
+    assert placements == [run_id]
+    manager.request_stop(run_id)
+
+
 def test_new_babel_materialization_inserts_only_new_row_at_last_sync_version() -> None:
     run_id = uuid4()
     creator_id = uuid4()
@@ -240,6 +295,39 @@ def test_scale_worker_exports_v2_child_descriptor_not_fixture_manifest(
     assert all(record.servingModelId == child.modelId for record in child_records)
     assert all(record.materializedModelVersion == 4 for record in child_records)
     assert registered[0][0].childManifest == child
+
+
+def test_scale_worker_accepts_original_to_v2_child_lineage_and_loads_child_state(
+    tmp_path, real_model_manifest
+) -> None:
+    run_id = uuid4()
+    child_document = real_model_manifest.model_dump(mode="json")
+    child_document.update(
+        modelId=uuid4(),
+        parentModelId=real_model_manifest.modelId,
+        producingRunId=run_id,
+        label="selected immutable child",
+    )
+    child = type(real_model_manifest).model_validate(child_document)
+    state_path = tmp_path / "online-state.json"
+    state_path.write_text(json.dumps({
+        "transferState": {"queryVector": [1.0] + [0.0] * 99}
+    }))
+    runtime = object.__new__(FridayDemoRuntime)
+    runtime.scale_run = True
+    runtime.model_lineage = [
+        SimpleNamespace(manifest=real_model_manifest, online_state_path=None),
+        SimpleNamespace(manifest=child, online_state_path=state_path),
+    ]
+    runtime.starting_artifact = runtime.model_lineage[-1]
+    runtime.starting_model = child
+
+    registry = runtime._build_model_registry()
+    state = runtime._load_starting_online_state()
+
+    assert registry.original == real_model_manifest
+    assert registry.select_for_scale(child.modelId) == child
+    assert state["transferState"]["queryVector"][0] == 1.0
 
 
 def test_v2_runtime_requires_qwen_and_selects_real_monthly_bundle(
