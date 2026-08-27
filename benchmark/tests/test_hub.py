@@ -76,7 +76,7 @@ def _bundle(tmp_path: Path):
         tmp_path / "output",
         run_id=RUN_ID,
         **_sources(tmp_path),
-        acceptance_label="formal",
+        acceptance_label="smoke",
         progress={"phase": "completed", "conditionIndex": 9, "conditionCount": 9},
         topology="same_host_split",
         placement={"servingPid": 41, "trainerPid": 42},
@@ -117,7 +117,7 @@ def test_run_bundle_closes_required_files_and_experiment_evidence(tmp_path: Path
     assert {path.name for path in bundle.root.iterdir()} == required | {"model-artifact"}
     manifest = json.loads(bundle.manifest_path.read_text())
     assert manifest["runId"] == str(RUN_ID)
-    assert manifest["acceptanceLabel"] == "formal"
+    assert manifest["acceptanceLabel"] == "smoke"
     assert manifest["progress"]["conditionCount"] == 9
     assert manifest["topology"] == "same_host_split"
     assert manifest["placement"]["trainerPid"] == 42

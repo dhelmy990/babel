@@ -8,7 +8,9 @@ version = "0.1.0"
 description = "Paired Friday-demo synchronous POST benchmark"
 requires-python = ">=3.10,<3.13"
 dependencies = [
+  "huggingface-hub>=0.30,<1",
   "httpx>=0.28,<0.29",
+  "pyarrow>=17,<26",
   "psutil>=5.9,<8",
   "pydantic>=2.10,<2.11",
 ]

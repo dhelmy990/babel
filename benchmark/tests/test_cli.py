@@ -139,6 +139,54 @@ def test_live_replay_cli_exposes_real_trainer_and_sync_inputs() -> None:
     assert args.sync_every_steps == 50
 
 
+def test_trial_bundle_cli_closes_build_and_publish_inputs() -> None:
+    build = _parser().parse_args(
+        [
+            "trial-bundle-build",
+            "--output-root",
+            "accepted",
+            "--trial-id",
+            "00000000-0000-5000-8000-000000000130",
+            "--evidence",
+            *[f"condition-{index}.json" for index in range(1, 10)],
+            "--population-manifest",
+            "population.json",
+            "--feedback-parquet",
+            "feedback.parquet",
+            "--edges-parquet",
+            "edges.parquet",
+            "--model-manifest",
+            "model-manifest.json",
+            "--model-artifact-root",
+            "model-artifact",
+            "--selected-child",
+            "selected-child.json",
+            "--model-repository",
+            "owner/model",
+            "--model-revision",
+            "a" * 40,
+            "--dataset-repository",
+            "owner/dataset",
+            "--dataset-revision",
+            "b" * 40,
+        ]
+    )
+    publish = _parser().parse_args(
+        [
+            "trial-bundle-publish",
+            "--bundle-root",
+            "accepted/runs/00000000-0000-5000-8000-000000000130",
+            "--repo-id",
+            "owner/dataset",
+        ]
+    )
+
+    assert build.command == "trial-bundle-build"
+    assert len(build.evidence) == 9
+    assert publish.command == "trial-bundle-publish"
+    assert publish.token_env == "HF_TOKEN"
+
+
 def test_v2_concurrent_replays_feed_the_three_ratio_report(tmp_path: Path) -> None:
     server = ThreadingHTTPServer(("127.0.0.1", 0), RecommendationHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)

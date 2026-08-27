@@ -127,6 +127,7 @@ def _json_object(path: Path, label: str) -> dict[str, Any]:
 
 def _validate_evidence(
     *,
+    run_id: UUID,
     progress: dict[str, object],
     topology: str,
     placement: dict[str, object],
@@ -134,6 +135,7 @@ def _validate_evidence(
     model_ledger: list[dict[str, object]],
     vector_snapshots: list[dict[str, object]],
     acceptance_label: str,
+    trial_evidence: dict[str, object] | None,
 ) -> None:
     if acceptance_label not in {"smoke", "formal"}:
         raise ValueError("acceptance_label must be smoke or formal")
@@ -142,6 +144,7 @@ def _validate_evidence(
         "same_host_split",
         "same_host_isolated",
         "cross_host",
+        "3x3_matrix",
     }:
         raise ValueError("topology is not supported")
     if not progress or not isinstance(placement, dict) or not isinstance(hardware, dict):
@@ -163,6 +166,64 @@ def _validate_evidence(
             or int(snapshot.get("dimension", 0)) != 100
         ):
             raise ValueError("vector snapshots require a 100d row count and SHA-256")
+    if acceptance_label == "formal":
+        if topology != "3x3_matrix" or trial_evidence is None:
+            raise ValueError("formal acceptance requires aggregate 3x3 trial evidence")
+        conditions = trial_evidence.get("conditions")
+        workload = trial_evidence.get("workloadIdentity")
+        population = trial_evidence.get("population")
+        pins = trial_evidence.get("pins")
+        selected = trial_evidence.get("selectedChild")
+        if (
+            trial_evidence.get("schemaVersion") != 1
+            or trial_evidence.get("trialId") != str(run_id)
+            or trial_evidence.get("conditionCount") != 9
+            or trial_evidence.get("zeroErrors") is not True
+            or not isinstance(conditions, list)
+            or len(conditions) != 9
+            or not isinstance(workload, list)
+            or len(workload) != 6
+            or any(not re.fullmatch(r"[0-9a-f]{64}", str(value)) for value in workload)
+            or not isinstance(population, dict)
+            or population.get("rows") != 10_000
+            or population.get("dimension") != 100
+            or not isinstance(pins, dict)
+            or not isinstance(selected, dict)
+        ):
+            raise ValueError("formal aggregate evidence is incomplete")
+        expected_modes = {
+            (topology_name, training, activation)
+            for topology_name in (
+                "same_process",
+                "same_host_split",
+                "same_host_isolated",
+            )
+            for training, activation in ((False, False), (True, False), (True, True))
+        }
+        actual_modes = {
+            (
+                row.get("conditionIdentity", {}).get("topology"),
+                row.get("conditionIdentity", {}).get("trainingEnabled"),
+                row.get("conditionIdentity", {}).get("activationEnabled"),
+            )
+            for row in conditions
+            if isinstance(row, dict)
+            and isinstance(row.get("conditionIdentity"), dict)
+        }
+        if actual_modes != expected_modes:
+            raise ValueError("formal aggregate evidence does not contain the exact 3x3 matrix")
+        if any(
+            int(snapshot.get("rows", 0)) != 10_000
+            for snapshot in vector_snapshots
+        ):
+            raise ValueError("formal vector snapshots must contain exactly 10,000 rows")
+        if (
+            progress.get("phase") != "completed"
+            or progress.get("conditionCount") != 9
+            or progress.get("conditionIndex") != 9
+            or progress.get("requested") != progress.get("completed")
+        ):
+            raise ValueError("formal progress must prove all nine conditions completed")
 
 
 def _model_artifact_files(
@@ -222,9 +283,11 @@ def build_run_bundle(
     model_ledger: list[dict[str, object]],
     vector_snapshots: list[dict[str, object]],
     acceptance_label: str,
+    trial_evidence: dict[str, object] | None = None,
 ) -> RunBundle:
     """Build one complete immutable run directory by atomic rename."""
     _validate_evidence(
+        run_id=run_id,
         progress=progress,
         topology=topology,
         placement=placement,
@@ -232,6 +295,7 @@ def build_run_bundle(
         model_ledger=model_ledger,
         vector_snapshots=vector_snapshots,
         acceptance_label=acceptance_label,
+        trial_evidence=trial_evidence,
     )
     sources = {
         "feedback.parquet": Path(feedback_parquet),
@@ -300,6 +364,8 @@ def build_run_bundle(
                 "files": artifact_names,
             },
         }
+        if trial_evidence is not None:
+            manifest_document["trialEvidence"] = trial_evidence
         manifest = partial / "manifest.json"
         manifest.write_bytes(_canonical_json(manifest_document))
         checksums = {

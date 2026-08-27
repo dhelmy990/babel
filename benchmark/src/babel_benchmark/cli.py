@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
+from dataclasses import asdict
 from pathlib import Path
 from uuid import UUID
 
@@ -80,6 +82,31 @@ def _parser() -> argparse.ArgumentParser:
     report.add_argument("--telemetry", nargs="*", default=[], type=Path)
     report.add_argument("--summary", required=True, type=Path)
     report.add_argument("--markdown", required=True, type=Path)
+
+    trial = commands.add_parser(
+        "trial-bundle-build", help="validate and build one formal 3x3 trial bundle"
+    )
+    trial.add_argument("--output-root", required=True, type=Path)
+    trial.add_argument("--trial-id", required=True, type=UUID)
+    trial.add_argument("--evidence", required=True, nargs=9, type=Path)
+    trial.add_argument("--population-manifest", required=True, type=Path)
+    trial.add_argument("--feedback-parquet", required=True, type=Path)
+    trial.add_argument("--edges-parquet", required=True, type=Path)
+    trial.add_argument("--model-manifest", required=True, type=Path)
+    trial.add_argument("--model-artifact-root", required=True, type=Path)
+    trial.add_argument("--selected-child", required=True, type=Path)
+    trial.add_argument("--model-repository", required=True)
+    trial.add_argument("--model-revision", required=True)
+    trial.add_argument("--dataset-repository", required=True)
+    trial.add_argument("--dataset-revision", required=True)
+
+    publish = commands.add_parser(
+        "trial-bundle-publish", help="upload and remotely verify one built trial bundle"
+    )
+    publish.add_argument("--bundle-root", required=True, type=Path)
+    publish.add_argument("--repo-id", required=True)
+    publish.add_argument("--revision", default="main")
+    publish.add_argument("--token-env", default="HF_TOKEN")
     return parser
 
 
@@ -90,6 +117,64 @@ def _write(path: Path, content: str) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.command == "trial-bundle-build":
+        from .trial_bundle import FormalPins, build_formal_trial_bundle
+
+        bundle = build_formal_trial_bundle(
+            args.output_root,
+            trial_id=args.trial_id,
+            evidence_paths=args.evidence,
+            population_manifest_path=args.population_manifest,
+            feedback_parquet=args.feedback_parquet,
+            edges_parquet=args.edges_parquet,
+            model_manifest=args.model_manifest,
+            model_artifact_root=args.model_artifact_root,
+            selected_child_path=args.selected_child,
+            pins=FormalPins(
+                args.model_repository,
+                args.model_revision,
+                args.dataset_repository,
+                args.dataset_revision,
+            ),
+        )
+        print(
+            json.dumps(
+                {
+                    "runId": str(bundle.run_id),
+                    "bundleRoot": str(bundle.root),
+                    "manifest": str(bundle.manifest_path),
+                    "checksums": str(bundle.checksums_path),
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    if args.command == "trial-bundle-publish":
+        from huggingface_hub import HfApi
+
+        from .hub import RunBundle, publish_run_bundle
+
+        manifest_path = args.bundle_root / "manifest.json"
+        checksums_path = args.bundle_root / "checksums.json"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            run_id = UUID(str(manifest["runId"]))
+        except (OSError, KeyError, ValueError, json.JSONDecodeError) as error:
+            raise ValueError("built trial bundle manifest is invalid") from error
+        if args.bundle_root.name != str(run_id) or not checksums_path.is_file():
+            raise ValueError("built trial bundle path or checksums differ from its run ID")
+        token = os.environ.get(args.token_env)
+        if not token:
+            raise ValueError(f"publication token environment is unset: {args.token_env}")
+        receipt = publish_run_bundle(
+            HfApi(),
+            RunBundle(args.bundle_root, run_id, manifest_path, checksums_path),
+            repo_id=args.repo_id,
+            token=token,
+            revision=args.revision,
+        )
+        print(json.dumps(asdict(receipt), sort_keys=True))
+        return 0
     if args.command in {"replay", "live-replay", "concurrent-replay"}:
         manifest = load_benchmark_manifest(args.manifest)
         matches = [row for row in manifest.conditions if row.name == args.condition]
