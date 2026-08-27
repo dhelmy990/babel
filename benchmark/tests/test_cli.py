@@ -151,6 +151,28 @@ def test_live_replay_cli_exposes_real_trainer_and_sync_inputs() -> None:
     assert args.sync_every_steps == 50
 
 
+def test_retrieval_comparison_cli_has_no_topology_selector() -> None:
+    args = _parser().parse_args(
+        [
+            "retrieval-compare",
+            "--population",
+            "population",
+            "--formal-pgvector-evidence",
+            "condition.json",
+            "--dsn",
+            "postgresql://localhost/babel",
+            "--output",
+            "retrieval.json",
+        ]
+    )
+
+    assert args.command == "retrieval-compare"
+    assert args.query_count == 100
+    assert args.warmup_passes == 1
+    assert args.measurement_passes == 3
+    assert not hasattr(args, "topology")
+
+
 def test_trial_bundle_cli_closes_build_and_publish_inputs() -> None:
     build = _parser().parse_args(
         [

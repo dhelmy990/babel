@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from uuid import UUID
+from pathlib import Path
 
 import numpy as np
 
@@ -36,6 +37,9 @@ class FakeHnswIndex:
         scores = self.vectors @ np.asarray(query[0], dtype=np.float32)
         order = np.argsort(-scores, kind="stable")[:k]
         return self.labels[order][None, :], (1.0 - scores[order])[None, :]
+
+    def save_index(self, path: str) -> None:
+        Path(path).write_bytes(b"x" * 321)
 
 
 def record(number: int, creator: UUID, axis: int) -> VectorRecord:
@@ -160,3 +164,19 @@ def test_search_grows_overfetch_only_when_creator_filter_removes_too_many() -> N
 
     assert len(result) == 10
     assert fake.query_ks == [20, 40]
+
+
+def test_serialized_index_size_reports_real_hnsw_footprint() -> None:
+    records = [record(4_000 + number, CREATOR_B, number % 100) for number in range(60)]
+    state = MaterializedServingState(
+        run_id=RUN,
+        model_id=MODEL,
+        model_version=0,
+        embedding_space_id=SPACE,
+        pgvector_snapshot_sha256="b" * 64,
+        backend_snapshot_sha256="b" * 64,
+    )
+    index = HnswlibCandidateIndex(index_factory=FakeHnswIndex)
+    index.activate(state, records)
+
+    assert index.serialized_index_size_bytes() == 321

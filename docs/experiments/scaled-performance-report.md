@@ -104,6 +104,15 @@ after a real PostgreSQL HNSW condition has been observed. Report snapshot/index
 preparation time, memory, steady latency/throughput, and Recall@K separately;
 do not mix index construction with request latency.
 
+The implemented comparison consumes the canonical frozen population and a
+deterministic ordered query selection. Its formal pgvector condition gate must
+match the snapshot/model identity and contain only successful measured requests.
+The result records p50/p95/p99, sequential retrieval throughput, Recall@10/50,
+preparation duration, index footprint, and the exact-audit checksum. It is
+labelled `retrieval_only` and `topologyConclusionEligible=false`. PostgreSQL
+relation storage and hnswlib serialized/RSS footprints retain their distinct
+measurement labels rather than being treated as equivalent RAM values.
+
 ## Scale
 
 Status: **manual gate at cohort 50; no automatic advancement**.

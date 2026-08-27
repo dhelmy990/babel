@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from uuid import UUID
@@ -132,6 +134,21 @@ class HnswlibCandidateIndex:
             query_k = min(len(self._records), query_k * 2)
         output.sort(key=lambda row: (-row.score, str(row.babel_id).lower()))
         return output[:k]
+
+    def serialized_index_size_bytes(self) -> int:
+        """Return hnswlib's own serialized index footprint, excluding vectors JSON."""
+        if self._index is None:
+            raise StaleServingState("hnswlib index is not active")
+        descriptor, name = tempfile.mkstemp(prefix="babel-hnsw-", suffix=".bin")
+        os.close(descriptor)
+        try:
+            self._index.save_index(name)
+            return os.path.getsize(name)
+        finally:
+            try:
+                os.unlink(name)
+            except FileNotFoundError:
+                pass
 
     @staticmethod
     def audit_recall(exact: Sequence[str], approximate: Sequence[str]) -> RecallAudit:

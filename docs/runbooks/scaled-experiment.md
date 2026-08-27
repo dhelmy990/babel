@@ -188,6 +188,47 @@ The original model is never replaced. Each completed compatible child remains
 separately selectable. A later run can select the original to reset the lineage
 or select condition 6's child to continue adaptation.
 
+## Optional retrieval-only pgvector/hnswlib comparison
+
+Do not run this comparison before at least one formal serving-only pgvector
+condition has completed successfully. It is deliberately gated by that
+condition's `live-evidence.json`; a smoke receipt, training condition, failed
+request, or another vector snapshot is rejected before the command opens a
+database connection.
+
+Install the optional local index dependency into the existing environment:
+
+```bash
+uv pip install --python online/.venv/bin/python -e 'benchmark[hnswlib]'
+```
+
+Then select one completed serving-only condition and run:
+
+```bash
+babel-friday-benchmark retrieval-compare \
+  --population "$PERF_ROOT/$TRIAL_ID/population" \
+  --formal-pgvector-evidence '<SERVING_ONLY_CONDITION>/live-evidence.json' \
+  --dsn "$BABEL_DATABASE_URL" \
+  --query-count 100 \
+  --warmup-passes 1 \
+  --measurement-passes 3 \
+  --output "$RUN_ROOT/retrieval-comparison.json"
+```
+
+The command selects a deterministic ordered set of query vectors from the
+checksum-verified `vectors.f32le` population. Both backends consume those same
+ordered IDs, exact float32 bytes, snapshot checksum, creator exclusions, and
+queries. Exact cosine search audits Recall@10 and Recall@50. Warmups and index
+preparation are excluded from p50/p95/p99 and throughput.
+
+The JSON result is explicitly `retrieval_only` with
+`topologyConclusionEligible=false`. PostgreSQL memory is labelled as total
+shared relation storage (table/index), while hnswlib reports its serialized
+index footprint and observed local RSS delta; those differently scoped values
+must not be presented as an apples-to-apples RAM comparison. This microbenchmark
+does not change pgvector as the formal/default backend and cannot support a
+serving/training topology conclusion.
+
 ## Export feedback and build the accepted bundle
 
 Do not begin this phase until the trial and all nine conditions are durably

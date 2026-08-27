@@ -120,6 +120,18 @@ def _parser() -> argparse.ArgumentParser:
     attach.add_argument("--trial-id", required=True, type=UUID)
     attach.add_argument("--base-url", default="http://127.0.0.1:8787")
     attach.add_argument("--nonce-env", default="BABEL_ADMIN_NONCE")
+
+    retrieval = commands.add_parser(
+        "retrieval-compare",
+        help="compare pgvector and hnswlib over one frozen snapshot (retrieval only)",
+    )
+    retrieval.add_argument("--population", required=True, type=Path)
+    retrieval.add_argument("--formal-pgvector-evidence", required=True, type=Path)
+    retrieval.add_argument("--dsn", required=True)
+    retrieval.add_argument("--output", required=True, type=Path)
+    retrieval.add_argument("--query-count", type=int, default=100)
+    retrieval.add_argument("--warmup-passes", type=int, default=1)
+    retrieval.add_argument("--measurement-passes", type=int, default=3)
     return parser
 
 
@@ -198,6 +210,19 @@ def _attach_backend_artifact_receipt(
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.command == "retrieval-compare":
+        from .retrieval_comparison import run_live_retrieval_comparison
+
+        report = run_live_retrieval_comparison(
+            population_path=args.population,
+            formal_pgvector_evidence_path=args.formal_pgvector_evidence,
+            dsn=args.dsn,
+            query_count=args.query_count,
+            warmup_passes=args.warmup_passes,
+            measurement_passes=args.measurement_passes,
+        )
+        _write(args.output, json.dumps(report, indent=2, sort_keys=True) + "\n")
+        return 0
     if args.command == "trial-bundle-attach":
         try:
             publication = json.loads(args.receipt.read_text(encoding="utf-8"))
