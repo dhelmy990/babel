@@ -203,22 +203,24 @@ class FaultController:
         before = self._hooks.probe()
         injected_at = self._clock()
         invalid_state_rejected: bool | None = None
-        if fault == "trainer_kill_restart":
-            self._hooks.kill_trainer()
-        elif fault == "kafka_pause_resume":
-            self._hooks.pause_kafka()
-        elif fault == "invalid_model_state":
-            invalid_state_rejected = self._hooks.inject_invalid_state()
-        else:
-            self._hooks.stop_serving()
-        during = self._hooks.probe()
-        detected_at = self._clock()
-        if fault == "trainer_kill_restart":
-            self._hooks.restart_trainer()
-        elif fault == "kafka_pause_resume":
-            self._hooks.resume_kafka()
-        elif fault == "serving_restart":
-            self._hooks.start_serving()
+        recovery: Callable[[], None] | None = None
+        try:
+            if fault == "trainer_kill_restart":
+                recovery = self._hooks.restart_trainer
+                self._hooks.kill_trainer()
+            elif fault == "kafka_pause_resume":
+                recovery = self._hooks.resume_kafka
+                self._hooks.pause_kafka()
+            elif fault == "invalid_model_state":
+                invalid_state_rejected = self._hooks.inject_invalid_state()
+            else:
+                recovery = self._hooks.start_serving
+                self._hooks.stop_serving()
+            during = self._hooks.probe()
+            detected_at = self._clock()
+        finally:
+            if recovery is not None:
+                recovery()
         after = self._hooks.probe()
         recovered_at = (
             detected_at if fault == "invalid_model_state" else self._clock()

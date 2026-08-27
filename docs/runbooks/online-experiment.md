@@ -88,11 +88,14 @@ PYTHONPATH=benchmark/src:online/src online/.venv/bin/python -m pytest \
 180 total, one suite timeout, the current fixture, and
 `formal_performance_claim=false`. `run_lifecycle_tiny_smoke()` calls one suite
 start, each condition callback, and one suite stop. It publishes the receipt
-only after cleanup succeeds. Every condition callback receives a cancellation
-event and must stop without further side effects when the suite deadline sets
-it. `DashboardPerformanceHttpClient` maps saved-trial creation and graceful
-stop to the Task 10 loopback admin endpoints; its caller supplies the admin
-nonce without persisting it.
+only after cleanup succeeds. Each condition runs in a Linux fork worker and
+receives a cancellation event. The runner reserves a cooperative-cancellation
+window, then terminates or kills a stuck worker and reaps it before returning;
+no callback remains alive after `TimeoutError`. A successful condition requires
+positive requests and edges, all required health observations, and an existing
+nonempty raw evidence file. `DashboardPerformanceHttpClient` maps saved-trial
+creation and graceful stop to the Task 10 loopback admin endpoints; its caller
+supplies the admin nonce without persisting it.
 
 This is currently a Python library entrypoint, not a live matrix CLI. The tests
 use a bounded callback harness. Saved-trial creation alone does not start a
@@ -104,10 +107,12 @@ dependency is not repaired by Task 12's receipt contracts.
 
 Formal population is a separate manual gate. Freeze 5,000 June plus 5,000 July
 Babels once, in stable Babel-ID order, and record the ordered-manifest and
-vector-byte checksums. Clone those exact bytes into every condition. Freeze the
-request corpus, feedback, creator schedule, event mix, start draws, and
-continuation draws as six independent checksums. Do not regenerate walks from
-condition-specific recommendations.
+vector-byte checksums. Also record checksums for the 50-creator round-robin
+assignment manifest and cross-month per-creator used-source sets. Clone those
+exact bytes into every condition. Freeze the request corpus, feedback,
+creator-local schedule, event mix, probability-0.40 start draws, and independent
+probability-0.40 continuation draws as six checksums. Do not regenerate walks
+from condition-specific recommendations.
 
 `FrozenPopulationReceipt` and `FrozenWorkloadReceipt` validate these artifacts;
 they do not create them. The exporter/checksum/clone driver remains required
@@ -138,7 +143,8 @@ callbacks own and can reap the restarted PIDs. The probe must read serving
 health, Kafka lag, duplicate/loss counters, and trainer/serving versions. A
 serving restart is stop → probe outage → start → probe recovery. Invalid state
 passes only when rejection is explicit and the last valid serving version
-remains available.
+remains available. Trainer restart, Kafka resume, and serving start execute even
+when the during-fault probe raises.
 
 Advance cohorts manually: 50, then 100, then 500. At 50 run all nine
 conditions. At higher cohorts run the monolith and one selected split topology

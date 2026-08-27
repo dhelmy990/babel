@@ -1,14 +1,13 @@
 """Bounded smoke matrix orchestration for recommendation experiments."""
 
 import json
+import multiprocessing
 import os
-import queue
-import threading
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 
 Topology = Literal["same_process", "same_host_split", "same_host_isolated"]
@@ -150,8 +149,14 @@ def tiny_smoke_plan(*, timeout_seconds: float = 60.0) -> TinySmokePlan:
     )
 
 
+class CancellationEvent(Protocol):
+    def is_set(self) -> bool: ...
+
+    def wait(self, timeout: float | None = None) -> bool: ...
+
+
 ConditionExecutor = Callable[
-    [SmokeCondition, int, float, threading.Event], SmokeConditionResult
+    [SmokeCondition, int, float, CancellationEvent], SmokeConditionResult
 ]
 
 
@@ -160,42 +165,60 @@ def _execute_with_timeout(
     condition: SmokeCondition,
     timeout_seconds: float,
 ) -> SmokeConditionResult:
-    outcome: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
-    cancel = threading.Event()
+    try:
+        context = multiprocessing.get_context("fork")
+    except ValueError as error:  # pragma: no cover - Linux demo contract
+        raise RuntimeError("tiny smoke requires a Linux fork process boundary") from error
+    receive, send = context.Pipe(duplex=False)
+    cancel = context.Event()
 
     def invoke() -> None:
+        receive.close()
         try:
-            outcome.put(
-                (
-                    True,
-                    execute_condition(
-                        condition,
-                        condition.request_limit,
-                        timeout_seconds,
-                        cancel,
-                    ),
-                )
+            value: tuple[bool, object] = (
+                True,
+                execute_condition(
+                    condition,
+                    condition.request_limit,
+                    timeout_seconds,
+                    cancel,
+                ),
             )
         except BaseException as error:
-            outcome.put((False, error))
+            value = (False, error)
+        try:
+            send.send(value)
+        except Exception:
+            send.send((False, RuntimeError("condition result could not be serialized")))
+        finally:
+            send.close()
 
-    worker = threading.Thread(
+    worker = context.Process(
         target=invoke,
-        daemon=True,
+        daemon=False,
         name=f"tiny-smoke-{condition.condition_id}",
     )
     worker.start()
-    worker.join(timeout_seconds)
+    send.close()
+    cancellation_grace = min(0.05, timeout_seconds / 2)
+    worker.join(max(0.0, timeout_seconds - cancellation_grace))
     if worker.is_alive():
         cancel.set()
+        worker.join(cancellation_grace)
+    if worker.is_alive():
+        worker.terminate()
         worker.join(0.05)
-        if worker.is_alive():
-            raise TimeoutError(
-                "tiny smoke exceeded its strict suite timeout; "
-                "condition callback did not honor cancellation"
-            )
+    if worker.is_alive():  # pragma: no cover - termination fallback
+        worker.kill()
+        worker.join()
+    if cancel.is_set():
+        receive.close()
         raise TimeoutError("tiny smoke exceeded its strict suite timeout")
-    succeeded, value = outcome.get_nowait()
+    if not receive.poll(0.05):
+        receive.close()
+        raise RuntimeError("smoke condition worker exited without a result")
+    succeeded, value = receive.recv()
+    receive.close()
     if not succeeded:
         if not isinstance(value, BaseException):  # pragma: no cover - defensive
             raise RuntimeError("smoke condition callback failed without an error")
@@ -214,6 +237,25 @@ def _persist_receipt(path: Path, receipt: TinySmokeReceipt) -> None:
         encoding="utf-8",
     )
     os.replace(partial, path)
+
+
+def _validate_success_evidence(result: SmokeConditionResult) -> None:
+    complete = (
+        result.request_count > 0
+        and result.edges_observed > 0
+        and result.startup_verified
+        and result.cleanup_verified
+        and result.progress_observed
+        and result.ratios_observed
+        and result.trainer_failure_serving_available
+    )
+    raw_path = Path(result.raw_results_path)
+    raw_complete = raw_path.is_file() and raw_path.stat().st_size > 0
+    if not complete or not raw_complete:
+        raise ValueError(
+            "successful smoke condition requires requests, edges, all health "
+            "checks, and a nonempty raw evidence file"
+        )
 
 
 def run_tiny_smoke(
@@ -239,6 +281,7 @@ def run_tiny_smoke(
             raise ValueError("condition result exceeds planned request bound")
         if monotonic() - started > plan.timeout_seconds:
             raise TimeoutError("tiny smoke exceeded its strict suite timeout")
+        _validate_success_evidence(result)
         results.append(result)
     receipt = TinySmokeReceipt(
         schema_version=1,
@@ -263,7 +306,7 @@ class CallbackSmokeRuntime:
         *,
         start_suite: Callable[[TinySmokePlan], Any],
         run_condition: Callable[
-            [Any, SmokeCondition, int, float, threading.Event],
+            [Any, SmokeCondition, int, float, CancellationEvent],
             SmokeConditionResult,
         ],
         stop_suite: Callable[[Any], None],
@@ -281,7 +324,7 @@ class CallbackSmokeRuntime:
         condition: SmokeCondition,
         request_limit: int,
         timeout_seconds: float,
-        cancel: threading.Event,
+        cancel: CancellationEvent,
     ) -> SmokeConditionResult:
         return self._run_condition(
             handle, condition, request_limit, timeout_seconds, cancel

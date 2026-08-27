@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Literal
 from uuid import UUID
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from .contracts import FrozenContract
 from .matrix import LoadMode, Topology
@@ -28,8 +28,27 @@ class FrozenPopulationReceipt(FrozenContract):
     ordered_manifest_sha256: str = Field(pattern=_SHA256)
     vector_bytes_sha256: str = Field(pattern=_SHA256)
     creator_source_unique: bool
+    creator_count: int = Field(gt=0)
+    round_robin_verified: bool
+    cross_month_used_source_invariant_verified: bool
+    creator_round_robin_manifest_sha256: str = Field(pattern=_SHA256)
+    cross_month_used_sources_manifest_sha256: str = Field(pattern=_SHA256)
 
     def validate_for_formal(self) -> "FrozenPopulationReceipt":
+        if (
+            self.june_created != 5_000
+            or self.july_created != 5_000
+            or self.creator_count != 50
+            or self.formal_threshold != 10_000
+            or not self.round_robin_verified
+            or not self.cross_month_used_source_invariant_verified
+            or self.creator_round_robin_manifest_sha256
+            == self.cross_month_used_sources_manifest_sha256
+        ):
+            raise ValueError(
+                "formal population requires 5,000 rows per month, 50 creators, "
+                "round-robin placement, and the cross-month used-source invariant"
+            )
         if (
             self.june_created + self.july_created != self.distinct_babel_count
             or self.distinct_babel_count != self.indexed_count
@@ -60,6 +79,16 @@ class FrozenWorkloadReceipt(FrozenContract):
     event_mix_sha256: str = Field(pattern=_SHA256)
     start_draws_sha256: str = Field(pattern=_SHA256)
     continuation_draws_sha256: str = Field(pattern=_SHA256)
+    creator_schedule_scope: Literal["creator_local"]
+    start_probability: Literal[0.4]
+    continuation_probability: Literal[0.4]
+    independent_draw_streams: Literal[True]
+
+    @model_validator(mode="after")
+    def draw_streams_are_independent(self) -> "FrozenWorkloadReceipt":
+        if self.start_draws_sha256 == self.continuation_draws_sha256:
+            raise ValueError("start and continuation draws must be independent")
+        return self
 
     @property
     def replay_identity(self) -> tuple[str, ...]:
@@ -93,6 +122,8 @@ def cohort_condition_matrix(
     allowed = {50, 100, 500, 1_000, 5_000, 10_000}
     if cohort_size not in allowed:
         raise ValueError("cohort must be one of the manual scaling ladder values")
+    if selected_split not in {"same_host_split", "same_host_isolated"}:
+        raise ValueError("selected split must be a split-service topology")
     topologies: tuple[Topology, ...] = (
         ("same_process", "same_host_split", "same_host_isolated")
         if cohort_size == 50
@@ -233,10 +264,21 @@ def validate_controlled_cohort(
     receipts: tuple[ControlledConditionReceipt, ...],
     *,
     expected_condition_ids: set[str],
+    expected_population: FrozenPopulationReceipt,
+    expected_workload: FrozenWorkloadReceipt,
     formal_threshold: int = 10_000,
 ) -> tuple[ControlledConditionReceipt, ...]:
-    if not receipts or {row.condition_id for row in receipts} != expected_condition_ids:
-        raise ValueError("controlled cohort condition set is incomplete")
+    receipt_ids = tuple(row.condition_id for row in receipts)
+    if (
+        not receipts
+        or len(receipts) != len(expected_condition_ids)
+        or len(set(receipt_ids)) != len(receipt_ids)
+        or set(receipt_ids) != expected_condition_ids
+    ):
+        raise ValueError(
+            "controlled cohort must contain each expected condition exactly once"
+        )
+    expected_population.validate_for_formal()
     baseline = receipts[0]
     identity = (
         baseline.cohort_size,
@@ -255,6 +297,13 @@ def validate_controlled_cohort(
         for row in receipts[1:]
     ):
         raise ValueError("controlled cohort population/workload drift detected")
+    if (
+        baseline.ordered_population_sha256
+        != expected_population.ordered_manifest_sha256
+        or baseline.vector_bytes_sha256 != expected_population.vector_bytes_sha256
+        or baseline.workload_identity != expected_workload.replay_identity
+    ):
+        raise ValueError("controlled cohort differs from its expected frozen identity")
     if any(
         row.created_count != row.indexed_count
         or row.indexed_count < formal_threshold

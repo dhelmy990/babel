@@ -31,6 +31,11 @@ def test_formal_receipts_require_complete_pinned_population_and_workload() -> No
         ordered_manifest_sha256="a" * 64,
         vector_bytes_sha256="b" * 64,
         creator_source_unique=True,
+        creator_count=50,
+        round_robin_verified=True,
+        cross_month_used_source_invariant_verified=True,
+        creator_round_robin_manifest_sha256="3" * 64,
+        cross_month_used_sources_manifest_sha256="4" * 64,
     )
     workload = FrozenWorkloadReceipt(
         request_count=10_000,
@@ -40,6 +45,10 @@ def test_formal_receipts_require_complete_pinned_population_and_workload() -> No
         event_mix_sha256="f" * 64,
         start_draws_sha256="1" * 64,
         continuation_draws_sha256="2" * 64,
+        creator_schedule_scope="creator_local",
+        start_probability=0.4,
+        continuation_probability=0.4,
+        independent_draw_streams=True,
     )
 
     assert population.formal_measurement_ready
@@ -54,6 +63,25 @@ def test_formal_receipts_require_complete_pinned_population_and_workload() -> No
 
     with pytest.raises(ValueError, match="created and indexed"):
         population.model_copy(update={"indexed_count": 9_999}).validate_for_formal()
+
+    for update in (
+        {"june_created": 4_999, "distinct_babel_count": 9_999},
+        {"july_created": 4_999, "distinct_babel_count": 9_999},
+        {"creator_count": 49},
+        {"round_robin_verified": False},
+        {"cross_month_used_source_invariant_verified": False},
+        {"cross_month_used_sources_manifest_sha256": "3" * 64},
+    ):
+        with pytest.raises(ValueError, match="formal population"):
+            population.model_copy(update=update).validate_for_formal()
+
+    with pytest.raises(ValueError, match="independent"):
+        FrozenWorkloadReceipt(
+            **{
+                **workload.model_dump(),
+                "continuation_draws_sha256": workload.start_draws_sha256,
+            }
+        )
 
 
 def test_first_cohort_uses_nine_conditions_and_higher_cohorts_use_six() -> None:
@@ -77,6 +105,11 @@ def test_first_cohort_uses_nine_conditions_and_higher_cohorts_use_six() -> None:
         "training_no_activation",
         "training_and_activation",
     }
+    assert len({row.condition_id for row in first}) == 9
+    assert len({row.condition_id for row in one_hundred}) == 6
+
+    with pytest.raises(ValueError, match="selected split"):
+        cohort_condition_matrix(100, selected_split="same_process")  # type: ignore[arg-type]
 
 
 def test_cohort_ladder_requires_explicit_operator_approval() -> None:
@@ -202,6 +235,39 @@ def test_lag_stop_rule_requires_two_increases_at_verified_maximum_backpressure()
 
 
 def test_controlled_conditions_must_clone_identical_population_and_workload() -> None:
+    population = FrozenPopulationReceipt(
+        dataset_repository="dhelmy990/babel-wikipedia-experiment",
+        dataset_revision="0" * 40,
+        model_id=uuid4(),
+        model_revision="1" * 40,
+        june_created=5_000,
+        july_created=5_000,
+        distinct_babel_count=10_000,
+        indexed_count=10_000,
+        formal_threshold=10_000,
+        ordered_manifest_path="population/ordered-babels.jsonl",
+        ordered_manifest_sha256="a" * 64,
+        vector_bytes_sha256="b" * 64,
+        creator_source_unique=True,
+        creator_count=50,
+        round_robin_verified=True,
+        cross_month_used_source_invariant_verified=True,
+        creator_round_robin_manifest_sha256="3" * 64,
+        cross_month_used_sources_manifest_sha256="4" * 64,
+    )
+    workload = FrozenWorkloadReceipt(
+        request_count=10_000,
+        request_corpus_sha256="c" * 64,
+        feedback_sha256="d" * 64,
+        creator_schedule_sha256="e" * 64,
+        event_mix_sha256="f" * 64,
+        start_draws_sha256="1" * 64,
+        continuation_draws_sha256="2" * 64,
+        creator_schedule_scope="creator_local",
+        start_probability=0.4,
+        continuation_probability=0.4,
+        independent_draw_streams=True,
+    )
     conditions = cohort_condition_matrix(50)
     receipts = tuple(
         ControlledConditionReceipt(
@@ -223,9 +289,13 @@ def test_controlled_conditions_must_clone_identical_population_and_workload() ->
         for row in conditions
     )
 
-    validate_controlled_cohort(receipts, expected_condition_ids={
-        row.condition_id for row in conditions
-    })
+    expected_ids = {row.condition_id for row in conditions}
+    validate_controlled_cohort(
+        receipts,
+        expected_condition_ids=expected_ids,
+        expected_population=population,
+        expected_workload=workload,
+    )
 
     drifted = receipts[:-1] + (
         receipts[-1].model_copy(update={"vector_bytes_sha256": "9" * 64}),
@@ -233,5 +303,26 @@ def test_controlled_conditions_must_clone_identical_population_and_workload() ->
     with pytest.raises(ValueError, match="population/workload drift"):
         validate_controlled_cohort(
             drifted,
-            expected_condition_ids={row.condition_id for row in conditions},
+            expected_condition_ids=expected_ids,
+            expected_population=population,
+            expected_workload=workload,
+        )
+
+    with pytest.raises(ValueError, match="exactly once"):
+        validate_controlled_cohort(
+            receipts + (receipts[0],),
+            expected_condition_ids=expected_ids,
+            expected_population=population,
+            expected_workload=workload,
+        )
+
+    wrong_expected = set(expected_ids)
+    wrong_expected.remove(next(iter(wrong_expected)))
+    wrong_expected.add("cohort-50.same_process.unknown.pgvector")
+    with pytest.raises(ValueError, match="exactly once"):
+        validate_controlled_cohort(
+            receipts,
+            expected_condition_ids=wrong_expected,
+            expected_population=population,
+            expected_workload=workload,
         )

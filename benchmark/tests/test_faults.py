@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from babel_benchmark.faults import (
     CallbackKafkaControl,
     FaultController,
@@ -131,3 +133,45 @@ def test_task9_http_and_kafka_adapters_map_to_real_lifecycle_seams() -> None:
         ("serving", "stop"),
         ("serving", "start"),
     ]
+
+
+@pytest.mark.parametrize(
+    "fault,recovery_event",
+    [
+        ("trainer_kill_restart", "trainer-restarted"),
+        ("kafka_pause_resume", "kafka-resumed"),
+        ("serving_restart", "serving-started"),
+    ],
+)
+def test_fault_controller_attempts_recovery_when_during_probe_fails(
+    fault, recovery_event
+) -> None:
+    events = []
+
+    class ProbeFailureHarness(LifecycleHarness):
+        def __init__(self):
+            super().__init__()
+            self.probes = 0
+
+        def probe(self):
+            self.probes += 1
+            if self.probes == 2:
+                raise RuntimeError("probe failed")
+            return super().probe()
+
+        def restart_trainer(self):
+            events.append("trainer-restarted")
+            super().restart_trainer()
+
+        def resume_kafka(self):
+            events.append("kafka-resumed")
+            super().resume_kafka()
+
+        def start_serving(self):
+            events.append("serving-started")
+            super().start_serving()
+
+    with pytest.raises(RuntimeError, match="probe failed"):
+        FaultController(ProbeFailureHarness())._run(fault)
+
+    assert events == [recovery_event]

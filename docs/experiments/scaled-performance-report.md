@@ -14,14 +14,18 @@ performance claim false**.
 - Load modes: serving only, training without activation, training with activation.
 - Bound: at most 20 requests per condition and 180 requests total.
 - Input: the current fixture only; no 10,000-Babel population was started.
-- Timeout: one strict suite deadline; a late condition prevents receipt publication.
-- Receipt: startup/cleanup, edges, progress, raw-result paths, ratios, and trainer-
-  failure serving availability are mandatory, with
+- Timeout: each condition runs in a Linux fork worker. The suite reserves a
+  cooperative-cancellation window, then terminates/kills a stuck worker before
+  returning; a late condition prevents receipt publication.
+- Receipt: positive requests/edges, startup/cleanup, progress, ratios, trainer-
+  failure serving availability, and an existing nonempty raw-result file are
+  mandatory, with
   `formal_performance_claim=false`.
 
 The test callback harness ran all nine condition slots and exercised the
-single-start/single-stop lifecycle. This proves the bound, deadline,
-cancellation, receipt, and cleanup contracts. It is not a live dashboard run.
+single-start/single-stop lifecycle. This proves the request bound, bounded worker
+termination, receipt validation, and cleanup contracts. It is not a live
+dashboard run.
 Task 9's fixture-scale component acceptance separately exercises the real Babel
 recommendation FastAPI application, coordinator, feedback path, and
 `OnlineTrainer`, including trainer-kill serving availability. Neither result is
@@ -40,7 +44,9 @@ Status: **awaiting operator population approval**.
 Formal measurement requires a receipt for 5,000 June plus 5,000 July
 synthetic-created Babels, with 10,000 distinct created IDs and 10,000 indexed
 real-Qwen vectors. The receipt freezes the ordered Babel manifest, its checksum,
-the vector-byte checksum, dataset/model commits, and creator/source uniqueness.
+the vector-byte checksum, dataset/model commits, creator/source uniqueness, a
+50-creator round-robin assignment-manifest checksum, and a separate cross-month
+used-source-set checksum. It requires exactly 5,000 rows per month.
 Each condition must clone the same bytes. Created and indexed counts below the
 declared threshold invalidate the condition.
 
@@ -60,6 +66,11 @@ At cohorts 100 and 500 it compares the monolith with one operator-selected split
 topology, reducing the higher-cohort matrix to six conditions. Every condition
 must reuse the same frozen request, feedback, creator schedule, event mix, and
 separate start/continuation draw checksums.
+
+The creator schedule is explicitly creator-local. Start and continuation use
+independent recorded draw streams, each with probability 0.40. Cohort validation
+requires every expected condition exactly once and rejects duplicates, extras,
+identity drift, and `same_process` masquerading as the selected split.
 
 All current topology labels are same-host. They measure process scheduling,
 memory contention, model-activation pauses, Kafka lag, and failure isolation.
@@ -103,7 +114,8 @@ after the fault, maximum lag, detection/recovery durations, duplicate/lost
 events, and trainer/serving versions. Invalid-state evidence additionally
 requires explicit rejection and retention of the last valid serving version.
 Serving restart uses separate stop/probe/start/probe boundaries; restart time is
-not mislabeled as detection time.
+not mislabeled as detection time. Trainer, Kafka, and serving recovery actions
+execute in `finally`, including when the during-fault probe fails.
 
 ## Formal result table
 

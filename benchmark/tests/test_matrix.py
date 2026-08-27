@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import time
+from dataclasses import replace
 
 import pytest
 
@@ -44,6 +46,8 @@ def test_tiny_smoke_persists_complete_nonformal_receipt(tmp_path) -> None:
         assert request_limit == 20
         assert 0 < timeout_seconds <= 30.0
         assert not cancel.is_set()
+        raw_path = tmp_path / f"{condition.condition_id}.jsonl"
+        raw_path.write_text("{}\n", encoding="utf-8")
         return SmokeConditionResult(
             condition_id=condition.condition_id,
             request_count=request_limit,
@@ -51,7 +55,7 @@ def test_tiny_smoke_persists_complete_nonformal_receipt(tmp_path) -> None:
             cleanup_verified=True,
             edges_observed=2,
             progress_observed=True,
-            raw_results_path=f"raw/{condition.condition_id}.jsonl",
+            raw_results_path=str(raw_path),
             ratios_observed=True,
             trainer_failure_serving_available=True,
         )
@@ -97,16 +101,16 @@ def test_tiny_smoke_fails_closed_when_strict_suite_timeout_expires(tmp_path) -> 
 
 
 def test_tiny_smoke_returns_at_deadline_when_condition_callback_blocks(tmp_path) -> None:
-    plan = tiny_smoke_plan(timeout_seconds=0.02)
+    plan = tiny_smoke_plan(timeout_seconds=0.1)
     started = time.monotonic()
-    cancelled = []
-    forbidden_post_timeout_side_effect = []
+    cancelled_path = tmp_path / "cancelled"
+    forbidden_post_timeout_side_effect = tmp_path / "forbidden"
 
     def block(_condition, _limit, _timeout, cancel):
         if cancel.wait(1):
-            cancelled.append(True)
+            cancelled_path.write_text("yes", encoding="utf-8")
             return None
-        forbidden_post_timeout_side_effect.append(True)
+        forbidden_post_timeout_side_effect.write_text("bad", encoding="utf-8")
         return None
 
     with pytest.raises(TimeoutError, match="strict suite timeout"):
@@ -116,10 +120,107 @@ def test_tiny_smoke_returns_at_deadline_when_condition_callback_blocks(tmp_path)
             receipt_path=tmp_path / "receipt.json",
         )
 
-    assert time.monotonic() - started < 0.2
-    assert cancelled == [True]
+    assert time.monotonic() - started < 0.25
+    assert cancelled_path.read_text(encoding="utf-8") == "yes"
     time.sleep(0.03)
-    assert forbidden_post_timeout_side_effect == []
+    assert not forbidden_post_timeout_side_effect.exists()
+
+
+def test_timeout_does_not_return_while_cancel_ignoring_callback_is_alive(
+    tmp_path,
+) -> None:
+    plan = tiny_smoke_plan(timeout_seconds=0.01)
+    delayed_side_effect = tmp_path / "delayed-side-effect"
+    started = time.monotonic()
+
+    def ignores_cancel(_condition, _limit, _timeout, _cancel):
+        time.sleep(0.12)
+        delayed_side_effect.write_text("bad", encoding="utf-8")
+        return None
+
+    with pytest.raises(TimeoutError, match="strict suite timeout"):
+        run_tiny_smoke(
+            plan,
+            ignores_cancel,
+            receipt_path=tmp_path / "receipt.json",
+        )
+
+    assert time.monotonic() - started < 0.1
+    time.sleep(0.14)
+    assert not delayed_side_effect.exists()
+
+
+def test_timeout_terminates_never_returning_executor(tmp_path) -> None:
+    plan = tiny_smoke_plan(timeout_seconds=0.03)
+    delayed_side_effect = tmp_path / "never-side-effect"
+    before = {child.pid for child in multiprocessing.active_children()}
+    started = time.monotonic()
+
+    def never_returns(_condition, _limit, _timeout, _cancel):
+        while True:
+            time.sleep(0.2)
+            delayed_side_effect.write_text("bad", encoding="utf-8")
+
+    with pytest.raises(TimeoutError, match="strict suite timeout"):
+        run_tiny_smoke(
+            plan,
+            never_returns,
+            receipt_path=tmp_path / "receipt.json",
+        )
+
+    assert time.monotonic() - started < 0.2
+    assert {child.pid for child in multiprocessing.active_children()} == before
+    time.sleep(0.22)
+    assert not delayed_side_effect.exists()
+
+
+@pytest.mark.parametrize(
+    "invalid_update,raw_state",
+    [
+        ({"request_count": 0}, "valid"),
+        ({"edges_observed": 0}, "valid"),
+        ({"startup_verified": False}, "valid"),
+        ({"cleanup_verified": False}, "valid"),
+        ({"progress_observed": False}, "valid"),
+        ({"ratios_observed": False}, "valid"),
+        ({"trainer_failure_serving_available": False}, "valid"),
+        ({}, "missing"),
+        ({}, "empty"),
+    ],
+)
+def test_tiny_smoke_rejects_incomplete_success_evidence(
+    tmp_path, invalid_update, raw_state
+) -> None:
+    plan = tiny_smoke_plan(timeout_seconds=2)
+    raw_path = tmp_path / "raw.jsonl"
+    if raw_state == "valid":
+        raw_path.write_text("{}\n", encoding="utf-8")
+    elif raw_state == "empty":
+        raw_path.touch()
+    valid = SmokeConditionResult(
+        condition_id=plan.conditions[0].condition_id,
+        request_count=1,
+        startup_verified=True,
+        cleanup_verified=True,
+        edges_observed=1,
+        progress_observed=True,
+        raw_results_path=str(raw_path),
+        ratios_observed=True,
+        trainer_failure_serving_available=True,
+    )
+
+    with pytest.raises(ValueError, match="successful smoke condition"):
+        run_tiny_smoke(
+            plan,
+            lambda condition, _limit, _timeout, _cancel: replace(
+                valid,
+                condition_id=condition.condition_id,
+                **invalid_update,
+            ),
+            receipt_path=tmp_path / "receipt.json",
+        )
+
+    assert not (tmp_path / "receipt.json").exists()
 
 
 def test_lifecycle_smoke_starts_once_runs_nine_conditions_and_stops(tmp_path) -> None:
@@ -129,6 +230,9 @@ def test_lifecycle_smoke_starts_once_runs_nine_conditions_and_stops(tmp_path) ->
         start_suite=lambda _plan: events.append("start") or "trial-1",
         run_condition=lambda handle, condition, limit, _timeout, _cancel: (
             events.append(("run", handle, condition.condition_id)),
+            (tmp_path / f"{condition.condition_id}.jsonl").write_text(
+                "{}\n", encoding="utf-8"
+            ),
             SmokeConditionResult(
                 condition_id=condition.condition_id,
                 request_count=limit,
@@ -136,11 +240,11 @@ def test_lifecycle_smoke_starts_once_runs_nine_conditions_and_stops(tmp_path) ->
                 cleanup_verified=True,
                 edges_observed=1,
                 progress_observed=True,
-                raw_results_path=f"raw/{condition.condition_id}.jsonl",
+                raw_results_path=str(tmp_path / f"{condition.condition_id}.jsonl"),
                 ratios_observed=True,
                 trainer_failure_serving_available=True,
             ),
-        )[1],
+        )[2],
         stop_suite=lambda handle: events.append(("stop", handle)),
     )
 
@@ -150,8 +254,8 @@ def test_lifecycle_smoke_starts_once_runs_nine_conditions_and_stops(tmp_path) ->
 
     assert receipt.total_requests == 180
     assert events[0] == "start"
-    assert len([row for row in events if isinstance(row, tuple) and row[0] == "run"]) == 9
     assert events[-1] == ("stop", "trial-1")
+    assert len(list(tmp_path.glob("*.jsonl"))) == 9
 
 
 def test_dashboard_http_adapter_uses_saved_trial_endpoints() -> None:
