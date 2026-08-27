@@ -17,6 +17,7 @@ from babel_online.runtime.performance_condition import (
 )
 from babel_online.runtime.performance_worker import PerformanceCondition
 from babel_online.contracts import CandidateActionV1, FeedbackEventV2, RecommendationRequestV2
+from babel_online.feedback import FeedbackRecord
 from babel_online.simulation.scheduler import ScheduledWork, deterministic_schedule
 from babel_online.simulation.walk import WalkRollEvidence
 from babel_online.observable import CreatedBabel
@@ -119,6 +120,68 @@ def test_feedback_publisher_abort_is_safe_before_start():
     publisher.abort()
 
 
+def test_feedback_publisher_captures_ordered_records_and_exact_offset_ranges():
+    request_ids = [uuid4(), uuid4(), uuid4()]
+    creator = uuid4()
+    events = [
+        SimpleNamespace(requestId=request_id, eventId=uuid4(), creatorId=creator)
+        for request_id in request_ids
+    ]
+    returned = iter(((0, 10), (0, 12), (1, 4)))
+    published = []
+
+    class Producer:
+        def publish(self, *, key, event):
+            published.append(event.requestId)
+            partition, offset = next(returned)
+            return FeedbackRecord(
+                topic="babel.feedback.v1",
+                partition=partition,
+                offset=offset,
+                key=key,
+                event=event,
+            )
+
+    publisher = condition_module._OrderedFeedbackPublisher(
+        dict(zip(request_ids, events, strict=True)),
+        {request_id: index for index, request_id in enumerate(request_ids)},
+        Producer(),
+        SimpleNamespace(persist_feedback_edges=lambda _event: None),
+    )
+    rows = [
+        SimpleNamespace(request=SimpleNamespace(requestId=value, creatorId=creator))
+        for value in request_ids
+    ]
+    publisher.start()
+    publisher.callback(rows[2], None, None)
+    publisher.callback(rows[0], None, None)
+    publisher.callback(rows[1], None, None)
+    publisher.finish(3)
+
+    assert published == request_ids
+    assert [record.event.requestId for record in publisher.records] == request_ids
+    assert publisher.offset_range_documents() == [
+        {
+            "topic": "babel.feedback.v1",
+            "partition": 0,
+            "startInclusive": 10,
+            "endExclusive": 11,
+        },
+        {
+            "topic": "babel.feedback.v1",
+            "partition": 0,
+            "startInclusive": 12,
+            "endExclusive": 13,
+        },
+        {
+            "topic": "babel.feedback.v1",
+            "partition": 1,
+            "startInclusive": 4,
+            "endExclusive": 5,
+        },
+    ]
+
+
 def test_split_host_rejects_stale_activation_receipt(tmp_path, monkeypatch):
     activation_dir = tmp_path / "activations"
     activation_dir.mkdir()
@@ -144,6 +207,83 @@ def test_split_host_rejects_stale_activation_receipt(tmp_path, monkeypatch):
         host.stop(wait_for_activation=True)
 
     assert stopped == ["trainer", "serving"]
+
+
+def test_split_host_removes_stale_trainer_ready_marker(tmp_path, monkeypatch):
+    run_id = UUID(int=41)
+    plan = build_live_condition_plan(
+        _condition("same_host_split", True, False),
+        run_id=run_id,
+        state_root=tmp_path / "topology",
+        serving_port=8791,
+        python_executable="/venv/bin/python",
+        cpu_count=4,
+    )
+    ready_path = Path(plan.commands["trainer"].environment["BABEL_TRAINER_READY_PATH"])
+    ready_path.parent.mkdir(parents=True)
+    ready_path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "runId": str(UUID(int=99)),
+                "consumerGroup": "stale",
+                "readyAtNs": 1,
+            }
+        )
+    )
+    running = SimpleNamespace(
+        serving_status=lambda: 200,
+        process_alive=lambda role: True,
+    )
+    host = condition_module._SplitProcessHost(plan)
+    host._supervisor = SimpleNamespace(
+        launch=lambda **_values: running,
+    )
+    moments = iter((0.0, 181.0))
+    monkeypatch.setattr(condition_module.time, "monotonic", lambda: next(moments))
+    monkeypatch.setattr(condition_module.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(TimeoutError, match="healthy"):
+        host.start()
+
+    assert not ready_path.exists()
+
+
+def test_split_host_rejects_ready_marker_when_trainer_exited(tmp_path):
+    run_id = UUID(int=42)
+    plan = build_live_condition_plan(
+        _condition("same_host_split", True, False),
+        run_id=run_id,
+        state_root=tmp_path / "topology",
+        serving_port=8791,
+        python_executable="/venv/bin/python",
+        cpu_count=4,
+    )
+    ready_path = Path(plan.commands["trainer"].environment["BABEL_TRAINER_READY_PATH"])
+    running = SimpleNamespace(
+        serving_status=lambda: 200,
+        process_alive=lambda role: role == "serving",
+    )
+
+    def launch(**_values):
+        ready_path.parent.mkdir(parents=True, exist_ok=True)
+        ready_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "runId": str(run_id),
+                    "consumerGroup": "fresh",
+                    "readyAtNs": (1 << 63) - 1,
+                }
+            )
+        )
+        return running
+
+    host = condition_module._SplitProcessHost(plan)
+    host._supervisor = SimpleNamespace(launch=launch)
+
+    with pytest.raises(RuntimeError, match="trainer exited"):
+        host.start()
 
 
 def test_latency_sink_records_real_response_boundary_and_reports_nearest_rank_p95():
@@ -391,6 +531,11 @@ def test_live_condition_rebinds_workload_and_publishes_exact_feedback(
             config=SimpleNamespace(startingModelId=UUID(int=20))
         ),
         persist_feedback_edges=lambda event: None,
+        performance_runtime_health=lambda run_id: {
+            "kafka_lag": 0,
+            "trainer_version": 1,
+            "serving_version": 0,
+        },
     )
     host = SimpleNamespace(
         services={"serving": 1},
@@ -399,9 +544,17 @@ def test_live_condition_rebinds_workload_and_publishes_exact_feedback(
         stop=lambda: None,
     )
     published = []
-    producer = SimpleNamespace(
-        publish=lambda **values: published.append(values), close=lambda: None
-    )
+    def publish(**values):
+        published.append(values)
+        return FeedbackRecord(
+            topic="babel.feedback.v1",
+            partition=0,
+            offset=17,
+            key=values["key"],
+            event=values["event"],
+        )
+
+    producer = SimpleNamespace(publish=publish, close=lambda: None)
 
     async def runner(manifest, spec, replay, universe, **options):
         assert replay.rows[0].request.runId == condition_run
@@ -440,6 +593,33 @@ def test_live_condition_rebinds_workload_and_publishes_exact_feedback(
     assert len(published) == 1
     assert published[0]["event"].runId == condition_run
     assert published[0]["event"].candidateActions == feedback.candidateActions
+    assert evidence["rawEvidence"]["feedbackKafka"] == {
+        "recordCount": 1,
+        "records": [
+            {
+                "topic": "babel.feedback.v1",
+                "partition": 0,
+                "offset": 17,
+                "key": str(creator),
+                "eventId": str(feedback.eventId),
+                "requestId": str(feedback.requestId),
+            }
+        ],
+        "offsetRanges": [
+            {
+                "topic": "babel.feedback.v1",
+                "partition": 0,
+                "startInclusive": 17,
+                "endExclusive": 18,
+            }
+        ],
+        "finalTrainerState": {
+            "available": True,
+            "kafkaLag": 0,
+            "trainerVersion": 1,
+            "servingVersion": 0,
+        },
+    }
 
 
 def test_real_workload_freezer_runs_reference_host_and_coordinator(tmp_path: Path):

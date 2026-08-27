@@ -22,6 +22,7 @@ from .topology import ResourceRequest, ServiceCommand, Topology
 
 @dataclass(frozen=True, slots=True)
 class LiveConditionPlan:
+    run_id: UUID
     topology: Topology
     commands: dict[str, ServiceCommand]
     resources: dict[str, ResourceRequest]
@@ -93,6 +94,7 @@ def build_live_condition_plan(
             "trainer": ResourceRequest(cpuAffinity=available_cpus[midpoint:]),
         }
     return LiveConditionPlan(
+        run_id=run_id,
         topology=topology,
         commands={"serving": serving, "trainer": trainer},
         resources=resources,
@@ -493,6 +495,13 @@ class _SplitProcessHost:
             return int(response.status)
 
     def start(self) -> None:
+        ready_path_value = self.plan.commands["trainer"].environment.get(
+            "BABEL_TRAINER_READY_PATH"
+        )
+        ready_path = Path(ready_path_value) if ready_path_value is not None else None
+        if ready_path is not None:
+            ready_path.unlink(missing_ok=True)
+        launched_at_ns = time.time_ns()
         self.running = self._supervisor.launch(
             topology=self.plan.topology,
             commands=self.plan.commands,
@@ -501,12 +510,13 @@ class _SplitProcessHost:
         )
         deadline = time.monotonic() + 180
         while True:
+            if not self.running.process_alive("trainer"):
+                raise RuntimeError("online trainer exited during startup")
             try:
                 if self.running.serving_status() == 200:
-                    ready_path = self.plan.commands["trainer"].environment.get(
-                        "BABEL_TRAINER_READY_PATH"
-                    )
-                    if ready_path is None or Path(ready_path).is_file():
+                    if ready_path is None or self._valid_trainer_ready(
+                        ready_path, launched_at_ns
+                    ):
                         return
             except Exception:
                 if not self.running.process_alive("serving"):
@@ -514,6 +524,18 @@ class _SplitProcessHost:
             if time.monotonic() >= deadline:
                 raise TimeoutError("recommendation serving did not become healthy")
             time.sleep(0.25)
+
+    def _valid_trainer_ready(self, path: Path, launched_at_ns: int) -> bool:
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+            return (
+                document["schemaVersion"] == 1
+                and UUID(str(document["runId"])) == self.plan.run_id
+                and bool(str(document["consumerGroup"]).strip())
+                and int(document["readyAtNs"]) >= launched_at_ns
+            )
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return False
 
     def stop(self, *, wait_for_activation: bool) -> None:
         if self.running is None:
@@ -576,6 +598,7 @@ class _OrderedFeedbackPublisher:
         self.producer = producer
         self.database = database
         self.published: set[UUID] = set()
+        self._records: list[Any] = []
         self._pending: dict[int, Any] = {}
         self._next = 0
         self._expected: int | None = None
@@ -617,8 +640,16 @@ class _OrderedFeedbackPublisher:
                         return
                     event = self._pending.pop(self._next)
                     self._next += 1
-                self.producer.publish(key=str(event.creatorId), event=event)
+                record = self.producer.publish(key=str(event.creatorId), event=event)
+                if (
+                    record.key != str(event.creatorId)
+                    or record.event.requestId != event.requestId
+                    or record.offset < 0
+                    or record.partition < 0
+                ):
+                    raise ValueError("feedback acknowledgement differs from published event")
                 self.database.persist_feedback_edges(event)
+                self._records.append(record)
                 self.published.add(event.requestId)
         except BaseException as error:
             self._error = error
@@ -634,6 +665,21 @@ class _OrderedFeedbackPublisher:
             raise RuntimeError("ordered feedback publication failed") from self._error
         if len(self.published) != expected:
             raise RuntimeError("ordered feedback publication was incomplete")
+        expected_requests = tuple(
+            request_id
+            for request_id, _index in sorted(
+                self.request_order.items(), key=lambda item: item[1]
+            )
+        )
+        actual_requests = tuple(record.event.requestId for record in self._records)
+        if len(self._records) != expected or actual_requests != expected_requests:
+            raise RuntimeError("feedback acknowledgement order or count differs")
+        offsets = [
+            (record.topic, int(record.partition), int(record.offset))
+            for record in self._records
+        ]
+        if len(set(offsets)) != len(offsets):
+            raise RuntimeError("feedback acknowledgements contain duplicate offsets")
 
     def abort(self) -> None:
         with self._condition:
@@ -642,6 +688,43 @@ class _OrderedFeedbackPublisher:
         if self._thread.ident is None:
             return
         self._thread.join(timeout=5)
+
+    @property
+    def records(self) -> tuple[Any, ...]:
+        return tuple(self._records)
+
+    def offset_range_documents(self) -> list[dict[str, int | str]]:
+        ranges: list[dict[str, int | str]] = []
+        by_partition: dict[tuple[str, int], list[int]] = {}
+        for record in self._records:
+            by_partition.setdefault(
+                (str(record.topic), int(record.partition)), []
+            ).append(int(record.offset))
+        for (topic, partition), offsets in sorted(by_partition.items()):
+            ordered = sorted(offsets)
+            start = previous = ordered[0]
+            for offset in ordered[1:]:
+                if offset == previous + 1:
+                    previous = offset
+                    continue
+                ranges.append(
+                    {
+                        "topic": topic,
+                        "partition": partition,
+                        "startInclusive": start,
+                        "endExclusive": previous + 1,
+                    }
+                )
+                start = previous = offset
+            ranges.append(
+                {
+                    "topic": topic,
+                    "partition": partition,
+                    "startInclusive": start,
+                    "endExclusive": previous + 1,
+                }
+            )
+        return ranges
 
 
 @contextmanager
@@ -652,6 +735,75 @@ def _host_lifecycle(host: Any, stop: Callable[[Any], None]):
         yield host
     finally:
         stop(host)
+
+
+def _feedback_kafka_evidence(
+    publisher: _OrderedFeedbackPublisher,
+    *,
+    database: Any,
+    run_id: UUID,
+    config: Any,
+) -> dict[str, Any]:
+    records = [
+        {
+            "topic": str(record.topic),
+            "partition": int(record.partition),
+            "offset": int(record.offset),
+            "key": str(record.key),
+            "eventId": str(record.event.eventId),
+            "requestId": str(record.event.requestId),
+        }
+        for record in publisher.records
+    ]
+    final: dict[str, Any] = {"available": False}
+    try:
+        health = dict(database.performance_runtime_health(run_id))
+    except (AttributeError, KeyError, RuntimeError):
+        health = {}
+    if "kafka_lag" in health:
+        final = {
+            "available": True,
+            "kafkaLag": int(health["kafka_lag"]),
+            "trainerVersion": int(health.get("trainer_version") or 0),
+            "servingVersion": int(health.get("serving_version") or 0),
+        }
+    state_root = getattr(config, "stateRoot", None)
+    if state_root:
+        from ..training.checkpoint import load_latest_checkpoint
+
+        checkpoint = load_latest_checkpoint(
+            Path(state_root) / str(run_id) / "checkpoints"
+        )
+        if checkpoint is not None:
+            offsets = [
+                {
+                    "topic": partition.topic,
+                    "partition": partition.partition,
+                    "nextOffset": int(offset),
+                }
+                for partition, offset in sorted(checkpoint.next_offsets.items())
+            ]
+            next_by_partition = {
+                (row["topic"], row["partition"]): row["nextOffset"]
+                for row in offsets
+            }
+            ranges = publisher.offset_range_documents()
+            final.update(
+                available=True,
+                nextOffsets=offsets,
+                offsetsCoverPublishedRanges=all(
+                    next_by_partition.get((row["topic"], row["partition"]), -1)
+                    >= row["endExclusive"]
+                    for row in ranges
+                ),
+                checkpointManifestSha256=checkpoint.manifest_sha256,
+            )
+    return {
+        "recordCount": len(records),
+        "records": records,
+        "offsetRanges": publisher.offset_range_documents(),
+        "finalTrainerState": final,
+    }
 
 
 class RealWorkloadFreezer:
@@ -1122,6 +1274,12 @@ def execute_live_condition(
         "measurements": [row.model_dump(mode="json") for row in result.measurements],
         "resources": [row.model_dump(mode="json") for row in result.resources],
         "placement": host.placement,
+        "feedbackKafka": _feedback_kafka_evidence(
+            feedback_publisher,
+            database=database,
+            run_id=run_id,
+            config=config,
+        ),
         "observedActivationTargets": [] if ledger is None else list(ledger.observed),
         "finalServingIdentity": {
             "modelId": str(final_active.model_id),
