@@ -21,6 +21,7 @@ import numpy as np
 from ..contracts import (
     ActivityLogV1,
     ModelManifestV2,
+    RunConfigV2,
     SynchronizationActivityV1,
     canonical_pgvector_snapshot_sha256,
 )
@@ -402,12 +403,38 @@ def _load_role_context(run_id: UUID, *, load_encoder: bool):
     )
 
 
+def resolve_trainer_activation(
+    cli_value: str | None,
+    environment: Mapping[str, str] = os.environ,
+) -> bool:
+    """Resolve the condition's explicit activation control without a silent default."""
+    raw = cli_value
+    if raw is None:
+        raw = environment.get("BABEL_ONLINE_ACTIVATION_ENABLED")
+    if raw is None:
+        raise ValueError(
+            "--activation-enabled or BABEL_ONLINE_ACTIVATION_ENABLED is required"
+        )
+    normalized = raw.strip().lower()
+    if normalized not in {"true", "false"}:
+        raise ValueError("activation-enabled must be true or false")
+    return normalized == "true"
+
+
+def require_scaled_trainer_config(config: object) -> RunConfigV2:
+    """Keep formal split-condition training on the scaled V2 run contract."""
+    if not isinstance(config, RunConfigV2):
+        raise TypeError("split condition trainer requires RunConfigV2")
+    return config
+
+
 def run_periodic_training(
     trainer: Any,
     *,
     stop_requested: Callable[[], bool],
     checkpoint_every_events: int,
     sync_every_steps: int,
+    activation_enabled: bool,
     publish_update: Callable[[], Any],
     initial_published_version: int,
     report_metrics: Callable[[], None] | None = None,
@@ -427,10 +454,27 @@ def run_periodic_training(
             checkpoint = trainer.checkpoint_and_commit()
             if report_checkpoint is not None:
                 report_checkpoint(checkpoint)
-        if trainer.training_version >= published_version + sync_every_steps:
+        if (
+            activation_enabled
+            and trainer.training_version >= published_version + sync_every_steps
+        ):
             publish_update()
             published_version = trainer.training_version
     return published_version
+
+
+def publish_final_update(
+    trainer: Any,
+    role: TrainerRole,
+    *,
+    last_published: int,
+    activation_enabled: bool,
+) -> int:
+    """Publish shutdown state only for the activation-enabled condition."""
+    if activation_enabled and trainer.training_version > last_published:
+        role.publish_update()
+        return trainer.training_version
+    return last_published
 
 
 def trainer_runtime_metrics(trainer: Any) -> dict[str, int | float]:
@@ -457,7 +501,12 @@ def trainer_main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(prog="babel-online-trainer")
     parser.add_argument("--run-id", required=True, type=UUID)
+    parser.add_argument("--activation-enabled", metavar="{true,false}")
     arguments = parser.parse_args(argv)
+    try:
+        activation_enabled = resolve_trainer_activation(arguments.activation_enabled)
+    except ValueError as error:
+        parser.error(str(error))
     (
         database,
         config,
@@ -468,6 +517,7 @@ def trainer_main(argv: list[str] | None = None) -> int:
         records,
         _encoder,
     ) = _load_role_context(arguments.run_id, load_encoder=False)
+    config = require_scaled_trainer_config(config)
     frozen = {
         record.babel.babelId: np.asarray(record.vector, dtype="<f4")
         for record in records
@@ -534,6 +584,7 @@ def trainer_main(argv: list[str] | None = None) -> int:
         stop_requested=stopping.is_set,
         checkpoint_every_events=config.checkpointEveryEvents,
         sync_every_steps=config.syncEverySteps,
+        activation_enabled=activation_enabled,
         publish_update=role.publish_update,
         initial_published_version=active.model_version,
         report_metrics=report_metrics,
@@ -544,8 +595,12 @@ def trainer_main(argv: list[str] | None = None) -> int:
     final_checkpoint = trainer.checkpoint_and_commit()
     report_metrics()
     report_checkpoint(final_checkpoint)
-    if trainer.training_version > last_published:
-        role.publish_update()
+    publish_final_update(
+        trainer,
+        role,
+        last_published=last_published,
+        activation_enabled=activation_enabled,
+    )
     consumer.close()
     return 0
 
@@ -769,6 +824,9 @@ __all__ = [
     "active_model_descends_from",
     "ServingRole",
     "TrainerRole",
+    "publish_final_update",
+    "require_scaled_trainer_config",
+    "resolve_trainer_activation",
     "run_periodic_training",
     "resolve_role_state_root",
     "scope_split_consumer",

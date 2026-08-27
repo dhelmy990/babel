@@ -425,9 +425,9 @@ TEST_CASE("performance launch returns failure persistence error when durability 
   CHECK(created.error().message == "could not persist performance failure");
 }
 
-TEST_CASE("performance graceful stop redispatches the same durable request after failure") {
+TEST_CASE("performance population stop redispatches the same durable request after failure") {
   FakeRepository repository;
-  repository.performance.status = PerformanceExperimentStatus::approved;
+  repository.performance.status = PerformanceExperimentStatus::population_pending;
   FakeWorker worker;
   FakePerformanceWorker performance_worker(&repository.events);
   performance_worker.stop_failures_remaining = 1;

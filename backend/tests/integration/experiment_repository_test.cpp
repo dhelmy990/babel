@@ -387,6 +387,39 @@ TEST_CASE_METHOD(ExperimentPostgresFixture,
 }
 
 TEST_CASE_METHOD(ExperimentPostgresFixture,
+                 "performance stop is durable and retryable throughout population and execution") {
+  const std::vector<std::string> stoppable_statuses{
+      "population_pending", "population_ready", "approved", "running"};
+
+  for (const auto& status : stoppable_statuses) {
+    const auto created = repository_.createPerformanceExperiment(
+        babel::PerformanceLaunchRequest{.starting_model_id = model_id_});
+    REQUIRE(created.has_value());
+    {
+      pqxx::connection connection(schemaUrl());
+      pqxx::work transaction(connection);
+      transaction.exec(
+          "UPDATE performance_experiments SET status=$2 WHERE id=$1",
+          pqxx::params{created->experiment_id, status});
+      transaction.commit();
+    }
+
+    const auto stopped =
+        repository_.requestPerformanceGracefulStop(created->experiment_id);
+    REQUIRE(stopped.has_value());
+    CHECK(stopped->status == babel::PerformanceExperimentStatus::stop_requested);
+    const auto retried =
+        repository_.requestPerformanceGracefulStop(created->experiment_id);
+    REQUIRE(retried.has_value());
+    CHECK(retried->status == babel::PerformanceExperimentStatus::stop_requested);
+    const auto reloaded =
+        repository_.getPerformanceExperiment(created->experiment_id);
+    REQUIRE(reloaded.has_value());
+    CHECK(reloaded->status == babel::PerformanceExperimentStatus::stop_requested);
+  }
+}
+
+TEST_CASE_METHOD(ExperimentPostgresFixture,
                  "performance execution identities and launch failure are durable") {
   const auto trial = repository_.createPerformanceExperiment(
       babel::PerformanceLaunchRequest{.starting_model_id = model_id_}).value();

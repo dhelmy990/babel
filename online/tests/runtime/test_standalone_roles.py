@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import numpy as np
 
+from babel_online.contracts import RunConfigV1, RunConfigV2
 from babel_online.model.registry import ModelRegistry
 from babel_online.feedback.bus import TopicPartition
 from babel_online.model.state_distributor import ModelStateDistributor
@@ -19,6 +20,9 @@ from babel_online.runtime.services import (
     resolve_role_state_root,
     scope_split_consumer,
     active_model_descends_from,
+    publish_final_update,
+    require_scaled_trainer_config,
+    resolve_trainer_activation,
     run_periodic_training,
 )
 import pytest
@@ -165,6 +169,32 @@ def test_role_entrypoints_are_independently_invokable(entrypoint, capsys) -> Non
     assert "--run-id" in capsys.readouterr().out
 
 
+def test_trainer_condition_requires_an_explicit_valid_activation_setting() -> None:
+    assert resolve_trainer_activation("true", {}) is True
+    assert resolve_trainer_activation("false", {}) is False
+    assert (
+        resolve_trainer_activation(None, {"BABEL_ONLINE_ACTIVATION_ENABLED": "true"})
+        is True
+    )
+    assert (
+        resolve_trainer_activation("false", {"BABEL_ONLINE_ACTIVATION_ENABLED": "true"})
+        is False
+    )
+    with pytest.raises(ValueError, match="activation-enabled"):
+        resolve_trainer_activation(None, {})
+    with pytest.raises(ValueError, match="true or false"):
+        resolve_trainer_activation(
+            None, {"BABEL_ONLINE_ACTIVATION_ENABLED": "sometimes"}
+        )
+
+
+def test_split_trainer_accepts_only_scaled_v2_run_configs() -> None:
+    scaled = RunConfigV2.model_construct(schemaVersion=2)
+    assert require_scaled_trainer_config(scaled) is scaled
+    with pytest.raises(TypeError, match="RunConfigV2"):
+        require_scaled_trainer_config(RunConfigV1.model_construct(schemaVersion=1))
+
+
 def test_trainer_publishes_periodic_immutable_updates_before_shutdown() -> None:
     stop = SimpleNamespace(value=False, is_set=lambda: stop.value)
     published, checkpoints, progress = [], [], []
@@ -189,6 +219,7 @@ def test_trainer_publishes_periodic_immutable_updates_before_shutdown() -> None:
         stop_requested=stop.is_set,
         checkpoint_every_events=2,
         sync_every_steps=2,
+        activation_enabled=True,
         publish_update=lambda: published.append(trainer.training_version),
         initial_published_version=0,
         report_metrics=lambda: progress.append(trainer.training_version),
@@ -197,6 +228,60 @@ def test_trainer_publishes_periodic_immutable_updates_before_shutdown() -> None:
     assert published == [2, 4]
     assert checkpoints == [2, 4]
     assert progress == [1, 2, 3, 4, 5]
+
+
+def test_training_without_activation_consumes_checkpoints_and_never_publishes() -> None:
+    stop = SimpleNamespace(value=False, is_set=lambda: stop.value)
+    published, checkpoints, progress = [], [], []
+
+    class Trainer:
+        training_version = 0
+        processed_events = 0
+
+        def process_available(self, **_kwargs):
+            self.training_version += 1
+            self.processed_events += 1
+            if self.training_version == 5:
+                stop.value = True
+            return 1
+
+        def checkpoint_and_commit(self):
+            checkpoints.append(self.training_version)
+
+    trainer = Trainer()
+    last_published = run_periodic_training(
+        trainer,
+        stop_requested=stop.is_set,
+        checkpoint_every_events=2,
+        sync_every_steps=2,
+        activation_enabled=False,
+        publish_update=lambda: published.append(trainer.training_version),
+        initial_published_version=0,
+        report_metrics=lambda: progress.append(trainer.training_version),
+    )
+
+    assert trainer.training_version == 5
+    assert published == []
+    assert checkpoints == [2, 4]
+    assert progress == [1, 2, 3, 4, 5]
+    assert last_published == 0
+
+
+def test_training_without_activation_never_publishes_the_final_update() -> None:
+    published = []
+    trainer = SimpleNamespace(training_version=5)
+    role = SimpleNamespace(publish_update=lambda: published.append(5))
+
+    assert (
+        publish_final_update(trainer, role, last_published=0, activation_enabled=False)
+        == 0
+    )
+    assert published == []
+    assert (
+        publish_final_update(trainer, role, last_published=0, activation_enabled=True)
+        == 5
+    )
+    assert published == [5]
 
 
 def test_split_trainer_reports_steps_loss_and_current_kafka_lag() -> None:

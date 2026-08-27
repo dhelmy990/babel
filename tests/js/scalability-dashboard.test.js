@@ -67,12 +67,13 @@ function definitionRows(element) {
   ]));
 }
 
-async function initializeController({ failPoll = false } = {}) {
+async function initializeController({ failPoll = false, status = 'running' } = {}) {
   const document = createDocument();
   const calls = [];
   let detailReads = 0;
   let intervalCallback;
   const trial = trialFixture();
+  trial.status = status;
   const fetchImpl = async (url, options = {}) => {
     calls.push([url, options]);
     if (url === '/admin/api/v1/experiment/models') {
@@ -190,6 +191,14 @@ test('dashboard polling renders persisted seeded, walk, and Hugging Face evidenc
     '/admin/api/v1/performance/trial-1',
     { method: 'GET', headers: { Accept: 'application/json' } },
   ]);
+});
+
+test('graceful stop remains available while the population is being built', async () => {
+  for (const status of ['population_pending', 'population_ready', 'approved', 'running']) {
+    const context = await initializeController({ status });
+    assert.equal(context.document.getElementById('performance-stop').disabled, false,
+      `stop should be enabled for ${status}`);
+  }
 });
 
 test('independent progress polling failure cannot mutate or stop a trial', async () => {

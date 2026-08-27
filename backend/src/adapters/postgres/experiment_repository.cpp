@@ -814,7 +814,9 @@ PostgresExperimentRepository::requestPerformanceGracefulStop(
       transaction.commit();
       return existing;
     }
-    if (existing.status != PerformanceExperimentStatus::approved &&
+    if (existing.status != PerformanceExperimentStatus::population_pending &&
+        existing.status != PerformanceExperimentStatus::population_ready &&
+        existing.status != PerformanceExperimentStatus::approved &&
         existing.status != PerformanceExperimentStatus::running) {
       return tl::make_unexpected(ApplicationError{
           ErrorCode::conflict, "performance experiment cannot be gracefully stopped"});
