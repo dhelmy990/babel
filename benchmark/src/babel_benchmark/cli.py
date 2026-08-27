@@ -280,6 +280,11 @@ def main(argv: list[str] | None = None) -> int:
                 "selected_child_path": inputs.selected_child,
                 "pins": inputs.pins,
             }
+            if inputs.condition_order:
+                options.update(
+                    expected_creator_cohort=inputs.creator_cohort,
+                    expected_condition_order=inputs.condition_order,
+                )
         else:
             missing = [name for name in manual_names if getattr(args, name) is None]
             if missing:

@@ -372,6 +372,59 @@ def _validate_matrix(
     return next(iter(workloads))
 
 
+def _validate_declared_condition_order(
+    rows: Sequence[_ConditionEvidence],
+    *,
+    cohort_size: int,
+    expected_creator_cohort: int | None,
+    expected_condition_order: Sequence[dict[str, Any]] | None,
+) -> None:
+    if expected_creator_cohort is None and expected_condition_order is None:
+        return
+    if (
+        expected_creator_cohort != cohort_size
+        or expected_condition_order is None
+        or len(expected_condition_order) != len(rows)
+    ):
+        raise ValueError("declared creator cohort or condition count differs")
+    required = {
+        "conditionIndex",
+        "conditionId",
+        "runId",
+        "topology",
+        "trainingEnabled",
+        "activationEnabled",
+    }
+    try:
+        declared = tuple(
+            (
+                int(document["conditionIndex"]),
+                UUID(str(document["conditionId"])),
+                UUID(str(document["runId"])),
+                document["topology"],
+                document["trainingEnabled"],
+                document["activationEnabled"],
+            )
+            for document in expected_condition_order
+            if isinstance(document, dict) and set(document) == required
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("declared condition order binding differs") from error
+    actual = tuple(
+        (
+            index,
+            row.condition_id,
+            row.run_id,
+            row.identity.topology,
+            row.identity.trainingEnabled,
+            row.identity.activationEnabled,
+        )
+        for index, row in enumerate(rows, start=1)
+    )
+    if declared != actual:
+        raise ValueError("declared condition order binding differs")
+
+
 def _feedback_export_binding(
     manifest_path: str | Path,
     feedback_path: str | Path,
@@ -709,6 +762,8 @@ def build_formal_trial_bundle(
     model_artifact_root: str | Path,
     selected_child_path: str | Path,
     pins: FormalPins,
+    expected_creator_cohort: int | None = None,
+    expected_condition_order: Sequence[dict[str, Any]] | None = None,
 ) -> RunBundle:
     """Validate one saved formal cohort, export aggregate evidence, and build locally."""
     rows = [_load_condition(Path(path)) for path in evidence_paths]
@@ -717,6 +772,12 @@ def build_formal_trial_bundle(
     )
     cohort_size = int(population["creatorCohort"])
     workload = _validate_matrix(rows, cohort_size=cohort_size)
+    _validate_declared_condition_order(
+        rows,
+        cohort_size=cohort_size,
+        expected_creator_cohort=expected_creator_cohort,
+        expected_condition_order=expected_condition_order,
+    )
     feedback_export = _feedback_export_binding(
         feedback_export_manifest_path,
         feedback_parquet,

@@ -331,6 +331,7 @@ def _build(
     selected_condition_index: int = 3,
     mutate=None,
     feedback_mutate=None,
+    declared_order_mutate=None,
 ):
     evidence, selected = _evidence_files(
         tmp_path,
@@ -339,6 +340,22 @@ def _build(
     )
     if mutate is not None:
         mutate(evidence)
+    declared_order = []
+    for index, path in enumerate(evidence, start=1):
+        document = json.loads(path.read_text())
+        identity = document["rawEvidence"]["conditionIdentity"]
+        declared_order.append(
+            {
+                "conditionIndex": index,
+                "conditionId": document["conditionId"],
+                "runId": document["runId"],
+                "topology": identity["topology"],
+                "trainingEnabled": identity["trainingEnabled"],
+                "activationEnabled": identity["activationEnabled"],
+            }
+        )
+    if declared_order_mutate is not None:
+        declared_order_mutate(declared_order)
     selected_path = tmp_path / "selected-child.json"
     selected_path.write_text(json.dumps(selected))
     model_manifest, model_root = _model_artifact(tmp_path, selected)
@@ -359,6 +376,8 @@ def _build(
         model_artifact_root=model_root,
         selected_child_path=selected_path,
         pins=FormalPins(MODEL_REPO, MODEL_REVISION, DATASET_REPO, DATASET_REVISION),
+        expected_creator_cohort=cohort_size,
+        expected_condition_order=declared_order,
     )
 
 
@@ -513,6 +532,21 @@ def test_higher_cohort_bundle_rejects_reordered_evidence_paths(tmp_path: Path) -
             cohort_size=100,
             selected_condition_index=6,
             mutate=reorder,
+        )
+
+
+def test_higher_cohort_bundle_rejects_cross_bound_handoff_condition(
+    tmp_path: Path,
+) -> None:
+    def bind_another_run(order: list[dict[str, object]]) -> None:
+        order[5]["runId"] = str(uuid5(TRIAL_ID, "another-trial-run"))
+
+    with pytest.raises(ValueError, match="declared condition order binding differs"):
+        _build(
+            tmp_path,
+            cohort_size=100,
+            selected_condition_index=6,
+            declared_order_mutate=bind_another_run,
         )
 
 
