@@ -956,20 +956,47 @@ class FridayDemoRuntime:
                     content_hash=str(article["content_hash"]),
                     event_number=row.schedule_index,
                 )
-                self.database.finalize_babel(
-                    self.config.runId, babel.babelId, None
+                precreated.append(
+                    _CompletedScaledRoot(
+                        scheduled=row,
+                        babel=babel,
+                        article=article,
+                        root_request_id=None,
+                    )
                 )
-                self._materialize_scaled_root(babel, article)
-        BoundedCreatorScheduler(
-            concurrent_users=self.config.concurrentUsers
-        ).run(
-            schedule,
-            lambda row: self._execute_scaled_session(
+            self._publish_scaled_root_batch(tuple(precreated))
+
+        completed_by_index: dict[int, _CompletedScaledRoot] = {}
+        completed_lock = threading.Lock()
+
+        def execute(row: ScheduledSession) -> None:
+            completed = self._execute_scaled_session(
                 row,
                 articles[row.root_babel_id],
                 hidden,
                 precreated=not self.config.interleaveCreationAndRecommendations,
-            ),
+            )
+            if completed is not None:
+                with completed_lock:
+                    completed_by_index[row.schedule_index] = completed
+
+        def publish_wave(wave: tuple[ScheduledSession, ...]) -> None:
+            if not self.config.interleaveCreationAndRecommendations:
+                return
+            with completed_lock:
+                completed = tuple(
+                    completed_by_index.pop(row.schedule_index)
+                    for row in wave
+                    if row.schedule_index in completed_by_index
+                )
+            self._publish_scaled_root_batch(completed)
+
+        BoundedCreatorScheduler(
+            concurrent_users=self.config.concurrentUsers
+        ).run(
+            schedule,
+            execute,
+            after_wave=publish_wave,
         )
 
     def _simulate(self, plan: list[tuple[str, UUID, dict[str, Any], UUID]], hidden: dict[str, set[tuple[str, str]]]) -> None:
