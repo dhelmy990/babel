@@ -184,8 +184,8 @@ def test_fault_campaign_cli_is_explicit_bounded_and_artifact_first() -> None:
             "population.json",
             "--receipt",
             "faults.json",
-            "--hooks-factory",
-            "operator_faults:build_hooks",
+            "--probe-workload",
+            "condition-06/workload",
         ]
     )
 
@@ -194,6 +194,9 @@ def test_fault_campaign_cli_is_explicit_bounded_and_artifact_first() -> None:
     assert args.recovery_timeout_seconds == 30
     assert args.fault_hold_seconds == 1
     assert args.poll_interval_seconds == 0.1
+    assert args.serving_port == 8793
+    assert args.kafka_container == "babel-slices-kafka-1"
+    assert args.probe_limit == 1000
     assert not hasattr(args, "topology")
 
 
@@ -283,7 +286,25 @@ def test_fault_campaign_cli_writes_receipt_without_embedding_control_secrets(
             self.serving = self.trainer = self.kafka = True
             self.lag = 0
 
-    monkeypatch.setattr(faults, "load_fault_hooks", lambda _spec: Hooks())
+    monkeypatch.setattr(
+        faults,
+        "load_accepted_fault_target",
+        lambda *_args: faults.FaultCampaignTarget(
+            trial_id=trial_id,
+            creator_count=50,
+            condition_count=9,
+            trial_sha256="a" * 64,
+            population_manifest_sha256="b" * 64,
+            condition_index=6,
+            run_id=UUID("00000000-0000-5000-8000-000000000006"),
+        ),
+    )
+    import babel_benchmark.fault_operator as fault_operator
+    monkeypatch.setattr(
+        fault_operator,
+        "build_same_host_fault_operator",
+        lambda _target, **_kwargs: Hooks(),
+    )
 
     assert (
         main(
@@ -295,8 +316,8 @@ def test_fault_campaign_cli_writes_receipt_without_embedding_control_secrets(
                 str(population),
                 "--receipt",
                 str(receipt),
-                "--hooks-factory",
-                "operator_faults:build_hooks",
+                "--probe-workload",
+                str(tmp_path / "condition-06" / "workload"),
                 "--fault-hold-seconds",
                 "0",
             ]
@@ -312,7 +333,7 @@ def test_fault_campaign_cli_writes_receipt_without_embedding_control_secrets(
         output["sha256"]
         == __import__("hashlib").sha256(receipt.read_bytes()).hexdigest()
     )
-    assert "operator_faults" not in receipt.read_text()
+    assert "HF_TOKEN" not in receipt.read_text()
 
 
 def test_trial_bundle_cli_closes_build_and_publish_inputs() -> None:

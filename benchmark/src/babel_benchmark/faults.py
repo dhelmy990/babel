@@ -64,7 +64,7 @@ class FaultLifecycleHooks(Protocol):
 
 
 class FaultCampaignHooks(FaultLifecycleHooks, Protocol):
-    def cleanup(self) -> None: ...
+    def cleanup(self) -> FaultSnapshot | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +74,8 @@ class FaultCampaignTarget:
     condition_count: int
     trial_sha256: str
     population_manifest_sha256: str
+    condition_index: int
+    run_id: UUID
 
 
 def _object(path: Path, label: str) -> dict[str, Any]:
@@ -118,6 +120,29 @@ def load_accepted_fault_target(
         or len(results) != expected_conditions
     ):
         raise ValueError("fault campaign requires one complete formal cohort matrix")
+    split_index = 6
+    matching = [
+        row
+        for row in results
+        if isinstance(row, dict) and int(row.get("conditionIndex", -1)) == split_index
+    ]
+    if len(matching) != 1:
+        raise ValueError("fault campaign requires formal condition 6")
+    split = matching[0]
+    raw = split.get("rawEvidence")
+    if (
+        split.get("topology") != "same_host_split"
+        or split.get("trainingEnabled") is not True
+        or split.get("synchronizationEnabled") is not True
+        or not isinstance(raw, dict)
+    ):
+        raise ValueError(
+            "condition 6 must be the real same-host split training+activation run"
+        )
+    try:
+        run_id = UUID(str(raw["runId"]))
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("condition 6 real run identity is unavailable") from error
 
     population_path = Path(population_manifest_path)
     population = _object(population_path, "frozen population manifest")
@@ -141,6 +166,8 @@ def load_accepted_fault_target(
         population_manifest_sha256=hashlib.sha256(
             population_path.read_bytes()
         ).hexdigest(),
+        condition_index=split_index,
+        run_id=run_id,
     )
 
 
@@ -613,8 +640,9 @@ class BoundedFaultCampaign:
             failure = str(error)
         finally:
             try:
-                self._hooks.cleanup()
-                cleanup_snapshot = self._hooks.probe()
+                cleanup_snapshot = self._hooks.cleanup()
+                if cleanup_snapshot is None:
+                    cleanup_snapshot = self._hooks.probe()
             except Exception as error:  # noqa: BLE001 - cleanup must not hide receipt
                 cleanup_error = str(error)
                 if failure is None:
@@ -628,6 +656,14 @@ class BoundedFaultCampaign:
                 initial_snapshot is None
                 or cleanup_snapshot.kafka_lag <= initial_snapshot.kafka_lag
             )
+            and (
+                initial_snapshot is None
+                or cleanup_snapshot.duplicate_events <= initial_snapshot.duplicate_events
+            )
+            and (
+                initial_snapshot is None
+                or cleanup_snapshot.lost_events <= initial_snapshot.lost_events
+            )
         )
         if not cleanup_verified and failure is None:
             failure = "fault campaign cleanup could not verify healthy services"
@@ -636,6 +672,8 @@ class BoundedFaultCampaign:
             "experimentId": str(self._target.trial_id),
             "creatorCount": self._target.creator_count,
             "conditionCount": self._target.condition_count,
+            "faultConditionIndex": self._target.condition_index,
+            "faultRunId": str(self._target.run_id),
             "acceptedTrialSha256": self._target.trial_sha256,
             "populationManifestSha256": self._target.population_manifest_sha256,
             "deploymentScope": "same_host",
@@ -652,6 +690,12 @@ class BoundedFaultCampaign:
             "cleanup": {
                 "verified": cleanup_verified,
                 "error": cleanup_error,
+                "duplicateEvents": (
+                    None if cleanup_snapshot is None else cleanup_snapshot.duplicate_events
+                ),
+                "lostEvents": (
+                    None if cleanup_snapshot is None else cleanup_snapshot.lost_events
+                ),
             },
             "failure": failure,
             "failedFault": failed_fault,

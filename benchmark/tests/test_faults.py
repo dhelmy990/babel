@@ -107,7 +107,24 @@ def _accepted_target_files(tmp_path: Path) -> tuple[Path, Path, UUID]:
                     "targetCreatedBabels": 10000,
                     "requiredVectorCount": 10000,
                     "progress": {"conditionCount": 9},
-                    "results": [{"conditionIndex": index} for index in range(1, 10)],
+                    "results": [
+                        {
+                            "conditionIndex": index,
+                            "topology": (
+                                "same_process" if index <= 3 else "same_host_split"
+                            ),
+                            "trainingEnabled": index not in {1, 4, 7},
+                            "synchronizationEnabled": index in {3, 6, 9},
+                            "rawEvidence": {
+                                "runId": str(
+                                    UUID(
+                                        f"00000000-0000-5000-8000-{index:012d}"
+                                    )
+                                )
+                            },
+                        }
+                        for index in range(1, 10)
+                    ],
                 }
             }
         )
@@ -123,6 +140,8 @@ def test_fault_target_requires_completed_approved_formal_population(tmp_path: Pa
 
     assert target.trial_id == trial_id
     assert target.condition_count == 9
+    assert target.condition_index == 6
+    assert target.run_id == UUID("00000000-0000-5000-8000-000000000006")
     assert target.trial_sha256 == hashlib.sha256(trial_path.read_bytes()).hexdigest()
     assert target.population_manifest_sha256 == hashlib.sha256(
         population_path.read_bytes()
@@ -132,6 +151,16 @@ def test_fault_target_requires_completed_approved_formal_population(tmp_path: Pa
     rejected["trial"]["operatorApproved"] = False
     trial_path.write_text(json.dumps(rejected))
     with pytest.raises(ValueError, match="completed and operator-approved"):
+        load_accepted_fault_target(trial_path, population_path)
+
+
+def test_fault_target_rejects_non_split_training_activation_condition(tmp_path: Path) -> None:
+    trial_path, population_path, _trial_id = _accepted_target_files(tmp_path)
+    document = json.loads(trial_path.read_text())
+    document["trial"]["results"][5]["topology"] = "same_process"
+    trial_path.write_text(json.dumps(document))
+
+    with pytest.raises(ValueError, match="condition 6.*same-host split"):
         load_accepted_fault_target(trial_path, population_path)
 
 
@@ -175,6 +204,8 @@ def test_bounded_fault_campaign_writes_truthful_fault_only_receipt(tmp_path: Pat
     assert serving["availability"]["availableAfterRecovery"]
     assert all(row["duplicates"] == 0 and row["lost"] == 0 for row in receipt["faults"])
     assert receipt["cleanup"]["verified"]
+    assert receipt["cleanup"]["duplicateEvents"] == 0
+    assert receipt["cleanup"]["lostEvents"] == 0
     assert harness.cleanup_calls == 1
     assert json.loads(receipt_path.read_text()) == receipt
 

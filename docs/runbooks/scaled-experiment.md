@@ -369,22 +369,30 @@ operator has accepted its measurements. This is a separate, explicitly invoked
 campaign: it does not run during population or the topology matrix and it does
 not support topology-performance conclusions.
 
-Provide an operator-owned Python factory that starts bounded request/feedback
-probe traffic over the frozen population and returns lifecycle hooks for the
-already-running local services. `probe` availability must reflect those real
-requests, not just process liveness. The adapter must implement `probe`, trainer
-kill/restart, Kafka pause/resume, invalid child-or-checkpoint injection, serving
-stop/start, and an idempotent `cleanup`. Keep credentials and process controls
-inside that local adapter; neither its factory name nor its secrets are written
-to the receipt. `cleanup` must also stop the probe traffic it started.
+The command owns fresh serving and trainer processes for condition 6 (the real
+same-host split, training-plus-activation condition), probes the already-running
+backend, and pauses the explicitly named local Kafka container. It starts a
+bounded background stream of real recommendation POSTs and Kafka feedback over
+that condition's rebound frozen workload. Availability therefore reflects real
+requests rather than process liveness. Credentials remain inherited environment
+variables and are never copied into the receipt. Cleanup resumes Kafka, verifies
+the roles recovered, stops probe traffic, terminates every process it started,
+and removes the rejected activation request.
 
 ```bash
 babel-friday-benchmark fault-campaign \
   --trial "$SAVED_TRIAL_JSON" \
   --population-manifest "$POPULATION_MANIFEST" \
-  --receipt "$HANDOFF_ROOT/fault-campaign.json" \
-  --hooks-factory 'operator_faults:build_hooks'
+  --probe-workload "$CONDITION_06_EVIDENCE_ROOT/workload" \
+  --kafka-container babel-slices-kafka-1 \
+  --receipt "$RUN_ROOT/faults/fault-campaign.json"
 ```
+
+Run from the same Python environment that installs both `babel-online` and
+`babel-friday-benchmark`, with `BABEL_DATABASE_URL` and `HF_TOKEN` set. The
+receipt and its CLI-printed SHA are a separate artifact at
+`$RUN_ROOT/faults/fault-campaign.json`; they are deliberately not inputs to the
+six- or nine-condition topology bundle.
 
 The command first verifies the exact completed, operator-approved 50-, 100-, or
 500-creator trial and its frozen 10,000-vector population. It then runs four

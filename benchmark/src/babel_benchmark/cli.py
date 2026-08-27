@@ -141,7 +141,13 @@ def _parser() -> argparse.ArgumentParser:
     faults.add_argument("--trial", required=True, type=Path)
     faults.add_argument("--population-manifest", required=True, type=Path)
     faults.add_argument("--receipt", required=True, type=Path)
-    faults.add_argument("--hooks-factory", required=True)
+    faults.add_argument("--probe-workload", required=True, type=Path)
+    faults.add_argument("--serving-port", type=int, default=8793)
+    faults.add_argument("--backend-base-url", default="http://127.0.0.1:8787")
+    faults.add_argument("--kafka-bootstrap-servers", default="127.0.0.1:29092")
+    faults.add_argument("--kafka-container", default="babel-slices-kafka-1")
+    faults.add_argument("--probe-limit", type=int, default=1000)
+    faults.add_argument("--probe-interval-seconds", type=float, default=0.05)
     faults.add_argument("--detection-timeout-seconds", type=float, default=10)
     faults.add_argument("--recovery-timeout-seconds", type=float, default=30)
     faults.add_argument("--fault-hold-seconds", type=float, default=1)
@@ -225,14 +231,23 @@ def _attach_backend_artifact_receipt(
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.command == "fault-campaign":
+        from .fault_operator import build_same_host_fault_operator
         from .faults import (
             BoundedFaultCampaign,
             load_accepted_fault_target,
-            load_fault_hooks,
         )
 
         target = load_accepted_fault_target(args.trial, args.population_manifest)
-        hooks = load_fault_hooks(args.hooks_factory)
+        hooks = build_same_host_fault_operator(
+            target,
+            workload=args.probe_workload,
+            serving_port=args.serving_port,
+            backend_base_url=args.backend_base_url,
+            kafka_bootstrap_servers=args.kafka_bootstrap_servers,
+            kafka_container=args.kafka_container,
+            probe_limit=args.probe_limit,
+            probe_interval_seconds=args.probe_interval_seconds,
+        )
         receipt = BoundedFaultCampaign(
             target,
             hooks,
