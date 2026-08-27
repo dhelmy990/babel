@@ -1124,7 +1124,10 @@ def execute_live_condition(
         candidateUniverseSha256=universe.sha256,
         scheduleOffsetsNs=spec.scheduleOffsetsNs,
         warmupCount=warmup_count,
-        timeoutSeconds=30.0,
+        # The accepted CPU-only demo deliberately drives up to 50 concurrent
+        # callers through one serialized 0.6B encoder. Preserve those slow
+        # responses as latency evidence instead of truncating the tail at 30s.
+        timeoutSeconds=120.0,
         scheduleMode="open_loop",
         maxInFlight=trial.concurrent_users,
         conditions=(spec,),

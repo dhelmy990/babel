@@ -559,6 +559,7 @@ def test_live_condition_rebinds_workload_and_publishes_exact_feedback(
     async def runner(manifest, spec, replay, universe, **options):
         assert replay.rows[0].request.runId == condition_run
         assert spec.requestCorpusSha256 == replay.sha256
+        assert manifest.timeoutSeconds == 120.0
         options["success_callback"](
             replay.rows[0], SimpleNamespace(), SimpleNamespace()
         )
