@@ -201,10 +201,22 @@ def _condition3_gate_raw_evidence(
         {
             "outcome": "success",
             "scheduleIndex": index,
+            "requestId": str(uuid5(EXPERIMENT_ID, f"request:{index}")),
             "isWarmup": index < warmup_count,
             "clientTotalNs": round(latency_ms * 1_000_000),
         }
         for index in range(warmup_count + measured_count)
+    ]
+    records = [
+        {
+            "topic": "babel.feedback.v1",
+            "partition": 0,
+            "offset": 11 + index,
+            "key": str(index),
+            "eventId": str(uuid5(EXPERIMENT_ID, f"feedback:{index}")),
+            "requestId": measurement["requestId"],
+        }
+        for index, measurement in enumerate(measurements)
     ]
     return {
         "conditionIdentity": {
@@ -225,13 +237,14 @@ def _condition3_gate_raw_evidence(
             ],
         },
         "feedbackKafka": {
-            "recordCount": 1,
+            "recordCount": len(records),
+            "records": records,
             "offsetRanges": [
                 {
                     "topic": "babel.feedback.v1",
                     "partition": 0,
                     "startInclusive": 11,
-                    "endExclusive": 12,
+                    "endExclusive": 11 + len(records),
                 }
             ],
             "finalTrainerState": {
@@ -242,7 +255,7 @@ def _condition3_gate_raw_evidence(
                     {
                         "topic": "babel.feedback.v1",
                         "partition": 0,
-                        "nextOffset": 12,
+                        "nextOffset": 11 + len(records),
                     }
                 ],
                 "checkpointManifestSha256": SHA,
@@ -300,6 +313,12 @@ def test_condition3_gate_evidence_hard_fails_dirty_activation_or_kafka_state() -
             ),
             "offset",
         ),
+        (
+            lambda value: value["feedbackKafka"]["records"][1].__setitem__(
+                "requestId", value["feedbackKafka"]["records"][0]["requestId"]
+            ),
+            "request identity",
+        ),
     ):
         candidate = json.loads(json.dumps(raw))
         mutation(candidate)
@@ -312,6 +331,25 @@ def test_condition3_gate_evidence_hard_fails_dirty_activation_or_kafka_state() -
                 expected_request_count=600,
                 latency_safety_threshold_ms=5_000.0,
             )
+
+
+def test_condition3_gate_evidence_rejects_one_feedback_for_750_requests() -> None:
+    raw = _condition3_gate_raw_evidence()
+    feedback = raw["feedbackKafka"]
+    feedback["recordCount"] = 1
+    feedback["records"] = feedback["records"][:1]
+    feedback["offsetRanges"][0]["endExclusive"] = 12
+    feedback["finalTrainerState"]["nextOffsets"][0]["nextOffset"] = 12
+
+    with pytest.raises(ValueError, match="published feedback count"):
+        validate_condition3_gate_evidence(
+            raw,
+            request_count=600,
+            p95_ms=20.0,
+            expected_warmup_count=150,
+            expected_request_count=600,
+            latency_safety_threshold_ms=5_000.0,
+        )
 
 
 def test_condition3_gate_evidence_rejects_one_measured_row_claiming_600() -> None:

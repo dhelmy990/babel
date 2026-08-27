@@ -287,17 +287,32 @@ def validate_condition3_gate_evidence(
         raise ValueError("Condition 3 activation evidence is incomplete")
     feedback = raw_evidence.get("feedbackKafka")
     final = feedback.get("finalTrainerState") if isinstance(feedback, dict) else None
+    records = feedback.get("records") if isinstance(feedback, dict) else None
     if (
         not isinstance(feedback, dict)
         or type(feedback.get("recordCount")) is not int
         or int(feedback["recordCount"]) <= 0
+        or not isinstance(records, list)
         or not isinstance(feedback.get("offsetRanges"), list)
         or not feedback["offsetRanges"]
         or not isinstance(final, dict)
         or final.get("available") is not True
     ):
         raise ValueError("Condition 3 Kafka offset evidence is incomplete")
+    if feedback["recordCount"] != len(measurements) or len(records) != len(
+        measurements
+    ):
+        raise ValueError("Condition 3 published feedback count differs")
     try:
+        measurement_request_ids = [
+            UUID(str(row["requestId"])) for row in measurements
+        ]
+        record_request_ids = [UUID(str(row["requestId"])) for row in records]
+        record_event_ids = [UUID(str(row["eventId"])) for row in records]
+        record_offsets = {
+            (str(row["topic"]), int(row["partition"]), int(row["offset"]))
+            for row in records
+        }
         ranges = {
             (str(row["topic"]), int(row["partition"])): (
                 int(row["startInclusive"]), int(row["endExclusive"])
@@ -311,10 +326,24 @@ def validate_condition3_gate_evidence(
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError("Condition 3 Kafka offset coverage is malformed") from error
     if (
+        len(set(measurement_request_ids)) != len(measurement_request_ids)
+        or len(set(record_request_ids)) != len(record_request_ids)
+        or len(set(record_event_ids)) != len(record_event_ids)
+        or len(record_offsets) != len(records)
+        or set(record_request_ids) != set(measurement_request_ids)
+    ):
+        raise ValueError("Condition 3 Kafka request identity coverage is incomplete")
+    expected_offsets = {
+        (topic, partition, offset)
+        for (topic, partition), (start, end) in ranges.items()
+        for offset in range(start, end)
+    }
+    if (
         len(ranges) != len(feedback["offsetRanges"])
         or sum(end - start for start, end in ranges.values())
         != feedback["recordCount"]
         or any(start < 0 or end <= start for start, end in ranges.values())
+        or record_offsets != expected_offsets
         or any(next_offsets.get(key, -1) < end for key, (_start, end) in ranges.items())
     ):
         raise ValueError("Condition 3 Kafka offset coverage is incomplete")
