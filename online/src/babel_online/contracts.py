@@ -33,6 +33,50 @@ class EmbeddingSpaceV1(FrozenContract):
     compatibilityVersion: str = Field(min_length=1)
 
 
+class DistilledServingArtifactV1(FrozenContract):
+    """Closed binding from an immutable training artifact to serving semantics.
+
+    The upstream training artifact records weights and training identities, but
+    its manifest does not spell out input formatting, pooling, or output
+    normalization.  Those fields are therefore bound explicitly here to the
+    training source revision carried by that artifact.
+    """
+
+    schemaVersion: Literal[1]
+    artifactRepo: str = Field(min_length=1)
+    artifactRevision: str = Field(pattern=r"^[a-f0-9]{40}$")
+    artifactPath: str = Field(pattern=r"^artifacts/[a-f0-9]{64}$")
+    artifactId: str = Field(pattern=r"^[a-f0-9]{64}$")
+    artifactSchema: Literal["babel-distillation-2016-interview-v1"]
+    baseModelId: Literal["Qwen/Qwen3-Embedding-0.6B"]
+    baseModelRevision: str = Field(pattern=r"^[a-f0-9]{40}$")
+    tokenizerRevision: str = Field(pattern=r"^[a-f0-9]{40}$")
+    datasetRepo: Literal["dhelmy990/babel-wikipedia-experiment"]
+    datasetConfig: Literal["distillation_2016_interview"]
+    datasetRevision: str = Field(pattern=r"^[a-f0-9]{40}$")
+    trainingSourceRevision: str = Field(pattern=r"^[a-f0-9]{40}$")
+    semanticsAuthority: Literal["pinned_training_source"]
+    inputFormat: Literal["canonical_title\\n\\nlead_text"]
+    maxLength: Literal[384]
+    paddingSide: Literal["left"]
+    pooling: Literal["last_non_padding_token"]
+    projectionInputDimension: Literal[1024]
+    embeddingDimension: Literal[100]
+    normalization: Literal["l2"]
+    adapterSha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    projectionSha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    validationSha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    immutable: Literal[True]
+
+    @model_validator(mode="after")
+    def artifact_path_matches_id(self) -> "DistilledServingArtifactV1":
+        if self.artifactPath != f"artifacts/{self.artifactId}":
+            raise ValueError("artifactPath must identify artifactId")
+        if self.tokenizerRevision != self.baseModelRevision:
+            raise ValueError("tokenizer and base model revisions must match")
+        return self
+
+
 class RunConfigV1(FrozenContract):
     schemaVersion: Literal[1]
     runId: UUID
@@ -395,6 +439,7 @@ __all__ = [
     "canonical_vector_sha256",
     "contract_schema_documents",
     "EmbeddingSpaceV1",
+    "DistilledServingArtifactV1",
     "FeedbackEventV1",
     "FeedbackActivityV1",
     "HnswSnapshotV1",

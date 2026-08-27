@@ -30,6 +30,13 @@ kafka = [
 parquet = [
   "pyarrow>=17,<26",
 ]
+qwen = [
+  "accelerate>=1.5,<2",
+  "peft>=0.15,<0.16",
+  "safetensors>=0.5,<1",
+  "torch>=2.6,<2.7",
+  "transformers>=4.51,<4.52",
+]
 
 [project.scripts]
 babel-online = "babel_online.runtime.cli:main"
@@ -39,6 +46,7 @@ testpaths = ["tests"]
 markers = [
   "kafka: requires a real Kafka service",
   "pgvector: requires a real PostgreSQL/pgvector service",
+  "real_model: requires access to the pinned private Qwen artifact",
 ]
 
 [tool.setuptools.packages.find]
