@@ -28,6 +28,27 @@ def test_simulator_only_coordinator_posts_recommendations_and_publishes_feedback
     )])
     requests, feedback, rolls, edges = [], [], [], []
 
+    class TraceSink:
+        def __init__(self):
+            self.requests = []
+            self.responses = []
+            self.feedback = []
+            self.roll_batches = []
+
+        def record_request(self, request):
+            self.requests.append(request)
+
+        def record_feedback(self, event):
+            self.feedback.append(event)
+
+        def record_response(self, request, response, client_total_ns):
+            self.responses.append((request, response, client_total_ns))
+
+        def record_rolls(self, traversal_session_id, evidence):
+            self.roll_batches.append((traversal_session_id, tuple(evidence)))
+
+    trace_sink = TraceSink()
+
     class Client:
         def recommend(self, request):
             requests.append(request)
@@ -87,6 +108,7 @@ def test_simulator_only_coordinator_posts_recommendations_and_publishes_feedback
         client_factory=Client,
         stop_event=SimpleNamespace(is_set=lambda: False),
         decide=lambda *_args, **_kwargs: "include",
+        trace_sink=trace_sink,
     )
 
     coordinator.run()
@@ -98,6 +120,11 @@ def test_simulator_only_coordinator_posts_recommendations_and_publishes_feedback
     assert any(row.kind == "continuation" for row in rolls)
     assert metrics[-1]["kafka_offset"] == 2
     assert metrics[-1]["event_rate"] > 0
+    assert trace_sink.requests == requests
+    assert [row[0] for row in trace_sink.responses] == requests
+    assert all(row[2] > 0 for row in trace_sink.responses)
+    assert trace_sink.feedback == feedback
+    assert trace_sink.roll_batches == [(schedule[0].traversal_session_id, tuple(rolls))]
 
 
 def test_decision_draw_identity_matches_task8_replay_contract(monkeypatch) -> None:

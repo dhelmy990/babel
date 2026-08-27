@@ -7,12 +7,12 @@ roots; it never creates a topology-specific candidate universe.
 
 from __future__ import annotations
 
-import time
 import json
 import os
+import time
 from collections.abc import Callable, Mapping, Sequence
 from threading import Lock
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID, uuid5
 
 from ..contracts import (
@@ -39,7 +39,29 @@ from ..simulation.walk import (
     RecommendationWalk,
     WalkExpansion,
     WalkNode,
+    WalkRollEvidence,
 )
+
+
+class WorkloadTraceSink(Protocol):
+    """Optional observation boundary used to freeze one reference workload."""
+
+    def record_request(self, request: RecommendationRequestV2) -> None: ...
+
+    def record_feedback(self, event: FeedbackEventV2) -> None: ...
+
+    def record_response(
+        self,
+        request: RecommendationRequestV2,
+        response: Any,
+        client_total_ns: int,
+    ) -> None: ...
+
+    def record_rolls(
+        self,
+        traversal_session_id: UUID,
+        rolls: Sequence[WalkRollEvidence],
+    ) -> None: ...
 
 
 class StandaloneCoordinator:
@@ -58,6 +80,7 @@ class StandaloneCoordinator:
         stop_event: Any,
         decide: Callable[[ScheduledSession, WalkNode, int, Any, str], str]
         | None = None,
+        trace_sink: WorkloadTraceSink | None = None,
     ) -> None:
         self.config = config
         self.database = database
@@ -68,6 +91,7 @@ class StandaloneCoordinator:
         self.client_factory = client_factory
         self.stop_event = stop_event
         self._decide = decide or self._default_decision
+        self._trace_sink = trace_sink
         self._lock = Lock()
         self._feedback_count = 0
         self._kafka_offset = 0
@@ -170,7 +194,13 @@ class StandaloneCoordinator:
                 ],
                 candidateCount=self.config.recommendationK,
             )
+            if self._trace_sink is not None:
+                self._trace_sink.record_request(request)
+            client_started_ns = time.perf_counter_ns()
             response = client.recommend(request)
+            client_total_ns = time.perf_counter_ns() - client_started_ns
+            if self._trace_sink is not None:
+                self._trace_sink.record_response(request, response, client_total_ns)
             if response.requestId != request_id or response.runId != self.config.runId:
                 raise RuntimeError("split recommendation response identity differs")
             actions = []
@@ -220,6 +250,8 @@ class StandaloneCoordinator:
                 occurredAtNs=time.time_ns(),
             )
             record = self.producer.publish(key=str(scheduled.creator_id), event=event)
+            if self._trace_sink is not None:
+                self._trace_sink.record_feedback(event)
             self.database.persist_feedback_edges(event)
             grouped = {"include": [], "exclude": [], "ignore": []}
             for action in actions:
@@ -291,6 +323,10 @@ class StandaloneCoordinator:
                 ),
                 recommend=recommend,
             )
+            if self._trace_sink is not None:
+                self._trace_sink.record_rolls(
+                    scheduled.traversal_session_id, trace.rolls
+                )
             self.database.persist_traversal_rolls(
                 self.config.runId, scheduled.traversal_session_id, trace.rolls
             )
