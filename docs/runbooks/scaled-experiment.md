@@ -238,9 +238,10 @@ serving/training topology conclusion.
 
 ## Export feedback and build the accepted bundle
 
-Do not begin this phase until the trial and all nine conditions are durably
-`completed`, training conditions report zero final Kafka lag, and the selected
-child is present in the model registry.
+Do not begin this phase until the trial's complete formal matrix is durably
+`completed` (nine conditions at cohort 50; six at cohorts 100/500), training
+conditions report zero final Kafka lag, and the selected child is present in
+the model registry.
 
 ```bash
 TRIAL_ID='ce8e54ff-e317-4a89-b7db-90327e02dc43'
@@ -258,8 +259,10 @@ babel-online performance-export \
   --bundle-inputs "$HANDOFF_ROOT/trial-bundle-inputs.json"
 ```
 
-The export replays only the exact acknowledged Kafka ranges for the nine bound
-condition run IDs. It validates Kafka high-watermarks, checkpoint coverage and
+The export replays only the exact acknowledged Kafka ranges for the trial's
+bound condition/run IDs. It validates the cohort-specific order (the full 3×3
+matrix at 50; `same_process` plus `same_host_split` at 100/500), Kafka
+high-watermarks, checkpoint coverage and
 zero final lag for training conditions, reconstructs accepted directed edges,
 compares those edges with PostgreSQL, and writes `feedback.parquet`,
 `edges.parquet`, and a checksum/count manifest. It then resolves condition 6's
@@ -278,8 +281,8 @@ babel-friday-benchmark trial-bundle-build \
   --inputs "$HANDOFF_ROOT/trial-bundle-inputs.json"
 ```
 
-The builder validates the exact trial ID, nine condition/run bindings, formal
-pins, selected child lineage, population and feedback manifests, required
+The builder validates the exact trial ID, cohort, ordered condition/run
+bindings, formal pins, selected child lineage, population and feedback manifests, required
 Parquet rows, and referenced model state. The resulting bundle is
 `$ACCEPTED_ROOT/runs/$TRIAL_ID` with `manifest.json`, `checksums.json`, summary,
 report, requests/resources/feedback/edges Parquet, population evidence, and the
@@ -316,7 +319,8 @@ babel-friday-benchmark trial-bundle-attach \
 Attachment succeeds only for the completed matching trial and exact remote path
 `runs/<TRIAL_ID>`. It is idempotent for the same verified receipt. Reload the
 dashboard and confirm the artifact commit/path, condition-6 child, original
-parent, and the three topology ratio sets.
+parent, and the available topology ratio sets (three at cohort 50; two at
+cohorts 100/500).
 
 The backend serving the already-running trial was started before the final
 artifact-attachment route landed. Wait for the trial to become durably
@@ -349,7 +353,12 @@ Higher cohorts set concurrent users equal to the creator cohort and remain
 manual: completion never starts the next cohort. Use the immutable original
 Qwen model for 100/500. Existing post-run children are bound to their producing
 50-creator population and are intentionally rejected until cross-cohort child
-population remapping exists. The selected trial view retains every persisted
+population remapping exists. After either higher trial completes, run the same
+export/build/publish/attach commands above: the generated handoff records the
+100/500 cohort, exact six-condition order, and condition 6
+(`same_host_split` with training and activation) as the default immutable child.
+It publishes beneath that higher trial's own `runs/<TRIAL_ID>` path and attaches
+only to that exact dashboard trial. The selected trial view retains every persisted
 condition row, its condition p95, and all three interference ratios; reopening a
 saved trial reloads those database-backed results.
 

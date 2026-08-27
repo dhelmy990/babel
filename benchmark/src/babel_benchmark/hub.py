@@ -145,6 +145,7 @@ def _validate_evidence(
         "same_host_isolated",
         "cross_host",
         "3x3_matrix",
+        "2x3_matrix",
     }:
         raise ValueError("topology is not supported")
     if not progress or not isinstance(placement, dict) or not isinstance(hardware, dict):
@@ -167,20 +168,28 @@ def _validate_evidence(
         ):
             raise ValueError("vector snapshots require a 100d row count and SHA-256")
     if acceptance_label == "formal":
-        if topology != "3x3_matrix" or trial_evidence is None:
-            raise ValueError("formal acceptance requires aggregate 3x3 trial evidence")
+        if topology not in {"3x3_matrix", "2x3_matrix"} or trial_evidence is None:
+            raise ValueError("formal acceptance requires aggregate cohort trial evidence")
         conditions = trial_evidence.get("conditions")
+        condition_order = trial_evidence.get("conditionOrder")
         workload = trial_evidence.get("workloadIdentity")
         population = trial_evidence.get("population")
         pins = trial_evidence.get("pins")
         selected = trial_evidence.get("selectedChild")
+        creator_cohort = int(trial_evidence.get("creatorCohort", 0))
+        condition_count = 9 if creator_cohort == 50 else 6
+        expected_topology = "3x3_matrix" if creator_cohort == 50 else "2x3_matrix"
         if (
             trial_evidence.get("schemaVersion") != 1
             or trial_evidence.get("trialId") != str(run_id)
-            or trial_evidence.get("conditionCount") != 9
+            or creator_cohort not in {50, 100, 500}
+            or topology != expected_topology
+            or trial_evidence.get("conditionCount") != condition_count
             or trial_evidence.get("zeroErrors") is not True
             or not isinstance(conditions, list)
-            or len(conditions) != 9
+            or len(conditions) != condition_count
+            or not isinstance(condition_order, list)
+            or len(condition_order) != condition_count
             or not isinstance(workload, list)
             or len(workload) != 6
             or any(not re.fullmatch(r"[0-9a-f]{64}", str(value)) for value in workload)
@@ -191,16 +200,17 @@ def _validate_evidence(
             or not isinstance(selected, dict)
         ):
             raise ValueError("formal aggregate evidence is incomplete")
-        expected_modes = {
+        topology_names = (
+            ("same_process", "same_host_split", "same_host_isolated")
+            if creator_cohort == 50
+            else ("same_process", "same_host_split")
+        )
+        expected_modes = tuple(
             (topology_name, training, activation)
-            for topology_name in (
-                "same_process",
-                "same_host_split",
-                "same_host_isolated",
-            )
+            for topology_name in topology_names
             for training, activation in ((False, False), (True, False), (True, True))
-        }
-        actual_modes = {
+        )
+        actual_modes = tuple(
             (
                 row.get("conditionIdentity", {}).get("topology"),
                 row.get("conditionIdentity", {}).get("trainingEnabled"),
@@ -209,9 +219,35 @@ def _validate_evidence(
             for row in conditions
             if isinstance(row, dict)
             and isinstance(row.get("conditionIdentity"), dict)
-        }
+        )
         if actual_modes != expected_modes:
-            raise ValueError("formal aggregate evidence does not contain the exact 3x3 matrix")
+            raise ValueError("formal aggregate evidence has the wrong condition order")
+        ordered_modes = tuple(
+            (
+                row.get("identity", {}).get("topology"),
+                row.get("identity", {}).get("trainingEnabled"),
+                row.get("identity", {}).get("activationEnabled"),
+            )
+            for row in condition_order
+            if isinstance(row, dict) and isinstance(row.get("identity"), dict)
+        )
+        ordered_bindings = tuple(
+            (row.get("conditionId"), row.get("runId"))
+            for row in condition_order
+            if isinstance(row, dict)
+        )
+        condition_bindings = tuple(
+            (row.get("conditionId"), row.get("runId"))
+            for row in conditions
+            if isinstance(row, dict)
+        )
+        if (
+            ordered_modes != expected_modes
+            or ordered_bindings != condition_bindings
+            or [row.get("conditionIndex") for row in condition_order]
+            != list(range(1, condition_count + 1))
+        ):
+            raise ValueError("formal aggregate condition order binding differs")
         if any(
             int(snapshot.get("rows", 0)) != 10_000
             for snapshot in vector_snapshots
@@ -219,11 +255,11 @@ def _validate_evidence(
             raise ValueError("formal vector snapshots must contain exactly 10,000 rows")
         if (
             progress.get("phase") != "completed"
-            or progress.get("conditionCount") != 9
-            or progress.get("conditionIndex") != 9
+            or progress.get("conditionCount") != condition_count
+            or progress.get("conditionIndex") != condition_count
             or progress.get("requested") != progress.get("completed")
         ):
-            raise ValueError("formal progress must prove all nine conditions completed")
+            raise ValueError("formal progress must prove all conditions completed")
 
 
 def _model_artifact_files(

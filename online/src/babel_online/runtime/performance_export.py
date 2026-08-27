@@ -185,6 +185,44 @@ def _load_condition_evidence(condition: Any, evidence_root: Path):
     return records, ranges
 
 
+def _formal_condition_order(creator_cohort: int) -> tuple[tuple[str, bool, bool], ...]:
+    if creator_cohort == 50:
+        topologies = ("same_process", "same_host_split", "same_host_isolated")
+    elif creator_cohort in {100, 500}:
+        topologies = ("same_process", "same_host_split")
+    else:
+        raise ValueError("performance trial creator cohort is not formal")
+    return tuple(
+        (topology, training_enabled, activation_enabled)
+        for topology in topologies
+        for training_enabled, activation_enabled in (
+            (False, False),
+            (True, False),
+            (True, True),
+        )
+    )
+
+
+def _completed_formal_conditions(trial: Any) -> tuple[Any, ...]:
+    creator_cohort = int(trial.creator_count)
+    expected_order = _formal_condition_order(creator_cohort)
+    ordered = tuple(sorted(trial.conditions, key=lambda row: row.condition_index))
+    if (
+        len(ordered) != len(expected_order)
+        or [row.condition_index for row in ordered]
+        != list(range(1, len(expected_order) + 1))
+        or any(row.status != "completed" or row.run_id is None for row in ordered)
+    ):
+        raise ValueError("performance trial lacks its completed bound conditions")
+    actual_order = tuple(
+        (row.topology, row.training_enabled, row.activation_enabled) for row in ordered
+    )
+    if actual_order != expected_order:
+        matrix = "3x3" if creator_cohort == 50 else "2x3"
+        raise ValueError(f"performance trial lacks the exact {matrix} condition matrix")
+    return ordered
+
+
 def export_completed_performance_trial(
     *,
     database: Any,
@@ -193,31 +231,13 @@ def export_completed_performance_trial(
     output_root: str | Path,
     feedback_source: Any,
 ) -> FeedbackExport:
-    """Validate nine live conditions and export their exact Kafka/edge evidence."""
+    """Validate one formal live cohort and export its exact Kafka/edge evidence."""
     trial = database.load_performance_experiment(experiment_id)
     if trial.id != experiment_id or trial.status != "completed":
         raise ValueError("performance trial must be durably completed")
-    conditions = tuple(sorted(trial.conditions, key=lambda row: row.condition_index))
-    expected_matrix = {
-        (topology, training_enabled, activation_enabled)
-        for topology in ("same_process", "same_host_split", "same_host_isolated")
-        for training_enabled, activation_enabled in (
-            (False, False),
-            (True, False),
-            (True, True),
-        )
-    }
-    if (
-        len(conditions) != 9
-        or [row.condition_index for row in conditions] != list(range(1, 10))
-        or any(row.status != "completed" or row.run_id is None for row in conditions)
-    ):
-        raise ValueError("performance trial lacks nine completed bound conditions")
-    if {
-        (row.topology, row.training_enabled, row.activation_enabled)
-        for row in conditions
-    } != expected_matrix:
-        raise ValueError("performance trial lacks the exact 3x3 condition matrix")
+    creator_cohort = int(trial.creator_count)
+    conditions = _completed_formal_conditions(trial)
+    condition_count = len(conditions)
 
     expected: dict[tuple[str, int, int], _ExpectedAcknowledgement] = {}
     ranges: list[OffsetRange] = []
@@ -261,6 +281,8 @@ def export_completed_performance_trial(
     manifest.update(
         {
             "experimentId": str(experiment_id),
+            "creatorCohort": creator_cohort,
+            "conditionCount": condition_count,
             "conditions": [
                 {"conditionId": str(row.id), "runId": str(row.run_id)}
                 for row in conditions
@@ -301,15 +323,9 @@ def write_trial_bundle_inputs(
     trial = database.load_performance_experiment(experiment_id)
     if trial.id != experiment_id or trial.status != "completed":
         raise ValueError("performance trial must be durably completed")
-    ordered_conditions = tuple(
-        sorted(trial.conditions, key=lambda value: value.condition_index)
-    )
-    if (
-        len(ordered_conditions) != 9
-        or [row.condition_index for row in ordered_conditions] != list(range(1, 10))
-        or any(row.status != "completed" or row.run_id is None for row in ordered_conditions)
-    ):
-        raise ValueError("trial bundle inputs require nine completed bound conditions")
+    creator_cohort = int(trial.creator_count)
+    ordered_conditions = _completed_formal_conditions(trial)
+    condition_count = len(ordered_conditions)
     matches = [
         row
         for row in ordered_conditions
@@ -329,8 +345,10 @@ def write_trial_bundle_inputs(
         (root / f"{row.condition_index:02d}" / "live-evidence.json").resolve()
         for row in ordered_conditions
     )
-    if len(evidence_paths) != 9 or any(not path.is_file() for path in evidence_paths):
-        raise ValueError("trial bundle inputs require all nine condition evidence files")
+    if len(evidence_paths) != condition_count or any(
+        not path.is_file() for path in evidence_paths
+    ):
+        raise ValueError("trial bundle inputs require every condition evidence file")
     try:
         evidence = json.loads(
             (root / f"{selected_condition_index:02d}" / "live-evidence.json").read_text(
@@ -394,8 +412,21 @@ def write_trial_bundle_inputs(
     _write_canonical(selected_path, selected_document)
     _write_canonical(model_manifest_path, child.model_dump(mode="json"))
     document = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "trialId": str(experiment_id),
+        "creatorCohort": creator_cohort,
+        "conditionCount": condition_count,
+        "conditionOrder": [
+            {
+                "conditionIndex": row.condition_index,
+                "conditionId": str(row.id),
+                "runId": str(row.run_id),
+                "topology": row.topology,
+                "trainingEnabled": row.training_enabled,
+                "activationEnabled": row.activation_enabled,
+            }
+            for row in ordered_conditions
+        ],
         "selectedConditionIndex": selected_condition_index,
         "evidencePaths": [str(path) for path in evidence_paths],
         "populationManifest": str(population.resolve()),

@@ -90,6 +90,14 @@ cohort that differs from its condition IDs, and counts that differ from the
 exact frozen 10,000-row population. Callers cannot weaken this with an
 independent threshold.
 
+The formal export and immutable publication contract now accepts both shapes.
+It preserves the exact nine-condition cohort-50 path and validates a canonical
+six-condition order for cohorts 100/500. Each accepted bundle records its
+creator cohort, condition count/order, exact condition/run bindings, zero-lag
+checkpoint coverage, feedback/edge checksums, model/population pins, and the
+default condition-6 split-service child before publication and exact-trial
+dashboard attachment.
+
 All current topology labels are same-host. They measure process scheduling,
 memory contention, model-activation pauses, Kafka lag, and failure isolation.
 They do not measure physical-network jitter, NIC bandwidth, remote-machine

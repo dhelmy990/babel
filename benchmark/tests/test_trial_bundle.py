@@ -12,6 +12,7 @@ import pytest
 from babel_benchmark.trial_bundle import (
     FormalPins,
     build_formal_trial_bundle,
+    load_formal_trial_bundle_inputs,
 )
 
 
@@ -107,13 +108,20 @@ def _resource(run_id: UUID, condition_id: str, index: int) -> dict[str, object]:
     }
 
 
-def _evidence_files(tmp_path: Path) -> tuple[list[Path], dict[str, object]]:
+def _evidence_files(
+    tmp_path: Path, *, cohort_size: int = 50, selected_condition_index: int = 3
+) -> tuple[list[Path], dict[str, object]]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
     selected: dict[str, object] | None = None
     modes = ((False, False), (True, False), (True, True))
     condition_index = 0
-    for topology in ("same_process", "same_host_split", "same_host_isolated"):
+    topologies = (
+        ("same_process", "same_host_split", "same_host_isolated")
+        if cohort_size == 50
+        else ("same_process", "same_host_split")
+    )
+    for topology in topologies:
         for training, activation in modes:
             condition_index += 1
             run_id = uuid5(TRIAL_ID, f"condition:{condition_index}")
@@ -121,7 +129,9 @@ def _evidence_files(tmp_path: Path) -> tuple[list[Path], dict[str, object]]:
             training_name = "training" if training else "serving"
             activation_name = "activation" if activation else "no_activation"
             stable = f"{topology}.{training_name}.{activation_name}.pgvector"
-            final_model = CHILD_ID if condition_index == 3 else ORIGINAL_ID
+            final_model = (
+                CHILD_ID if condition_index == selected_condition_index else ORIGINAL_ID
+            )
             document = {
                 "conditionId": str(condition_uuid),
                 "runId": str(run_id),
@@ -170,7 +180,7 @@ def _evidence_files(tmp_path: Path) -> tuple[list[Path], dict[str, object]]:
     return paths, selected
 
 
-def _population(tmp_path: Path) -> Path:
+def _population(tmp_path: Path, *, cohort_size: int = 50) -> Path:
     path = tmp_path / "population-manifest.json"
     path.write_text(
         json.dumps(
@@ -179,6 +189,7 @@ def _population(tmp_path: Path) -> Path:
                 "experimentId": str(TRIAL_ID),
                 "babelCount": 10_000,
                 "scheduleCount": 10_000,
+                "creatorCount": cohort_size,
                 "embeddingDimension": 100,
                 "modelId": str(ORIGINAL_ID),
                 "artifactRepo": MODEL_REPO,
@@ -197,6 +208,7 @@ def _feedback_export(
     tmp_path: Path,
     evidence_paths: list[Path],
     *,
+    cohort_size: int = 50,
     wrong_run: bool = False,
     extra_feedback_column: bool = False,
 ) -> tuple[Path, Path, Path]:
@@ -264,6 +276,8 @@ def _feedback_export(
             {
                 "schemaVersion": 1,
                 "experimentId": str(TRIAL_ID),
+                "creatorCohort": cohort_size,
+                "conditionCount": len(conditions),
                 "conditions": conditions,
                 "feedbackParquet": {
                     "path": "feedback.parquet",
@@ -310,19 +324,34 @@ def _model_artifact(tmp_path: Path, selected: dict[str, object]) -> tuple[Path, 
     return manifest, root
 
 
-def _build(tmp_path: Path, *, mutate=None):
-    evidence, selected = _evidence_files(tmp_path)
+def _build(
+    tmp_path: Path,
+    *,
+    cohort_size: int = 50,
+    selected_condition_index: int = 3,
+    mutate=None,
+    feedback_mutate=None,
+):
+    evidence, selected = _evidence_files(
+        tmp_path,
+        cohort_size=cohort_size,
+        selected_condition_index=selected_condition_index,
+    )
     if mutate is not None:
         mutate(evidence)
     selected_path = tmp_path / "selected-child.json"
     selected_path.write_text(json.dumps(selected))
     model_manifest, model_root = _model_artifact(tmp_path, selected)
-    feedback, edges, feedback_manifest = _feedback_export(tmp_path, evidence)
+    feedback, edges, feedback_manifest = _feedback_export(
+        tmp_path, evidence, cohort_size=cohort_size
+    )
+    if feedback_mutate is not None:
+        feedback_mutate(feedback_manifest)
     return build_formal_trial_bundle(
         tmp_path / "accepted",
         trial_id=TRIAL_ID,
         evidence_paths=evidence,
-        population_manifest_path=_population(tmp_path),
+        population_manifest_path=_population(tmp_path, cohort_size=cohort_size),
         feedback_parquet=feedback,
         edges_parquet=edges,
         feedback_export_manifest_path=feedback_manifest,
@@ -360,6 +389,131 @@ def test_formal_trial_bundle_exports_exact_aggregate_matrix(tmp_path: Path) -> N
         "same_host_isolated",
     }
     assert "Formal 3x3 recommendation matrix" in (bundle.root / "report.md").read_text()
+
+
+@pytest.mark.parametrize("cohort_size", (100, 500))
+def test_higher_cohort_bundle_records_exact_six_condition_order(
+    tmp_path: Path, cohort_size: int
+) -> None:
+    bundle = _build(
+        tmp_path,
+        cohort_size=cohort_size,
+        selected_condition_index=6,
+    )
+
+    manifest = json.loads(bundle.manifest_path.read_text())
+    assert manifest["topology"] == "2x3_matrix"
+    evidence = manifest["trialEvidence"]
+    assert evidence["creatorCohort"] == cohort_size
+    assert evidence["conditionCount"] == 6
+    assert [row["conditionIndex"] for row in evidence["conditionOrder"]] == list(
+        range(1, 7)
+    )
+    assert [row["conditionIdentity"]["topology"] for row in evidence["conditions"]] == [
+        "same_process",
+        "same_process",
+        "same_process",
+        "same_host_split",
+        "same_host_split",
+        "same_host_split",
+    ]
+    assert evidence["selectedChild"]["conditionId"] == evidence["conditionOrder"][5][
+        "conditionId"
+    ]
+    summary = json.loads((bundle.root / "summary.json").read_text())
+    assert summary["creatorCohort"] == cohort_size
+    assert summary["conditionCount"] == 6
+    assert summary["topology"] == "2x3_matrix"
+    assert pq.read_table(bundle.root / "requests.parquet").num_rows == 6
+    assert pq.read_table(bundle.root / "resources.parquet").num_rows == 6
+    assert set(summary["interferenceByTopology"]) == {
+        "same_process",
+        "same_host_split",
+    }
+    assert "Formal 2x3 recommendation matrix" in (bundle.root / "report.md").read_text()
+
+
+def test_higher_cohort_input_manifest_loads_exact_trial_bound_order(
+    tmp_path: Path,
+) -> None:
+    evidence, _selected = _evidence_files(
+        tmp_path / "evidence", cohort_size=100, selected_condition_index=6
+    )
+    order = []
+    for index, path in enumerate(evidence, start=1):
+        document = json.loads(path.read_text())
+        identity = document["rawEvidence"]["conditionIdentity"]
+        order.append(
+            {
+                "conditionIndex": index,
+                "conditionId": document["conditionId"],
+                "runId": document["runId"],
+                "topology": identity["topology"],
+                "trainingEnabled": identity["trainingEnabled"],
+                "activationEnabled": identity["activationEnabled"],
+            }
+        )
+    document = {
+        "schemaVersion": 2,
+        "trialId": str(TRIAL_ID),
+        "creatorCohort": 100,
+        "conditionCount": 6,
+        "conditionOrder": order,
+        "selectedConditionIndex": 6,
+        "evidencePaths": [str(path.resolve()) for path in evidence],
+        "populationManifest": str((tmp_path / "population.json").resolve()),
+        "feedbackParquet": str((tmp_path / "feedback.parquet").resolve()),
+        "edgesParquet": str((tmp_path / "edges.parquet").resolve()),
+        "feedbackExportManifest": str((tmp_path / "feedback-manifest.json").resolve()),
+        "modelManifest": str((tmp_path / "model-manifest.json").resolve()),
+        "modelArtifactRoot": str((tmp_path / "model-artifact").resolve()),
+        "selectedChild": str((tmp_path / "selected-child.json").resolve()),
+        "pins": {
+            "modelRepository": MODEL_REPO,
+            "modelRevision": MODEL_REVISION,
+            "datasetRepository": DATASET_REPO,
+            "datasetRevision": DATASET_REVISION,
+        },
+    }
+    path = tmp_path / "trial-bundle-inputs.json"
+    path.write_text(json.dumps(document))
+
+    loaded = load_formal_trial_bundle_inputs(path)
+
+    assert loaded.creator_cohort == 100
+    assert loaded.selected_condition_index == 6
+    assert len(loaded.evidence_paths) == 6
+    assert [row["conditionIndex"] for row in loaded.condition_order] == list(range(1, 7))
+
+
+def test_higher_cohort_bundle_rejects_feedback_export_for_another_cohort(
+    tmp_path: Path,
+) -> None:
+    def drift(path: Path) -> None:
+        document = json.loads(path.read_text())
+        document["creatorCohort"] = 500
+        path.write_text(json.dumps(document))
+
+    with pytest.raises(ValueError, match="feedback export cohort"):
+        _build(
+            tmp_path,
+            cohort_size=100,
+            selected_condition_index=6,
+            feedback_mutate=drift,
+        )
+
+
+def test_higher_cohort_bundle_rejects_reordered_evidence_paths(tmp_path: Path) -> None:
+    def reorder(paths: list[Path]) -> None:
+        paths[2], paths[3] = paths[3], paths[2]
+
+    with pytest.raises(ValueError, match="exact 2x3 matrix order"):
+        _build(
+            tmp_path,
+            cohort_size=100,
+            selected_condition_index=6,
+            mutate=reorder,
+        )
 
 
 def test_formal_trial_bundle_rejects_any_failed_measurement(tmp_path: Path) -> None:

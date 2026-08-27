@@ -224,6 +224,44 @@ def test_trial_bundle_cli_closes_build_and_publish_inputs() -> None:
     assert publish.token_env == "HF_TOKEN"
 
 
+def test_trial_bundle_cli_accepts_six_manual_higher_cohort_evidence_files() -> None:
+    build = _parser().parse_args(
+        [
+            "trial-bundle-build",
+            "--output-root",
+            "accepted",
+            "--trial-id",
+            "00000000-0000-5000-8000-000000000130",
+            "--evidence",
+            *[f"condition-{index}.json" for index in range(1, 7)],
+            "--population-manifest",
+            "population.json",
+            "--feedback-parquet",
+            "feedback.parquet",
+            "--edges-parquet",
+            "edges.parquet",
+            "--feedback-export-manifest",
+            "feedback-export-manifest.json",
+            "--model-manifest",
+            "model-manifest.json",
+            "--model-artifact-root",
+            "model-artifact",
+            "--selected-child",
+            "selected-child.json",
+            "--model-repository",
+            "owner/model",
+            "--model-revision",
+            "a" * 40,
+            "--dataset-repository",
+            "owner/dataset",
+            "--dataset-revision",
+            "b" * 40,
+        ]
+    )
+
+    assert len(build.evidence) == 6
+
+
 def test_trial_bundle_build_accepts_one_generated_input_manifest(
     monkeypatch, tmp_path, capsys
 ) -> None:

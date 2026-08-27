@@ -1,4 +1,4 @@
-"""Closed trial-level export for one accepted formal 3x3 matrix."""
+"""Closed trial-level export for one accepted formal cohort matrix."""
 
 from __future__ import annotations
 
@@ -19,8 +19,20 @@ from .resources import ResourceObservationV1
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _REVISION = re.compile(r"^[0-9a-f]{40,64}$")
 _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-_MODES = {(False, False), (True, False), (True, True)}
-_TOPOLOGIES = {"same_process", "same_host_split", "same_host_isolated"}
+
+
+def _expected_condition_order(cohort_size: int) -> tuple[tuple[str, bool, bool], ...]:
+    if cohort_size == 50:
+        topologies = ("same_process", "same_host_split", "same_host_isolated")
+    elif cohort_size in {100, 500}:
+        topologies = ("same_process", "same_host_split")
+    else:
+        raise ValueError("formal creator cohort must be 50, 100, or 500")
+    return tuple(
+        (topology, training, activation)
+        for topology in topologies
+        for training, activation in ((False, False), (True, False), (True, True))
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,7 +64,9 @@ class FormalPins:
 @dataclass(frozen=True, slots=True)
 class FormalTrialBundleInputs:
     trial_id: UUID
+    creator_cohort: int
     selected_condition_index: int
+    condition_order: tuple[dict[str, Any], ...]
     evidence_paths: tuple[Path, ...]
     population_manifest: Path
     feedback_parquet: Path
@@ -104,7 +118,7 @@ def _object(path: str | Path, label: str) -> dict[str, Any]:
 def load_formal_trial_bundle_inputs(path: str | Path) -> FormalTrialBundleInputs:
     """Load the closed local-path handoff emitted by performance-export."""
     document = _object(path, "trial bundle inputs")
-    required = {
+    legacy_required = {
         "schemaVersion",
         "trialId",
         "selectedConditionIndex",
@@ -118,13 +132,59 @@ def load_formal_trial_bundle_inputs(path: str | Path) -> FormalTrialBundleInputs
         "selectedChild",
         "pins",
     }
-    if set(document) != required or document.get("schemaVersion") != 1:
+    schema_version = int(document.get("schemaVersion", 0))
+    required = (
+        legacy_required
+        if schema_version == 1
+        else legacy_required | {"creatorCohort", "conditionCount", "conditionOrder"}
+    )
+    if schema_version not in {1, 2} or set(document) != required:
         raise ValueError("trial bundle input contract differs")
+    creator_cohort = int(document.get("creatorCohort", 50))
+    expected_order = _expected_condition_order(creator_cohort)
+    condition_count = len(expected_order)
+    raw_order = document.get("conditionOrder", [])
+    if schema_version == 2:
+        if document.get("conditionCount") != condition_count or not isinstance(
+            raw_order, list
+        ) or len(raw_order) != condition_count:
+            raise ValueError("trial bundle input condition count differs")
+        normalized_order: list[dict[str, Any]] = []
+        bindings: set[tuple[UUID, UUID]] = set()
+        for index, (row, expected_identity) in enumerate(
+            zip(raw_order, expected_order, strict=True), start=1
+        ):
+            required_order = {
+                "conditionIndex",
+                "conditionId",
+                "runId",
+                "topology",
+                "trainingEnabled",
+                "activationEnabled",
+            }
+            if not isinstance(row, dict) or set(row) != required_order:
+                raise ValueError("trial bundle input condition order differs")
+            condition_id = UUID(str(row["conditionId"]))
+            run_id = UUID(str(row["runId"]))
+            identity = (
+                row["topology"],
+                row["trainingEnabled"],
+                row["activationEnabled"],
+            )
+            if int(row["conditionIndex"]) != index or identity != expected_identity:
+                raise ValueError("trial bundle input condition order differs")
+            bindings.add((condition_id, run_id))
+            normalized_order.append(dict(row))
+        if len(bindings) != condition_count:
+            raise ValueError("trial bundle input condition bindings are not unique")
+        condition_order = tuple(normalized_order)
+    else:
+        condition_order = ()
     evidence = document.get("evidencePaths")
     pins = document.get("pins")
     if (
         not isinstance(evidence, list)
-        or len(evidence) != 9
+        or len(evidence) != condition_count
         or not all(isinstance(value, str) and value for value in evidence)
         or not isinstance(pins, dict)
         or set(pins)
@@ -155,11 +215,17 @@ def load_formal_trial_bundle_inputs(path: str | Path) -> FormalTrialBundleInputs
     if any(not value.is_absolute() for value in paths):
         raise ValueError("trial bundle input paths must be absolute")
     selected_index = int(document["selectedConditionIndex"])
-    if selected_index not in {3, 6, 9}:
+    if (
+        selected_index < 1
+        or selected_index > condition_count
+        or expected_order[selected_index - 1][2] is not True
+    ):
         raise ValueError("selected condition index must identify an activation condition")
     return FormalTrialBundleInputs(
         trial_id=UUID(str(document["trialId"])),
+        creator_cohort=creator_cohort,
         selected_condition_index=selected_index,
+        condition_order=condition_order,
         evidence_paths=evidence_paths,
         population_manifest=Path(path_fields["populationManifest"]),
         feedback_parquet=Path(path_fields["feedbackParquet"]),
@@ -279,25 +345,26 @@ def _load_condition(path: Path) -> _ConditionEvidence:
     )
 
 
-def _validate_matrix(rows: Sequence[_ConditionEvidence]) -> tuple[str, ...]:
-    if len(rows) != 9:
-        raise ValueError("formal trial requires exactly nine condition results")
-    actual = {
+def _validate_matrix(
+    rows: Sequence[_ConditionEvidence], *, cohort_size: int
+) -> tuple[str, ...]:
+    expected = _expected_condition_order(cohort_size)
+    if len(rows) != len(expected):
+        raise ValueError("formal trial condition count differs from its creator cohort")
+    actual = tuple(
         (
             row.identity.topology,
             row.identity.trainingEnabled,
             row.identity.activationEnabled,
         )
         for row in rows
-    }
-    expected = {
-        (topology, training, activation)
-        for topology in _TOPOLOGIES
-        for training, activation in _MODES
-    }
+    )
     if actual != expected:
-        raise ValueError("formal trial does not contain the exact 3x3 matrix")
-    if len({row.condition_id for row in rows}) != 9 or len({row.run_id for row in rows}) != 9:
+        matrix = "3x3" if cohort_size == 50 else "2x3"
+        raise ValueError(f"formal trial does not contain the exact {matrix} matrix order")
+    if len({row.condition_id for row in rows}) != len(rows) or len(
+        {row.run_id for row in rows}
+    ) != len(rows):
         raise ValueError("formal condition and execution identities must be unique")
     workloads = {row.workload_identity for row in rows}
     if len(workloads) != 1:
@@ -311,6 +378,7 @@ def _feedback_export_binding(
     edges_path: str | Path,
     *,
     trial_id: UUID,
+    cohort_size: int,
     conditions: Sequence[_ConditionEvidence],
 ) -> dict[str, Any]:
     manifest_file = Path(manifest_path)
@@ -319,11 +387,19 @@ def _feedback_export_binding(
         trial_id
     ):
         raise ValueError("feedback export belongs to another trial")
+    declared_cohort = document.get("creatorCohort")
+    declared_count = document.get("conditionCount")
+    if (
+        (declared_cohort is not None and int(declared_cohort) != cohort_size)
+        or (declared_count is not None and int(declared_count) != len(conditions))
+        or (cohort_size != 50 and (declared_cohort is None or declared_count is None))
+    ):
+        raise ValueError("feedback export cohort or condition count differs")
     expected_pairs = {
         (str(row.condition_id), str(row.run_id)) for row in conditions
     }
     condition_rows = document.get("conditions")
-    if not isinstance(condition_rows, list) or len(condition_rows) != 9:
+    if not isinstance(condition_rows, list) or len(condition_rows) != len(conditions):
         raise ValueError("feedback export condition binding differs")
     try:
         actual_pairs = {
@@ -333,7 +409,7 @@ def _feedback_export_binding(
         }
     except (KeyError, ValueError) as error:
         raise ValueError("feedback export condition binding differs") from error
-    if len(actual_pairs) != 9 or actual_pairs != expected_pairs:
+    if len(actual_pairs) != len(conditions) or actual_pairs != expected_pairs:
         raise ValueError("feedback export condition binding differs")
 
     import pyarrow.parquet as pq
@@ -419,6 +495,8 @@ def _feedback_export_binding(
     return {
         "schemaVersion": 1,
         "experimentId": str(trial_id),
+        "creatorCohort": cohort_size,
+        "conditionCount": len(conditions),
         "conditions": condition_rows,
         **verified,
         "manifestSha256": _sha256(manifest_file),
@@ -431,6 +509,8 @@ def _population_evidence(
     document = _object(path, "population manifest")
     if str(document.get("experimentId")) != str(trial_id):
         raise ValueError("population manifest belongs to another trial")
+    creator_cohort = int(document.get("creatorCount", 0))
+    _expected_condition_order(creator_cohort)
     if (
         int(document.get("babelCount", 0)) != 10_000
         or int(document.get("scheduleCount", 0)) != 10_000
@@ -454,6 +534,7 @@ def _population_evidence(
     return {
         "rows": 10_000,
         "dimension": 100,
+        "creatorCohort": creator_cohort,
         "modelId": str(UUID(str(document["modelId"]))),
         "vectorsSha256": vectors,
         "pgvectorSnapshotSha256": pgvector,
@@ -558,12 +639,25 @@ def _summarize(
             "Ifull": full / serving,
             "IActivationIncrement": full / training,
         }
+    cohort_size = int(population["creatorCohort"])
+    condition_order = [
+        {
+            "conditionIndex": index,
+            "conditionId": str(row.condition_id),
+            "runId": str(row.run_id),
+            "identity": row.identity.model_dump(mode="json"),
+        }
+        for index, row in enumerate(rows, start=1)
+    ]
+    topology = "3x3_matrix" if cohort_size == 50 else "2x3_matrix"
     return {
         "schemaVersion": 1,
         "trialId": str(trial_id),
         "acceptanceLabel": "formal",
-        "topology": "3x3_matrix",
-        "conditionCount": 9,
+        "topology": topology,
+        "creatorCohort": cohort_size,
+        "conditionCount": len(rows),
+        "conditionOrder": condition_order,
         "requestCount": sum(row.request_count for row in rows),
         "errorCount": 0,
         "workloadIdentity": list(workload),
@@ -576,7 +670,7 @@ def _summarize(
 
 def _report(summary: dict[str, Any]) -> str:
     lines = [
-        "# Formal 3x3 recommendation matrix",
+        f"# Formal {summary['topology'].replace('_matrix', '')} recommendation matrix",
         "",
         f"Trial: `{summary['trialId']}`",
         "",
@@ -616,21 +710,20 @@ def build_formal_trial_bundle(
     selected_child_path: str | Path,
     pins: FormalPins,
 ) -> RunBundle:
-    """Validate nine saved receipts, export aggregate evidence, and build locally."""
-    rows = sorted(
-        (_load_condition(Path(path)) for path in evidence_paths),
-        key=lambda row: row.identity.stable_key,
+    """Validate one saved formal cohort, export aggregate evidence, and build locally."""
+    rows = [_load_condition(Path(path)) for path in evidence_paths]
+    population = _population_evidence(
+        population_manifest_path, trial_id=trial_id, pins=pins
     )
-    workload = _validate_matrix(rows)
+    cohort_size = int(population["creatorCohort"])
+    workload = _validate_matrix(rows, cohort_size=cohort_size)
     feedback_export = _feedback_export_binding(
         feedback_export_manifest_path,
         feedback_parquet,
         edges_parquet,
         trial_id=trial_id,
+        cohort_size=cohort_size,
         conditions=rows,
-    )
-    population = _population_evidence(
-        population_manifest_path, trial_id=trial_id, pins=pins
     )
     selected = _selected_child(
         selected_child_path, rows, population, model_manifest
@@ -667,10 +760,15 @@ def build_formal_trial_bundle(
     report_path.write_text(_report(summary), encoding="utf-8")
 
     condition_evidence = [row.aggregate_row() for row in rows]
+    condition_order = summary["conditionOrder"]
+    condition_count = len(rows)
+    topology = str(summary["topology"])
     trial_evidence = {
         "schemaVersion": 1,
         "trialId": str(trial_id),
-        "conditionCount": 9,
+        "creatorCohort": cohort_size,
+        "conditionCount": condition_count,
+        "conditionOrder": condition_order,
         "zeroErrors": True,
         "workloadIdentity": list(workload),
         "pins": pins.as_document(),
@@ -739,12 +837,12 @@ def build_formal_trial_bundle(
         model_artifact_root=model_artifact_root,
         progress={
             "phase": "completed",
-            "conditionIndex": 9,
-            "conditionCount": 9,
+            "conditionIndex": condition_count,
+            "conditionCount": condition_count,
             "requested": summary["requestCount"],
             "completed": summary["requestCount"],
         },
-        topology="3x3_matrix",
+        topology=topology,
         placement=placements,
         hardware=hardware,
         model_ledger=model_ledger,

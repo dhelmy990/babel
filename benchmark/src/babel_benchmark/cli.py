@@ -86,12 +86,12 @@ def _parser() -> argparse.ArgumentParser:
     report.add_argument("--markdown", required=True, type=Path)
 
     trial = commands.add_parser(
-        "trial-bundle-build", help="validate and build one formal 3x3 trial bundle"
+        "trial-bundle-build", help="validate and build one formal cohort trial bundle"
     )
     trial.add_argument("--output-root", required=True, type=Path)
     trial.add_argument("--inputs", type=Path)
     trial.add_argument("--trial-id", type=UUID)
-    trial.add_argument("--evidence", nargs=9, type=Path)
+    trial.add_argument("--evidence", nargs="+", type=Path)
     trial.add_argument("--population-manifest", type=Path)
     trial.add_argument("--feedback-parquet", type=Path)
     trial.add_argument("--edges-parquet", type=Path)

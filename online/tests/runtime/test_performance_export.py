@@ -19,10 +19,15 @@ from tests.feedback.test_bus import feedback_event_v2
 EXPERIMENT_ID = UUID("aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa")
 
 
-def _completed_trial():
+def _completed_trial(cohort_size: int = 50):
     conditions = []
     index = 0
-    for topology in ("same_process", "same_host_split", "same_host_isolated"):
+    topologies = (
+        ("same_process", "same_host_split", "same_host_isolated")
+        if cohort_size == 50
+        else ("same_process", "same_host_split")
+    )
+    for topology in topologies:
         for training, activation in ((False, False), (True, False), (True, True)):
             index += 1
             conditions.append(
@@ -44,6 +49,7 @@ def _completed_trial():
         model_revision="a" * 40,
         dataset_repository="owner/dataset",
         dataset_revision="b" * 40,
+        creator_count=cohort_size,
         population_bundle_path=None,
         conditions=tuple(conditions),
     )
@@ -148,6 +154,8 @@ def test_completed_trial_export_replays_exact_ranges_and_matches_database_edges(
     }
     manifest = json.loads(result.manifest_path.read_text())
     assert manifest["experimentId"] == str(trial.id)
+    assert manifest["creatorCohort"] == 50
+    assert manifest["conditionCount"] == 9
     assert manifest["conditions"] == [
         {"conditionId": str(row.id), "runId": str(row.run_id)}
         for row in trial.conditions
@@ -162,6 +170,38 @@ def test_completed_trial_export_replays_exact_ranges_and_matches_database_edges(
         "rows": 9,
         "sha256": hashlib.sha256(result.edge_parquet_path.read_bytes()).hexdigest(),
     }
+
+
+@pytest.mark.parametrize("cohort_size", (100, 500))
+def test_higher_cohort_export_replays_exact_six_condition_trial(
+    tmp_path, cohort_size
+):
+    from babel_online.runtime.performance_export import export_completed_performance_trial
+
+    trial = _completed_trial(cohort_size)
+    bus = InMemoryFeedbackBus()
+    events = _write_evidence(tmp_path / "conditions", trial, bus)
+    database = SimpleNamespace(
+        load_performance_experiment=lambda _trial_id: trial,
+        canonical_edges=lambda run_id: reconstruct_canonical_edges([events[run_id]]),
+    )
+
+    result = export_completed_performance_trial(
+        database=database,
+        experiment_id=trial.id,
+        evidence_root=tmp_path / "conditions",
+        output_root=tmp_path / "export",
+        feedback_source=bus,
+    )
+
+    manifest = json.loads(result.manifest_path.read_text())
+    assert len(result.records) == 6
+    assert manifest["creatorCohort"] == cohort_size
+    assert manifest["conditionCount"] == 6
+    assert manifest["conditions"] == [
+        {"conditionId": str(row.id), "runId": str(row.run_id)}
+        for row in trial.conditions
+    ]
 
 
 def test_completed_trial_export_rejects_nonzero_training_lag(tmp_path):
@@ -249,6 +289,7 @@ def test_completed_trial_export_requires_exact_topology_mode_matrix(tmp_path):
     trial = SimpleNamespace(
         id=original.id,
         status=original.status,
+        creator_count=original.creator_count,
         conditions=tuple(conditions),
     )
     bus = InMemoryFeedbackBus()
@@ -261,6 +302,31 @@ def test_completed_trial_export_requires_exact_topology_mode_matrix(tmp_path):
     with pytest.raises(ValueError, match="exact 3x3 condition matrix"):
         export_completed_performance_trial(
             database=database,
+            experiment_id=trial.id,
+            evidence_root=tmp_path / "conditions",
+            output_root=tmp_path / "export",
+            feedback_source=bus,
+        )
+
+
+def test_higher_cohort_export_rejects_out_of_order_condition_bindings(tmp_path):
+    from babel_online.runtime.performance_export import export_completed_performance_trial
+
+    original = _completed_trial(100)
+    conditions = list(original.conditions)
+    conditions[2] = replace(conditions[2], condition_index=4)
+    conditions[3] = replace(conditions[3], condition_index=3)
+    trial = SimpleNamespace(
+        id=original.id,
+        status=original.status,
+        creator_count=100,
+        conditions=tuple(conditions),
+    )
+    bus = InMemoryFeedbackBus()
+
+    with pytest.raises(ValueError, match="exact 2x3 condition matrix"):
+        export_completed_performance_trial(
+            database=SimpleNamespace(load_performance_experiment=lambda _id: trial),
             experiment_id=trial.id,
             evidence_root=tmp_path / "conditions",
             output_root=tmp_path / "export",
@@ -293,10 +359,13 @@ def test_completed_trial_export_rejects_range_beyond_kafka_high_watermark(tmp_pa
         )
 
 
-def test_bundle_inputs_select_completed_activation_child_from_registry(tmp_path):
+@pytest.mark.parametrize(("cohort_size", "condition_count"), ((50, 9), (100, 6), (500, 6)))
+def test_bundle_inputs_select_completed_activation_child_from_registry(
+    tmp_path, cohort_size, condition_count
+):
     from babel_online.runtime.performance_export import write_trial_bundle_inputs
 
-    trial = _completed_trial()
+    trial = _completed_trial(cohort_size)
     population = tmp_path / "performance" / str(trial.id) / "population"
     population.mkdir(parents=True)
     (population / "manifest.json").write_text("{}")
@@ -372,9 +441,23 @@ def test_bundle_inputs_select_completed_activation_child_from_registry(tmp_path)
     inputs = json.loads(result.read_text())
     assert inputs["selectedConditionIndex"] == 6
     assert inputs["trialId"] == str(trial.id)
+    assert inputs["schemaVersion"] == 2
+    assert inputs["creatorCohort"] == cohort_size
+    assert inputs["conditionCount"] == condition_count
     assert inputs["evidencePaths"] == [
         str((evidence_root / f"{index:02d}/live-evidence.json").resolve())
-        for index in range(1, 10)
+        for index in range(1, condition_count + 1)
+    ]
+    assert inputs["conditionOrder"] == [
+        {
+            "conditionIndex": row.condition_index,
+            "conditionId": str(row.id),
+            "runId": str(row.run_id),
+            "topology": row.topology,
+            "trainingEnabled": row.training_enabled,
+            "activationEnabled": row.activation_enabled,
+        }
+        for row in trial.conditions
     ]
     assert inputs["populationManifest"] == str((population / "manifest.json").resolve())
     assert inputs["modelArtifactRoot"] == str(artifact_root.resolve())

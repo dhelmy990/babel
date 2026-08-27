@@ -116,7 +116,7 @@ original remains immutable and separately selectable.
 
 ## Export, publish, and attach
 
-Run this only after the trial and all nine conditions are durably `completed`:
+For cohort 50, run this only after all nine conditions are durably `completed`:
 
 ```bash
 TRIAL_ID='ce8e54ff-e317-4a89-b7db-90327e02dc43'
@@ -157,6 +157,14 @@ babel-friday-benchmark trial-bundle-attach \
 The backend accepts only `runs/<TRIAL_ID>` for that saved trial. Reload the
 dashboard and confirm that the remote commit/path and condition-6 child are
 visible while the original model remains selectable.
+
+The same commands publish cohorts 100 and 500 after their six conditions are
+complete. Keep `--selected-condition-index 6`: in the higher-cohort order this
+is `same_host_split` with training and activation. The generated handoff and
+accepted manifest bind the creator cohort, condition count, ordered six
+condition/run pairs, population/model pins, feedback/edge checksums, and the
+selected child. Publication still uses `runs/<TRIAL_ID>`, and attachment still
+accepts only that exact saved trial.
 
 For the already-running trial, wait until it is durably `completed` before
 stopping any process. Then rebuild/restart the backend from the current branch
