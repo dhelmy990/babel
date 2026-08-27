@@ -14,7 +14,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid5
 
 import numpy as np
 
@@ -22,13 +22,16 @@ from .contracts import (
     CATALOG_ARROW_SCHEMA,
     EMBEDDINGS_ARROW_SCHEMA,
     PARQUET_WRITER_SETTINGS,
+    POPULATION_HASH_DERIVATIONS,
     PayloadMetadataV1,
     PopulationTransferManifestV1,
     PopulationTransferMetadataV1,
 )
+from ..contracts import canonical_pgvector_snapshot_sha256
 
 
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
+_ARTICLE_KEY = re.compile(r"^enwiki:[1-9][0-9]*$")
 _BUNDLE_NAMES = frozenset(
     {
         "SHA256SUMS",
@@ -90,6 +93,14 @@ class BundleFiles:
     checksums: Path
     digest: str
     manifest_contract: PopulationTransferManifestV1
+
+
+@dataclass(frozen=True, slots=True)
+class _ValidatedPopulation:
+    rows: list[PopulationTransferRow]
+    vectors: list[bytes]
+    norms: list[float]
+    hashes: dict[str, str]
 
 
 def vector_f32le(values: object) -> bytes:
@@ -184,31 +195,97 @@ def _catalog_schema():
     return pa.schema([pa.field(name, kind, nullable=False) for name, kind in fields])
 
 
-def _checked_rows(
-    source: PopulationTransferBundleInput,
-) -> tuple[list[PopulationTransferRow], list[bytes], list[float]]:
-    metadata = source.metadata
-    if len(source.rows) != 10_000:
+def _canonical_json_line(value: dict[str, object]) -> bytes:
+    return (
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        + "\n"
+    ).encode("utf-8")
+
+
+def _population_hashes(rows: list[PopulationTransferRow], vectors: list[bytes]) -> dict[str, str]:
+    content = bytearray()
+    schedule = bytearray()
+    snapshots: list[dict[str, object]] = []
+    for ordinal, (row, vector) in enumerate(zip(rows, vectors, strict=True)):
+        vector_sha = hashlib.sha256(vector).hexdigest()
+        content.extend(
+            _canonical_json_line(
+                {
+                    "babelId": row.babel_id,
+                    "catalogContentHash": row.catalog_content_hash,
+                    "createdAtNs": row.created_at_ns,
+                    "creatorId": row.creator_id,
+                    "eventNumber": row.event_number,
+                    "ordinal": ordinal,
+                    "sourceArticleKey": row.source_article_key,
+                    "text": row.article_text,
+                    "title": row.title,
+                }
+            )
+        )
+        schedule.extend(
+            _canonical_json_line(
+                {
+                    "creatorEventNumber": row.creator_event_number,
+                    "creatorId": row.creator_id,
+                    "ordinal": ordinal,
+                    "period": row.period,
+                    "rootBabelId": row.root_babel_id,
+                    "scheduleIndex": row.schedule_index,
+                    "sourceArticleKey": row.source_article_key,
+                    "traversalSessionId": row.traversal_session_id,
+                    "workId": row.work_id,
+                    "workloadSha256": row.workload_sha256,
+                }
+            )
+        )
+        snapshots.append(
+            {
+                "babelId": row.babel_id,
+                "creatorId": row.creator_id,
+                "sourceArticleKey": row.source_article_key,
+                "catalogContentHash": row.catalog_content_hash,
+                "embeddingSpaceId": row.embedding_space_id,
+                "servingModelId": row.serving_model_id,
+                "materializedModelVersion": row.materialized_model_version,
+                "vectorSha256": vector_sha,
+            }
+        )
+    hashes = {
+        "orderedPopulationSha256": hashlib.sha256(b"".join(vectors)).hexdigest(),
+        "snapshotSha256": canonical_pgvector_snapshot_sha256(snapshots),
+        "scheduleSha256": hashlib.sha256(schedule).hexdigest(),
+        "contentSha256": hashlib.sha256(content).hexdigest(),
+    }
+    hashes["frozenPopulationSha256"] = hashlib.sha256(
+        json.dumps(hashes, sort_keys=True, separators=(",", ":")).encode("ascii")
+    ).hexdigest()
+    return hashes
+
+
+def _require_integer(value: object, field: str, maximum: int) -> int:
+    if type(value) is not int or not 0 <= value <= maximum:
+        raise PopulationTransferIntegrityError(f"{field} must be a nonnegative integer")
+    return value
+
+
+def _validate_population_rows(
+    rows: list[PopulationTransferRow],
+    metadata: PopulationTransferMetadataV1 | PopulationTransferManifestV1,
+) -> _ValidatedPopulation:
+    if len(rows) != 10_000:
         raise PopulationTransferIntegrityError(
             "population bundle must contain exactly 10,000 rows"
         )
-    rows = sorted(source.rows, key=lambda row: row.babel_id)
     pairs = [(row.babel_id, row.model_artifact_id) for row in rows]
     if len(set(pairs)) != len(pairs):
         raise PopulationTransferIntegrityError("duplicate embedding pair")
     identifiers = [row.babel_id for row in rows]
     if len(set(identifiers)) != len(identifiers):
         raise PopulationTransferIntegrityError("duplicate Babel ID")
-    if len({row.creator_id for row in rows}) != 50:
+    if identifiers != sorted(identifiers):
         raise PopulationTransferIntegrityError(
-            "population bundle must contain exactly 50 creators"
-        )
-    if dict(sorted(Counter(row.period for row in rows).items())) != {
-        "2026-06": 5_000,
-        "2026-07": 5_000,
-    }:
-        raise PopulationTransferIntegrityError(
-            "population bundle must contain exactly 5,000 rows per period"
+            "population rows must use lowercase Babel-ID order"
         )
     vectors: list[bytes] = []
     norms: list[float] = []
@@ -225,14 +302,42 @@ def _checked_rows(
             _canonical_uuid(getattr(row, field), field)
         for field in ("catalog_content_hash", "model_artifact_id", "workload_sha256"):
             _sha_text(getattr(row, field), field)
-        if not 0 <= row.materialized_model_version <= 2_147_483_647:
-            raise PopulationTransferIntegrityError("materialized_model_version is outside int32")
-        if not 0 <= row.schedule_index <= 2_147_483_647:
-            raise PopulationTransferIntegrityError("schedule_index is outside int32")
-        if not 0 <= row.creator_event_number <= 2_147_483_647:
-            raise PopulationTransferIntegrityError("creator_event_number is outside int32")
-        if not row.source_article_key or not row.title or not row.article_text:
-            raise PopulationTransferIntegrityError("catalog text identity fields must be non-empty")
+        _require_integer(
+            row.materialized_model_version,
+            "materialized model version",
+            2_147_483_647,
+        )
+        _require_integer(row.event_number, "event number", 9_223_372_036_854_775_807)
+        _require_integer(row.schedule_index, "schedule index", 2_147_483_647)
+        _require_integer(row.creator_event_number, "creator event number", 2_147_483_647)
+        _require_integer(row.created_at_ns, "created timestamp", 9_223_372_036_854_775_807)
+        _require_integer(
+            row.schedule_created_at_ns,
+            "schedule timestamp",
+            9_223_372_036_854_775_807,
+        )
+        _require_integer(row.finalized_at_ns, "finalized timestamp", 9_223_372_036_854_775_807)
+        if not row.schedule_created_at_ns <= row.created_at_ns <= row.finalized_at_ns:
+            raise PopulationTransferIntegrityError("timestamp order is invalid")
+        if not isinstance(row.title, str) or not row.title.strip():
+            raise PopulationTransferIntegrityError("title must be non-empty")
+        if not isinstance(row.article_text, str) or not row.article_text.strip():
+            raise PopulationTransferIntegrityError("article text must be non-empty")
+        if _ARTICLE_KEY.fullmatch(row.source_article_key) is None:
+            raise PopulationTransferIntegrityError("source article key is not canonical")
+        if row.period not in ("2026-06", "2026-07"):
+            raise PopulationTransferIntegrityError("period must be 2026-06 or 2026-07")
+        if row.root_babel_id != row.babel_id:
+            raise PopulationTransferIntegrityError("root Babel ID differs from Babel ID")
+        if row.event_number != row.schedule_index:
+            raise PopulationTransferIntegrityError("event number differs from schedule index")
+        if (
+            hashlib.sha256(row.article_text.encode("utf-8")).hexdigest()
+            != row.catalog_content_hash
+        ):
+            raise PopulationTransferIntegrityError(
+                "catalog content hash differs from article text"
+            )
         if row.serving_model_id != str(metadata.servingModelId):
             raise PopulationTransferIntegrityError("row serving model differs from metadata")
         if row.materialized_model_version != metadata.materializedModelVersion:
@@ -243,12 +348,85 @@ def _checked_rows(
             raise PopulationTransferIntegrityError("row model artifact differs from metadata")
         if row.dataset_revision != metadata.datasetRevision:
             raise PopulationTransferIntegrityError("row dataset revision differs from metadata")
-        if row.dataset_repository != metadata.datasetRepository or row.dataset_configuration != metadata.datasetConfiguration:
+        if (
+            row.dataset_repository != metadata.datasetRepository
+            or row.dataset_configuration != metadata.datasetConfiguration
+        ):
             raise PopulationTransferIntegrityError("row dataset identity differs from metadata")
+        expected_work_id = uuid5(
+            metadata.originRunId,
+            f"work:{row.creator_id}:{row.creator_event_number}",
+        )
+        expected_traversal_id = uuid5(
+            metadata.originRunId,
+            f"traversal:{row.creator_id}:{row.creator_event_number}",
+        )
+        if row.work_id != str(expected_work_id):
+            raise PopulationTransferIntegrityError("work ID differs from schedule identity")
+        if row.traversal_session_id != str(expected_traversal_id):
+            raise PopulationTransferIntegrityError(
+                "traversal ID differs from schedule identity"
+            )
+        workload = {
+            "creatorEventNumber": row.creator_event_number,
+            "creatorId": row.creator_id,
+            "period": row.period,
+            "rootBabelId": row.root_babel_id,
+            "runId": str(metadata.originRunId),
+            "sourceArticleKey": row.source_article_key,
+            "workId": row.work_id,
+        }
+        expected_workload = hashlib.sha256(
+            json.dumps(workload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        if row.workload_sha256 != expected_workload:
+            raise PopulationTransferIntegrityError(
+                "workload hash differs from schedule identity"
+            )
         encoded = vector_f32le(row.vector)
         vectors.append(encoded)
         norms.append(float(np.linalg.norm(np.frombuffer(encoded, dtype="<f4").astype(np.float64))))
-    return rows, vectors, norms
+    if len({row.creator_id for row in rows}) != 50:
+        raise PopulationTransferIntegrityError(
+            "population bundle must contain exactly 50 creators"
+        )
+    if dict(sorted(Counter(row.period for row in rows).items())) != {
+        "2026-06": 5_000,
+        "2026-07": 5_000,
+    }:
+        raise PopulationTransferIntegrityError(
+            "population bundle must contain exactly 5,000 rows per period"
+        )
+    if sorted(row.event_number for row in rows) != list(range(10_000)):
+        raise PopulationTransferIntegrityError("event numbers must be globally contiguous")
+    if sorted(row.schedule_index for row in rows) != list(range(10_000)):
+        raise PopulationTransferIntegrityError("schedule indexes must be globally contiguous")
+    creator_events: dict[str, int] = {}
+    creator_sources: set[tuple[str, str]] = set()
+    for row in sorted(rows, key=lambda item: item.schedule_index):
+        expected_event = creator_events.get(row.creator_id, 0)
+        if row.creator_event_number != expected_event:
+            raise PopulationTransferIntegrityError(
+                "creator event numbers must be contiguous"
+            )
+        creator_events[row.creator_id] = expected_event + 1
+        source_identity = (row.creator_id, row.source_article_key)
+        if source_identity in creator_sources:
+            raise PopulationTransferIntegrityError(
+                "creator source identities must be unique"
+            )
+        creator_sources.add(source_identity)
+    return _ValidatedPopulation(
+        rows=rows,
+        vectors=vectors,
+        norms=norms,
+        hashes=_population_hashes(rows, vectors),
+    )
+
+
+def _checked_rows(source: PopulationTransferBundleInput) -> _ValidatedPopulation:
+    rows = sorted(source.rows, key=lambda row: row.babel_id)
+    return _validate_population_rows(rows, source.metadata)
 
 
 def _write_parquet(
@@ -343,8 +521,11 @@ def _write_manifest(
     source: PopulationTransferBundleInput,
     rows: list[PopulationTransferRow],
     norms: list[float],
+    hashes: dict[str, str],
     root: Path,
 ) -> Path:
+    import pyarrow as pa
+
     payloads = {
         name: PayloadMetadataV1(sha256=_sha256(root / name), bytes=(root / name).stat().st_size)
         for name in ("babel_catalog.parquet", "babel_embeddings.parquet", "import_population.py")
@@ -354,6 +535,7 @@ def _write_manifest(
     metadata = source.metadata.model_dump()
     manifest = PopulationTransferManifestV1(
         **metadata,
+        **hashes,
         schemaVersion=1,
         bundleFormatVersion=1,
         rowCount=len(rows),
@@ -371,10 +553,14 @@ def _write_manifest(
         vectorNormP99=float(np.percentile(norm_array, 99)),
         vectorNormMax=float(norm_array.max()),
         arrowSchemas={
-            "babel_embeddings": EMBEDDINGS_ARROW_SCHEMA,
-            "babel_catalog": CATALOG_ARROW_SCHEMA,
+            "babel_embeddings": [dict(field) for field in EMBEDDINGS_ARROW_SCHEMA],
+            "babel_catalog": [dict(field) for field in CATALOG_ARROW_SCHEMA],
         },
-        writerSettings=PARQUET_WRITER_SETTINGS,
+        writerSettings={
+            **PARQUET_WRITER_SETTINGS,
+            "pyarrowVersion": pa.__version__,
+        },
+        hashDerivations=dict(POPULATION_HASH_DERIVATIONS),
         payloads=payloads,
     )
     document = json.dumps(
@@ -390,7 +576,9 @@ def _write_manifest(
 
 def _write_checksums(root: Path) -> tuple[Path, str]:
     checksums = root / "SHA256SUMS"
-    value = "".join(f"{_sha256(root / name)}  {name}\n" for name in _CHECKSUM_NAMES).encode("ascii")
+    value = "".join(
+        f"{_sha256(root / name)}  {name}\n" for name in _CHECKSUM_NAMES
+    ).encode("ascii")
     checksums.write_bytes(value)
     return checksums, hashlib.sha256(value).hexdigest()
 
@@ -408,6 +596,78 @@ def _paths(root: Path, digest: str, manifest: PopulationTransferManifestV1) -> B
     )
 
 
+def _stable_bundle_bytes(directory: Path) -> tuple[dict[str, bytes], dict[str, int]]:
+    try:
+        root_lstat = directory.lstat()
+    except OSError as error:
+        raise PopulationTransferIntegrityError("bundle root is unavailable") from error
+    if stat.S_ISLNK(root_lstat.st_mode):
+        raise PopulationTransferIntegrityError("bundle root must not be a symlink")
+    if not stat.S_ISDIR(root_lstat.st_mode):
+        raise PopulationTransferIntegrityError("bundle root must be a directory")
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    directory_fd = os.open(directory, directory_flags)
+    try:
+        opened_root = os.fstat(directory_fd)
+        if (opened_root.st_dev, opened_root.st_ino) != (
+            root_lstat.st_dev,
+            root_lstat.st_ino,
+        ):
+            raise PopulationTransferIntegrityError("bundle root changed while opening")
+        names = set(os.listdir(directory_fd))
+        if names != _BUNDLE_NAMES:
+            raise PopulationTransferIntegrityError(
+                "bundle does not contain exactly five files"
+            )
+        payloads: dict[str, bytes] = {}
+        modes: dict[str, int] = {}
+        file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        for name in sorted(names):
+            before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if stat.S_ISLNK(before.st_mode):
+                raise PopulationTransferIntegrityError(
+                    f"bundle file {name} must not be a symlink"
+                )
+            if not stat.S_ISREG(before.st_mode):
+                raise PopulationTransferIntegrityError(
+                    f"bundle file {name} must be a regular file"
+                )
+            file_fd = os.open(name, file_flags, dir_fd=directory_fd)
+            try:
+                opened = os.fstat(file_fd)
+                if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+                    raise PopulationTransferIntegrityError(
+                        f"bundle file {name} changed while opening"
+                    )
+                chunks: list[bytes] = []
+                while True:
+                    chunk = os.read(file_fd, 1024 * 1024)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                after = os.fstat(file_fd)
+                if (
+                    after.st_size != opened.st_size
+                    or after.st_mtime_ns != opened.st_mtime_ns
+                    or after.st_ctime_ns != opened.st_ctime_ns
+                ):
+                    raise PopulationTransferIntegrityError(
+                        f"bundle file {name} changed while reading"
+                    )
+                value = b"".join(chunks)
+                if len(value) != opened.st_size:
+                    raise PopulationTransferIntegrityError(
+                        f"bundle file {name} size changed while reading"
+                    )
+                payloads[name] = value
+                modes[name] = stat.S_IMODE(opened.st_mode)
+            finally:
+                os.close(file_fd)
+        return payloads, modes
+    finally:
+        os.close(directory_fd)
+
+
 def write_bundle_payloads(
     rows: PopulationTransferBundleInput, root: str | Path
 ) -> BundleFiles:
@@ -422,12 +682,18 @@ def write_bundle_payloads(
     )
     temporary.chmod(0o700)
     try:
-        checked, vectors, norms = _checked_rows(rows)
-        _write_parquet(checked, vectors, temporary)
+        validated = _checked_rows(rows)
+        _write_parquet(validated.rows, validated.vectors, temporary)
         launcher = temporary / "import_population.py"
         launcher.write_bytes(_launcher_bytes())
         launcher.chmod(0o700)
-        _write_manifest(rows, checked, norms, temporary)
+        _write_manifest(
+            rows,
+            validated.rows,
+            validated.norms,
+            validated.hashes,
+            temporary,
+        )
         _, digest = _write_checksums(temporary)
         verify_bundle(temporary, digest)
         os.replace(temporary, destination)
@@ -438,15 +704,24 @@ def write_bundle_payloads(
         raise
 
 
-def _verify_parquet(files: BundleFiles) -> None:
+def _verify_parquet(files: BundleFiles, payloads: dict[str, bytes]) -> None:
+    import pyarrow as pa
     import pyarrow.parquet as pq
 
-    if pq.read_schema(files.embeddings) != _embedding_schema():
+    if files.manifest_contract.writerSettings.pyarrowVersion != pa.__version__:
+        raise PopulationTransferIntegrityError("PyArrow writer/runtime version mismatch")
+    parquet_files = {
+        files.embeddings: pq.ParquetFile(
+            pa.BufferReader(payloads[files.embeddings.name])
+        ),
+        files.catalog: pq.ParquetFile(pa.BufferReader(payloads[files.catalog.name])),
+    }
+    if parquet_files[files.embeddings].schema_arrow != _embedding_schema():
         raise PopulationTransferIntegrityError("babel_embeddings schema mismatch")
-    if pq.read_schema(files.catalog) != _catalog_schema():
+    if parquet_files[files.catalog].schema_arrow != _catalog_schema():
         raise PopulationTransferIntegrityError("babel_catalog schema mismatch")
-    for path in (files.embeddings, files.catalog):
-        metadata = pq.ParquetFile(path).metadata
+    for path, parquet_file in parquet_files.items():
+        metadata = parquet_file.metadata
         if metadata.format_version != "2.6":
             raise PopulationTransferIntegrityError("Parquet version mismatch")
         if (
@@ -471,16 +746,21 @@ def _verify_parquet(files: BundleFiles) -> None:
                 if column.compression != "ZSTD" or column.statistics is None:
                     raise PopulationTransferIntegrityError("Parquet writer settings mismatch")
                 if "RLE_DICTIONARY" in column.encodings or "PLAIN_DICTIONARY" in column.encodings:
-                    raise PopulationTransferIntegrityError("Parquet dictionary encoding is forbidden")
+                    raise PopulationTransferIntegrityError(
+                        "Parquet dictionary encoding is forbidden"
+                    )
         if not metadata.metadata or b"ARROW:schema" not in metadata.metadata:
             raise PopulationTransferIntegrityError("stored Arrow schema is missing")
 
 
-def _verify_contents(files: BundleFiles) -> None:
+def _verify_contents(files: BundleFiles, payloads: dict[str, bytes]) -> None:
+    import pyarrow as pa
     import pyarrow.parquet as pq
 
-    embeddings = pq.read_table(files.embeddings).to_pylist()
-    catalog = pq.read_table(files.catalog).to_pylist()
+    embeddings = pq.read_table(
+        pa.BufferReader(payloads[files.embeddings.name])
+    ).to_pylist()
+    catalog = pq.read_table(pa.BufferReader(payloads[files.catalog.name])).to_pylist()
     manifest = files.manifest_contract
     if len(embeddings) != manifest.rowCount or len(catalog) != manifest.rowCount:
         raise PopulationTransferIntegrityError("Parquet row count differs from manifest")
@@ -490,49 +770,17 @@ def _verify_contents(files: BundleFiles) -> None:
         raise PopulationTransferIntegrityError("Parquet rows are not in canonical Babel-ID order")
     if len(set(embedding_ids)) != len(embedding_ids):
         raise PopulationTransferIntegrityError("duplicate Babel ID in payload")
-    norms: list[float] = []
+    semantic_rows: list[PopulationTransferRow] = []
     for embedding, catalog_row in zip(embeddings, catalog, strict=True):
-        for row, fields in (
-            (
-                embedding,
-                ("babel_id", "creator_id", "serving_model_id", "embedding_space_id"),
-            ),
-            (
-                catalog_row,
-                (
-                    "babel_id",
-                    "creator_id",
-                    "root_babel_id",
-                    "traversal_session_id",
-                    "work_id",
-                ),
-            ),
-        ):
-            for field in fields:
-                _canonical_uuid(row[field], field)
-        if (
-            embedding["serving_model_id"] != str(manifest.servingModelId)
-            or embedding["materialized_model_version"]
-            != manifest.materializedModelVersion
-            or embedding["embedding_space_id"] != str(manifest.embeddingSpaceId)
-            or embedding["model_artifact_id"] != manifest.modelArtifactId
-            or embedding["dataset_revision"] != manifest.datasetRevision
-        ):
-            raise PopulationTransferIntegrityError(
-                "embedding identity differs from manifest"
-            )
-        if (
-            catalog_row["dataset_repository"] != manifest.datasetRepository
-            or catalog_row["dataset_configuration"]
-            != manifest.datasetConfiguration
-            or catalog_row["dataset_revision"] != manifest.datasetRevision
-        ):
-            raise PopulationTransferIntegrityError("catalog identity differs from manifest")
         encoded = vector_f32le(embedding["vector"])
         if hashlib.sha256(encoded).hexdigest() != embedding["vector_sha256"]:
             raise PopulationTransferIntegrityError("vector checksum mismatch")
-        norms.append(float(np.linalg.norm(np.frombuffer(encoded, dtype="<f4").astype(np.float64))))
-        if embedding["creator_id"] != catalog_row["creator_id"] or embedding["catalog_content_hash"] != catalog_row["catalog_content_hash"]:
+        if (
+            embedding["babel_id"] != catalog_row["babel_id"]
+            or embedding["creator_id"] != catalog_row["creator_id"]
+            or embedding["catalog_content_hash"] != catalog_row["catalog_content_hash"]
+            or embedding["dataset_revision"] != catalog_row["dataset_revision"]
+        ):
             raise PopulationTransferIntegrityError("catalog and embedding identities differ")
         expected_reference = json.dumps(
             {
@@ -546,11 +794,40 @@ def _verify_contents(files: BundleFiles) -> None:
         )
         if catalog_row["dataset_row_reference"] != expected_reference:
             raise PopulationTransferIntegrityError("dataset row reference mismatch")
-    creators = {row["creator_id"] for row in catalog}
-    periods = dict(sorted(Counter(row["period"] for row in catalog).items()))
-    if len(creators) != manifest.creatorCount or periods != manifest.periodCounts:
-        raise PopulationTransferIntegrityError("creator or period counts differ from manifest")
-    norm_array = np.asarray(norms, dtype=np.float64)
+        semantic_rows.append(
+            PopulationTransferRow(
+                babel_id=embedding["babel_id"],
+                creator_id=embedding["creator_id"],
+                serving_model_id=embedding["serving_model_id"],
+                materialized_model_version=embedding["materialized_model_version"],
+                embedding_space_id=embedding["embedding_space_id"],
+                catalog_content_hash=embedding["catalog_content_hash"],
+                model_artifact_id=embedding["model_artifact_id"],
+                dataset_revision=embedding["dataset_revision"],
+                vector=embedding["vector"],
+                source_article_key=catalog_row["source_article_key"],
+                title=catalog_row["title"],
+                article_text=catalog_row["article_text"],
+                event_number=catalog_row["event_number"],
+                created_at_ns=catalog_row["created_at_ns"],
+                finalized_at_ns=catalog_row["finalized_at_ns"],
+                schedule_index=catalog_row["schedule_index"],
+                creator_event_number=catalog_row["creator_event_number"],
+                period=catalog_row["period"],
+                root_babel_id=catalog_row["root_babel_id"],
+                traversal_session_id=catalog_row["traversal_session_id"],
+                work_id=catalog_row["work_id"],
+                workload_sha256=catalog_row["workload_sha256"],
+                schedule_created_at_ns=catalog_row["schedule_created_at_ns"],
+                dataset_repository=catalog_row["dataset_repository"],
+                dataset_configuration=catalog_row["dataset_configuration"],
+            )
+        )
+    validated = _validate_population_rows(semantic_rows, manifest)
+    for field, value in validated.hashes.items():
+        if getattr(manifest, field) != value:
+            raise PopulationTransferIntegrityError(f"{field} differs from payload")
+    norm_array = np.asarray(validated.norms, dtype=np.float64)
     actual = (
         float(norm_array.min()),
         float(norm_array.mean()),
@@ -578,28 +855,36 @@ def verify_bundle(root: str | Path, trusted_digest: str) -> BundleFiles:
     try:
         if _SHA256.fullmatch(trusted_digest) is None:
             raise PopulationTransferIntegrityError("trusted digest is not a SHA-256")
-        if not directory.is_dir() or {path.name for path in directory.iterdir()} != _BUNDLE_NAMES:
-            raise PopulationTransferIntegrityError("bundle does not contain exactly five files")
-        checksums = directory / "SHA256SUMS"
-        if hashlib.sha256(checksums.read_bytes()).hexdigest() != trusted_digest:
+        payloads, modes = _stable_bundle_bytes(directory)
+        checksum_bytes = payloads["SHA256SUMS"]
+        if hashlib.sha256(checksum_bytes).hexdigest() != trusted_digest:
             raise PopulationTransferIntegrityError("trusted digest does not match SHA256SUMS")
-        lines = checksums.read_text(encoding="ascii").splitlines()
-        expected_lines = [f"{_sha256(directory / name)}  {name}" for name in _CHECKSUM_NAMES]
+        lines = checksum_bytes.decode("ascii").splitlines()
+        expected_lines = [
+            f"{hashlib.sha256(payloads[name]).hexdigest()}  {name}"
+            for name in _CHECKSUM_NAMES
+        ]
         if lines != expected_lines:
             raise PopulationTransferIntegrityError("bundle checksum coverage or value mismatch")
-        launcher = directory / "import_population.py"
-        if launcher.read_bytes() != _launcher_bytes() or stat.S_IMODE(launcher.stat().st_mode) != 0o700:
+        if payloads["import_population.py"] != _launcher_bytes() or modes[
+            "import_population.py"
+        ] != 0o700:
             raise PopulationTransferIntegrityError("import launcher bytes or mode mismatch")
         manifest = PopulationTransferManifestV1.model_validate_json(
-            (directory / "manifest.json").read_bytes()
+            payloads["manifest.json"]
         )
         for name, payload in manifest.payloads.items():
-            path = directory / name
-            if path.stat().st_size != payload.bytes or _sha256(path) != payload.sha256:
-                raise PopulationTransferIntegrityError("manifest payload checksum or size mismatch")
+            value = payloads[name]
+            if (
+                len(value) != payload.bytes
+                or hashlib.sha256(value).hexdigest() != payload.sha256
+            ):
+                raise PopulationTransferIntegrityError(
+                    "manifest payload checksum or size mismatch"
+                )
         files = _paths(directory, trusted_digest, manifest)
-        _verify_parquet(files)
-        _verify_contents(files)
+        _verify_parquet(files, payloads)
+        _verify_contents(files, payloads)
         return files
     except PopulationTransferIntegrityError:
         raise

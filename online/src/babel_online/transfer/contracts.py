@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime, timedelta
+from types import MappingProxyType
 from typing import Literal
 from uuid import UUID
 
@@ -23,7 +25,7 @@ DATASET_REPOSITORY = "dhelmy990/babel-wikipedia-experiment"
 DATASET_CONFIGURATION = "crosswalk_2026_06_07"
 DATASET_REVISION = "0d1ab2c7f0e2295682288fcf10077d2d776bf559"
 
-EMBEDDINGS_ARROW_SCHEMA: list[dict[str, object]] = [
+_EMBEDDINGS_ARROW_SCHEMA = [
     {"name": "babel_id", "type": "string", "nullable": False},
     {"name": "creator_id", "type": "string", "nullable": False},
     {"name": "serving_model_id", "type": "string", "nullable": False},
@@ -39,8 +41,11 @@ EMBEDDINGS_ARROW_SCHEMA: list[dict[str, object]] = [
     },
     {"name": "vector_sha256", "type": "string", "nullable": False},
 ]
+EMBEDDINGS_ARROW_SCHEMA: tuple[Mapping[str, object], ...] = tuple(
+    MappingProxyType(field) for field in _EMBEDDINGS_ARROW_SCHEMA
+)
 
-CATALOG_ARROW_SCHEMA: list[dict[str, object]] = [
+_CATALOG_ARROW_SCHEMA = [
     {"name": "babel_id", "type": "string", "nullable": False},
     {"name": "creator_id", "type": "string", "nullable": False},
     {"name": "source_article_key", "type": "string", "nullable": False},
@@ -63,25 +68,53 @@ CATALOG_ARROW_SCHEMA: list[dict[str, object]] = [
     {"name": "dataset_revision", "type": "string", "nullable": False},
     {"name": "dataset_row_reference", "type": "string", "nullable": False},
 ]
+CATALOG_ARROW_SCHEMA: tuple[Mapping[str, object], ...] = tuple(
+    MappingProxyType(field) for field in _CATALOG_ARROW_SCHEMA
+)
 
-PARQUET_WRITER_SETTINGS: dict[str, object] = {
-    "parquetVersion": "2.6",
-    "dataPageVersion": "1.0",
-    "compression": "zstd",
-    "compressionLevel": 9,
-    "useDictionary": False,
-    "writeStatistics": True,
-    "useCompliantNestedType": True,
-    "storeSchema": True,
-    "rowGroupSize": 10_000,
-    "timestampRepresentation": "integer_ns",
-}
+PARQUET_WRITER_SETTINGS: Mapping[str, object] = MappingProxyType(
+    {
+        "parquetVersion": "2.6",
+        "dataPageVersion": "1.0",
+        "compression": "zstd",
+        "compressionLevel": 9,
+        "useDictionary": False,
+        "writeStatistics": True,
+        "useCompliantNestedType": True,
+        "storeSchema": True,
+        "rowGroupSize": 10_000,
+        "timestampRepresentation": "integer_ns",
+    }
+)
+
+POPULATION_HASH_DERIVATIONS: Mapping[str, str] = MappingProxyType(
+    {
+        "orderedPopulationSha256": "sha256(concat(vector_f32le in lowercase babel_id order))",
+        "snapshotSha256": "canonical_pgvector_snapshot_sha256(v1)",
+        "scheduleSha256": "sha256(model.frozen_population schedule.jsonl v1)",
+        "contentSha256": "sha256(model.frozen_population babels.jsonl v1)",
+        "frozenPopulationSha256": "sha256(sorted-key compact JSON of contentSha256,orderedPopulationSha256,scheduleSha256,snapshotSha256)",
+    }
+)
 
 
 class _StrictFrozenModel(BaseModel):
     model_config = ConfigDict(
         extra="forbid", frozen=True, strict=True, allow_inf_nan=False
     )
+
+
+class _FrozenDict(dict):
+    def _immutable(self, *_args: object, **_kwargs: object) -> None:
+        raise TypeError("frozen contract mapping does not support mutation")
+
+    __setitem__ = _immutable
+    __delitem__ = _immutable
+    clear = _immutable
+    pop = _immutable
+    popitem = _immutable
+    setdefault = _immutable
+    update = _immutable
 
 
 class ArrowFieldV1(_StrictFrozenModel):
@@ -97,13 +130,21 @@ class ArrowSchemasV1(_StrictFrozenModel):
     @field_validator("babel_embeddings", "babel_catalog", mode="before")
     @classmethod
     def freeze_field_sequence(cls, value: object) -> object:
-        return tuple(value) if isinstance(value, list) else value
+        if isinstance(value, (list, tuple)):
+            return tuple(
+                dict(item) if isinstance(item, Mapping) else item for item in value
+            )
+        return value
 
     @model_validator(mode="after")
     def exact_schemas(self) -> "ArrowSchemasV1":
-        if [field.model_dump() for field in self.babel_embeddings] != EMBEDDINGS_ARROW_SCHEMA:
+        if tuple(field.model_dump() for field in self.babel_embeddings) != tuple(
+            dict(field) for field in EMBEDDINGS_ARROW_SCHEMA
+        ):
             raise ValueError("babel_embeddings Arrow schema is not the frozen schema")
-        if [field.model_dump() for field in self.babel_catalog] != CATALOG_ARROW_SCHEMA:
+        if tuple(field.model_dump() for field in self.babel_catalog) != tuple(
+            dict(field) for field in CATALOG_ARROW_SCHEMA
+        ):
             raise ValueError("babel_catalog Arrow schema is not the frozen schema")
         return self
 
@@ -119,6 +160,23 @@ class ParquetWriterSettingsV1(_StrictFrozenModel):
     storeSchema: Literal[True]
     rowGroupSize: Literal[10_000]
     timestampRepresentation: Literal["integer_ns"]
+    pyarrowVersion: str = Field(pattern=r"^[0-9]+\.[0-9]+\.[0-9]+(?:[a-zA-Z0-9.+-]*)?$")
+
+
+class PopulationHashDerivationsV1(_StrictFrozenModel):
+    orderedPopulationSha256: Literal[
+        "sha256(concat(vector_f32le in lowercase babel_id order))"
+    ]
+    snapshotSha256: Literal["canonical_pgvector_snapshot_sha256(v1)"]
+    scheduleSha256: Literal[
+        "sha256(model.frozen_population schedule.jsonl v1)"
+    ]
+    contentSha256: Literal[
+        "sha256(model.frozen_population babels.jsonl v1)"
+    ]
+    frozenPopulationSha256: Literal[
+        "sha256(sorted-key compact JSON of contentSha256,orderedPopulationSha256,scheduleSha256,snapshotSha256)"
+    ]
 
 
 class PayloadMetadataV1(_StrictFrozenModel):
@@ -165,11 +223,6 @@ class PopulationTransferMetadataV1(_StrictFrozenModel):
     datasetRepository: Literal[DATASET_REPOSITORY]
     datasetConfiguration: Literal[DATASET_CONFIGURATION]
     datasetRevision: Literal[DATASET_REVISION]
-    frozenPopulationSha256: str = Field(pattern=SHA256_PATTERN)
-    orderedPopulationSha256: str = Field(pattern=SHA256_PATTERN)
-    snapshotSha256: str = Field(pattern=SHA256_PATTERN)
-    scheduleSha256: str = Field(pattern=SHA256_PATTERN)
-    contentSha256: str = Field(pattern=SHA256_PATTERN)
     createdAt: datetime
     rebinding: OriginToFreshRebindingV1
 
@@ -224,7 +277,7 @@ class PopulationTransferManifestV1(_StrictFrozenModel):
     originRunId: UUID
     rowCount: Literal[10_000]
     creatorCount: Literal[50]
-    periodCounts: dict[str, int]
+    periodCounts: Mapping[str, int]
     vectorDimension: Literal[100]
     vectorDtype: Literal["float32"]
     byteOrder: Literal["little"]
@@ -256,8 +309,14 @@ class PopulationTransferManifestV1(_StrictFrozenModel):
     vectorNormMax: float
     arrowSchemas: ArrowSchemasV1
     writerSettings: ParquetWriterSettingsV1
-    payloads: dict[str, PayloadMetadataV1]
+    hashDerivations: PopulationHashDerivationsV1
+    payloads: Mapping[str, PayloadMetadataV1]
     rebinding: OriginToFreshRebindingV1
+
+    @field_validator("hashDerivations", mode="before")
+    @classmethod
+    def accept_immutable_hash_derivations(cls, value: object) -> object:
+        return dict(value) if isinstance(value, Mapping) else value
 
     @field_validator("originTrialId")
     @classmethod
@@ -296,10 +355,19 @@ class PopulationTransferManifestV1(_StrictFrozenModel):
 
     @field_validator("periodCounts")
     @classmethod
-    def periods_are_exact_and_ordered(cls, value: dict[str, int]) -> dict[str, int]:
+    def periods_are_exact_and_ordered(
+        cls, value: Mapping[str, int]
+    ) -> Mapping[str, int]:
         if value != {"2026-06": 5_000, "2026-07": 5_000}:
             raise ValueError("periodCounts must be exactly 5,000 June and 5,000 July rows")
-        return value
+        return _FrozenDict(value)
+
+    @field_validator("payloads")
+    @classmethod
+    def freeze_payloads(
+        cls, value: Mapping[str, PayloadMetadataV1]
+    ) -> Mapping[str, PayloadMetadataV1]:
+        return _FrozenDict(value)
 
     @model_validator(mode="after")
     def closed_population_contract(self) -> "PopulationTransferManifestV1":

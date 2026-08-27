@@ -5,6 +5,8 @@ import importlib
 import json
 import shutil
 import stat
+import subprocess
+import sys
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,11 +56,6 @@ def metadata() -> PopulationTransferMetadataV1:
         datasetRepository="dhelmy990/babel-wikipedia-experiment",
         datasetConfiguration="crosswalk_2026_06_07",
         datasetRevision=DATASET_REVISION,
-        frozenPopulationSha256="5" * 64,
-        orderedPopulationSha256="6" * 64,
-        snapshotSha256="7" * 64,
-        scheduleSha256="8" * 64,
-        contentSha256="9" * 64,
         createdAt=datetime(2026, 8, 27, 1, 2, 3, tzinfo=timezone.utc),
         rebinding=OriginToFreshRebindingV1(
             originRunId=ORIGIN_RUN_ID,
@@ -87,30 +84,48 @@ def row(
     identifier = str(uuid5(ORIGIN_RUN_ID, f"babel:{ordinal}"))
     creator = str(uuid5(ORIGIN_RUN_ID, f"creator:{ordinal % 50}"))
     period = "2026-06" if ordinal < 5_000 else "2026-07"
+    article_text = f"Article {ordinal}"
+    creator_event_number = ordinal // 50
+    work_id = uuid5(ORIGIN_RUN_ID, f"work:{creator}:{creator_event_number}")
+    workload = {
+        "creatorEventNumber": creator_event_number,
+        "creatorId": creator,
+        "period": period,
+        "rootBabelId": identifier,
+        "runId": str(ORIGIN_RUN_ID),
+        "sourceArticleKey": f"enwiki:{ordinal + 1}",
+        "workId": str(work_id),
+    }
+    schedule_created_at_ns = ordinal * 1_000
+    created_at_ns = schedule_created_at_ns + 100
     return PopulationTransferRow(
         babel_id=babel_id or identifier,
         creator_id=creator,
         serving_model_id=SERVING_MODEL_ID,
         materialized_model_version=0,
         embedding_space_id=EMBEDDING_SPACE_ID,
-        catalog_content_hash=f"{ordinal:064x}",
+        catalog_content_hash=hashlib.sha256(article_text.encode()).hexdigest(),
         model_artifact_id=model_artifact_id,
         dataset_revision=DATASET_REVISION,
         vector=UNIT_VECTOR if vector is None else vector,
         source_article_key=f"enwiki:{ordinal + 1}",
         title=f"Title {ordinal}",
-        article_text=f"Article {ordinal}",
-        event_number=ordinal + 1,
-        created_at_ns=100 + ordinal,
-        finalized_at_ns=200 + ordinal,
+        article_text=article_text,
+        event_number=ordinal,
+        created_at_ns=created_at_ns,
+        finalized_at_ns=created_at_ns + 200,
         schedule_index=ordinal,
-        creator_event_number=1,
+        creator_event_number=creator_event_number,
         period=period,
         root_babel_id=identifier,
-        traversal_session_id=str(uuid5(ORIGIN_RUN_ID, f"traversal:{ordinal}")),
-        work_id=str(uuid5(ORIGIN_RUN_ID, f"work:{ordinal}")),
-        workload_sha256=hashlib.sha256(f"work:{ordinal}".encode()).hexdigest(),
-        schedule_created_at_ns=50 + ordinal,
+        traversal_session_id=str(
+            uuid5(ORIGIN_RUN_ID, f"traversal:{creator}:{creator_event_number}")
+        ),
+        work_id=str(work_id),
+        workload_sha256=hashlib.sha256(
+            json.dumps(workload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        schedule_created_at_ns=schedule_created_at_ns,
         dataset_repository="dhelmy990/babel-wikipedia-experiment",
         dataset_configuration="crosswalk_2026_06_07",
     )
@@ -188,13 +203,14 @@ def expected_catalog_schema() -> pa.Schema:
     )
 
 
-def resign_bundle(files: BundleFiles, payload_name: str) -> str:
-    payload = files.root / payload_name
+def resign_bundle(files: BundleFiles, *payload_names: str) -> str:
     manifest_document = json.loads(files.manifest.read_text(encoding="utf-8"))
-    manifest_document["payloads"][payload_name] = {
-        "bytes": payload.stat().st_size,
-        "sha256": hashlib.sha256(payload.read_bytes()).hexdigest(),
-    }
+    for payload_name in payload_names:
+        payload = files.root / payload_name
+        manifest_document["payloads"][payload_name] = {
+            "bytes": payload.stat().st_size,
+            "sha256": hashlib.sha256(payload.read_bytes()).hexdigest(),
+        }
     files.manifest.write_text(
         json.dumps(manifest_document, sort_keys=True, separators=(",", ":")) + "\n",
         encoding="utf-8",
@@ -211,6 +227,68 @@ def resign_bundle(files: BundleFiles, payload_name: str) -> str:
         encoding="ascii",
     )
     return hashlib.sha256(files.checksums.read_bytes()).hexdigest()
+
+
+def write_exact_table(table: pa.Table, path: Path) -> None:
+    pq.write_table(
+        table,
+        path,
+        version="2.6",
+        data_page_version="1.0",
+        compression="zstd",
+        compression_level=9,
+        use_dictionary=False,
+        write_statistics=True,
+        use_compliant_nested_type=True,
+        store_schema=True,
+        row_group_size=10_000,
+    )
+
+
+def replace_first(table: pa.Table, field: str, value: object) -> pa.Table:
+    index = table.schema.get_field_index(field)
+    values = table.column(index).to_pylist()
+    values[0] = value
+    arrow_field = table.schema.field(index)
+    return table.set_column(index, arrow_field, pa.array(values, type=arrow_field.type))
+
+
+def mutated_bundle(
+    production_bundle: BundleFiles,
+    root: Path,
+    *,
+    catalog_changes: dict[str, object] | None = None,
+    embedding_changes: dict[str, object] | None = None,
+) -> tuple[BundleFiles, str]:
+    shutil.copytree(production_bundle.root, root)
+    files = verify_bundle(root, production_bundle.digest)
+    changed: list[str] = []
+    if catalog_changes:
+        table = pq.read_table(files.catalog)
+        for field, value in catalog_changes.items():
+            table = replace_first(table, field, value)
+        source = table.column("source_article_key")[0].as_py()
+        period = table.column("period")[0].as_py()
+        content_hash = table.column("catalog_content_hash")[0].as_py()
+        reference = json.dumps(
+            {
+                "catalogContentHash": content_hash,
+                "period": period,
+                "sourceArticleKey": source,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        table = replace_first(table, "dataset_row_reference", reference)
+        write_exact_table(table, files.catalog)
+        changed.append("babel_catalog.parquet")
+    if embedding_changes:
+        table = pq.read_table(files.embeddings)
+        for field, value in embedding_changes.items():
+            table = replace_first(table, field, value)
+        write_exact_table(table, files.embeddings)
+        changed.append("babel_embeddings.parquet")
+    return files, resign_bundle(files, *changed)
 
 
 def test_vector_f32le_is_exact_and_rejects_shape_finiteness_and_norm() -> None:
@@ -277,7 +355,7 @@ def test_write_bundle_is_deterministic_complete_and_uses_exact_parquet_contract(
     first_source = next(item for item in catalog if item["source_article_key"] == "enwiki:1")
     assert first_source["dataset_row_reference"] == json.dumps(
         {
-            "catalogContentHash": "0" * 64,
+            "catalogContentHash": hashlib.sha256(b"Article 0").hexdigest(),
             "period": "2026-06",
             "sourceArticleKey": "enwiki:1",
         },
@@ -304,6 +382,52 @@ def test_write_bundle_is_deterministic_complete_and_uses_exact_parquet_contract(
         == 1.0
     )
     assert manifest.writerSettings.rowGroupSize == 10_000
+
+    canonical_content = b"".join(
+        (
+            json.dumps(
+                {
+                    "babelId": item["babel_id"],
+                    "catalogContentHash": item["catalog_content_hash"],
+                    "createdAtNs": item["created_at_ns"],
+                    "creatorId": item["creator_id"],
+                    "eventNumber": item["event_number"],
+                    "ordinal": ordinal,
+                    "sourceArticleKey": item["source_article_key"],
+                    "text": item["article_text"],
+                    "title": item["title"],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode()
+        for ordinal, item in enumerate(catalog)
+    )
+    canonical_schedule = b"".join(
+        (
+            json.dumps(
+                {
+                    "creatorEventNumber": item["creator_event_number"],
+                    "creatorId": item["creator_id"],
+                    "ordinal": ordinal,
+                    "period": item["period"],
+                    "rootBabelId": item["root_babel_id"],
+                    "scheduleIndex": item["schedule_index"],
+                    "sourceArticleKey": item["source_article_key"],
+                    "traversalSessionId": item["traversal_session_id"],
+                    "workId": item["work_id"],
+                    "workloadSha256": item["workload_sha256"],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode()
+        for ordinal, item in enumerate(catalog)
+    )
+    assert manifest.contentSha256 == hashlib.sha256(canonical_content).hexdigest()
+    assert manifest.scheduleSha256 == hashlib.sha256(canonical_schedule).hexdigest()
 
     checksum_lines = first.checksums.read_text(encoding="ascii").splitlines()
     assert [line.split("  ", 1)[1] for line in checksum_lines] == sorted(
@@ -412,6 +536,163 @@ def test_verify_rejects_an_extra_file(
 
     with pytest.raises(PopulationTransferIntegrityError, match="exactly five files"):
         verify_bundle(copied, production_bundle.digest)
+
+
+@pytest.mark.parametrize(
+    ("case", "catalog_changes", "embedding_changes", "message"),
+    [
+        ("workload", {"workload_sha256": "0" * 64}, None, "workload"),
+        (
+            "content_hash",
+            {"catalog_content_hash": "a" * 64},
+            {"catalog_content_hash": "a" * 64},
+            "catalog content hash",
+        ),
+        ("empty_title", {"title": ""}, None, "title"),
+        (
+            "empty_text",
+            {
+                "article_text": "",
+                "catalog_content_hash": hashlib.sha256(b"").hexdigest(),
+            },
+            {"catalog_content_hash": hashlib.sha256(b"").hexdigest()},
+            "article text",
+        ),
+        ("event", {"event_number": -1}, None, "event number"),
+        ("schedule", {"schedule_index": -1}, None, "schedule index"),
+        ("timestamp", {"finalized_at_ns": -1}, None, "timestamp"),
+        ("period", {"period": "2026-08"}, None, "period must"),
+        ("source", {"source_article_key": "wiki:1"}, None, "source article key"),
+        (
+            "root",
+            {"root_babel_id": str(ORIGIN_TRIAL_ID)},
+            None,
+            "root Babel ID",
+        ),
+    ],
+)
+def test_verify_rejects_resigned_semantically_malformed_rows(
+    tmp_path: Path,
+    production_bundle: BundleFiles,
+    case: str,
+    catalog_changes: dict[str, object],
+    embedding_changes: dict[str, object] | None,
+    message: str,
+) -> None:
+    files, digest = mutated_bundle(
+        production_bundle,
+        tmp_path / case,
+        catalog_changes=catalog_changes,
+        embedding_changes=embedding_changes,
+    )
+
+    with pytest.raises(PopulationTransferIntegrityError, match=message):
+        verify_bundle(files.root, digest)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "orderedPopulationSha256",
+        "snapshotSha256",
+        "scheduleSha256",
+        "contentSha256",
+        "frozenPopulationSha256",
+    ],
+)
+def test_verify_recomputes_every_derivable_manifest_hash(
+    tmp_path: Path, production_bundle: BundleFiles, field: str
+) -> None:
+    copied_root = tmp_path / field
+    shutil.copytree(production_bundle.root, copied_root)
+    files = verify_bundle(copied_root, production_bundle.digest)
+    manifest = json.loads(files.manifest.read_text(encoding="utf-8"))
+    manifest[field] = "f" * 64
+    files.manifest.write_text(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    digest = resign_bundle(files)
+
+    with pytest.raises(PopulationTransferIntegrityError, match=field):
+        verify_bundle(files.root, digest)
+
+
+def test_verify_rejects_a_different_pyarrow_writer_version(
+    tmp_path: Path, production_bundle: BundleFiles
+) -> None:
+    copied_root = tmp_path / "pyarrow-version"
+    shutil.copytree(production_bundle.root, copied_root)
+    files = verify_bundle(copied_root, production_bundle.digest)
+    manifest = json.loads(files.manifest.read_text(encoding="utf-8"))
+    manifest["writerSettings"]["pyarrowVersion"] = "0.0.0"
+    files.manifest.write_text(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    digest = resign_bundle(files)
+
+    with pytest.raises(PopulationTransferIntegrityError, match="PyArrow"):
+        verify_bundle(files.root, digest)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "SHA256SUMS",
+        "babel_catalog.parquet",
+        "babel_embeddings.parquet",
+        "import_population.py",
+        "manifest.json",
+    ],
+)
+def test_verify_rejects_every_symlinked_bundle_file(
+    tmp_path: Path, production_bundle: BundleFiles, name: str
+) -> None:
+    copied_root = tmp_path / name.replace(".", "-")
+    shutil.copytree(production_bundle.root, copied_root)
+    linked = copied_root / name
+    linked.unlink()
+    linked.symlink_to(production_bundle.root / name)
+
+    with pytest.raises(PopulationTransferIntegrityError, match="regular file|symlink"):
+        verify_bundle(copied_root, production_bundle.digest)
+
+
+def test_verify_rejects_a_symlinked_bundle_root(
+    tmp_path: Path, production_bundle: BundleFiles
+) -> None:
+    linked_root = tmp_path / "linked-root"
+    linked_root.symlink_to(production_bundle.root, target_is_directory=True)
+
+    with pytest.raises(PopulationTransferIntegrityError, match="root.*symlink|root.*directory"):
+        verify_bundle(linked_root, production_bundle.digest)
+
+
+def test_import_launcher_help_is_runnable(production_bundle: BundleFiles) -> None:
+    completed = subprocess.run(
+        [sys.executable, str(production_bundle.launcher), "--help"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "population bundle" in completed.stdout
+
+
+def test_import_launcher_fails_clearly_until_adapter_exists(
+    production_bundle: BundleFiles,
+) -> None:
+    completed = subprocess.run(
+        [sys.executable, str(production_bundle.launcher)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert "not implemented until import adapter" in completed.stderr
 
 
 def test_writer_passes_every_frozen_parquet_setting(

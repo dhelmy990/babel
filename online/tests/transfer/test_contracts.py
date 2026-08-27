@@ -4,12 +4,14 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 import pytest
+import pyarrow as pa
 from pydantic import ValidationError
 
 from babel_online.transfer import (
     CATALOG_ARROW_SCHEMA,
     EMBEDDINGS_ARROW_SCHEMA,
     PARQUET_WRITER_SETTINGS,
+    POPULATION_HASH_DERIVATIONS,
     OriginToFreshRebindingV1,
     PayloadMetadataV1,
     PopulationTransferManifestV1,
@@ -64,7 +66,11 @@ def manifest_values() -> dict[str, object]:
             "babel_embeddings": EMBEDDINGS_ARROW_SCHEMA,
             "babel_catalog": CATALOG_ARROW_SCHEMA,
         },
-        "writerSettings": PARQUET_WRITER_SETTINGS,
+        "writerSettings": {
+            **PARQUET_WRITER_SETTINGS,
+            "pyarrowVersion": pa.__version__,
+        },
+        "hashDerivations": POPULATION_HASH_DERIVATIONS,
         "payloads": {
             "babel_catalog.parquet": PayloadMetadataV1(
                 sha256="a" * 64, bytes=123
@@ -101,11 +107,26 @@ def test_manifest_round_trips_as_a_frozen_strict_v1_contract() -> None:
 
     assert restored == manifest
     assert restored.materializedModelVersion == 0
+    assert restored.writerSettings.pyarrowVersion == pa.__version__
+    assert restored.hashDerivations.model_dump() == dict(POPULATION_HASH_DERIVATIONS)
     assert restored.createdAt.tzinfo == timezone.utc
     with pytest.raises(ValidationError):
         PopulationTransferManifestV1.model_validate({**manifest_values(), "extra": 1})
     with pytest.raises(ValidationError):
         manifest.rowCount = 3  # type: ignore[misc]
+    with pytest.raises(TypeError):
+        manifest.periodCounts["2026-06"] = 1
+    with pytest.raises(TypeError):
+        manifest.payloads["manifest.json"] = PayloadMetadataV1(
+            sha256="d" * 64, bytes=1
+        )
+
+
+def test_exported_schema_and_writer_constants_are_defensively_immutable() -> None:
+    with pytest.raises(TypeError):
+        PARQUET_WRITER_SETTINGS["compressionLevel"] = 1
+    with pytest.raises(TypeError):
+        EMBEDDINGS_ARROW_SCHEMA[0]["name"] = "changed"
 
 
 @pytest.mark.parametrize(
