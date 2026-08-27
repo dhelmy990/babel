@@ -165,6 +165,26 @@ def _parser() -> argparse.ArgumentParser:
     fault_publish.add_argument("--repo-id", required=True)
     fault_publish.add_argument("--revision", default="main")
     fault_publish.add_argument("--token-env", default="HF_TOKEN")
+
+    representative_build = commands.add_parser(
+        "representative-run-build",
+        help="validate and build one closed non-formal representative trial bundle",
+    )
+    representative_build.add_argument("--trial-id", required=True, type=UUID)
+    representative_build.add_argument("--export-root", required=True, type=Path)
+    representative_build.add_argument("--evidence-root", required=True, type=Path)
+    representative_build.add_argument("--report", required=True, type=Path)
+    representative_build.add_argument("--output-root", required=True, type=Path)
+
+    representative_publish = commands.add_parser(
+        "representative-run-publish",
+        help="publish and remotely verify one closed representative trial bundle",
+    )
+    representative_publish.add_argument("--trial-id", required=True, type=UUID)
+    representative_publish.add_argument("--bundle-root", required=True, type=Path)
+    representative_publish.add_argument("--repo-id", required=True)
+    representative_publish.add_argument("--revision", default="main")
+    representative_publish.add_argument("--token-env", default="HF_TOKEN")
     return parser
 
 
@@ -243,6 +263,67 @@ def _attach_backend_artifact_receipt(
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.command == "representative-run-build":
+        from .representative_publication import build_representative_run_bundle
+
+        bundle = build_representative_run_bundle(
+            args.output_root,
+            trial_id=args.trial_id,
+            export_root=args.export_root,
+            evidence_root=args.evidence_root,
+            report_path=args.report,
+        )
+        print(
+            json.dumps(
+                {
+                    "trialId": str(bundle.trial_id),
+                    "evidenceScope": bundle.evidence_scope,
+                    "formalPerformanceClaim": False,
+                    "bundleRoot": str(bundle.root),
+                    "bundlePath": bundle.bundle_path,
+                    "artifactSha256": bundle.artifact_sha256,
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    if args.command == "representative-run-publish":
+        from huggingface_hub import HfApi
+
+        from .representative_publication import (
+            load_representative_run_bundle,
+            publish_representative_run_bundle,
+        )
+
+        token = os.environ.get(args.token_env)
+        if not token:
+            raise ValueError(f"publication token environment is unset: {args.token_env}")
+        bundle = load_representative_run_bundle(
+            args.bundle_root, trial_id=args.trial_id
+        )
+        receipt = publish_representative_run_bundle(
+            HfApi(),
+            bundle,
+            repo_id=args.repo_id,
+            token=token,
+            revision=args.revision,
+        )
+        print(
+            json.dumps(
+                {
+                    "repository": receipt.repository,
+                    "commitSha": receipt.commit_sha,
+                    "bundlePath": receipt.bundle_path,
+                    "artifactSha256": receipt.artifact_sha256,
+                    "trialId": str(receipt.trial_id),
+                    "evidenceScope": receipt.evidence_scope,
+                    "formalPerformanceClaim": False,
+                    "verifiedFiles": receipt.verified_files,
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
     if args.command == "fault-evidence-publish":
         from huggingface_hub import HfApi
 

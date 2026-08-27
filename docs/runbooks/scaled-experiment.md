@@ -281,8 +281,55 @@ babel-online performance-export \
 
 The resulting manifest records `formalPerformanceClaim=false` and the exact
 representative evidence scope. It cannot enter the formal accepted-model bundle
-or be attached through the formal publisher. Rolling Hugging Face publication
-may copy this directory later under a clearly named representative path.
+or be attached through the formal publisher. Build the closed representative
+bundle from the completed export, all six condition evidence files, and the
+reviewed report:
+
+```bash
+TRIAL_ID='0367346d-98f9-4419-b2db-9194c4c868f7'
+RUN_ROOT="/home/dhelmy990/Data/babel-data/runs/$TRIAL_ID"
+PERF_ROOT='/home/dhelmy990/Data/babel-data/state/performance'
+REPRESENTATIVE_ROOT="$RUN_ROOT/representative-accepted"
+BUILD_RECEIPT="$RUN_ROOT/representative-build-receipt.json"
+
+babel-friday-benchmark representative-run-build \
+  --trial-id "$TRIAL_ID" \
+  --export-root "$RUN_ROOT/representative-export/feedback-export" \
+  --evidence-root "$PERF_ROOT/$TRIAL_ID/conditions" \
+  --report 'docs/experiments/scaled-performance-report.md' \
+  --output-root "$REPRESENTATIVE_ROOT" \
+  > "$BUILD_RECEIPT"
+
+BUNDLE_ROOT="$(jq -r '.bundleRoot' "$BUILD_RECEIPT")"
+```
+
+The builder rechecks the trial ID, exact `formalPerformanceClaim=false` value,
+the `representative_` evidence scope, both declared Parquet checksums and row
+counts, and the six condition bindings. It stages the raw export and condition
+evidence with generated trial summary/results and model-lineage documents,
+report markdown, and a complete checksum inventory. Its content-addressed local
+path is always
+`representative-runs/<TRIAL_ID>/<checksum-inventory-sha256>/`; it never writes
+under `runs/<TRIAL_ID>/`.
+
+Publish that exact closed bundle to the private dataset repository with the
+already loaded token:
+
+```bash
+babel-friday-benchmark representative-run-publish \
+  --trial-id "$TRIAL_ID" \
+  --bundle-root "$BUNDLE_ROOT" \
+  --repo-id 'dhelmy990/babel-wikipedia-experiment' \
+  --revision main \
+  > "$RUN_ROOT/representative-publication-receipt.json"
+```
+
+Publication proves the target dataset repository is private, rejects an
+existing immutable path, uploads only beneath
+`representative-runs/<TRIAL_ID>/<checksum-inventory-sha256>/`, and reloads the
+complete inventory at the returned commit to verify every checksum. The printed
+receipt contains no token. This representative receipt must not be passed to
+`trial-bundle-attach` and cannot claim formal performance evidence.
 
 Do not begin this phase until the trial's complete formal matrix is durably
 `completed` (nine conditions at cohort 50; six at cohorts 100/500), training
