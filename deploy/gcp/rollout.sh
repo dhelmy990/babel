@@ -48,7 +48,7 @@ install -m 0600 SHA256SUMS "$NEW_RELEASE/SHA256SUMS"
 install -m 0700 rollout.sh "$NEW_RELEASE/rollout.sh"
 install -m 0700 rollout_supervisor.sh "$NEW_RELEASE/rollout_supervisor.sh"
 install -m 0700 release.py "$NEW_RELEASE/release.py"
-install -m 0700 predeploy.py "$NEW_RELEASE/predeploy.py"
+install -m 0644 predeploy.py "$NEW_RELEASE/predeploy.py"
 install -m 0700 condition3_gate.sh "$NEW_RELEASE/condition3_gate.sh"
 install -m 0600 compose.yaml "$NEW_RELEASE/compose.yaml"
 install -d -m 0750 -o 10001 -g 10001 /var/lib/babel-online

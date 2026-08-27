@@ -509,6 +509,24 @@ def test_rollout_validates_before_migration_and_rolls_back_on_failed_health() ->
     assert '"$BABEL_SERVING_IMAGE" \\\n  -c \'import torch;' in script
 
 
+def test_rollout_installs_predeploy_readable_by_non_root_trainer() -> None:
+    script = (DEPLOY / "rollout.sh").read_text()
+    dockerfile = (ROOT / "Dockerfile").read_text()
+    online_runtime_stage = dockerfile.split(
+        "FROM python:3.12-slim-bookworm AS online-runtime", 1
+    )[1].split("FROM online-runtime AS serving", 1)[0]
+
+    assert "USER 10001:10001" in online_runtime_stage
+    assert 'install -m 0644 predeploy.py "$NEW_RELEASE/predeploy.py"' in script
+    predeploy_command = script.split(
+        'docker run --rm --network host --env-file "$RUNTIME_ENV"', 1
+    )[1].split('>"$NEW_RELEASE/predeploy-evidence.json"', 1)[0]
+    assert "--user root" not in predeploy_command
+    assert '--volume "$NEW_RELEASE/predeploy.py:/opt/babel-predeploy.py:ro"' in (
+        predeploy_command
+    )
+
+
 def test_condition3_operator_is_bounded_and_never_auto_continues_matrix() -> None:
     script = (DEPLOY / "condition3_gate.sh").read_text()
     worker_source = (
