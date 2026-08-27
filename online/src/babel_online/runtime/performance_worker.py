@@ -797,6 +797,12 @@ class PerformanceJobManager:
         trial = self.database.load_performance_experiment(experiment_id)
         trial.validate_formal_defaults()
         if trial.status == "completed" and trial.operator_approved:
+            if not self.allow_population_build:
+                try:
+                    self._validate_imported_ready_population(trial)
+                except BaseException as error:
+                    self._record_imported_population_failure(experiment_id, error)
+                    raise
             return
         if not (
             trial.operator_approved

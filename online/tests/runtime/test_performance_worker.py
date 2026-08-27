@@ -475,6 +475,104 @@ def test_approval_clones_once_and_replays_one_frozen_workload_across_3x3(tmp_pat
     assert manager.status["phase"] == "completed"
 
 
+@pytest.mark.parametrize(
+    ("binding_failure", "message"),
+    [
+        ("missing", "manifest is unavailable"),
+        ("drifted", "manifest checksum differs"),
+        ("symlinked", "manifest is unavailable"),
+    ],
+)
+def test_completed_guarded_approval_retry_revalidates_imported_binding(
+    tmp_path: Path, binding_failure: str, message: str
+) -> None:
+    database = FakeDatabase()
+    population = _population_manifest()
+    population_dir = tmp_path / "population"
+    population_dir.mkdir()
+    manifest_path = population_dir / "manifest.json"
+    manifest_bytes = population.model_dump_json().encode() + b"\n"
+    manifest_path.write_bytes(manifest_bytes)
+    database.trial = _trial(
+        status="approved",
+        operator_approved=True,
+        population_ready=True,
+        population_run_id=POPULATION_RUN_ID,
+        population_bundle_path=str(population_dir),
+        population_manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+    )
+    frozen = tmp_path / "workload"
+    frozen.mkdir()
+    (frozen / "requests.template.jsonl").write_text("{}\n")
+    calls: list[str] = []
+
+    def freeze(*_args):
+        calls.append("freezer")
+        return type("Frozen", (), {"path": frozen, "identity": (SHA,) * 6})()
+
+    def run(_trial, condition, run_id, _workload, _stop):
+        calls.append("runner")
+        return LiveConditionEvidence(
+            condition_id=condition.id,
+            run_id=run_id,
+            request_count=1,
+            p95_ms=1.0,
+            raw_evidence={"status": "complete"},
+        )
+
+    manager = PerformanceJobManager(
+        database=database,
+        output_root=tmp_path,
+        population_builder=lambda *_args: pytest.fail("population build is disabled"),
+        workload_freezer=freeze,
+        condition_runner=run,
+        population_loader=lambda _path: population,
+        allow_population_build=False,
+    )
+    manager.approve_next_scale(EXPERIMENT_ID)
+    _wait(manager)
+    assert database.trial.status == "completed"
+    calls.clear()
+
+    if binding_failure == "missing":
+        manifest_path.unlink()
+    elif binding_failure == "drifted":
+        manifest_path.write_bytes(manifest_bytes + b" ")
+    else:
+        target = population_dir / "manifest-target.json"
+        target.write_bytes(manifest_bytes)
+        manifest_path.unlink()
+        manifest_path.symlink_to(target)
+
+    with pytest.raises(RuntimeError, match=message):
+        manager.approve_next_scale(EXPERIMENT_ID)
+
+    assert calls == []
+    assert database.trial.status == "failed"
+    assert manager.status["phase"] == "failed"
+
+
+def test_completed_build_enabled_approval_retry_remains_idempotent(tmp_path: Path) -> None:
+    database = FakeDatabase()
+    database.trial = _trial(
+        status="completed",
+        operator_approved=True,
+        population_ready=True,
+    )
+    manager = PerformanceJobManager(
+        database=database,
+        output_root=tmp_path,
+        population_builder=lambda *_args: pytest.fail("completed retry must return"),
+        workload_freezer=lambda *_args: pytest.fail("completed retry must return"),
+        condition_runner=lambda *_args: pytest.fail("completed retry must return"),
+        allow_population_build=True,
+    )
+
+    manager.approve_next_scale(EXPERIMENT_ID)
+
+    assert database.trial.status == "completed"
+
+
 @pytest.mark.parametrize("creator_count", [100, 500])
 def test_higher_cohort_runs_six_conditions_with_one_frozen_workload(
     tmp_path: Path, creator_count: int
