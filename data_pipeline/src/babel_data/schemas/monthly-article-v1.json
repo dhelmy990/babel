@@ -8,7 +8,7 @@
   "properties": {
     "article_key": {"type": "string", "pattern": "^enwiki:[1-9][0-9]*$"},
     "period": {"type": "string", "pattern": "^[0-9]{4}(-[0-9]{2}(-[0-9]{2})?)?$"},
-    "release_scope": {"const": "friday_demo_fixture"},
+    "release_scope": {"enum": ["friday_demo_fixture", "10k_timeboxed_engineering_snapshot"]},
     "source_snapshot": {"type": "string", "format": "date"},
     "namespace": {"const": 0},
     "page_id": {"type": "integer", "minimum": 1},

@@ -40,6 +40,11 @@ from .release import (
 )
 from .shard import load_readiness, write_shards
 from .sources import load_source_manifest
+from .monthly.selection import (
+    CandidateIdentity,
+    EngineeringSnapshotPolicyV1,
+    freeze_joint_selection,
+)
 
 
 DEFAULT_DATA_ROOT = Path("/home/dhelmy990/Data/babel-data")
@@ -136,6 +141,46 @@ def _source_sha256(path: Path) -> str:
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _monthly_candidates(path: Path) -> list[CandidateIdentity]:
+    return [
+        CandidateIdentity(
+            period=str(row["period"]),
+            page_id=int(row["page_id"]),
+            canonical_title=str(row["canonical_title"]),
+            traffic=int(row["traffic"]),
+            priority=int(row.get("priority", 3)),
+        )
+        for row in _jsonl(path)
+    ]
+
+
+def _select_monthly_snapshot(arguments: argparse.Namespace) -> dict[str, object]:
+    policy = EngineeringSnapshotPolicyV1(
+        target_rows=arguments.target_rows,
+        minimum_rows=arguments.minimum_rows,
+        deadline_seconds=arguments.deadline_seconds,
+        seed=arguments.seed,
+    )
+    result = freeze_joint_selection(
+        _monthly_candidates(Path(arguments.june_candidates)),
+        _monthly_candidates(Path(arguments.july_candidates)),
+        policy=policy,
+    )
+    output = Path(arguments.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(result.to_document(), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return {
+        "status": "ok",
+        "command": "select-monthly-snapshot",
+        "output": str(output),
+        "rows_per_month": result.rows_per_month,
+        "ordered_identity_sha256": result.ordered_identity_sha256,
+    }
 
 
 def _manifest_files(manifest_path: Path) -> list[Path]:
@@ -485,6 +530,16 @@ def _parser() -> argparse.ArgumentParser:
     complete.add_argument("--token")
     complete.add_argument("--no-resume", action="store_true")
     complete.set_defaults(handler=_build_complete)
+
+    monthly = commands.add_parser("select-monthly-snapshot")
+    monthly.add_argument("--june-candidates", required=True)
+    monthly.add_argument("--july-candidates", required=True)
+    monthly.add_argument("--output", required=True)
+    monthly.add_argument("--target-rows", type=int, default=10_000)
+    monthly.add_argument("--minimum-rows", type=int, default=5_000)
+    monthly.add_argument("--deadline-seconds", type=float, default=45 * 60)
+    monthly.add_argument("--seed", default="babel-monthly-engineering-v1")
+    monthly.set_defaults(handler=_select_monthly_snapshot)
     return parser
 
 

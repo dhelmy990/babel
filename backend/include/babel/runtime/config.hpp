@@ -25,8 +25,8 @@ struct RuntimeConfig {
   std::optional<std::string> huggingface_token;
   SourceSelection seed_source{
       .repository = "dhelmy990/babel-wikipedia-experiment",
-      .configuration = "demo_catalog_2026_06",
-      .requested_revision = "e1acc648fcace8820dd5ee70bae9216ea4334555",
+      .configuration = "catalog_2026_06",
+      .requested_revision = "0d1ab2c7f0e2295682288fcf10077d2d776bf559",
       .artifact_path = "backend-seed/2026-06/resolved-catalog-v3.jsonl",
   };
   std::filesystem::path huggingface_cache_root{

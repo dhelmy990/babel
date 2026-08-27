@@ -368,14 +368,14 @@ TEST_CASE("runtime configuration is fixed to loopback and rejects unsafe databas
   CHECK(defaults->database_url ==
         "postgresql://babel:babel-local-dev@127.0.0.1:54329/babel");
   CHECK(defaults->seed_source.repository == "dhelmy990/babel-wikipedia-experiment");
-  CHECK(defaults->seed_source.configuration == "demo_catalog_2026_06");
+  CHECK(defaults->seed_source.configuration == "catalog_2026_06");
   CHECK(defaults->experiment_source.repository ==
         "dhelmy990/babel-wikipedia-experiment");
   CHECK(defaults->experiment_source.configuration == "demo_crosswalk");
   CHECK(defaults->experiment_source.commit_sha ==
         "e1acc648fcace8820dd5ee70bae9216ea4334555");
   CHECK(defaults->seed_source.requested_revision ==
-        "e1acc648fcace8820dd5ee70bae9216ea4334555");
+        "0d1ab2c7f0e2295682288fcf10077d2d776bf559");
   CHECK(defaults->seed_source.artifact_path ==
         "backend-seed/2026-06/resolved-catalog-v3.jsonl");
   CHECK(defaults->huggingface_cache_root ==
