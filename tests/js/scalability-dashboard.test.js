@@ -67,7 +67,7 @@ function definitionRows(element) {
   ]));
 }
 
-async function initializeController({ failPoll = false, status = 'running' } = {}) {
+async function initializeController({ failPoll = false, status = 'running', prepareRerun = false } = {}) {
   const document = createDocument();
   const calls = [];
   let detailReads = 0;
@@ -87,16 +87,49 @@ async function initializeController({ failPoll = false, status = 'running' } = {
       if (failPoll && detailReads > 1) return response({}, { ok: false, status: 503 });
       return response({ trial });
     }
+    if (prepareRerun && url === '/admin/api/v1/performance/trial-1/representative-rerun') {
+      return response({ trial: {
+        ...trial, experimentId: '11111111-1111-4111-8111-111111111111',
+        status: 'population_ready', operatorApproved: false,
+        requestIdentity: { evidenceScope: 'representative_same_process_vs_split' },
+        progress: { ...trial.progress, conditionCount: 6 },
+      } }, { status: 201 });
+    }
     throw new Error(`unexpected request: ${url}`);
   };
   const controller = dashboard.createScalabilityController({
     document, fetchImpl, progressApi: progress,
     setIntervalImpl(callback) { intervalCallback = callback; return 17; },
     clearIntervalImpl() {},
+    uuidImpl() { return '11111111-1111-4111-8111-111111111111'; },
   });
   await controller.initialize();
   return { calls, controller, document, intervalCallback, trial };
 }
+
+test('dashboard prepares an unapproved bounded 2x3 rerun from the selected frozen trial', async () => {
+  const context = await initializeController({ status: 'population_ready', prepareRerun: true });
+  context.document.getElementById('performance-rerun-matrix').value = '2x3';
+  context.document.getElementById('performance-rerun-warmup').value = '5';
+  context.document.getElementById('performance-rerun-duration').value = '25';
+  context.document.getElementById('performance-rerun-rps').value = '5';
+
+  await context.document.getElementById('performance-rerun').dispatch('click');
+
+  const [url, options] = context.calls.find(([candidate]) =>
+    candidate.endsWith('/representative-rerun'));
+  assert.equal(url, '/admin/api/v1/performance/trial-1/representative-rerun');
+  assert.equal(options.method, 'POST');
+  assert.equal(options.headers['X-Babel-Admin-Nonce'], 'nonce');
+  assert.deepEqual(JSON.parse(options.body), {
+    rerunId: '11111111-1111-4111-8111-111111111111',
+    matrix: '2x3', warmupSeconds: 5, durationSeconds: 25, targetRps: 5,
+  });
+  assert.equal(context.calls.some(([candidate]) => candidate.endsWith('/approve-next-scale')), false);
+  assert.match(context.document.getElementById('performance-status').textContent,
+    /representative · non-formal/i);
+  assert.equal(context.document.getElementById('performance-approve').disabled, false);
+});
 
 test('trial defaults preserve the real split Qwen experiment', () => {
   assert.deepEqual(dashboard.trialDefaults(), {
@@ -197,6 +230,25 @@ test('population gate rejects mismatched model or dataset provenance', () => {
     },
   };
   assert.equal(dashboard.populationGateView(trial).canRunFormalTrial, false);
+});
+
+test('representative approval is never exposed as a formal measurement gate', () => {
+  const digest = 'a'.repeat(64);
+  const trial = {
+    populationReady: true, operatorApproved: true,
+    requiredVectorCount: 10000, targetCreatedBabels: 10000,
+    modelRepository: 'model/repo', modelRevision: 'b'.repeat(40),
+    datasetRepository: 'dataset/repo', datasetRevision: 'c'.repeat(40),
+    requestIdentity: { evidenceScope: 'representative_same_process_vs_split' },
+    populationEvidence: {
+      vectorCount: 10000, requiredVectorCount: 10000, vectorSha256: digest,
+      modelRepository: 'model/repo', modelRevision: 'b'.repeat(40), modelSha256: digest,
+      datasetRepository: 'dataset/repo', datasetRevision: 'c'.repeat(40), datasetSha256: digest,
+    },
+  };
+  const view = dashboard.populationGateView(trial);
+  assert.equal(view.canRunFormalTrial, false);
+  assert.match(view.message, /representative.*non-formal/i);
 });
 
 test('dashboard polling renders persisted seeded, walk, and Hugging Face evidence', async () => {

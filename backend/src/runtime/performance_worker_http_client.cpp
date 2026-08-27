@@ -4,6 +4,7 @@
 #include <array>
 #include <cctype>
 #include <stdexcept>
+#include <sstream>
 #include <utility>
 
 #include <curl/curl.h>
@@ -109,6 +110,18 @@ Result<void> PerformanceWorkerHttpClient::requestGracefulStop(
 Result<void> PerformanceWorkerHttpClient::approveNextScale(
     std::string_view experiment_id) {
   return command(experiment_id, "approve-next-scale");
+}
+
+Result<void> PerformanceWorkerHttpClient::prepareRerun(
+    std::string_view source_experiment_id,
+    const PerformanceRerunRequest& request) {
+  std::ostringstream action;
+  action << "prepare-rerun/" << request.rerun_id
+         << "?matrix=" << request.matrix
+         << "&warmup_seconds=" << request.warmup_seconds
+         << "&duration_seconds=" << request.duration_seconds
+         << "&target_rps=" << request.target_rps;
+  return command(source_experiment_id, action.str());
 }
 
 }  // namespace babel

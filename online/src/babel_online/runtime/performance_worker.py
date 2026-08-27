@@ -84,6 +84,19 @@ class PerformanceExperiment:
     population_bundle_path: str | None
     population_manifest_sha256: str | None
     conditions: tuple[PerformanceCondition, ...]
+    evidence_scope: str = "formal"
+    source_trial_id: UUID | None = None
+    source_workload_path: str | None = None
+    source_workload_identity: tuple[str, ...] | None = None
+    population_vector_count: int = 0
+    population_vector_sha256: str | None = None
+    population_model_repository: str | None = None
+    population_model_revision: str | None = None
+    population_model_sha256: str | None = None
+    population_dataset_repository: str | None = None
+    population_dataset_revision: str | None = None
+    population_dataset_sha256: str | None = None
+    replay_request_limit: int | None = None
 
     @property
     def condition_count(self) -> int:
@@ -91,7 +104,8 @@ class PerformanceExperiment:
 
     def validate_formal_defaults(self) -> None:
         if (
-            self.creator_count not in {50, 100, 500}
+            self.evidence_scope != "formal"
+            or self.creator_count not in {50, 100, 500}
             or self.target_created_babels != 10_000
             or self.concurrent_users != self.creator_count
             or self.recommendation_start_probability != 0.4
@@ -117,6 +131,51 @@ class PerformanceExperiment:
         }
         if len(self.conditions) != len(expected) or actual != expected:
             raise ValueError("saved trial does not contain its exact condition matrix")
+
+    def validate_runnable_contract(self) -> None:
+        """Accept formal matrices or the explicitly non-formal split-service trio."""
+        if self.evidence_scope == "formal":
+            self.validate_formal_defaults()
+            return
+        if self.evidence_scope not in {
+            "representative_same_process_vs_split",
+            "representative_split_smoke",
+        }:
+            raise ValueError("saved trial has an unsupported evidence scope")
+        topologies = (
+            ("same_process", "same_host_split")
+            if self.evidence_scope == "representative_same_process_vs_split"
+            else ("same_host_split",)
+        )
+        expected = {
+            (topology, training, activation)
+            for topology in topologies
+            for training, activation in ((False, False), (True, False), (True, True))
+        }
+        actual = {
+            (row.topology, row.training_enabled, row.activation_enabled)
+            for row in self.conditions
+        }
+        if (
+            self.creator_count != 50
+            or self.target_created_babels != 10_000
+            or self.concurrent_users != 50
+            or self.recommendation_start_probability != 0.4
+            or self.continuation_probability != 0.4
+            or self.maximum_traversal_depth != 2
+            or self.maximum_requests_per_traversal != 10
+            or not self.interleave_creation_and_recommendations
+            or self.source_trial_id is None
+            or self.source_workload_path is None
+            or self.source_workload_identity is None
+            or self.replay_request_limit is None
+            or self.replay_request_limit <= 0
+            or len(self.conditions) != len(expected)
+            or actual != expected
+        ):
+            raise ValueError(
+                "saved representative trial does not contain the exact same-host split trio"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -565,7 +624,14 @@ def _manifest_sha(manifest: FrozenPopulationManifestV1) -> str:
 def _validate_population_cohort(
     trial: PerformanceExperiment, manifest: FrozenPopulationManifestV1
 ) -> None:
-    if manifest.experimentId != str(trial.id):
+    expected_experiment_id = (
+        trial.source_trial_id
+        if trial.evidence_scope.startswith("representative_")
+        else trial.id
+    )
+    if expected_experiment_id is None or manifest.experimentId != str(
+        expected_experiment_id
+    ):
         raise ValueError("frozen population belongs to another trial")
     if manifest.creatorCount != trial.creator_count:
         raise ValueError("frozen population creator count differs from cohort")
@@ -710,7 +776,7 @@ class PerformanceJobManager:
 
     def start(self, experiment_id: UUID) -> None:
         trial = self.database.load_performance_experiment(experiment_id)
-        trial.validate_formal_defaults()
+        trial.validate_runnable_contract()
         if trial.population_ready:
             if not self.allow_population_build:
                 try:
@@ -795,7 +861,7 @@ class PerformanceJobManager:
 
     def approve_next_scale(self, experiment_id: UUID) -> None:
         trial = self.database.load_performance_experiment(experiment_id)
-        trial.validate_formal_defaults()
+        trial.validate_runnable_contract()
         if trial.status == "completed" and trial.operator_approved:
             if not self.allow_population_build:
                 try:
@@ -860,13 +926,12 @@ class PerformanceJobManager:
             workload = self.workload_freezer(
                 trial, manifest, population_dir, self._stop.is_set
             )
-            request_count = sum(
-                1
-                for line in (workload.path / "requests.template.jsonl").read_text(
-                    encoding="utf-8"
-                ).splitlines()
-                if line.strip()
-            )
+            with (workload.path / "requests.template.jsonl").open(
+                "r", encoding="utf-8"
+            ) as source_requests:
+                request_count = sum(bool(line.strip()) for line in source_requests)
+            if trial.replay_request_limit is not None:
+                request_count = min(request_count, trial.replay_request_limit)
             elapsed = max(1e-9, time.monotonic() - capture_started)
             self.database.append_performance_progress(
                 experiment_id,
@@ -991,6 +1056,39 @@ class PerformanceJobManager:
                 self.database.transition_performance(experiment_id, "interrupted")
                 self._phase = "interrupted"
 
+    def prepare_representative_rerun(
+        self,
+        *,
+        source_trial_id: UUID,
+        rerun_id: UUID,
+        matrix: str,
+        warmup_seconds: int,
+        duration_seconds: int,
+        target_rps: float,
+    ) -> None:
+        """Stage verified frozen inputs; execution still waits on dashboard approval."""
+        from .performance_rerun import (
+            REPRESENTATIVE_SCOPE,
+            SPLIT_SMOKE_SCOPE,
+            create_representative_rerun,
+        )
+
+        if matrix not in {"2x3", "split-smoke"}:
+            raise ValueError("representative rerun matrix is unsupported")
+        create_representative_rerun(
+            database=self.database,
+            source_trial_id=source_trial_id,
+            rerun_id=rerun_id,
+            state_root=self.output_root,
+            evidence_scope=(
+                REPRESENTATIVE_SCOPE if matrix == "2x3" else SPLIT_SMOKE_SCOPE
+            ),
+            warmup_seconds=warmup_seconds,
+            duration_seconds=duration_seconds,
+            target_rps=target_rps,
+        )
+        self.start(rerun_id)
+
     def wait(self, timeout: float | None = None) -> None:
         with self._lock:
             thread = self._thread
@@ -1039,6 +1137,31 @@ def create_performance_control_app(
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.post(
+        "/v1/performance/{source_trial_id}/prepare-rerun/{rerun_id}",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def prepare_rerun(
+        source_trial_id: UUID,
+        rerun_id: UUID,
+        matrix: str = "2x3",
+        warmup_seconds: int = 5,
+        duration_seconds: int = 25,
+        target_rps: float = 5.0,
+        x_babel_worker_token: str | None = Header(default=None),
+    ) -> Response:
+        authorize(x_babel_worker_token)
+        return invoke(
+            lambda: manager.prepare_representative_rerun(
+                source_trial_id=source_trial_id,
+                rerun_id=rerun_id,
+                matrix=matrix,
+                warmup_seconds=warmup_seconds,
+                duration_seconds=duration_seconds,
+                target_rps=target_rps,
+            )
+        )
 
     @app.post(
         "/v1/performance/{experiment_id}/start",

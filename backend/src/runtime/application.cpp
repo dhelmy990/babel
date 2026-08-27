@@ -135,6 +135,10 @@ class UnavailablePerformanceWorker final : public PerformanceExperimentWorker {
   Result<void> start(std::string_view) override { return unavailable(); }
   Result<void> requestGracefulStop(std::string_view) override { return unavailable(); }
   Result<void> approveNextScale(std::string_view) override { return unavailable(); }
+  Result<void> prepareRerun(
+      std::string_view, const PerformanceRerunRequest&) override {
+    return unavailable();
+  }
 
  private:
   static Result<void> unavailable() {
@@ -521,6 +525,15 @@ Result<void> Application::serve() {
                                std::string experiment_id) {
         experiment_controller.performanceGracefulStop(
             request, std::move(experiment_id), std::move(callback));
+      },
+      {drogon::Post});
+  server.registerHandler(
+      "/admin/api/v1/performance/{1}/representative-rerun",
+      [&experiment_controller](const drogon::HttpRequestPtr& request,
+                               ExperimentController::Callback&& callback,
+                               std::string source_experiment_id) {
+        experiment_controller.preparePerformanceRerun(
+            request, std::move(source_experiment_id), std::move(callback));
       },
       {drogon::Post});
   server.registerHandler(

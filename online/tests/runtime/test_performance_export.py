@@ -172,6 +172,61 @@ def test_completed_trial_export_replays_exact_ranges_and_matches_database_edges(
     }
 
 
+def test_formal_export_rejects_explicitly_representative_trial_before_reading_evidence(
+    tmp_path,
+):
+    from babel_online.runtime.performance_export import export_completed_performance_trial
+
+    trial = SimpleNamespace(
+        **{
+            **_completed_trial().__dict__,
+            "evidence_scope": "representative_same_process_vs_split",
+        }
+    )
+    with pytest.raises(ValueError, match="non-formal"):
+        export_completed_performance_trial(
+            database=SimpleNamespace(load_performance_experiment=lambda _id: trial),
+            experiment_id=trial.id,
+            evidence_root=tmp_path / "missing",
+            output_root=tmp_path / "export",
+            feedback_source=object(),
+        )
+
+
+def test_representative_export_is_saved_with_non_formal_scope(tmp_path):
+    from babel_online.runtime.performance_export import (
+        export_completed_representative_trial,
+    )
+
+    trial = SimpleNamespace(
+        **{
+            **_completed_trial(100).__dict__,
+            "evidence_scope": "representative_same_process_vs_split",
+            "creator_count": 50,
+        }
+    )
+    bus = InMemoryFeedbackBus()
+    events = _write_evidence(tmp_path / "conditions", trial, bus)
+    database = SimpleNamespace(
+        load_performance_experiment=lambda _trial_id: trial,
+        canonical_edges=lambda run_id: reconstruct_canonical_edges([events[run_id]]),
+    )
+
+    result = export_completed_representative_trial(
+        database=database,
+        experiment_id=trial.id,
+        evidence_root=tmp_path / "conditions",
+        output_root=tmp_path / "representative-export",
+        feedback_source=bus,
+    )
+
+    manifest = json.loads(result.manifest_path.read_text())
+    assert manifest["evidenceScope"] == "representative_same_process_vs_split"
+    assert manifest["formalPerformanceClaim"] is False
+    assert manifest["conditionCount"] == 6
+    assert manifest["feedbackParquet"]["rows"] == 6
+
+
 @pytest.mark.parametrize("cohort_size", (100, 500))
 def test_higher_cohort_export_replays_exact_six_condition_trial(
     tmp_path, cohort_size

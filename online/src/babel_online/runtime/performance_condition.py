@@ -859,6 +859,18 @@ class RealWorkloadFreezer:
         from .coordinator import StandaloneCoordinator
         from .performance_worker import FrozenWorkload
 
+        if str(getattr(trial, "evidence_scope", "formal")).startswith(
+            "representative_"
+        ):
+            source_path = Path(str(getattr(trial, "source_workload_path", "")))
+            expected_identity = getattr(trial, "source_workload_identity", None)
+            if not source_path.is_dir() or expected_identity is None:
+                raise ValueError("representative rerun source workload is unavailable")
+            existing = load_frozen_workload(source_path)
+            if tuple(existing.identity) != tuple(expected_identity):
+                raise ValueError("reused workload identity differs from dashboard binding")
+            return FrozenWorkload(existing.path, tuple(existing.identity))
+
         output = self.output_root / str(trial.id) / "workload"
         if (output / "manifest.json").is_file():
             existing = load_frozen_workload(output)
@@ -1022,6 +1034,55 @@ class RealWorkloadFreezer:
         return FrozenWorkload(bundle.path, bundle.identity)
 
 
+def _select_replay_subset(
+    workload_path: Path, destination: Path, request_limit: int | None
+) -> tuple[Path, list[dict[str, Any]], int]:
+    """Materialize a request-aligned prefix without changing frozen source files."""
+    request_path = workload_path / "requests.template.jsonl"
+    feedback_path = workload_path / "feedback.template.jsonl"
+    request_lines = [
+        line
+        for line in request_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    feedback_rows = [
+        json.loads(line)
+        for line in feedback_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    source_count = len(request_lines)
+    if source_count == 0:
+        raise ValueError("frozen workload contains no requests")
+    selected_count = source_count if request_limit is None else int(request_limit)
+    if selected_count <= 0 or selected_count > source_count:
+        raise ValueError("representative request limit exceeds frozen workload")
+    selected_lines = request_lines[:selected_count]
+    request_ids = [
+        str(json.loads(line)["request"]["requestId"]) for line in selected_lines
+    ]
+    feedback_by_request: dict[str, dict[str, Any]] = {}
+    for row in feedback_rows:
+        request_id = str(row.get("requestId", ""))
+        if not request_id or request_id in feedback_by_request:
+            raise ValueError("frozen workload feedback identity is invalid")
+        feedback_by_request[request_id] = row
+    if any(request_id not in feedback_by_request for request_id in request_ids):
+        raise ValueError("selected requests lack aligned frozen feedback")
+    if selected_count == source_count:
+        selected_path = request_path
+    else:
+        destination.mkdir(parents=True, exist_ok=True)
+        selected_path = destination / "requests.selected.jsonl"
+        selected_path.write_text(
+            "".join(f"{line}\n" for line in selected_lines), encoding="utf-8"
+        )
+    return (
+        selected_path,
+        [feedback_by_request[request_id] for request_id in request_ids],
+        source_count,
+    )
+
+
 def execute_live_condition(
     *,
     database: Any,
@@ -1076,7 +1137,11 @@ def execute_live_condition(
             frozen, run_id=run_id, output_path=rebound_path
         )
         documents = load_workload_documents(rebound_path)
-    request_path = rebound_path / "requests.template.jsonl"
+    request_path, selected_feedback_rows, source_request_count = _select_replay_subset(
+        rebound_path,
+        condition_directory / "selected-replay",
+        getattr(trial, "replay_request_limit", None),
+    )
     replay = ReplayCorpus.from_jsonl(request_path)
     candidate_path = condition_directory / "candidate-universe.jsonl"
     _write_candidate_universe(database, run_id, candidate_path)
@@ -1088,7 +1153,7 @@ def execute_live_condition(
         raise ValueError("condition run starting model differs from saved trial")
     feedback_events = tuple(
         FeedbackEventV2.model_validate(row)
-        for row in documents["feedback.template.jsonl"]
+        for row in selected_feedback_rows
     )
     feedback_by_request = {row.requestId: row for row in feedback_events}
     request_ids = {row.request.requestId for row in replay.rows}
@@ -1284,6 +1349,9 @@ def execute_live_condition(
     raw = {
         "conditionIdentity": identity.model_dump(mode="json"),
         "workloadIdentity": list(frozen.identity),
+        "evidenceScope": getattr(trial, "evidence_scope", "formal"),
+        "sourceWorkloadRequestCount": source_request_count,
+        "selectedRequestCount": len(replay.rows),
         "warmupCount": warmup_count,
         "measurements": [row.model_dump(mode="json") for row in result.measurements],
         "resources": [row.model_dump(mode="json") for row in result.resources],

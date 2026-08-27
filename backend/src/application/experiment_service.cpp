@@ -334,6 +334,36 @@ Result<PerformanceExperimentDto> ExperimentService::approvePerformanceNextScale(
   return approved;
 }
 
+Result<PerformanceExperimentDto> ExperimentService::preparePerformanceRerun(
+    std::string_view source_experiment_id,
+    const PerformanceRerunRequest& request) {
+  if (source_experiment_id.empty() ||
+      !ExperimentRunId::parse(request.rerun_id).has_value() ||
+      source_experiment_id == request.rerun_id ||
+      (request.matrix != "2x3" && request.matrix != "split-smoke") ||
+      request.warmup_seconds > 3600 || request.duration_seconds == 0 ||
+      request.duration_seconds > 86400 || !std::isfinite(request.target_rps) ||
+      request.target_rps <= 0) {
+    return invalidArgument("representative rerun request is invalid");
+  }
+  if (performance_worker_ == nullptr) {
+    return tl::make_unexpected(ApplicationError{
+        ErrorCode::database_unavailable,
+        "performance worker is required to verify frozen rerun inputs"});
+  }
+  auto source = repository_.getPerformanceExperiment(source_experiment_id);
+  if (!source) return tl::make_unexpected(source.error());
+  if (!source->population_ready || !source->run_id ||
+      !source->population_manifest_sha256 || !source->population_bundle_path) {
+    return tl::make_unexpected(ApplicationError{
+        ErrorCode::conflict,
+        "source trial does not have a reusable frozen population"});
+  }
+  auto prepared = performance_worker_->prepareRerun(source_experiment_id, request);
+  if (!prepared) return tl::make_unexpected(prepared.error());
+  return repository_.getPerformanceExperiment(request.rerun_id);
+}
+
 Result<PerformanceExperimentDto> ExperimentService::markPerformancePopulationReady(
     std::string_view experiment_id, const PerformancePopulationEvidence& evidence) {
   auto trial = getPerformanceExperiment(experiment_id);

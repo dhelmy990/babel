@@ -59,10 +59,13 @@
       && evidence.datasetRepository === trial?.datasetRepository
       && evidence.datasetRevision === trial?.datasetRevision;
     const approved = trial?.operatorApproved === true;
+    const formal = trial?.requestIdentity?.evidenceScope == null
+      || trial.requestIdentity.evidenceScope === 'formal';
     return {
-      canRunFormalTrial: ready && approved,
+      canRunFormalTrial: ready && approved && formal,
       message: !ready ? 'Waiting for exact real model, dataset, vector count, and checksum evidence.'
-        : approved ? 'Population approved for formal measurements.'
+        : approved && formal ? 'Population approved for formal measurements.'
+          : approved ? 'Population approved for representative measurements (non-formal).'
           : 'Population ready; explicit operator approval is required before measurements.',
     };
   }
@@ -93,6 +96,17 @@
     });
   }
 
+  function evidenceScope(trial) {
+    const scope = trial?.requestIdentity?.evidenceScope;
+    if (scope === 'representative_same_process_vs_split') {
+      return { label: 'representative · non-formal 2×3', conditionCount: 6 };
+    }
+    if (scope === 'representative_split_smoke') {
+      return { label: 'representative · non-formal split smoke', conditionCount: 3 };
+    }
+    return { label: 'formal', conditionCount: cohortConditionCount(trial?.creatorCount || 50) };
+  }
+
   async function jsonRequest(fetchImpl, url, options = {}) {
     let response;
     try {
@@ -115,6 +129,7 @@
     const progressApiImpl = options.progressApi || progressApi;
     const setIntervalImpl = options.setIntervalImpl || root.setInterval.bind(root);
     const clearIntervalImpl = options.clearIntervalImpl || root.clearInterval.bind(root);
+    const uuidImpl = options.uuidImpl || (() => root.crypto.randomUUID());
     if (!progressApiImpl?.createTrialProgressPoller || !progressApiImpl?.progressView) {
       throw new Error('The read-only trial progress component is unavailable');
     }
@@ -128,6 +143,9 @@
       'performance-warmup', 'performance-duration', 'performance-rps',
       'performance-safety', 'performance-training-batch', 'performance-sync-steps',
       'performance-interleave', 'performance-create',
+      'performance-rerun-source', 'performance-rerun-matrix',
+      'performance-rerun-warmup', 'performance-rerun-duration',
+      'performance-rerun-rps', 'performance-rerun',
       'performance-approve', 'performance-stop', 'performance-phase',
       'performance-progress', 'performance-rate', 'performance-gate',
       'performance-ratios', 'performance-results', 'performance-telemetry',
@@ -225,7 +243,9 @@
         setStatus('No scalability trial has been saved');
         return;
       }
-      setStatus(`${String(trial.status).replaceAll('_', ' ')} · ${trial.creatorCount || 50} creators · ${trial.progress?.conditionCount || cohortConditionCount(trial.creatorCount || 50)} conditions · ${trial.targetCreatedBabels} Babel target`);
+      const scope = evidenceScope(trial);
+      setStatus(`${String(trial.status).replaceAll('_', ' ')} · ${scope.label} · ${trial.creatorCount || 50} creators · ${trial.progress?.conditionCount || scope.conditionCount} conditions · ${trial.targetCreatedBabels} Babel target`);
+      elements['performance-rerun-source'].textContent = trial.experimentId;
       const gate = populationGateView(trial);
       elements['performance-gate'].textContent = gate.message;
       elements['performance-approve'].disabled = pending || !trial.populationReady
@@ -234,6 +254,7 @@
         'population_pending', 'population_ready', 'approved', 'running', 'stop_requested',
       ].includes(trial.status);
       elements['performance-create'].disabled = pending || ['running', 'draining'].includes(trial.status);
+      elements['performance-rerun'].disabled = pending || trial.populationReady !== true;
       if (persistedProgressView) renderProgress(persistedProgressView);
       else if (trial.progress) renderProgress(progressApiImpl.progressView(trial.progress));
       const telemetry = trial.progress?.telemetry || {};
@@ -254,7 +275,7 @@
       ]);
       elements['performance-results'].replaceChildren();
       const conditionCount = trial.progress?.conditionCount
-        || cohortConditionCount(trial.creatorCount || 50);
+        || scope.conditionCount;
       const results = Array.isArray(trial.results)
         ? [...trial.results].sort((left, right) => (
           Number(left.conditionIndex) - Number(right.conditionIndex)))
@@ -307,7 +328,8 @@
         const body = documentRef.createElement('button');
         heading.textContent = trial.createdAt || trial.experimentId;
         body.type = 'button'; body.className = 'secondary';
-        body.textContent = `${trial.status} · ${trial.creatorCount || 50} creators · ${trial.progress?.conditionCount || cohortConditionCount(trial.creatorCount || 50)} conditions`;
+        const scope = evidenceScope(trial);
+        body.textContent = `${trial.status} · ${scope.label} · ${trial.creatorCount || 50} creators · ${trial.progress?.conditionCount || scope.conditionCount} conditions`;
         body.addEventListener('click', () => loadTrial(trial.experimentId));
         item.appendChild(heading); item.appendChild(body);
         elements['performance-trials'].appendChild(item);
@@ -388,6 +410,16 @@
     }
 
     elements['performance-create'].addEventListener('click', () => mutation('/admin/api/v1/performance', launchBody()));
+    elements['performance-rerun'].addEventListener('click', () => current && mutation(
+      `/admin/api/v1/performance/${encodeURIComponent(current.experimentId)}/representative-rerun`,
+      {
+        rerunId: uuidImpl(),
+        matrix: elements['performance-rerun-matrix'].value || '2x3',
+        warmupSeconds: Number(elements['performance-rerun-warmup'].value),
+        durationSeconds: Number(elements['performance-rerun-duration'].value),
+        targetRps: Number(elements['performance-rerun-rps'].value),
+      },
+    ));
     elements['performance-approve'].addEventListener('click', () => current && mutation(`/admin/api/v1/performance/${encodeURIComponent(current.experimentId)}/approve-next-scale`));
     elements['performance-stop'].addEventListener('click', () => current && mutation(`/admin/api/v1/performance/${encodeURIComponent(current.experimentId)}/graceful-stop`));
 
@@ -424,6 +456,6 @@
   return Object.freeze({
     bindPairedControl, buildTrialRequest, cohortConditionCount, cohortTrialRequest,
     createScalabilityController,
-    interferenceRatios, jsonRequest, populationGateView, trialDefaults,
+    evidenceScope, interferenceRatios, jsonRequest, populationGateView, trialDefaults,
   });
 }));

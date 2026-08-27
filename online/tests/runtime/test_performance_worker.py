@@ -703,6 +703,30 @@ def test_control_app_authenticates_exact_cpp_routes(tmp_path: Path):
         ).status_code
         == 202
     )
+    rerun_id = UUID("dddddddd-dddd-5ddd-8ddd-dddddddddddd")
+    prepared = []
+    manager.prepare_representative_rerun = lambda **values: prepared.append(values)
+    assert (
+        client.post(
+            f"/v1/performance/{EXPERIMENT_ID}/prepare-rerun/{rerun_id}",
+            params={
+                "matrix": "2x3",
+                "warmup_seconds": 5,
+                "duration_seconds": 25,
+                "target_rps": 5.0,
+            },
+            headers={"X-Babel-Worker-Token": token},
+        ).status_code
+        == 202
+    )
+    assert prepared == [{
+        "source_trial_id": EXPERIMENT_ID,
+        "rerun_id": rerun_id,
+        "matrix": "2x3",
+        "warmup_seconds": 5,
+        "duration_seconds": 25,
+        "target_rps": 5.0,
+    }]
     assert (
         client.post(
             f"/v1/performance/{EXPERIMENT_ID}/graceful-stop",
