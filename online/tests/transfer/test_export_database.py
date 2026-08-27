@@ -281,7 +281,7 @@ def configured_source(tmp_path: Path):
     return manifest, cursor
 
 
-def test_export_uses_one_read_only_snapshot_and_exact_binary_selector(
+def test_export_uses_authoritative_evidence_and_exact_binary_selector(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     manifest, cursor = configured_source(tmp_path)
@@ -326,6 +326,10 @@ def test_export_uses_one_read_only_snapshot_and_exact_binary_selector(
     assert transaction_sql == "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
     evidence_sql = next(query for query, _ in cursor.queries if "latest_progress" in query)
     assert "phase IN ('population','population_ready')" in evidence_sql
+    approval_cte = evidence_sql.split("latest_approval AS (", 1)[1].split(")", 1)[0]
+    assert "action='approve_next_scale'" in approval_cte
+    assert "start_matrix" not in approval_cte
+    assert " action IN " not in approval_cte
     selector, parameters = next(
         item for item in cursor.queries if "public.vector_send" in item[0]
     )

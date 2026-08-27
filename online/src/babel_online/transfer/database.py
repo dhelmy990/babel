@@ -238,7 +238,7 @@ WITH latest_progress AS (
 ), latest_approval AS (
   SELECT population_vector_count,population_vector_sha256
   FROM performance_approvals
-  WHERE experiment_id=%s AND action='start_matrix'
+  WHERE experiment_id=%s AND action='approve_next_scale'
   ORDER BY approval_sequence DESC
   LIMIT 1
 )
