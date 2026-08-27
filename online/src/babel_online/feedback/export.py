@@ -28,6 +28,13 @@ class FeedbackExport:
     edge_parquet_path: Path
     manifest_path: Path
 
+    def publication_files(self) -> dict[str, Path]:
+        """Return the canonical observable Parquet inputs for a run bundle."""
+        return {
+            "feedback.parquet": self.parquet_path,
+            "edges.parquet": self.edge_parquet_path,
+        }
+
 
 @dataclass(frozen=True, order=True, slots=True)
 class CanonicalExperimentEdge:

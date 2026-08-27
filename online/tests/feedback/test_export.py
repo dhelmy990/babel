@@ -47,6 +47,10 @@ def test_export_is_exactly_start_inclusive_end_exclusive(tmp_path) -> None:
             "endExclusive": 3,
         }
     ]
+    assert result.publication_files() == {
+        "feedback.parquet": result.parquet_path,
+        "edges.parquet": result.edge_parquet_path,
+    }
 
 
 def test_v2_edge_reconstruction_uses_earliest_event_time_then_id_not_arrival() -> None:

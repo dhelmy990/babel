@@ -99,10 +99,39 @@ from PostgreSQL, then acquires the full June/July bundle from the private Hub at
 the exact recorded commit. It has no live-Wikipedia or arbitrary-local-data
 fallback. See [the experiment runbook](docs/runbooks/online-experiment.md).
 
-Migrations 005 and 006 are schema-only: they never insert placeholder model
-provenance. The worker registers only a configured checksum-verified artifact.
-The repository fixture is visibly labeled as a deterministic demo stand-in and
-must be replaced by the complete Colab artifact for research runs.
+Migrations 005 through 008 are schema-only: they never insert placeholder model
+provenance. The real-model mode downloads and verifies the pinned trained Qwen
+adapter/projection, attaches it to the exact upstream base revision, and serves
+normalized 100-dimensional vectors. The deterministic fixture remains available
+only for bounded smoke tests.
+
+## Run The Scaled Architecture Experiment
+
+The dashboard's separate **Scalability trial** panel saves immutable experiment
+and nine-condition identities. Its default is a same-host split between the
+recommendation server and Kafka-consuming trainer, with pgvector, 50 creators,
+10,000 synthetic-created Babels, 50 concurrent users, interleaved creation and
+recommendation, independent 0.40 walk start/continuation draws, depth 2, and a
+ten-request cap. Paired sliders and numeric inputs allow safe defaults or
+explicit custom populations.
+
+Formal measurement cannot begin merely because population reaches its target.
+The dashboard requires matching model, dataset, 100-dimensional vector count,
+and checksum evidence plus explicit operator approval. It then displays
+independent persisted progress, topology and resource placement, request and
+walk/cache telemetry, Kafka/trainer health, model staleness, activation spikes,
+saved results, and all three interference ratios. Graceful stop drains work and
+preserves the last valid serving model. The immutable original and compatible
+post-run children remain separately selectable.
+
+Accepted runs can be packaged beneath an immutable private-Hub
+`runs/<run-id>/` path. Publication rejects secrets and existing accepted paths,
+then reloads JSON evidence, the reusable child descriptor and serving state,
+and one row from every Parquet file at the returned commit. See [the scaled
+experiment runbook](docs/runbooks/scaled-experiment.md)
+and [operator handoff](prompts/scaled-experiment-handoff.md). A tiny 3-by-3 is
+smoke evidence only; complete a controlled concurrent run before publishing or
+claiming a formal result.
 
 ## Migrate Personal Data
 

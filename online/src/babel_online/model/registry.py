@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
+from pathlib import PurePosixPath
+from typing import Literal
 from uuid import UUID
 
 from ..contracts import ModelManifest, ModelManifestV2
@@ -15,14 +19,46 @@ class IncompatibleChildModel(ValueError):
     pass
 
 
+class DuplicateModelPublication(ValueError):
+    pass
+
+
 class UnknownModel(KeyError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class ModelPublication:
+    model_id: UUID
+    parent_model_id: UUID | None
+    original_model_id: UUID
+    role: Literal["original", "child"]
+    repository: str
+    commit_sha: str
+    manifest_path: str
+    serving_artifact_path: str
+
+    def as_row(self) -> dict[str, object]:
+        return {
+            "modelId": str(self.model_id),
+            "parentModelId": (
+                None if self.parent_model_id is None else str(self.parent_model_id)
+            ),
+            "originalModelId": str(self.original_model_id),
+            "role": self.role,
+            "repository": self.repository,
+            "commitSha": self.commit_sha,
+            "manifestPath": self.manifest_path,
+            "servingArtifactPath": self.serving_artifact_path,
+            "immutable": True,
+        }
 
 
 class ModelRegistry:
     def __init__(self) -> None:
         self._models: dict[UUID, ModelManifest] = {}
         self._original_id: UUID | None = None
+        self._publications: dict[UUID, ModelPublication] = {}
 
     @property
     def original(self) -> ModelManifest:
@@ -80,10 +116,69 @@ class ModelRegistry:
             )
         return manifest
 
+    def record_publication(
+        self,
+        model_id: UUID,
+        *,
+        repository: str,
+        commit_sha: str,
+        manifest_path: str,
+        serving_artifact_path: str,
+    ) -> ModelPublication:
+        """Record one returned immutable Hub commit without replacing its model."""
+        manifest = self.get(model_id)
+        if self._original_id is None:
+            raise UnknownModel("original model is not registered")
+        if model_id in self._publications:
+            raise DuplicateModelPublication(
+                f"model publication already recorded: {model_id}"
+            )
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+            raise ValueError("model publication repository must be owner/name")
+        if not re.fullmatch(r"[0-9a-f]{40,64}", commit_sha):
+            raise ValueError("model publication requires an immutable commit SHA")
+        path = PurePosixPath(manifest_path)
+        if (
+            path.is_absolute()
+            or ".." in path.parts
+            or str(path) != manifest_path
+            or path.name not in {"manifest.json", "model-manifest.json"}
+        ):
+            raise ValueError("model manifest path must be canonical and relative")
+        serving_path = PurePosixPath(serving_artifact_path)
+        if (
+            serving_path.is_absolute()
+            or ".." in serving_path.parts
+            or str(serving_path) != serving_artifact_path
+        ):
+            raise ValueError("serving artifact path must be canonical and relative")
+        publication = ModelPublication(
+            model_id=model_id,
+            parent_model_id=manifest.parentModelId,
+            original_model_id=self._original_id,
+            role="original" if model_id == self._original_id else "child",
+            repository=repository,
+            commit_sha=commit_sha,
+            manifest_path=manifest_path,
+            serving_artifact_path=serving_artifact_path,
+        )
+        self._publications[model_id] = publication
+        return publication
+
+    def publication_ledger(self) -> tuple[ModelPublication, ...]:
+        """Return original first, then children in immutable registration order."""
+        return tuple(
+            self._publications[model_id]
+            for model_id in self._models
+            if model_id in self._publications
+        )
+
 
 __all__ = [
     "DuplicateModel",
+    "DuplicateModelPublication",
     "IncompatibleChildModel",
+    "ModelPublication",
     "ModelRegistry",
     "UnknownModel",
 ]
