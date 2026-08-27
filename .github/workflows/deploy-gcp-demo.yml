@@ -58,6 +58,13 @@ jobs:
           node-version: "24"
           cache: npm
 
+      - name: Set up just
+        run: |
+          set -euo pipefail
+          cargo install --locked --version '=1.57.0' --root "$RUNNER_TEMP/just" just
+          printf '%s\n' "$RUNNER_TEMP/just/bin" >>"$GITHUB_PATH"
+          [[ "$("$RUNNER_TEMP/just/bin/just" --version)" == "just 1.57.0" ]]
+
       - name: Install test dependencies
         run: |
           npm ci

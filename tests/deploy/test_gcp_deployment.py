@@ -155,6 +155,31 @@ def test_workflow_is_wif_only_digest_deployment_from_demo_branch() -> None:
             assert "${{ vars." not in step.get("run", "")
 
 
+def test_workflow_provisions_pinned_just_before_javascript_tests() -> None:
+    workflow = (ROOT / ".github/workflows/deploy-gcp-demo.yml").read_text()
+    steps = yaml.load(workflow, Loader=yaml.BaseLoader)["jobs"]["test"]["steps"]
+    just_index = next(
+        (index for index, step in enumerate(steps) if step.get("name") == "Set up just"),
+        None,
+    )
+    test_index = next(
+        index
+        for index, step in enumerate(steps)
+        if step.get("name") == "Run JavaScript and deployment tests"
+    )
+
+    assert just_index is not None
+    assert just_index < test_index
+    install = steps[just_index]["run"]
+    assert "cargo install --locked --version '=1.57.0'" in install
+    assert '--root "$RUNNER_TEMP/just" just' in install
+    assert '"$RUNNER_TEMP/just/bin" >>"$GITHUB_PATH"' in install
+    assert (
+        '[[ "$("$RUNNER_TEMP/just/bin/just" --version)" == "just 1.57.0" ]]'
+        in install
+    )
+
+
 def test_release_rejects_nonfresh_or_unbound_gcp_ids() -> None:
     release = _load_release_module()
     candidate = _valid_release()
