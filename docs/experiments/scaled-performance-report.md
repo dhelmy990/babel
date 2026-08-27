@@ -54,7 +54,7 @@ strict timeout/process-group behavior.
 
 ## Population
 
-Status: **awaiting operator population approval**.
+Status: **verified 10,000-vector population complete**.
 
 Formal measurement requires a receipt for 5,000 June plus 5,000 July
 synthetic-created Babels, with 10,000 distinct created IDs and 10,000 indexed
@@ -67,14 +67,23 @@ declared threshold invalidate the condition.
 
 The approved source release is
 `dhelmy990/babel-wikipedia-experiment@0d1ab2c7f0e2295682288fcf10077d2d776bf559`.
-No full population or Qwen encoding was launched while implementing this slice.
-The receipt types validate a freeze produced elsewhere; they do not yet export,
-checksum, or clone the 10,000 rows. Those are required Task 12 formal-run steps,
-deliberately held behind operator approval rather than deferred to Task 13.
+On 27 August 2026, population run
+`7f4ad291-e6d0-5bb9-9658-3605c634a3a9` completed and passed the independent
+gate. It contains exactly 10,000 distinct created Babels and 10,000 finite,
+normalized 100-dimensional vectors across 50 creators, split 5,000 June and
+5,000 July. The frozen population manifest SHA-256 is
+`3100687c4fe902d7afe468de141c7a08da81b267e8dd5944c427c825688ca9c7`; the
+ordered vector SHA-256 is
+`ae261599fa06ac3e545619d567b03cb58dc8bcb9794576bbae2d4ef65f0f6ca4`; and
+the pgvector snapshot SHA-256 is
+`bf8e693a8cc341724a40adedcc9da5f769547677ab97f3965ea9a2c0eedf3881`.
+The population uses the pinned trained Qwen adapter and projection from
+`dhelmy990/babel-qwen-navigation-2016-interview@57d949cd634b920cc1a46f27c9b21df094b5240e`.
 
 ## Topology
 
-Status: **bounded live driver passed; formal values pending**.
+Status: **bounded live driver passed; first real-Qwen control matrix stopped at
+condition 3 and is non-formal**.
 
 At cohort 50, the controlled runner expects all nine topology/load conditions.
 At cohorts 100 and 500 it compares the monolith with one operator-selected split
@@ -102,6 +111,34 @@ All current topology labels are same-host. They measure process scheduling,
 memory contention, model-activation pauses, Kafka lag, and failure isolation.
 They do not measure physical-network jitter, NIC bandwidth, remote-machine
 failure, distributed clocks, or separate physical GPUs.
+
+### First real-Qwen control attempt
+
+Trial `ce8e54ff-e317-4a89-b7db-90327e02dc43` froze one deterministic workload
+of 2,464 recommendation requests over the accepted 10,000-Babel population.
+Serving used the exact pinned Qwen LoRA plus 100-dimensional projection and
+pgvector snapshot described above.
+
+- Condition 1, `same_process` serving only: all 2,464 requests succeeded; 150
+  were warm-up and 2,314 were measured; p95 was 18,607.913402 ms.
+- Condition 2, `same_process` training without activation: all 2,464 requests
+  succeeded; p95 was 20,574.653075 ms; all 2,464 Kafka records were consumed
+  and final lag was zero. The observed `Itraining` was approximately 1.1057,
+  or a 10.57% p95 increase.
+- Condition 3, `same_process` training with activation, did not produce
+  accepted condition evidence. The old one-event NumPy updater consumed only
+  640 of 2,464 records before the fixed drain deadline while writing 68 model
+  snapshots (535 MiB of runtime state). The worker failed closed with
+  `online trainer did not drain to captured offsets`; conditions 4 through 9
+  were not started.
+
+This is partial control evidence, not a completed 3x3 result and not eligible
+for formal publication. It proves real trained-Qwen serving and gives a valid
+serving-only baseline, but the training rows use the superseded demo updater.
+Commit `83d0e3c` replaces that updater with a reviewed PyTorch online head,
+real configured micro-batching, trainable creator context/fusion, sparse item
+residuals, complete checkpoint state, and serving activation. The corrective
+run must reuse the frozen population and workload under a new trial identity.
 
 ## Retrieval
 
@@ -156,14 +193,15 @@ execute in `finally`, including when the during-fault probe fails.
 
 ## Formal result table
 
-No formal values have been collected yet. Populate this section only after the
-10,000-vector receipt is approved and the first controlled cohort completes.
+No complete formal matrix has been collected yet. Partial control measurements
+are reported above and must not be presented as a completed topology result.
 
 | Evidence | Status | Artifact |
 |---|---|---|
 | Tiny 3×3 smoke | Live passed; 9 requests; non-formal | `state/live-smoke-actual-v5/receipt.json` |
-| Frozen 10,000-Babel population | Pending | — |
-| Cohort-50 topology matrix | Pending | — |
+| Frozen 10,000-Babel population | Passed | `state/performance/ce8e54ff-e317-4a89-b7db-90327e02dc43/population/manifest.json` |
+| First cohort-50 control attempt | Failed closed at condition 3; non-formal | `state/performance/ce8e54ff-e317-4a89-b7db-90327e02dc43/conditions/` |
+| Corrective cohort-50 topology run | Pending | — |
 | pgvector/HNSW comparison | Pending | — |
 | Cohort 100/500 scale | Pending | — |
 | Live fault campaign | Pending | — |
