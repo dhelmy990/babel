@@ -110,6 +110,14 @@ button.secondary { background: transparent; color: var(--accent); }
 .activity li { display: grid; grid-template-columns: 13rem 1fr; gap: 1rem; padding: .8rem 0; border-top: 1px solid var(--line); font-size: .76rem; line-height: 1.5; overflow-wrap: anywhere; }
 .activity strong { color: var(--accent); font-weight: 500; }
 .activity-error span, .activity-warning span { color: #d6b4a4; }
+.paired-control { grid-column: span 1; }
+.paired-control input[type="range"] { padding: 0; accent-color: var(--accent); }
+.checkbox-control { display: flex; align-items: center; gap: .6rem; padding-top: 1.3rem; }
+.checkbox-control input { width: auto; margin: 0; }
+.contract-note, .trial-progress p { color: var(--muted); font-size: .76rem; line-height: 1.6; }
+.trial-progress { padding: 1.1rem 0; border-bottom: 1px solid var(--line); }
+.trial-progress p { margin: .25rem 0; }
+.trial-progress progress { margin: .75rem 0; }
 
 @media (max-width: 560px) {
   .operations { width: min(100% - 2rem, 58rem); padding-top: 3rem; }

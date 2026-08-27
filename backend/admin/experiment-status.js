@@ -52,7 +52,7 @@
     if (!run || typeof run !== 'object') return [];
     const checkpoint = run.checkpointPath || 'pending';
     const rankLoss = run.rollingRankLoss == null ? 'pending' : number(run.rollingRankLoss);
-    return [
+    const rows = [
       ['Created Babels', String(number(run.createdBabelCount))],
       ['Feedback', String(number(run.feedbackCount))],
       ['Event rate', `${number(run.eventRate)}/s`],
@@ -61,6 +61,16 @@
       ['Checkpoint', checkpoint],
       ['Serving sync', `${run.servingSynced ? 'synced' : 'pending'} · model v${number(run.activeModelVersion)}`],
     ];
+    if (run.placement && typeof run.placement === 'object') {
+      rows.push(['Placement', `${run.placement.topology || 'unknown'} · serving ${run.placement.servingPid ?? 'pending'} · trainer ${run.placement.trainerPid ?? 'pending'}`]);
+    }
+    if (run.sourceVectorOrigins && typeof run.sourceVectorOrigins === 'object') {
+      rows.push(['Vector origins', `qwen ${number(run.sourceVectorOrigins.qwen_encode)} · cache ${number(run.sourceVectorOrigins.cache_hit)} · pgvector ${number(run.sourceVectorOrigins.pgvector_load)}`]);
+    }
+    if (Number.isFinite(run.trainerServingStalenessSteps)) {
+      rows.push(['Model staleness', `${run.trainerServingStalenessSteps} trainer steps`]);
+    }
+    return rows;
   }
 
   function joined(values) {
@@ -77,6 +87,9 @@
         + `candidates ${joined(details.candidateBabelIds)} · include ${joined(details.includeBabelIds)} · `
         + `exclude ${joined(details.excludeBabelIds)} · ignore ${joined(details.ignoreBabelIds)} · `
         + `${edges} accepted edge${edges === 1 ? '' : 's'} · ${details.modelId} v${number(details.modelVersion)}`;
+      if (details.requestId) summary += ` · request ${details.requestId}`;
+      if (details.traversalSessionId) summary += ` · walk ${details.traversalSessionId}`;
+      if (details.sourceVectorOrigin) summary += ` · vector ${details.sourceVectorOrigin}`;
     } else if (details.kind === 'feedback') {
       summary = `${summary} · offset ${number(details.kafkaOffset)} · lag ${number(details.kafkaLag)}`;
     } else if (details.kind === 'training') {

@@ -259,3 +259,110 @@ TEST_CASE_METHOD(ExperimentPostgresFixture,
   CHECK(recovered->status == babel::ExperimentStatus::interrupted);
   CHECK(recovered->failure == "backend restarted before experiment completed");
 }
+
+TEST_CASE_METHOD(ExperimentPostgresFixture,
+                 "performance trials save nine conditions and require frozen population evidence") {
+  const babel::PerformanceLaunchRequest launch{
+      .starting_model_id = model_id_,
+  };
+  const auto created = repository_.createPerformanceExperiment(launch);
+  REQUIRE(created.has_value());
+  CHECK(created->status == babel::PerformanceExperimentStatus::population_pending);
+  CHECK(created->launch.topology == babel::PerformanceTopology::same_host_split);
+  CHECK(created->launch.target_created_babels == 10000);
+  REQUIRE(created->progress.has_value());
+  CHECK(created->progress->condition_count == 9);
+  REQUIRE(repository_.appendPerformanceProgress(
+      created->experiment_id,
+      babel::PerformanceProgressDto{
+          .phase = "measuring", .condition_index = 1, .condition_count = 9,
+          .seeded_articles = 10000, .created_babels = 100,
+          .indexed_babels = 90, .requested = 20, .completed = 18,
+          .elapsed_seconds = 10, .recent_rate = 10, .draining = false,
+          .telemetry_json = R"({"kafkaLag":2})",
+      }).has_value());
+
+  pqxx::connection connection(schemaUrl());
+  pqxx::work transaction(connection);
+  CHECK(transaction.exec(
+      "SELECT count(*) FROM performance_conditions WHERE experiment_id = $1",
+      pqxx::params{created->experiment_id}).one_field().as<int>() == 9);
+  CHECK_THROWS(transaction.exec(
+      "UPDATE performance_experiments SET topology = 'same_process' WHERE id = $1",
+      pqxx::params{created->experiment_id}));
+  transaction.abort();
+
+  const auto blocked = repository_.approvePerformanceNextScale(created->experiment_id);
+  REQUIRE_FALSE(blocked.has_value());
+  CHECK(blocked.error().code == babel::ErrorCode::conflict);
+
+  const auto ready = repository_.markPerformancePopulationReady(
+      created->experiment_id,
+      babel::PerformancePopulationEvidence{
+          .vector_count = 10000,
+          .vector_sha256 = std::string(64, 'a'),
+          .model_repository = "dhelmy990/babel-qwen-navigation-2016-interview",
+          .model_revision = "57d949cd634b920cc1a46f27c9b21df094b5240e",
+          .model_sha256 = std::string(64, 'b'),
+          .dataset_repository = "dhelmy990/babel-wikipedia-experiment",
+          .dataset_revision = "0d1ab2c7f0e2295682288fcf10077d2d776bf559",
+          .dataset_sha256 = std::string(64, 'c'),
+      });
+  REQUIRE(ready.has_value());
+
+  pqxx::connection condition_connection(schemaUrl());
+  pqxx::read_transaction condition_read(condition_connection);
+  const auto condition_id = condition_read.exec(
+      "SELECT id FROM performance_conditions WHERE experiment_id = $1 "
+      "ORDER BY condition_index LIMIT 1",
+      pqxx::params{created->experiment_id}).one_field().as<std::string>();
+  REQUIRE(repository_.savePerformanceResult(
+      created->experiment_id,
+      babel::PerformanceResultDto{
+          .condition_id = condition_id, .condition_index = 1,
+          .topology = babel::PerformanceTopology::same_process,
+          .training_enabled = false, .synchronization_enabled = false,
+          .raw_evidence_json = R"({"requestCount":6})",
+          .evidence_sha256 = std::string(64, 'f'), .serving_p95_ms = 10,
+          .training_p95_ms = 15, .full_p95_ms = 18,
+          .itraining = 1.5, .ifull = 1.8, .iactivation_increment = 1.2,
+      }).has_value());
+
+  const auto approved = repository_.approvePerformanceNextScale(created->experiment_id);
+  REQUIRE(approved.has_value());
+  CHECK(approved->operator_approved);
+  CHECK(approved->status == babel::PerformanceExperimentStatus::approved);
+
+  const auto attached = repository_.attachPerformanceArtifact(
+      created->experiment_id,
+      babel::PerformanceArtifactReceipt{
+          .artifact_sha256 = std::string(64, 'd'),
+          .remote_hf_commit_sha = std::string(40, 'e'),
+          .remote_hf_bundle_path = "runs/trial/evidence",
+      });
+  REQUIRE(attached.has_value());
+  CHECK(attached->remote_hf_bundle_path == "runs/trial/evidence");
+  const auto replacement = repository_.attachPerformanceArtifact(
+      created->experiment_id,
+      babel::PerformanceArtifactReceipt{
+          .artifact_sha256 = std::string(64, 'f'),
+          .remote_hf_commit_sha = std::string(40, 'a'),
+          .remote_hf_bundle_path = "runs/trial/replacement",
+      });
+  REQUIRE_FALSE(replacement.has_value());
+  CHECK(replacement.error().code == babel::ErrorCode::conflict);
+
+  const auto reloaded = repository_.getPerformanceExperiment(created->experiment_id);
+  REQUIRE(reloaded.has_value());
+  REQUIRE(reloaded->progress.has_value());
+  CHECK(reloaded->progress->phase == "measuring");
+  CHECK(reloaded->progress->telemetry_json == R"({"kafkaLag": 2})");
+  REQUIRE(reloaded->results.size() == 1);
+  CHECK(reloaded->results.front().itraining == 1.5);
+  CHECK(reloaded->results.front().ifull == 1.8);
+  CHECK(reloaded->results.front().iactivation_increment == 1.2);
+  const auto listed = repository_.listPerformanceExperiments(10, std::nullopt);
+  REQUIRE(listed.has_value());
+  REQUIRE(listed->size() == 1);
+  CHECK(listed->front().experiment_id == created->experiment_id);
+}

@@ -23,6 +23,14 @@ class ExperimentController final {
   void activity(const drogon::HttpRequestPtr&, std::string run_id, Callback) const;
   void start(const drogon::HttpRequestPtr&, Callback) const;
   void gracefulStop(const drogon::HttpRequestPtr&, std::string run_id, Callback) const;
+  void performanceList(const drogon::HttpRequestPtr&, Callback) const;
+  void performance(const drogon::HttpRequestPtr&, std::string experiment_id,
+                   Callback) const;
+  void createPerformance(const drogon::HttpRequestPtr&, Callback) const;
+  void performanceGracefulStop(const drogon::HttpRequestPtr&,
+                               std::string experiment_id, Callback) const;
+  void approveNextScale(const drogon::HttpRequestPtr&, std::string experiment_id,
+                        Callback) const;
 
  private:
   AdminSecurity& security_;

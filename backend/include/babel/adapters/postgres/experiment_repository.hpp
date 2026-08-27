@@ -20,6 +20,24 @@ class PostgresExperimentRepository final : public ExperimentRepository {
   Result<void> markInterruptedRuns();
   Result<std::vector<ExperimentActivityDto>> activity(
       ExperimentRunId, std::uint64_t after_sequence, std::size_t limit) override;
+  Result<PerformanceExperimentDto> createPerformanceExperiment(
+      const PerformanceLaunchRequest&) override;
+  Result<std::vector<PerformanceExperimentDto>> listPerformanceExperiments(
+      std::size_t limit, std::optional<std::string> before) override;
+  Result<PerformanceExperimentDto> getPerformanceExperiment(
+      std::string_view experiment_id) override;
+  Result<PerformanceExperimentDto> requestPerformanceGracefulStop(
+      std::string_view experiment_id) override;
+  Result<PerformanceExperimentDto> approvePerformanceNextScale(
+      std::string_view experiment_id) override;
+  Result<PerformanceExperimentDto> markPerformancePopulationReady(
+      std::string_view experiment_id, const PerformancePopulationEvidence&) override;
+  Result<PerformanceExperimentDto> attachPerformanceArtifact(
+      std::string_view experiment_id, const PerformanceArtifactReceipt&) override;
+  Result<void> appendPerformanceProgress(
+      std::string_view experiment_id, const PerformanceProgressDto&) override;
+  Result<void> savePerformanceResult(
+      std::string_view experiment_id, const PerformanceResultDto&) override;
 
  private:
   PostgresDatabase& database_;

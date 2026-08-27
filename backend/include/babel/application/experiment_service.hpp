@@ -20,6 +20,23 @@ class ExperimentService final {
                                                        std::size_t limit);
   Result<ExperimentRunStatusDto> start(const ExperimentLaunchRequest&);
   Result<ExperimentRunStatusDto> requestGracefulStop(ExperimentRunId);
+  Result<PerformanceExperimentDto> createPerformanceExperiment(
+      const PerformanceLaunchRequest&);
+  Result<std::vector<PerformanceExperimentDto>> listPerformanceExperiments(
+      std::size_t limit, std::optional<std::string> before);
+  Result<PerformanceExperimentDto> getPerformanceExperiment(std::string_view experiment_id);
+  Result<PerformanceExperimentDto> requestPerformanceGracefulStop(
+      std::string_view experiment_id);
+  Result<PerformanceExperimentDto> approvePerformanceNextScale(
+      std::string_view experiment_id);
+  Result<PerformanceExperimentDto> markPerformancePopulationReady(
+      std::string_view experiment_id, const PerformancePopulationEvidence&);
+  Result<PerformanceExperimentDto> attachPerformanceArtifact(
+      std::string_view experiment_id, const PerformanceArtifactReceipt&);
+  Result<void> appendPerformanceProgress(std::string_view experiment_id,
+                                         const PerformanceProgressDto&);
+  Result<void> savePerformanceResult(std::string_view experiment_id,
+                                     const PerformanceResultDto&);
 
  private:
   ExperimentRepository& repository_;

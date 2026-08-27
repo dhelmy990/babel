@@ -111,6 +111,33 @@ test('feedback, training, synchronization, and lifecycle activity are readable',
   assert.equal(activityView({ message: 'Run draining', details: { kind: 'lifecycle' } }).summary, 'Run draining');
 });
 
+test('scaled run health exposes placement cache origins and model staleness when persisted', () => {
+  const view = healthView({
+    createdBabelCount: 10, feedbackCount: 20, eventRate: 2, kafkaOffset: 20,
+    kafkaLag: 1, trainerSteps: 4, checkpointPath: 'ckpt', servingSynced: false,
+    activeModelVersion: 2, placement: { topology: 'same_host_split', servingPid: 11, trainerPid: 12 },
+    sourceVectorOrigins: { qwen_encode: 2, cache_hit: 8, pgvector_load: 10 },
+    trainerServingStalenessSteps: 3,
+  });
+  assert.deepEqual(view.slice(-3), [
+    ['Placement', 'same_host_split · serving 11 · trainer 12'],
+    ['Vector origins', 'qwen 2 · cache 8 · pgvector 10'],
+    ['Model staleness', '3 trainer steps'],
+  ]);
+  const activity = activityView({
+    component: 'serving', event: 'recommendation',
+    details: {
+      kind: 'recommendation', creatorId: 'c', newBabelTitle: 'Source', newBabelId: 'b',
+      candidateBabelIds: [], includeBabelIds: [], excludeBabelIds: [], ignoreBabelIds: [],
+      acceptedEdgeCount: 0, modelId: 'm', modelVersion: 2, requestId: 'req',
+      traversalSessionId: 'walk', sourceVectorOrigin: 'pgvector_load',
+    },
+  });
+  assert.match(activity.summary, /request req/);
+  assert.match(activity.summary, /walk walk/);
+  assert.match(activity.summary, /vector pgvector_load/);
+});
+
 test('start posts only the public launch request with the admin nonce', async () => {
   const body = { startingModelId: original.modelId, retrievalBackend: 'pgvector', creatorCount: 50, scenario: 'june_to_july', eventBudgetPerMonth: 100, runSeed: 0 };
   const result = await dashboard.startExperiment(async (url, options) => {

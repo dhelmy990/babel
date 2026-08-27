@@ -14,6 +14,18 @@ namespace babel {
 
 enum class RetrievalBackend { pgvector, hnswlib };
 enum class ExperimentScenario { june_only, june_to_july };
+enum class PerformanceTopology { same_process, same_host_split, same_host_isolated };
+enum class PerformanceExperimentStatus {
+  population_pending,
+  population_ready,
+  approved,
+  running,
+  stop_requested,
+  draining,
+  completed,
+  failed,
+  interrupted,
+};
 enum class ExperimentStatus {
   starting,
   running,
@@ -83,6 +95,109 @@ struct ExperimentLaunchSnapshot {
   ExperimentLaunchRequest request;
   ExperimentSourcePin source;
   std::vector<std::string> environment_sequence;
+};
+
+struct PerformanceLaunchRequest {
+  RecommenderModelId starting_model_id;
+  PerformanceTopology topology{PerformanceTopology::same_host_split};
+  std::string model_repository{"dhelmy990/babel-qwen-navigation-2016-interview"};
+  std::string model_revision{"57d949cd634b920cc1a46f27c9b21df094b5240e"};
+  std::string dataset_repository{"dhelmy990/babel-wikipedia-experiment"};
+  std::string dataset_revision{"0d1ab2c7f0e2295682288fcf10077d2d776bf559"};
+  RetrievalBackend retrieval_backend{RetrievalBackend::pgvector};
+  std::size_t creator_count{50};
+  std::size_t seeded_articles{10000};
+  std::size_t target_created_babels{10000};
+  std::size_t concurrent_users{50};
+  double recommendation_start_probability{0.40};
+  double continuation_probability{0.40};
+  std::size_t maximum_traversal_depth{2};
+  std::size_t maximum_requests_per_traversal{10};
+  std::size_t training_micro_batch_size{8};
+  std::size_t sync_every_steps{10};
+  bool interleave_creation_and_recommendations{true};
+  bool auto_advance{false};
+  std::size_t warmup_seconds{30};
+  std::size_t duration_seconds{120};
+  double target_rps{5.0};
+  double latency_safety_threshold_ms{5000.0};
+};
+
+struct PerformanceProgressDto {
+  std::string phase{"population"};
+  std::optional<std::size_t> condition_index{};
+  std::size_t condition_count{9};
+  std::uint64_t seeded_articles{0};
+  std::uint64_t created_babels{0};
+  std::uint64_t indexed_babels{0};
+  std::uint64_t requested{0};
+  std::uint64_t completed{0};
+  double elapsed_seconds{0};
+  double recent_rate{0};
+  bool draining{false};
+  std::string telemetry_json{"{}"};
+};
+
+struct PerformanceResultDto {
+  std::string condition_id;
+  std::size_t condition_index{0};
+  PerformanceTopology topology{PerformanceTopology::same_host_split};
+  bool training_enabled{false};
+  bool synchronization_enabled{false};
+  std::string raw_evidence_json{"{}"};
+  std::string evidence_sha256;
+  double serving_p95_ms{0};
+  std::optional<double> training_p95_ms{};
+  std::optional<double> full_p95_ms{};
+  std::optional<double> itraining{};
+  std::optional<double> ifull{};
+  std::optional<double> iactivation_increment{};
+};
+
+struct PerformancePopulationEvidence {
+  std::uint64_t vector_count{0};
+  std::string vector_sha256;
+  std::string model_repository;
+  std::string model_revision;
+  std::string model_sha256;
+  std::string dataset_repository;
+  std::string dataset_revision;
+  std::string dataset_sha256;
+};
+
+struct PerformanceArtifactReceipt {
+  std::string artifact_sha256;
+  std::string remote_hf_commit_sha;
+  std::string remote_hf_bundle_path;
+};
+
+struct PerformanceExperimentDto {
+  std::string experiment_id;
+  PerformanceExperimentStatus status{PerformanceExperimentStatus::population_pending};
+  PerformanceLaunchRequest launch;
+  bool population_ready{false};
+  std::uint64_t population_vector_count{0};
+  std::optional<std::string> population_vector_sha256{};
+  std::optional<std::string> population_model_repository{};
+  std::optional<std::string> population_model_revision{};
+  std::optional<std::string> population_model_sha256{};
+  std::optional<std::string> population_dataset_repository{};
+  std::optional<std::string> population_dataset_revision{};
+  std::optional<std::string> population_dataset_sha256{};
+  bool operator_approved{false};
+  std::optional<ExperimentRunId> run_id{};
+  std::optional<std::string> placement_manifest_json{};
+  std::optional<std::string> placement_sha256{};
+  std::string hardware_identity_json{"{}"};
+  std::string resource_identity_json{"{}"};
+  std::string request_identity_json{"{}"};
+  std::string feedback_identity_json{"{}"};
+  std::optional<std::string> artifact_sha256{};
+  std::optional<std::string> remote_hf_commit_sha{};
+  std::optional<std::string> remote_hf_bundle_path{};
+  std::optional<PerformanceProgressDto> progress{};
+  std::vector<PerformanceResultDto> results;
+  std::string created_at;
 };
 
 struct ExperimentRunStatusDto {
@@ -166,6 +281,9 @@ struct ExperimentActivityDto {
 [[nodiscard]] std::string_view retrievalBackendName(RetrievalBackend) noexcept;
 [[nodiscard]] std::string_view experimentScenarioName(ExperimentScenario) noexcept;
 [[nodiscard]] std::string_view experimentStatusName(ExperimentStatus) noexcept;
+[[nodiscard]] std::string_view performanceTopologyName(PerformanceTopology) noexcept;
+[[nodiscard]] std::string_view performanceExperimentStatusName(
+    PerformanceExperimentStatus) noexcept;
 [[nodiscard]] bool isTerminal(ExperimentStatus) noexcept;
 
 }  // namespace babel

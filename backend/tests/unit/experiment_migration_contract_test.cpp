@@ -76,7 +76,31 @@ TEST_CASE("scaled experiment migration persists schedules and directed canonical
         std::string::npos);
 }
 
-TEST_CASE("runtime readiness requires every migration through scaled experiment version seven") {
+TEST_CASE("performance migration saves immutable trials evidence progress and approvals") {
+  const auto migration_path =
+      std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
+      "migrations/008_performance_experiments.sql";
+  std::ifstream migration_file(migration_path);
+  REQUIRE(migration_file.good());
+
+  const std::string migration{std::istreambuf_iterator<char>{migration_file}, {}};
+  CHECK(migration.find("CREATE TABLE performance_experiments") != std::string::npos);
+  CHECK(migration.find("CREATE TABLE performance_conditions") != std::string::npos);
+  CHECK(migration.find("CREATE TABLE performance_progress_snapshots") != std::string::npos);
+  CHECK(migration.find("CREATE TABLE performance_results") != std::string::npos);
+  CHECK(migration.find("CREATE TABLE performance_approvals") != std::string::npos);
+  CHECK(migration.find("population_ready") != std::string::npos);
+  CHECK(migration.find("population_model_repository") != std::string::npos);
+  CHECK(migration.find("population_dataset_revision") != std::string::npos);
+  CHECK(migration.find("operator_approved") != std::string::npos);
+  CHECK(migration.find("remote_hf_commit_sha") != std::string::npos);
+  CHECK(migration.find("prevent_performance_identity_mutation") != std::string::npos);
+  CHECK(migration.find("itraining double precision") != std::string::npos);
+  CHECK(migration.find("ifull double precision") != std::string::npos);
+  CHECK(migration.find("iactivation_increment double precision") != std::string::npos);
+}
+
+TEST_CASE("runtime readiness requires every migration through performance version eight") {
   const auto application_path =
       std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
       "src/runtime/application.cpp";
@@ -84,8 +108,8 @@ TEST_CASE("runtime readiness requires every migration through scaled experiment 
   REQUIRE(application_file.good());
 
   const std::string source{std::istreambuf_iterator<char>{application_file}, {}};
-  CHECK(source.find("SELECT count(*) = 7 FROM schema_migrations") !=
+  CHECK(source.find("SELECT count(*) = 8 FROM schema_migrations") !=
         std::string::npos);
-  CHECK(source.find("version IN ('1', '2', '3', '4', '5', '6', '7')") !=
+  CHECK(source.find("version IN ('1', '2', '3', '4', '5', '6', '7', '8')") !=
         std::string::npos);
 }

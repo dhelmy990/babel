@@ -29,8 +29,8 @@ RecommenderModelDto model() {
       .label = "Original 2016 baseline",
       .parent_model_id = std::nullopt,
       .producing_run_id = std::nullopt,
-      .encoder_repo = "dhelmy990/babel-two-tower-recommender",
-      .encoder_revision = std::string(40, 'a'),
+      .encoder_repo = "dhelmy990/babel-qwen-navigation-2016-interview",
+      .encoder_revision = "57d949cd634b920cc1a46f27c9b21df094b5240e",
       .dataset_repo = "dhelmy990/babel-wikipedia-experiment",
       .dataset_revision = std::string(40, 'b'),
       .environment_sequence = {"2026-06"},
@@ -134,7 +134,78 @@ class Repository final : public ExperimentRepository {
         },
     }};
   }
+  Result<PerformanceExperimentDto> createPerformanceExperiment(
+      const PerformanceLaunchRequest& request) override {
+    performance.launch = request;
+    return performance;
+  }
+  Result<std::vector<PerformanceExperimentDto>> listPerformanceExperiments(
+      std::size_t limit, std::optional<std::string> before) override {
+    performance_limit = limit;
+    performance_before = std::move(before);
+    return std::vector<PerformanceExperimentDto>{performance};
+  }
+  Result<PerformanceExperimentDto> getPerformanceExperiment(std::string_view) override {
+    return performance;
+  }
+  Result<PerformanceExperimentDto> requestPerformanceGracefulStop(
+      std::string_view) override {
+    performance.status = PerformanceExperimentStatus::stop_requested;
+    return performance;
+  }
+  Result<PerformanceExperimentDto> approvePerformanceNextScale(
+      std::string_view) override {
+    performance.status = PerformanceExperimentStatus::approved;
+    performance.operator_approved = true;
+    return performance;
+  }
+  Result<PerformanceExperimentDto> markPerformancePopulationReady(
+      std::string_view, const PerformancePopulationEvidence&) override {
+    return performance;
+  }
+  Result<PerformanceExperimentDto> attachPerformanceArtifact(
+      std::string_view, const PerformanceArtifactReceipt&) override {
+    return performance;
+  }
+  Result<void> appendPerformanceProgress(
+      std::string_view, const PerformanceProgressDto&) override {
+    return {};
+  }
+  Result<void> savePerformanceResult(
+      std::string_view, const PerformanceResultDto&) override {
+    return {};
+  }
   std::optional<ExperimentLaunchSnapshot> last_snapshot;
+  PerformanceExperimentDto performance{
+      .experiment_id = "33333333-3333-5333-8333-333333333333",
+      .status = PerformanceExperimentStatus::population_pending,
+      .launch = PerformanceLaunchRequest{.starting_model_id = modelId()},
+      .progress = PerformanceProgressDto{
+          .phase = "population", .condition_index = std::nullopt,
+          .condition_count = 9, .seeded_articles = 5000, .created_babels = 100,
+          .indexed_babels = 90, .requested = 20, .completed = 18,
+          .elapsed_seconds = 10, .recent_rate = 10, .draining = false,
+          .telemetry_json = R"({"kafkaLag":2,"trainerSteps":9})",
+      },
+      .results = {PerformanceResultDto{
+          .condition_id = "44444444-4444-5444-8444-444444444444",
+          .condition_index = 3,
+          .topology = PerformanceTopology::same_host_split,
+          .training_enabled = true,
+          .synchronization_enabled = true,
+          .raw_evidence_json = R"({"requestCount":6})",
+          .evidence_sha256 = std::string(64, 'a'),
+          .serving_p95_ms = 10,
+          .training_p95_ms = 15,
+          .full_p95_ms = 18,
+          .itraining = 1.5,
+          .ifull = 1.8,
+          .iactivation_increment = 1.2,
+      }},
+      .created_at = "2026-08-27T00:00:00.000Z",
+  };
+  std::size_t performance_limit{0};
+  std::optional<std::string> performance_before;
 };
 
 class Worker final : public ExperimentWorker {
@@ -267,4 +338,72 @@ TEST_CASE("experiment launch rejects malformed and unknown operator fields") {
     CHECK(rejected->getStatusCode() == drogon::k400BadRequest);
   }
   CHECK_FALSE(repository.last_snapshot.has_value());
+}
+
+TEST_CASE("saved performance list and progress detail are read only") {
+  Repository repository;
+  Worker worker;
+  ExperimentService service(repository, worker,
+                            ExperimentSourcePin{"repo", "config", std::string(40, 'e')});
+  AdminSecurity security("nonce");
+  ExperimentController controller(security, service);
+
+  auto list_request = request(drogon::Get);
+  list_request->setParameter("limit", "10");
+  list_request->setParameter("before", "2026-08-28T00:00:00.000Z");
+  const auto listed = invoke([&](auto callback) {
+    controller.performanceList(list_request, std::move(callback));
+  });
+  REQUIRE(listed->getStatusCode() == drogon::k200OK);
+  CHECK(repository.performance_limit == 10);
+  CHECK(repository.performance_before == "2026-08-28T00:00:00.000Z");
+  CHECK(body(listed).at("trials").size() == 1);
+
+  const auto detail = invoke([&](auto callback) {
+    controller.performance(request(drogon::Get), repository.performance.experiment_id,
+                           std::move(callback));
+  });
+  REQUIRE(detail->getStatusCode() == drogon::k200OK);
+  const auto trial = body(detail).at("trial");
+  CHECK(trial.at("topology") == "same_host_split");
+  CHECK(trial.at("progress").at("conditionCount") == 9);
+  CHECK(trial.at("progress").at("telemetry").at("kafkaLag") == 2);
+  REQUIRE(trial.at("results").size() == 1);
+  CHECK(trial.at("results").at(0).at("Itraining") == 1.5);
+  CHECK(trial.at("results").at(0).at("Ifull") == 1.8);
+  CHECK(trial.at("results").at(0).at("IActivationIncrement") == 1.2);
+  CHECK(trial.at("results").at(0).at("evidenceSha256") == std::string(64, 'a'));
+}
+
+TEST_CASE("performance mutations require nonce and approval waits for population evidence") {
+  Repository repository;
+  Worker worker;
+  ExperimentService service(repository, worker,
+                            ExperimentSourcePin{"repo", "config", std::string(40, 'e')});
+  AdminSecurity security("nonce");
+  ExperimentController controller(security, service);
+  const auto launch = NJson{{"startingModelId", modelId().value}}.dump();
+
+  const auto forbidden = invoke([&](auto callback) {
+    controller.createPerformance(request(drogon::Post, launch), std::move(callback));
+  });
+  CHECK(forbidden->getStatusCode() == drogon::k403Forbidden);
+
+  auto authorized = request(drogon::Post, launch);
+  authorized->addHeader("x-babel-admin-nonce", "nonce");
+  const auto created = invoke([&](auto callback) {
+    controller.createPerformance(authorized, std::move(callback));
+  });
+  REQUIRE(created->getStatusCode() == drogon::k201Created);
+  CHECK(body(created).at("trial").at("datasetRevision") ==
+        "0d1ab2c7f0e2295682288fcf10077d2d776bf559");
+  CHECK_FALSE(body(created).at("trial").at("autoAdvance").get<bool>());
+
+  auto approve = request(drogon::Post);
+  approve->addHeader("x-babel-admin-nonce", "nonce");
+  const auto blocked = invoke([&](auto callback) {
+    controller.approveNextScale(approve, repository.performance.experiment_id,
+                                std::move(callback));
+  });
+  CHECK(blocked->getStatusCode() == drogon::k409Conflict);
 }

@@ -16,8 +16,8 @@ RecommenderModelDto originalModel() {
       .label = "Original 2016 baseline",
       .parent_model_id = std::nullopt,
       .producing_run_id = std::nullopt,
-      .encoder_repo = "dhelmy990/babel-two-tower-recommender",
-      .encoder_revision = std::string(40, 'a'),
+      .encoder_repo = "dhelmy990/babel-qwen-navigation-2016-interview",
+      .encoder_revision = "57d949cd634b920cc1a46f27c9b21df094b5240e",
       .dataset_repo = "dhelmy990/babel-wikipedia-experiment",
       .dataset_revision = std::string(40, 'b'),
       .environment_sequence = {"2026-06"},
@@ -100,6 +100,65 @@ class FakeRepository final : public ExperimentRepository {
     return std::vector<ExperimentActivityDto>{};
   }
 
+  Result<PerformanceExperimentDto> createPerformanceExperiment(
+      const PerformanceLaunchRequest& request) override {
+    performance_created = request;
+    return performance;
+  }
+  Result<std::vector<PerformanceExperimentDto>> listPerformanceExperiments(
+      std::size_t, std::optional<std::string>) override {
+    return std::vector<PerformanceExperimentDto>{performance};
+  }
+  Result<PerformanceExperimentDto> getPerformanceExperiment(std::string_view) override {
+    return performance;
+  }
+  Result<PerformanceExperimentDto> requestPerformanceGracefulStop(
+      std::string_view) override {
+    performance.status = PerformanceExperimentStatus::stop_requested;
+    return performance;
+  }
+  Result<PerformanceExperimentDto> approvePerformanceNextScale(
+      std::string_view) override {
+    ++approve_calls;
+    if (!performance.population_ready) {
+      return tl::make_unexpected(ApplicationError{ErrorCode::conflict,
+                                                  "population is not ready"});
+    }
+    performance.operator_approved = true;
+    performance.status = PerformanceExperimentStatus::approved;
+    return performance;
+  }
+  Result<PerformanceExperimentDto> markPerformancePopulationReady(
+      std::string_view, const PerformancePopulationEvidence& evidence) override {
+    performance.population_ready = true;
+    performance.population_vector_count = evidence.vector_count;
+    performance.population_vector_sha256 = evidence.vector_sha256;
+    performance.population_model_repository = evidence.model_repository;
+    performance.population_model_revision = evidence.model_revision;
+    performance.population_model_sha256 = evidence.model_sha256;
+    performance.population_dataset_repository = evidence.dataset_repository;
+    performance.population_dataset_revision = evidence.dataset_revision;
+    performance.population_dataset_sha256 = evidence.dataset_sha256;
+    return performance;
+  }
+  Result<PerformanceExperimentDto> attachPerformanceArtifact(
+      std::string_view, const PerformanceArtifactReceipt& receipt) override {
+    performance.artifact_sha256 = receipt.artifact_sha256;
+    performance.remote_hf_commit_sha = receipt.remote_hf_commit_sha;
+    performance.remote_hf_bundle_path = receipt.remote_hf_bundle_path;
+    return performance;
+  }
+  Result<void> appendPerformanceProgress(
+      std::string_view, const PerformanceProgressDto& progress) override {
+    performance.progress = progress;
+    return {};
+  }
+  Result<void> savePerformanceResult(
+      std::string_view, const PerformanceResultDto& result) override {
+    performance.results.push_back(result);
+    return {};
+  }
+
   RecommenderModelDto model{originalModel()};
   ExperimentRunId run_id{
       ExperimentRunId::parse("22222222-2222-5222-8222-222222222222").value()};
@@ -117,6 +176,15 @@ class FakeRepository final : public ExperimentRepository {
   std::string failure;
   int create_calls{0};
   int failed_calls{0};
+  PerformanceExperimentDto performance{
+      .experiment_id = "33333333-3333-5333-8333-333333333333",
+      .status = PerformanceExperimentStatus::population_pending,
+      .launch = PerformanceLaunchRequest{.starting_model_id = model.model_id},
+      .results = {},
+      .created_at = "",
+  };
+  std::optional<PerformanceLaunchRequest> performance_created;
+  int approve_calls{0};
 };
 
 class FakeWorker final : public ExperimentWorker {
@@ -229,4 +297,90 @@ TEST_CASE("graceful stop persists intent and never exposes a kill operation") {
   CHECK(stopped->status == ExperimentStatus::stop_requested);
   CHECK(worker.stop_calls == 1);
   CHECK(worker.stopped_run == repository.run_id);
+}
+
+TEST_CASE("performance trial defaults freeze split real model and scale controls") {
+  FakeRepository repository;
+  FakeWorker worker;
+  ExperimentService service(repository, worker, sourcePin());
+  PerformanceLaunchRequest request{.starting_model_id = repository.model.model_id};
+
+  const auto created = service.createPerformanceExperiment(request);
+
+  REQUIRE(created.has_value());
+  REQUIRE(repository.performance_created.has_value());
+  CHECK(repository.performance_created->topology == PerformanceTopology::same_host_split);
+  CHECK(repository.performance_created->dataset_revision ==
+        "0d1ab2c7f0e2295682288fcf10077d2d776bf559");
+  CHECK(repository.performance_created->model_revision ==
+        "57d949cd634b920cc1a46f27c9b21df094b5240e");
+  CHECK(repository.performance_created->retrieval_backend == RetrievalBackend::pgvector);
+  CHECK(repository.performance_created->creator_count == 50);
+  CHECK(repository.performance_created->seeded_articles == 10000);
+  CHECK(repository.performance_created->target_created_babels == 10000);
+  CHECK(repository.performance_created->concurrent_users == 50);
+  CHECK(repository.performance_created->recommendation_start_probability == 0.40);
+  CHECK(repository.performance_created->continuation_probability == 0.40);
+  CHECK(repository.performance_created->maximum_traversal_depth == 2);
+  CHECK(repository.performance_created->maximum_requests_per_traversal == 10);
+  CHECK(repository.performance_created->training_micro_batch_size == 8);
+  CHECK(repository.performance_created->sync_every_steps == 10);
+  CHECK(repository.performance_created->interleave_creation_and_recommendations);
+  CHECK_FALSE(repository.performance_created->auto_advance);
+}
+
+TEST_CASE("formal performance approval is blocked until exact population evidence exists") {
+  FakeRepository repository;
+  FakeWorker worker;
+  ExperimentService service(repository, worker, sourcePin());
+
+  const auto blocked = service.approvePerformanceNextScale(
+      repository.performance.experiment_id);
+  REQUIRE_FALSE(blocked.has_value());
+  CHECK(blocked.error().code == ErrorCode::conflict);
+
+  repository.performance.population_ready = true;
+  repository.performance.population_vector_count = 10000;
+  repository.performance.population_vector_sha256 = std::string(64, 'a');
+  repository.performance.population_model_repository =
+      repository.performance.launch.model_repository;
+  repository.performance.population_model_revision =
+      repository.performance.launch.model_revision;
+  repository.performance.population_model_sha256 = std::string(64, 'b');
+  repository.performance.population_dataset_repository =
+      repository.performance.launch.dataset_repository;
+  repository.performance.population_dataset_revision =
+      repository.performance.launch.dataset_revision;
+  repository.performance.population_dataset_sha256 = std::string(64, 'c');
+  const auto approved = service.approvePerformanceNextScale(
+      repository.performance.experiment_id);
+  REQUIRE(approved.has_value());
+  CHECK(approved->operator_approved);
+}
+
+TEST_CASE("population ready receipt must match frozen model dataset and vector target") {
+  FakeRepository repository;
+  FakeWorker worker;
+  ExperimentService service(repository, worker, sourcePin());
+  PerformancePopulationEvidence evidence{
+      .vector_count = 10000,
+      .vector_sha256 = std::string(64, 'a'),
+      .model_repository = repository.performance.launch.model_repository,
+      .model_revision = repository.performance.launch.model_revision,
+      .model_sha256 = std::string(64, 'b'),
+      .dataset_repository = repository.performance.launch.dataset_repository,
+      .dataset_revision = repository.performance.launch.dataset_revision,
+      .dataset_sha256 = std::string(64, 'c'),
+  };
+  auto wrong = evidence;
+  wrong.dataset_revision = std::string(40, 'd');
+  const auto rejected = service.markPerformancePopulationReady(
+      repository.performance.experiment_id, wrong);
+  REQUIRE_FALSE(rejected.has_value());
+  CHECK(rejected.error().code == ErrorCode::invalid_argument);
+
+  const auto accepted = service.markPerformancePopulationReady(
+      repository.performance.experiment_id, evidence);
+  REQUIRE(accepted.has_value());
+  CHECK(accepted->population_ready);
 }

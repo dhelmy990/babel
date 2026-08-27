@@ -214,7 +214,12 @@ Result<void> Application::verifySchemaReady() {
           to_regclass('public.experiment_babels') IS NOT NULL AND
           to_regclass('public.experiment_activity_logs') IS NOT NULL AND
           to_regclass('public.babel_embeddings') IS NOT NULL AND
-          to_regclass('public.run_embedding_states') IS NOT NULL
+          to_regclass('public.run_embedding_states') IS NOT NULL AND
+          to_regclass('public.performance_experiments') IS NOT NULL AND
+          to_regclass('public.performance_conditions') IS NOT NULL AND
+          to_regclass('public.performance_progress_snapshots') IS NOT NULL AND
+          to_regclass('public.performance_results') IS NOT NULL AND
+          to_regclass('public.performance_approvals') IS NOT NULL
       )");
     if (!tables_ready.one_field().as<bool>()) {
       return tl::make_unexpected(ApplicationError{
@@ -223,8 +228,8 @@ Result<void> Application::verifySchemaReady() {
       });
     }
     if (transaction.exec(
-            "SELECT count(*) = 7 FROM schema_migrations "
-            "WHERE version IN ('1', '2', '3', '4', '5', '6', '7')")
+            "SELECT count(*) = 8 FROM schema_migrations "
+            "WHERE version IN ('1', '2', '3', '4', '5', '6', '7', '8')")
             .one_field()
             .as<bool>() == false) {
       return tl::make_unexpected(ApplicationError{
@@ -390,6 +395,20 @@ Result<void> Application::serve() {
       },
       {drogon::Get});
   server.registerHandler(
+      "/admin/trial-progress.js",
+      [&admin_controller](const drogon::HttpRequestPtr& request,
+                          AdminController::Callback&& callback) {
+        admin_controller.trialProgressJs(request, std::move(callback));
+      },
+      {drogon::Get});
+  server.registerHandler(
+      "/admin/scalability-dashboard.js",
+      [&admin_controller](const drogon::HttpRequestPtr& request,
+                          AdminController::Callback&& callback) {
+        admin_controller.scalabilityDashboardJs(request, std::move(callback));
+      },
+      {drogon::Get});
+  server.registerHandler(
       "/admin/api/v1/seed",
       [&admin_controller](const drogon::HttpRequestPtr& request,
                           AdminController::Callback&& callback) {
@@ -447,6 +466,47 @@ Result<void> Application::serve() {
                                std::string run_id) {
         experiment_controller.gracefulStop(request, std::move(run_id),
                                            std::move(callback));
+      },
+      {drogon::Post});
+  server.registerHandler(
+      "/admin/api/v1/performance",
+      [&experiment_controller](const drogon::HttpRequestPtr& request,
+                               ExperimentController::Callback&& callback) {
+        experiment_controller.performanceList(request, std::move(callback));
+      },
+      {drogon::Get});
+  server.registerHandler(
+      "/admin/api/v1/performance",
+      [&experiment_controller](const drogon::HttpRequestPtr& request,
+                               ExperimentController::Callback&& callback) {
+        experiment_controller.createPerformance(request, std::move(callback));
+      },
+      {drogon::Post});
+  server.registerHandler(
+      "/admin/api/v1/performance/{1}",
+      [&experiment_controller](const drogon::HttpRequestPtr& request,
+                               ExperimentController::Callback&& callback,
+                               std::string experiment_id) {
+        experiment_controller.performance(request, std::move(experiment_id),
+                                          std::move(callback));
+      },
+      {drogon::Get});
+  server.registerHandler(
+      "/admin/api/v1/performance/{1}/graceful-stop",
+      [&experiment_controller](const drogon::HttpRequestPtr& request,
+                               ExperimentController::Callback&& callback,
+                               std::string experiment_id) {
+        experiment_controller.performanceGracefulStop(
+            request, std::move(experiment_id), std::move(callback));
+      },
+      {drogon::Post});
+  server.registerHandler(
+      "/admin/api/v1/performance/{1}/approve-next-scale",
+      [&experiment_controller](const drogon::HttpRequestPtr& request,
+                               ExperimentController::Callback&& callback,
+                               std::string experiment_id) {
+        experiment_controller.approveNextScale(request, std::move(experiment_id),
+                                               std::move(callback));
       },
       {drogon::Post});
 

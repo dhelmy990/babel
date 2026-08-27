@@ -91,6 +91,116 @@ Json runJson(const ExperimentRunStatusDto& value) {
               {"failure", nullable(value.failure)}};
 }
 
+Json parsedObject(std::string_view value) {
+  auto parsed = Json::parse(value, nullptr, false);
+  return parsed.is_object() ? parsed : Json::object();
+}
+
+Json performanceJson(const PerformanceExperimentDto& value) {
+  const auto& launch = value.launch;
+  Json progress = nullptr;
+  if (value.progress) {
+    progress = Json{{"phase", value.progress->phase},
+                    {"conditionIndex", value.progress->condition_index
+                                           ? Json(*value.progress->condition_index)
+                                           : Json(nullptr)},
+                    {"conditionCount", value.progress->condition_count},
+                    {"seededArticles", value.progress->seeded_articles},
+                    {"targetSeededArticles", launch.seeded_articles},
+                    {"createdBabels", value.progress->created_babels},
+                    {"targetCreatedBabels", launch.target_created_babels},
+                    {"indexedBabels", value.progress->indexed_babels},
+                    {"requested", value.progress->requested},
+                    {"completed", value.progress->completed},
+                    {"elapsedSeconds", value.progress->elapsed_seconds},
+                    {"recentRate", value.progress->recent_rate},
+                    {"draining", value.progress->draining},
+                    {"telemetry", parsedObject(value.progress->telemetry_json)}};
+  }
+  Json results = Json::array();
+  for (const auto& result : value.results) {
+    results.push_back(Json{
+        {"conditionId", result.condition_id},
+        {"conditionIndex", result.condition_index},
+        {"topology", performanceTopologyName(result.topology)},
+        {"trainingEnabled", result.training_enabled},
+        {"synchronizationEnabled", result.synchronization_enabled},
+        {"rawEvidence", parsedObject(result.raw_evidence_json)},
+        {"evidenceSha256", result.evidence_sha256},
+        {"servingP95Ms", result.serving_p95_ms},
+        {"trainingP95Ms", result.training_p95_ms ? Json(*result.training_p95_ms)
+                                                   : Json(nullptr)},
+        {"fullP95Ms", result.full_p95_ms ? Json(*result.full_p95_ms)
+                                           : Json(nullptr)},
+        {"Itraining", result.itraining ? Json(*result.itraining) : Json(nullptr)},
+        {"Ifull", result.ifull ? Json(*result.ifull) : Json(nullptr)},
+        {"IActivationIncrement", result.iactivation_increment
+                                     ? Json(*result.iactivation_increment)
+                                     : Json(nullptr)},
+    });
+  }
+  return Json{
+      {"experimentId", value.experiment_id},
+      {"status", performanceExperimentStatusName(value.status)},
+      {"topology", performanceTopologyName(launch.topology)},
+      {"startingModelId", launch.starting_model_id.value},
+      {"modelRepository", launch.model_repository},
+      {"modelRevision", launch.model_revision},
+      {"datasetRepository", launch.dataset_repository},
+      {"datasetRevision", launch.dataset_revision},
+      {"retrievalBackend", retrievalBackendName(launch.retrieval_backend)},
+      {"creatorCount", launch.creator_count},
+      {"seededArticles", launch.seeded_articles},
+      {"targetCreatedBabels", launch.target_created_babels},
+      {"concurrentUsers", launch.concurrent_users},
+      {"recommendationStartProbability", launch.recommendation_start_probability},
+      {"continuationProbability", launch.continuation_probability},
+      {"maximumTraversalDepth", launch.maximum_traversal_depth},
+      {"maximumRequestsPerTraversal", launch.maximum_requests_per_traversal},
+      {"trainingMicroBatchSize", launch.training_micro_batch_size},
+      {"syncEverySteps", launch.sync_every_steps},
+      {"interleaveCreationAndRecommendations",
+       launch.interleave_creation_and_recommendations},
+      {"autoAdvance", launch.auto_advance},
+      {"warmupSeconds", launch.warmup_seconds},
+      {"durationSeconds", launch.duration_seconds},
+      {"targetRps", launch.target_rps},
+      {"latencySafetyThresholdMs", launch.latency_safety_threshold_ms},
+      {"populationReady", value.population_ready},
+      {"operatorApproved", value.operator_approved},
+      {"vectorCount", value.population_vector_count},
+      {"requiredVectorCount", launch.target_created_babels},
+      {"vectorChecksum", nullable(value.population_vector_sha256)},
+      {"modelChecksum", nullable(value.population_model_sha256)},
+      {"datasetChecksum", nullable(value.population_dataset_sha256)},
+      {"populationEvidence",
+       Json{{"vectorCount", value.population_vector_count},
+            {"requiredVectorCount", launch.target_created_babels},
+            {"vectorSha256", nullable(value.population_vector_sha256)},
+            {"modelRepository", nullable(value.population_model_repository)},
+            {"modelRevision", nullable(value.population_model_revision)},
+            {"modelSha256", nullable(value.population_model_sha256)},
+            {"datasetRepository", nullable(value.population_dataset_repository)},
+            {"datasetRevision", nullable(value.population_dataset_revision)},
+            {"datasetSha256", nullable(value.population_dataset_sha256)}}},
+      {"runId", value.run_id ? Json(value.run_id->value) : Json(nullptr)},
+      {"placement", value.placement_manifest_json
+                            ? parsedObject(*value.placement_manifest_json)
+                            : Json(nullptr)},
+      {"placementSha256", nullable(value.placement_sha256)},
+      {"hardware", parsedObject(value.hardware_identity_json)},
+      {"resources", parsedObject(value.resource_identity_json)},
+      {"requestIdentity", parsedObject(value.request_identity_json)},
+      {"feedbackIdentity", parsedObject(value.feedback_identity_json)},
+      {"artifactSha256", nullable(value.artifact_sha256)},
+      {"remoteHfCommitSha", nullable(value.remote_hf_commit_sha)},
+      {"remoteHfBundlePath", nullable(value.remote_hf_bundle_path)},
+      {"progress", std::move(progress)},
+      {"results", std::move(results)},
+      {"createdAt", value.created_at},
+  };
+}
+
 Json idArray(const std::vector<BabelId>& values) {
   Json result = Json::array();
   for (const auto& value : values) result.push_back(value.value);
@@ -262,6 +372,87 @@ Result<ExperimentLaunchRequest> launchRequest(const drogon::HttpRequestPtr& requ
   }
 }
 
+Result<PerformanceLaunchRequest> performanceLaunchRequest(
+    const drogon::HttpRequestPtr& request) {
+  auto payload = Json::parse(request->body(), nullptr, false);
+  if (!payload.is_object()) return invalidArgument("performance launch must be JSON");
+  const std::set<std::string> allowed{
+      "startingModelId", "topology", "modelRepository", "modelRevision",
+      "datasetRepository", "datasetRevision", "retrievalBackend", "creatorCount",
+      "seededArticles", "targetCreatedBabels", "concurrentUsers",
+      "recommendationStartProbability", "continuationProbability",
+      "maximumTraversalDepth", "maximumRequestsPerTraversal",
+      "trainingMicroBatchSize", "syncEverySteps",
+      "interleaveCreationAndRecommendations", "autoAdvance", "warmupSeconds",
+      "durationSeconds", "targetRps", "latencySafetyThresholdMs"};
+  for (const auto& [key, value] : payload.items()) {
+    static_cast<void>(value);
+    if (!allowed.contains(key)) return invalidArgument("unknown performance launch field");
+  }
+  if (!payload.contains("startingModelId") ||
+      !payload.at("startingModelId").is_string()) {
+    return invalidArgument("startingModelId is required");
+  }
+  auto model_id = RecommenderModelId::parse(
+      payload.at("startingModelId").get<std::string>());
+  if (!model_id) return tl::make_unexpected(model_id.error());
+  try {
+    const auto topology_name = payload.value("topology", "same_host_split");
+    if (topology_name != "same_process" && topology_name != "same_host_split" &&
+        topology_name != "same_host_isolated") {
+      return invalidArgument("topology must be a supported same-host mode");
+    }
+    const auto backend_name = payload.value("retrievalBackend", "pgvector");
+    if (backend_name != "pgvector" && backend_name != "hnswlib") {
+      return invalidArgument("retrievalBackend must be pgvector or hnswlib");
+    }
+    auto defaults = PerformanceLaunchRequest{.starting_model_id = *model_id};
+    return PerformanceLaunchRequest{
+        .starting_model_id = *model_id,
+        .topology = topology_name == "same_process"
+                        ? PerformanceTopology::same_process
+                        : topology_name == "same_host_isolated"
+                              ? PerformanceTopology::same_host_isolated
+                              : PerformanceTopology::same_host_split,
+        .model_repository = payload.value("modelRepository", defaults.model_repository),
+        .model_revision = payload.value("modelRevision", defaults.model_revision),
+        .dataset_repository =
+            payload.value("datasetRepository", defaults.dataset_repository),
+        .dataset_revision = payload.value("datasetRevision", defaults.dataset_revision),
+        .retrieval_backend = backend_name == "hnswlib" ? RetrievalBackend::hnswlib
+                                                        : RetrievalBackend::pgvector,
+        .creator_count = payload.value("creatorCount", defaults.creator_count),
+        .seeded_articles = payload.value("seededArticles", defaults.seeded_articles),
+        .target_created_babels =
+            payload.value("targetCreatedBabels", defaults.target_created_babels),
+        .concurrent_users =
+            payload.value("concurrentUsers", defaults.concurrent_users),
+        .recommendation_start_probability = payload.value(
+            "recommendationStartProbability", defaults.recommendation_start_probability),
+        .continuation_probability = payload.value(
+            "continuationProbability", defaults.continuation_probability),
+        .maximum_traversal_depth = payload.value(
+            "maximumTraversalDepth", defaults.maximum_traversal_depth),
+        .maximum_requests_per_traversal = payload.value(
+            "maximumRequestsPerTraversal", defaults.maximum_requests_per_traversal),
+        .training_micro_batch_size = payload.value(
+            "trainingMicroBatchSize", defaults.training_micro_batch_size),
+        .sync_every_steps = payload.value("syncEverySteps", defaults.sync_every_steps),
+        .interleave_creation_and_recommendations = payload.value(
+            "interleaveCreationAndRecommendations",
+            defaults.interleave_creation_and_recommendations),
+        .auto_advance = payload.value("autoAdvance", defaults.auto_advance),
+        .warmup_seconds = payload.value("warmupSeconds", defaults.warmup_seconds),
+        .duration_seconds = payload.value("durationSeconds", defaults.duration_seconds),
+        .target_rps = payload.value("targetRps", defaults.target_rps),
+        .latency_safety_threshold_ms = payload.value(
+            "latencySafetyThresholdMs", defaults.latency_safety_threshold_ms),
+    };
+  } catch (const std::exception&) {
+    return invalidArgument("performance launch field has invalid type");
+  }
+}
+
 }  // namespace
 
 ExperimentController::ExperimentController(AdminSecurity& security,
@@ -387,6 +578,102 @@ void ExperimentController::gracefulStop(const drogon::HttpRequestPtr& request,
   callback(jsonResponse(drogon::k202Accepted,
                         Json{{"runId", stopped->run_id.value},
                              {"status", experimentStatusName(stopped->status)}}));
+}
+
+void ExperimentController::performanceList(const drogon::HttpRequestPtr& request,
+                                           Callback callback) const {
+  auto limit = unsignedParameter(request->getParameter("limit"), 25);
+  if (!limit || *limit == 0 || *limit > 100) {
+    callback(jsonResponse(drogon::k400BadRequest,
+                          Json{{"error", Json{{"code", "invalid_argument"},
+                                               {"message", "Invalid trial pagination"}}}}));
+    return;
+  }
+  const auto raw_before = request->getParameter("before");
+  std::optional<std::string> before = raw_before.empty()
+                                          ? std::nullopt
+                                          : std::optional<std::string>{raw_before};
+  auto rows = service_.listPerformanceExperiments(
+      static_cast<std::size_t>(*limit), std::move(before));
+  if (!rows) {
+    callback(failure(rows.error(), "Saved performance trials unavailable"));
+    return;
+  }
+  Json trials = Json::array();
+  for (const auto& row : *rows) trials.push_back(performanceJson(row));
+  const auto next_before = rows->empty() ? Json(nullptr) : Json(rows->back().created_at);
+  callback(jsonResponse(drogon::k200OK,
+                        Json{{"trials", std::move(trials)},
+                             {"nextBefore", next_before}}));
+}
+
+void ExperimentController::performance(const drogon::HttpRequestPtr&,
+                                       std::string experiment_id,
+                                       Callback callback) const {
+  auto trial = service_.getPerformanceExperiment(experiment_id);
+  if (!trial) {
+    callback(failure(trial.error(), "Performance trial unavailable"));
+    return;
+  }
+  callback(jsonResponse(drogon::k200OK, Json{{"trial", performanceJson(*trial)}}));
+}
+
+void ExperimentController::createPerformance(const drogon::HttpRequestPtr& request,
+                                             Callback callback) const {
+  if (!security_.authorizeMutation(request)) {
+    callback(jsonResponse(drogon::k403Forbidden,
+                          Json{{"error", Json{{"code", "forbidden"},
+                                               {"message", "Performance request rejected"}}}}));
+    return;
+  }
+  auto parsed = performanceLaunchRequest(request);
+  if (!parsed) {
+    callback(failure(parsed.error(), "Invalid performance launch"));
+    return;
+  }
+  auto created = service_.createPerformanceExperiment(*parsed);
+  if (!created) {
+    callback(failure(created.error(), "Performance trial could not be created"));
+    return;
+  }
+  callback(jsonResponse(drogon::k201Created,
+                        Json{{"trial", performanceJson(*created)}}));
+}
+
+void ExperimentController::performanceGracefulStop(
+    const drogon::HttpRequestPtr& request, std::string experiment_id,
+    Callback callback) const {
+  if (!security_.authorizeMutation(request)) {
+    callback(jsonResponse(drogon::k403Forbidden,
+                          Json{{"error", Json{{"code", "forbidden"},
+                                               {"message", "Performance request rejected"}}}}));
+    return;
+  }
+  auto stopped = service_.requestPerformanceGracefulStop(experiment_id);
+  if (!stopped) {
+    callback(failure(stopped.error(), "Performance trial could not be stopped"));
+    return;
+  }
+  callback(jsonResponse(drogon::k202Accepted,
+                        Json{{"trial", performanceJson(*stopped)}}));
+}
+
+void ExperimentController::approveNextScale(const drogon::HttpRequestPtr& request,
+                                            std::string experiment_id,
+                                            Callback callback) const {
+  if (!security_.authorizeMutation(request)) {
+    callback(jsonResponse(drogon::k403Forbidden,
+                          Json{{"error", Json{{"code", "forbidden"},
+                                               {"message", "Performance request rejected"}}}}));
+    return;
+  }
+  auto approved = service_.approvePerformanceNextScale(experiment_id);
+  if (!approved) {
+    callback(failure(approved.error(), "Population approval gate is not satisfied"));
+    return;
+  }
+  callback(jsonResponse(drogon::k202Accepted,
+                        Json{{"trial", performanceJson(*approved)}}));
 }
 
 }  // namespace babel

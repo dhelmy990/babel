@@ -156,6 +156,18 @@ void AdminController::experimentDashboardJs(const drogon::HttpRequestPtr&,
         std::move(callback));
 }
 
+void AdminController::trialProgressJs(const drogon::HttpRequestPtr&,
+                                      Callback callback) const {
+  asset("trial-progress.js", "application/javascript; charset=utf-8", false,
+        std::move(callback));
+}
+
+void AdminController::scalabilityDashboardJs(const drogon::HttpRequestPtr&,
+                                             Callback callback) const {
+  asset("scalability-dashboard.js", "application/javascript; charset=utf-8", false,
+        std::move(callback));
+}
+
 void AdminController::asset(std::string_view filename, std::string_view content_type,
                             bool inject_nonce, Callback callback) const {
   if (filename.find('/') != std::string_view::npos ||
