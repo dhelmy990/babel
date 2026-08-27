@@ -554,6 +554,7 @@ class RuntimeDatabase:
             interleaveCreationAndRecommendations=(
                 trial.interleave_creation_and_recommendations
             ),
+            trainingMicroBatchSize=trial.training_micro_batch_size,
         )
         self.create_scaled_run(config)
         return run_id

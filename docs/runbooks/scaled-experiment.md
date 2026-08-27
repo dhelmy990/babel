@@ -12,6 +12,15 @@ recommendation POSTs, Kafka feedback, asynchronous training, and immutable
 model activation. Fixture or smoke results can prove wiring but cannot support
 the formal performance claims.
 
+For a post-remediation formal run, online adaptation uses the small PyTorch
+creator-context head, not `NumpyWorkingModel`. The frozen 100-dimensional Qwen
+vectors remain unchanged; scaled feedback trains attention/fusion tensors and
+residuals only for touched candidate Babels. `trainingMicroBatchSize` controls
+the number of feedback events per optimizer step (default 8). Checkpoints bind
+the complete context, residual, Adam, scheduler, offset, step, and version
+state. Activation swaps both materialized pgvector rows and the matching
+context tensors, while the original Qwen model remains immutable/selectable.
+
 > **Active-run warning:** trial
 > `ce8e54ff-e317-4a89-b7db-90327e02dc43` is already building its population.
 > Do not run the preparation/launch commands against it, regenerate its worker

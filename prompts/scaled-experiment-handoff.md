@@ -6,6 +6,14 @@ Qwen population and executes the formal matrix. PostgreSQL/pgvector is the
 durable vector store and Kafka is the feedback path. Neither the 80-row fixture
 nor the deterministic encoder is valid formal evidence.
 
+The formal training conditions must run from a revision containing the real
+PyTorch online head. The head consumes frozen 100-dimensional Qwen vectors,
+trains creator-context attention/fusion plus touched-item residuals in event
+micro-batches, and checkpoints its optimizer/scheduler and Kafka offsets.
+Serving activation must load the same context tensors together with the
+materialized child vectors; a run that still constructs `NumpyWorkingModel` is
+plumbing evidence only.
+
 > **Active-run warning:** trial
 > `ce8e54ff-e317-4a89-b7db-90327e02dc43` is already building its population.
 > Do not rerun the launch commands, regenerate its worker token, or restart its

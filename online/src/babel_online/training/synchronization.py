@@ -77,6 +77,7 @@ class AtomicSynchronizer:
         materialized_state: Any,
         candidate_index: Any,
         vector_records: list[Any],
+        context_tower: Any | None = None,
     ) -> SyncArtifact:
         version = int(materialized_state.model_version)
         if version < 0 or materialized_state.model_id != selected_model_id:
@@ -110,6 +111,7 @@ class AtomicSynchronizer:
             materialized_state=materialized_state,
             candidate_index=candidate_index,
             vector_records=vector_records,
+            context_tower=context_tower,
         )
         return SyncArtifact(final, version, state_sha)
 

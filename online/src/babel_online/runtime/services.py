@@ -131,6 +131,13 @@ class TrainerRole:
         state = _canonical_json(captured.model_state)
         transfer = captured.model_state.get("transferState", {})
         probe_vector = transfer.get("queryVector", [1.0] + [0.0] * 99)
+        probe_expected = probe_vector
+        if captured.model_state.get("modelKind") == "torch_online_recommender_v1":
+            from ..training.torch_working import TorchServingContext
+
+            probe_expected = TorchServingContext.from_working_state(
+                captured.model_state
+            ).semantic_probe(probe_vector)
         child = export_real_qwen_child(
             self.state_root / str(self.run_id) / "models",
             parent=self.parent,
@@ -144,7 +151,7 @@ class TrainerRole:
             probe=KnownVectorProbeV1(
                 schemaVersion=1,
                 inputVector=probe_vector,
-                expectedSemanticSha256=semantic_vector_sha256(probe_vector),
+                expectedSemanticSha256=semantic_vector_sha256(probe_expected),
             ),
             registry=self.registry,
         )
@@ -291,17 +298,13 @@ def load_selected_working_model(
     selected_artifact: tuple[RealQwenChildStateV1 | None, Path | None],
 ) -> Any:
     """Construct the trainer state shared by monolith and split topologies."""
-    from ..training.working import NumpyWorkingModel
+    from ..training.torch_working import TorchOnlineRecommender
 
     frozen = {
         record.babel.babelId: np.asarray(record.vector, dtype="<f4")
         for record in records
     }
-    model = NumpyWorkingModel(
-        frozen,
-        query_vector=np.mean(np.stack(list(frozen.values())), axis=0),
-        learning_rate=0.05,
-    )
+    model = TorchOnlineRecommender(frozen, learning_rate=0.05)
     descriptor, descriptor_path = selected_artifact
     if (descriptor is None) != (descriptor_path is None):
         raise ValueError("selected child descriptor binding is incomplete")
@@ -312,18 +315,15 @@ def load_selected_working_model(
         except ValueError as error:
             raise ValueError("selected child state escapes its artifact") from error
         state = json.loads(state_path.read_text(encoding="utf-8"))
-        # Validate the complete immutable state, then carry forward only the
-        # portable context/optimizer settings.  The records are already the
-        # child's materialized snapshot, so reapplying its old residuals would
-        # move every vector away from the selected child before new feedback.
-        model.load_state_dict(state)
-        transfer = model.transfer_state_dict()
-        learning_rate = model.learning_rate
-        model = NumpyWorkingModel(
-            frozen,
-            query_vector=np.asarray(transfer["queryVector"], dtype="<f4"),
-            learning_rate=learning_rate,
-        )
+        # The selected rows already contain the child's residual materialization.
+        # Carry only its portable creator-context and optimizer schedule into the
+        # new run so residuals are not applied twice.
+        transfer = state.get("transferState")
+        if state.get("modelKind") != TorchOnlineRecommender.model_kind or not isinstance(
+            transfer, Mapping
+        ):
+            raise ValueError("selected child does not contain a real Torch online head")
+        model.load_transfer_state(transfer)
     return model
 
 
@@ -487,7 +487,8 @@ def run_periodic_training(
     published_version = initial_published_version
     while not stop_requested():
         processed = trainer.process_available(
-            max_records=1, poll_timeout_seconds=0.1
+            max_records=getattr(trainer, "micro_batch_size", 1),
+            poll_timeout_seconds=0.1,
         )
         if processed and report_metrics is not None:
             report_metrics()
@@ -574,6 +575,7 @@ def trainer_main(argv: list[str] | None = None) -> int:
             model_id=loaded.manifest.modelId,
             embedding_space_id=loaded.manifest.embeddingSpace.embeddingSpaceId,
         ),
+        micro_batch_size=config.trainingMicroBatchSize,
     )
     restored = trainer.restore_latest()
     if restored is None:
@@ -660,7 +662,7 @@ def serving_main(argv: list[str] | None = None) -> int:
     from ..model.source_vector_cache import SourceVectorResolver
     from ..serving.app import create_app
     from ..serving.state import ServingState
-    from ..training.working import NumpyWorkingModel
+    from ..training.torch_working import TorchOnlineRecommender
 
     parser = argparse.ArgumentParser(prog="babel-recommendation-server")
     parser.add_argument("--run-id", required=True, type=UUID)
@@ -670,7 +672,7 @@ def serving_main(argv: list[str] | None = None) -> int:
         database,
         config,
         loaded,
-        _selected_artifact,
+        selected_artifact,
         registry,
         active,
         records,
@@ -685,9 +687,22 @@ def serving_main(argv: list[str] | None = None) -> int:
         vector_records=records,
         qwen_encoder=encoder,
         scale_run=True,
+        context_tower=(
+            load_selected_working_model(records, selected_artifact)
+            if selected_artifact[0] is not None
+            else None
+        ),
     )
     active_prepared: dict[str, Any] = {
-        "value": (loaded.manifest, active, index, records)
+        "value": (
+            loaded.manifest,
+            active,
+            index,
+            records,
+            None,
+            None,
+            state.snapshot().context_tower,
+        )
     }
 
     def prepare(descriptor: RealQwenChildStateV1, root: Path):
@@ -714,11 +729,7 @@ def serving_main(argv: list[str] | None = None) -> int:
             record.babel.babelId: np.asarray(record.vector, dtype="<f4")
             for record in records
         }
-        probe_model = NumpyWorkingModel(
-            frozen,
-            query_vector=np.mean(np.stack(list(frozen.values())), axis=0),
-            learning_rate=0.05,
-        )
+        probe_model = TorchOnlineRecommender(frozen, learning_rate=0.05)
         probe_model.load_state_dict(online_state)
         materialized = probe_model.materialized_vectors()
         if any(
@@ -745,10 +756,9 @@ def serving_main(argv: list[str] | None = None) -> int:
         descriptor_root = prepared[4]
         state_path = descriptor_root / "online-state.json"
         probe_model = prepared[6]
-        actual = probe_model.transfer_state_dict()["queryVector"]
+        actual = probe_model.semantic_probe(known.inputVector)
         return (
             state_path.is_file()
-            and np.allclose(actual, known.inputVector, rtol=1e-6, atol=1e-7)
             and semantic_vector_sha256(actual) == known.expectedSemanticSha256
             and bool(prepared[3])
         )
@@ -776,10 +786,11 @@ def serving_main(argv: list[str] | None = None) -> int:
             materialized_state=child_state,
             candidate_index=child_index,
             vector_records=child_records,
+            context_tower=prepared[6],
             activation_commit=commit_pointer,
         )
         active_prepared["value"] = prepared
-        if len(prepared) < 6:
+        if prepared[5] is None:
             # Rollback to the original/previous prepared snapshot. It has no
             # child descriptor and must remain selectable without child logs.
             return

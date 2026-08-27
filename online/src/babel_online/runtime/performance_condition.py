@@ -18,6 +18,7 @@ from uuid import UUID, uuid5
 
 from .performance_worker import PerformanceCondition
 from .topology import ResourceRequest, ServiceCommand, Topology
+from ..training.torch_working import TorchServingContext
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,6 +288,11 @@ class _SameProcessHost:
         self.condition = condition
         self._load_records = _load_records
         self._PgvectorCandidateIndex = PgvectorCandidateIndex
+        serving_context = (
+            load_selected_working_model(self.records, selected_artifact)
+            if selected_artifact[0] is not None
+            else None
+        )
         self.serving = ServingState(
             registry=self.registry,
             selected_model_id=loaded.manifest.modelId,
@@ -295,6 +301,7 @@ class _SameProcessHost:
             vector_records=self.records,
             qwen_encoder=encoder,
             scale_run=True,
+            context_tower=serving_context,
         )
         resolver = SourceVectorResolver(
             encoder,
@@ -331,6 +338,7 @@ class _SameProcessHost:
                     model_id=loaded.manifest.modelId,
                     embedding_space_id=loaded.manifest.embeddingSpace.embeddingSpaceId,
                 ),
+                micro_batch_size=self.config.trainingMicroBatchSize,
             )
             self.trainer.training_version = self.active.model_version
             self.role = TrainerRole(
@@ -386,6 +394,14 @@ class _SameProcessHost:
                 self.database.query_candidates
             ),
             vector_records=records,
+            context_tower=TorchServingContext.from_working_state(
+                json.loads(
+                    (
+                        published.child.root
+                        / published.child.descriptor.onlineStatePath
+                    ).read_text(encoding="utf-8")
+                )
+            ),
             activation_commit=commit,
         )
         try:

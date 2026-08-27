@@ -17,6 +17,7 @@ from ..model.candidate_index import CandidateIndex, MaterializedServingState
 from ..model.item_tower import ItemTower, QwenItemTower
 from ..model.qwen_encoder import Qwen100Encoder
 from ..model.registry import ModelRegistry
+from ..model.context_tower import CreatorContextTower
 from ..observable import VectorRecord, ensure_unique_sources
 
 
@@ -27,6 +28,7 @@ class ServingSnapshot:
     materialized_state: MaterializedServingState
     candidate_index: CandidateIndex
     item_tower: ItemTower | QwenItemTower
+    context_tower: object
     vectors_by_babel_id: Mapping[UUID, NDArray[np.float32]]
     source_keys_by_babel_id: Mapping[UUID, str]
     owners_by_babel_id: Mapping[UUID, UUID]
@@ -46,6 +48,7 @@ class ServingState:
         vector_records: list[VectorRecord],
         qwen_encoder: Qwen100Encoder | None = None,
         scale_run: bool = False,
+        context_tower: object | None = None,
     ) -> None:
         self._lock = RLock()
         self._registry = registry
@@ -56,6 +59,7 @@ class ServingState:
             candidate_index,
             vector_records,
             qwen_encoder,
+            context_tower or CreatorContextTower.original(),
         )
 
     def _build_snapshot(
@@ -65,6 +69,7 @@ class ServingState:
         candidate_index: CandidateIndex,
         vector_records: list[VectorRecord],
         qwen_encoder: Qwen100Encoder | None,
+        context_tower: object,
     ) -> ServingSnapshot:
         model = (
             self._registry.select_for_scale(selected_model_id)
@@ -133,6 +138,7 @@ class ServingState:
             materialized_state=materialized_state,
             candidate_index=candidate_index,
             item_tower=item_tower,
+            context_tower=context_tower,
             vectors_by_babel_id=MappingProxyType(vectors),
             source_keys_by_babel_id=MappingProxyType(source_keys),
             owners_by_babel_id=MappingProxyType(owners),
@@ -151,6 +157,7 @@ class ServingState:
         candidate_index: CandidateIndex,
         vector_records: list[VectorRecord],
         qwen_encoder: Qwen100Encoder | None = None,
+        context_tower: object | None = None,
         activation_commit: Callable[[], None] | None = None,
     ) -> None:
         if qwen_encoder is None:
@@ -163,6 +170,7 @@ class ServingState:
             candidate_index,
             vector_records,
             qwen_encoder,
+            context_tower or self.snapshot().context_tower,
         )
         with self._lock:
             if activation_commit is not None:

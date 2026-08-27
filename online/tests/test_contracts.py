@@ -363,6 +363,7 @@ def test_scaled_v2_contracts_close_walk_identity_and_preserve_v1() -> None:
     assert run.maximumTraversalDepth == 2
     assert run.maximumRequestsPerTraversal == 10
     assert run.interleaveCreationAndRecommendations is True
+    assert run.trainingMicroBatchSize == 8
     disabled_interleave = RunConfigV2.model_validate(
         {**run.model_dump(mode="json"), "interleaveCreationAndRecommendations": False}
     )
@@ -370,6 +371,10 @@ def test_scaled_v2_contracts_close_walk_identity_and_preserve_v1() -> None:
     with pytest.raises(ValidationError):
         RunConfigV2.model_validate(
             {**run.model_dump(mode="json"), "targetCreatedBabels": 9_999}
+        )
+    with pytest.raises(ValidationError):
+        RunConfigV2.model_validate(
+            {**run.model_dump(mode="json"), "trainingMicroBatchSize": 0}
         )
 
     root = RecommendationRequestV2.model_validate(valid_request_v2(depth=0))

@@ -6,11 +6,14 @@ from .loss import weighted_pairwise_loss
 from .pairs import TrainingPair, pairs_from_event
 from .synchronization import AtomicSynchronizer, SyncArtifact, export_immutable_child
 from .working import NumpyWorkingModel
+from .torch_working import TorchOnlineRecommender, TorchServingContext
 
 __all__ = [
     "AtomicSynchronizer",
     "CheckpointState",
     "NumpyWorkingModel",
+    "TorchOnlineRecommender",
+    "TorchServingContext",
     "OnlineTrainer",
     "SyncArtifact",
     "TrainingPair",

@@ -5,6 +5,7 @@ from pathlib import Path
 import time
 from uuid import UUID
 
+import numpy as np
 from fastapi.testclient import TestClient
 
 from babel_online.contracts import (
@@ -32,7 +33,9 @@ def read_jsonl(path: Path) -> list[dict[str, object]]:
     return [json.loads(line) for line in path.read_text().splitlines() if line]
 
 
-def serving_state() -> tuple[ServingState, ModelRegistry, set[str], set[str]]:
+def serving_state(
+    *, context_tower=None
+) -> tuple[ServingState, ModelRegistry, set[str], set[str]]:
     model = ModelManifestV1.model_validate_json((FIXTURE / "original-model.json").read_text())
     registry = ModelRegistry()
     registry.register_original(model)
@@ -67,6 +70,7 @@ def serving_state() -> tuple[ServingState, ModelRegistry, set[str], set[str]]:
         materialized_state=materialized,
         candidate_index=index,
         vector_records=records,
+        context_tower=context_tower,
     )
     return (
         state,
@@ -117,6 +121,25 @@ def test_serving_health_reports_last_valid_model_without_trainer_dependency() ->
         "modelId": "00000000-0000-5000-8000-000000000002",
         "modelVersion": 0,
     }
+
+
+def test_serving_snapshot_uses_an_activated_online_context_head() -> None:
+    class ActivatedContext:
+        def __call__(self, *, new, history):
+            vector = np.zeros(100, dtype=np.float32)
+            vector[17] = 1.0
+            return vector
+
+    state, _registry, _created_ids, _created_sources = serving_state(
+        context_tower=ActivatedContext()
+    )
+
+    query = state.snapshot().context_tower(
+        new=np.eye(100, dtype=np.float32)[0],
+        history=np.empty((0, 100), dtype=np.float32),
+    )
+
+    assert query[17] == 1.0
 
 
 def test_fixture_smoke_also_keeps_one_long_lived_item_tower() -> None:

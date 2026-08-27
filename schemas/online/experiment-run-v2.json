@@ -188,6 +188,13 @@
       "exclusiveMinimum": 0,
       "title": "Topl",
       "type": "integer"
+    },
+    "trainingMicroBatchSize": {
+      "default": 8,
+      "maximum": 1024,
+      "minimum": 1,
+      "title": "Trainingmicrobatchsize",
+      "type": "integer"
     }
   },
   "required": [

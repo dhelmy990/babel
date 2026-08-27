@@ -71,6 +71,7 @@ from ..training.checkpoint import CheckpointIdentity, load_latest_checkpoint
 from ..training.consumer import OnlineTrainer
 from ..training.synchronization import AtomicSynchronizer, export_immutable_child
 from ..training.working import NumpyWorkingModel
+from ..training.torch_working import TorchOnlineRecommender, TorchServingContext
 from .database import RuntimeDatabase, lifecycle_activity
 from .dataset_bundle import DatasetBundle
 
@@ -388,6 +389,12 @@ class FridayDemoRuntime:
         materialized_state: MaterializedServingState,
         records: list[VectorRecord],
     ) -> ServingState:
+        working = getattr(self, "model", None)
+        context_tower = (
+            TorchServingContext.from_working_state(working.state_dict())
+            if self.scale_run and isinstance(working, TorchOnlineRecommender)
+            else None
+        )
         return ServingState(
             registry=self.registry,
             selected_model_id=self.starting_model.modelId,
@@ -396,6 +403,7 @@ class FridayDemoRuntime:
             vector_records=records,
             qwen_encoder=self.qwen_encoder,
             scale_run=self.scale_run,
+            context_tower=context_tower,
         )
 
     def _simulation_draw(
@@ -480,12 +488,18 @@ class FridayDemoRuntime:
             backend_sha256=sha,
         )
         if synchronize:
+            context_tower = (
+                TorchServingContext.from_working_state(captured_model_state)
+                if self.scale_run and captured_model_state is not None
+                else None
+            )
             artifact = self.synchronizer.publish(
                 model_state=captured_model_state,
                 selected_model_id=self.starting_model.modelId,
                 materialized_state=state,
                 candidate_index=self.index,
                 vector_records=records,
+                context_tower=context_tower,
             )
             self._last_sync_version = version
             self.database.append_activity(
@@ -1221,6 +1235,13 @@ class FridayDemoRuntime:
         ).encode("utf-8")
         transfer = self.model.state_dict().get("transferState", {})
         probe_vector = transfer.get("queryVector", [1.0] + [0.0] * 99)
+        probe_expected = (
+            TorchServingContext.from_working_state(self.model.state_dict()).semantic_probe(
+                probe_vector
+            )
+            if isinstance(self.model, TorchOnlineRecommender)
+            else probe_vector
+        )
         exported = export_real_qwen_child(
             Path(self.config.artifactRoot) / str(self.config.runId) / "models",
             parent=self.starting_model,
@@ -1234,7 +1255,7 @@ class FridayDemoRuntime:
             probe=KnownVectorProbeV1(
                 schemaVersion=1,
                 inputVector=probe_vector,
-                expectedSemanticSha256=semantic_vector_sha256(probe_vector),
+                expectedSemanticSha256=semantic_vector_sha256(probe_expected),
             ),
             registry=self.registry,
         )
@@ -1297,6 +1318,7 @@ class FridayDemoRuntime:
                 materialized_state=child_state,
                 candidate_index=self.index,
                 vector_records=child_records,
+                context_tower=self.model if self.scale_run else None,
             )
             self._records = child_records
         self.database.update_metrics(
@@ -1368,8 +1390,13 @@ class FridayDemoRuntime:
         plan = self._plan()
         frozen = self._encode_plan_vectors(plan)
         self._frozen_vectors = {key: value.copy() for key, value in frozen.items()}
-        query = np.mean(np.stack(list(frozen.values())), axis=0)
-        self.model = NumpyWorkingModel(frozen, query_vector=query, learning_rate=0.05)
+        if self.scale_run:
+            self.model = TorchOnlineRecommender(frozen, learning_rate=0.05)
+        else:
+            query = np.mean(np.stack(list(frozen.values())), axis=0)
+            self.model = NumpyWorkingModel(
+                frozen, query_vector=query, learning_rate=0.05
+            )
         starting_state = self._load_starting_online_state()
         if isinstance(starting_state, dict) and isinstance(
             starting_state.get("transferState"), dict
@@ -1425,6 +1452,11 @@ class FridayDemoRuntime:
                 run_id=self.config.runId,
                 model_id=self.starting_model.modelId,
                 embedding_space_id=self.starting_model.embeddingSpace.embeddingSpaceId,
+            ),
+            micro_batch_size=(
+                self.config.trainingMicroBatchSize
+                if isinstance(self.config, RunConfigV2)
+                else 1
             ),
         )
         self._trainer_thread = threading.Thread(

@@ -16,7 +16,6 @@ from ..contracts import (
     RecommendationResponseV1,
     RecommendationResponseV2,
 )
-from ..model.context_tower import CreatorContextTower
 from ..model.source_vector_cache import SourceVectorResolver, VectorCacheKey
 from .state import ServingState
 from .timings import server_timing_header
@@ -148,7 +147,7 @@ def create_app(
                 if history_vectors
                 else np.empty((0, 100), dtype="<f4")
             )
-            query = CreatorContextTower.original()(new=new_vector, history=history)
+            query = snapshot.context_tower(new=new_vector, history=history)
             context_ns = perf_counter_ns() - started
 
             started = perf_counter_ns()

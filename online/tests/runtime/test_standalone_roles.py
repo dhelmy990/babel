@@ -26,6 +26,7 @@ from babel_online.runtime.services import (
     run_periodic_training,
     load_selected_working_model,
 )
+from babel_online.training.torch_working import TorchOnlineRecommender
 import pytest
 
 
@@ -389,14 +390,12 @@ def test_same_process_and_split_training_load_identical_selected_child_state(
                 vector=tuple(float(value) for value in vector),
             )
         )
-    state = {
-        "learningRate": 0.017,
-        "transferState": {"queryVector": ([0.0, 1.0] + [0.0] * 98)},
-        "residuals": {
-            str(babel_ids[0]): ([0.0, 0.25] + [0.0] * 98),
-            str(babel_ids[1]): ([-0.125] + [0.0] * 99),
-        },
+    frozen = {
+        record.babel.babelId: np.asarray(record.vector, dtype="<f4")
+        for record in records
     }
+    selected_model = TorchOnlineRecommender(frozen, learning_rate=0.017)
+    state = selected_model.state_dict()
     descriptor_path = tmp_path / "model" / "state-descriptor.json"
     descriptor_path.parent.mkdir()
     (descriptor_path.parent / "online-state.json").write_text(json.dumps(state))
@@ -414,9 +413,7 @@ def test_same_process_and_split_training_load_identical_selected_child_state(
             same_process.materialized_vector(record.babel.babelId),
             np.asarray(record.vector, dtype="<f4"),
         )
-        assert np.allclose(
-            same_process.residual(record.babel.babelId), np.zeros(100)
-        )
+        assert np.allclose(same_process.residual(record.babel.babelId), np.zeros(100))
 
 
 def test_original_training_starts_without_child_state() -> None:
@@ -441,5 +438,31 @@ def test_original_training_starts_without_child_state() -> None:
 
     model = load_selected_working_model([record], (None, None))
 
+    assert isinstance(model, TorchOnlineRecommender)
     assert model.learning_rate == 0.05
     assert np.allclose(model.residual(record.babel.babelId), np.zeros(100))
+
+
+def test_periodic_training_polls_the_configured_micro_batch() -> None:
+    calls = []
+
+    class Trainer:
+        micro_batch_size = 8
+        training_version = 0
+        processed_events = 0
+
+        def process_available(self, **kwargs):
+            calls.append(kwargs["max_records"])
+            return 0
+
+    run_periodic_training(
+        Trainer(),
+        stop_requested=lambda: len(calls) == 1,
+        checkpoint_every_events=100,
+        sync_every_steps=10,
+        activation_enabled=False,
+        publish_update=lambda: None,
+        initial_published_version=0,
+    )
+
+    assert calls == [8]

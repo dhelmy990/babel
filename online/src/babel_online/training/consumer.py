@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,11 +37,22 @@ class OnlineTrainer:
         consumer: FeedbackConsumer,
         checkpoint_root: str | Path,
         identity: CheckpointIdentity | None = None,
+        micro_batch_size: int = 1,
+        batch_fill_timeout_seconds: float = 2.0,
     ) -> None:
+        if micro_batch_size <= 0:
+            raise ValueError("training micro-batch size must be positive")
+        if (
+            batch_fill_timeout_seconds <= 0
+            or not math.isfinite(batch_fill_timeout_seconds)
+        ):
+            raise ValueError("batch fill timeout must be positive and finite")
         self.model = model
         self.consumer = consumer
         self.checkpoint_root = Path(checkpoint_root)
         self.identity = identity
+        self.micro_batch_size = int(micro_batch_size)
+        self.batch_fill_timeout_seconds = float(batch_fill_timeout_seconds)
         self.global_step = 0
         self.training_version = 0
         self.processed_events = 0
@@ -83,32 +95,69 @@ class OnlineTrainer:
     ) -> int:
         processed = 0
         while max_records is None or processed < max_records:
-            if end_offsets is not None and all(
-                self.next_offsets.get(partition, 0) >= bound
-                for partition, bound in end_offsets.items()
-            ):
+            batch = []
+            remaining = (
+                self.micro_batch_size
+                if max_records is None
+                else min(self.micro_batch_size, max_records - processed)
+            )
+            fill_deadline: float | None = None
+            while len(batch) < remaining:
+                observed_offsets = dict(self.next_offsets)
+                for pending in batch:
+                    observed_offsets[pending.topic_partition] = pending.offset + 1
+                if end_offsets is not None and all(
+                    observed_offsets.get(partition, 0) >= bound
+                    for partition, bound in end_offsets.items()
+                ):
+                    break
+                if batch:
+                    if fill_deadline is None:
+                        fill_deadline = time.monotonic() + self.batch_fill_timeout_seconds
+                    wait_seconds = max(0.0, fill_deadline - time.monotonic())
+                    if wait_seconds == 0.0:
+                        break
+                else:
+                    wait_seconds = poll_timeout_seconds
+                record = self.consumer.poll(wait_seconds)
+                if record is None:
+                    break
+                partition = record.topic_partition
+                if end_offsets is not None and record.offset >= end_offsets[partition]:
+                    self.consumer.seek({partition: record.offset})
+                    break
+                batch.append(record)
+            if not batch:
                 break
-            record = self.consumer.poll(poll_timeout_seconds)
-            if record is None:
-                break
-            partition = record.topic_partition
-            if end_offsets is not None and record.offset >= end_offsets[partition]:
-                self.consumer.seek({partition: record.offset})
-                break
-            pairs = pairs_from_event(record.event)
             with self._lock:
-                if pairs:
+                batch_events = [record.event for record in batch]
+                has_pairs = any(pairs_from_event(event) for event in batch_events)
+                event_aware = hasattr(self.model, "train_events")
+                if event_aware or has_pairs:
                     step_started = time.perf_counter_ns()
-                    loss = float(self.model.train_pairs(pairs))
-                    self.last_step_time_ms = (
-                        time.perf_counter_ns() - step_started
-                    ) / 1_000_000
-                    self.losses.append(loss)
-                    self.global_step += 1
-                    self.training_version += 1
-                self.next_offsets[partition] = record.offset + 1
-                self.processed_events += 1
-            processed += 1
+                    if event_aware:
+                        trained = self.model.train_events(batch_events)
+                    else:
+                        pairs = tuple(
+                            pair
+                            for event in batch_events
+                            for pair in pairs_from_event(event)
+                        )
+                        trained = self.model.train_pairs(pairs)
+                    if trained is None and has_pairs:
+                        raise RuntimeError("pair-bearing batch did not produce a loss")
+                    if trained is not None:
+                        loss = float(trained)
+                        self.last_step_time_ms = (
+                            time.perf_counter_ns() - step_started
+                        ) / 1_000_000
+                        self.losses.append(loss)
+                        self.global_step += 1
+                        self.training_version += 1
+                for record in batch:
+                    self.next_offsets[record.topic_partition] = record.offset + 1
+                self.processed_events += len(batch)
+            processed += len(batch)
         return processed
 
     def run_until_stopped(
@@ -122,7 +171,7 @@ class OnlineTrainer:
             raise ValueError("checkpoint interval must be positive")
         while not stop_requested():
             processed = self.process_available(
-                max_records=1,
+                max_records=self.micro_batch_size,
                 poll_timeout_seconds=poll_timeout_seconds,
             )
             if processed and self.processed_events % checkpoint_every_events == 0:
@@ -141,7 +190,7 @@ class OnlineTrainer:
             for partition, bound in end_offsets.items()
         ):
             self.process_available(
-                max_records=1,
+                max_records=self.micro_batch_size,
                 end_offsets=end_offsets,
                 poll_timeout_seconds=poll_timeout_seconds,
             )

@@ -129,6 +129,7 @@ class RunConfigV2(RunConfigV1):
     maximumTraversalDepth: Literal[2] = 2
     maximumRequestsPerTraversal: int = Field(default=10, ge=1, le=10)
     interleaveCreationAndRecommendations: bool = True
+    trainingMicroBatchSize: int = Field(default=8, ge=1, le=1024)
 
     @model_validator(mode="after")
     def concurrency_is_bounded_by_creators(self) -> "RunConfigV2":

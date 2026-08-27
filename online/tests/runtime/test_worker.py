@@ -418,6 +418,9 @@ def test_v2_plan_vectors_and_serving_use_same_injected_qwen(
     ).ModelRegistry()
     runtime.registry.register_real_original(model)
     runtime.index = PgvectorCandidateIndex(lambda *_args: [])
+    from babel_online.training.torch_working import TorchOnlineRecommender
+
+    runtime.model = TorchOnlineRecommender({babel_id: expected})
     state = MaterializedServingState(
         run_id=run_id,
         model_id=model.modelId,
@@ -431,6 +434,7 @@ def test_v2_plan_vectors_and_serving_use_same_injected_qwen(
 
     assert isinstance(serving.snapshot().item_tower, QwenItemTower)
     assert serving.snapshot().item_tower.encoder is encoder
+    assert serving.snapshot().context_tower is not runtime.model
     babel = CreatedBabel(
         babelId=babel_id,
         runId=run_id,

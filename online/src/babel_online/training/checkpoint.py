@@ -116,10 +116,14 @@ def save_online_checkpoint(
                 "nextOffsets": _offset_rows(next_offsets),
                 "metrics": dict(metrics),
                 "modelState": dict(model_state),
-                "optimizerState": {
-                    "kind": "sgd",
-                    "learningRate": model_state.get("learningRate"),
-                },
+                "optimizerState": model_state.get(
+                    "optimizerState",
+                    {
+                        "kind": "sgd",
+                        "learningRate": model_state.get("learningRate"),
+                    },
+                ),
+                "schedulerState": model_state.get("schedulerState"),
                 "rngStateBase64": base64.b64encode(rng_state or _rng_bytes()).decode(
                     "ascii"
                 ),
