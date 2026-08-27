@@ -393,8 +393,8 @@ def test_same_process_and_split_training_load_identical_selected_child_state(
         "learningRate": 0.017,
         "transferState": {"queryVector": ([0.0, 1.0] + [0.0] * 98)},
         "residuals": {
-            str(babel_ids[0]): ([0.25] + [0.0] * 99),
-            str(babel_ids[1]): ([0.0, -0.125] + [0.0] * 98),
+            str(babel_ids[0]): ([0.0, 0.25] + [0.0] * 98),
+            str(babel_ids[1]): ([-0.125] + [0.0] * 99),
         },
     }
     descriptor_path = tmp_path / "model" / "state-descriptor.json"
@@ -405,9 +405,18 @@ def test_same_process_and_split_training_load_identical_selected_child_state(
     same_process = load_selected_working_model(records, selected)
     split_process = load_selected_working_model(records, selected)
 
-    assert same_process.state_dict() == state
-    assert split_process.state_dict() == state
+    assert same_process.state_dict() == split_process.state_dict()
     assert same_process.frozen_bytes() == split_process.frozen_bytes()
+    assert same_process.learning_rate == state["learningRate"]
+    assert same_process.transfer_state_dict() == state["transferState"]
+    for record in records:
+        assert np.allclose(
+            same_process.materialized_vector(record.babel.babelId),
+            np.asarray(record.vector, dtype="<f4"),
+        )
+        assert np.allclose(
+            same_process.residual(record.babel.babelId), np.zeros(100)
+        )
 
 
 def test_original_training_starts_without_child_state() -> None:

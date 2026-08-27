@@ -312,7 +312,18 @@ def load_selected_working_model(
         except ValueError as error:
             raise ValueError("selected child state escapes its artifact") from error
         state = json.loads(state_path.read_text(encoding="utf-8"))
+        # Validate the complete immutable state, then carry forward only the
+        # portable context/optimizer settings.  The records are already the
+        # child's materialized snapshot, so reapplying its old residuals would
+        # move every vector away from the selected child before new feedback.
         model.load_state_dict(state)
+        transfer = model.transfer_state_dict()
+        learning_rate = model.learning_rate
+        model = NumpyWorkingModel(
+            frozen,
+            query_vector=np.asarray(transfer["queryVector"], dtype="<f4"),
+            learning_rate=learning_rate,
+        )
     return model
 
 
