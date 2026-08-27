@@ -349,7 +349,9 @@ Higher cohorts set concurrent users equal to the creator cohort and remain
 manual: completion never starts the next cohort. Use the immutable original
 Qwen model for 100/500. Existing post-run children are bound to their producing
 50-creator population and are intentionally rejected until cross-cohort child
-population remapping exists.
+population remapping exists. The selected trial view retains every persisted
+condition row, its condition p95, and all three interference ratios; reopening a
+saved trial reloads those database-backed results.
 
 ## Shutdown and recovery boundary
 

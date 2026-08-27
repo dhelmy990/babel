@@ -228,6 +228,32 @@ test('dashboard polling renders persisted seeded, walk, and Hugging Face evidenc
   ]);
 });
 
+test('dashboard renders every persisted condition result for the selected cohort', async () => {
+  const context = await initializeController();
+  context.trial.creatorCount = 100;
+  context.trial.progress.conditionCount = 6;
+  context.trial.results = [
+    {
+      conditionIndex: 4, topology: 'same_host_split', trainingEnabled: false,
+      synchronizationEnabled: false, servingP95Ms: 18,
+      Itraining: 1.5, Ifull: 1.8, IActivationIncrement: 1.2,
+    },
+    {
+      conditionIndex: 1, topology: 'same_process', trainingEnabled: false,
+      synchronizationEnabled: false, servingP95Ms: 30,
+      Itraining: 1.4, Ifull: 1.7, IActivationIncrement: 1.214,
+    },
+  ];
+
+  await context.intervalCallback();
+
+  const rows = context.document.getElementById('performance-results').children;
+  assert.equal(rows.length, 2);
+  assert.match(rows[0].textContent, /1\/6 · same_process · serving only · p95 30 ms/);
+  assert.match(rows[0].textContent, /Itraining 1.4 · Ifull 1.7/);
+  assert.match(rows[1].textContent, /4\/6 · same_host_split · serving only · p95 18 ms/);
+});
+
 test('graceful stop remains available while active and after a persisted dispatch request', async () => {
   for (const status of [
     'population_pending', 'population_ready', 'approved', 'running', 'stop_requested',

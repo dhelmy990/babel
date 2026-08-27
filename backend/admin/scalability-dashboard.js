@@ -130,7 +130,8 @@
       'performance-interleave', 'performance-create',
       'performance-approve', 'performance-stop', 'performance-phase',
       'performance-progress', 'performance-rate', 'performance-gate',
-      'performance-ratios', 'performance-telemetry', 'performance-trials',
+      'performance-ratios', 'performance-results', 'performance-telemetry',
+      'performance-trials',
     ];
     const elements = Object.fromEntries(ids.map((id) => [id, documentRef.getElementById(id)]));
     const nonce = documentRef.querySelector('meta[name="babel-admin-nonce"]')?.content || '';
@@ -251,6 +252,26 @@
         ['Ifull = F/S', ratios.Ifull],
         ['IActivationIncrement = F/T', ratios.IActivationIncrement],
       ]);
+      elements['performance-results'].replaceChildren();
+      const conditionCount = trial.progress?.conditionCount
+        || cohortConditionCount(trial.creatorCount || 50);
+      const results = Array.isArray(trial.results)
+        ? [...trial.results].sort((left, right) => (
+          Number(left.conditionIndex) - Number(right.conditionIndex)))
+        : [];
+      for (const result of results) {
+        const row = documentRef.createElement('li');
+        const mode = !result.trainingEnabled ? 'serving only'
+          : result.synchronizationEnabled ? 'training + activation'
+            : 'training, no activation';
+        const conditionP95 = result.rawEvidence?.conditionP95Ms
+          ?? result.servingP95Ms;
+        row.textContent = `${result.conditionIndex}/${conditionCount}`
+          + ` · ${result.topology} · ${mode} · p95 ${display(conditionP95)} ms`
+          + ` · Itraining ${display(result.Itraining)} · Ifull ${display(result.Ifull)}`
+          + ` · IActivationIncrement ${display(result.IActivationIncrement)}`;
+        elements['performance-results'].appendChild(row);
+      }
       definitionList(elements['performance-telemetry'], [
         ['Topology / placement', `${trial.topology} · ${display(trial.placement)}`],
         ['PIDs / resources', `${display(trial.placement?.processes)} · ${display(trial.resources)}`],
