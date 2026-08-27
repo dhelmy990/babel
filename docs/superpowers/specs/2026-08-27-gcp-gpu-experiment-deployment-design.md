@@ -152,7 +152,9 @@ On the VM:
 - `uv sync` uses `online/uv.lock` with the development, Kafka, Parquet,
   pgvector, and Qwen extras.
 - Backend and performance worker run as supervised services with independent
-  logs and restart-on-failure behavior.
+  logs. The backend restarts on failure. The performance worker does not
+  restart automatically during an active trial because an interrupted formal
+  matrix cannot resume in place.
 - Runtime state, Hugging Face caches, model caches, evidence, and journals live
   under a dedicated persistent root on the boot disk.
 - `BABEL_ONLINE_QWEN_DEVICE=cuda` is set for the performance worker and inherited
@@ -271,8 +273,12 @@ warmup, measurement, request, or workload semantics. Require each condition to
 produce durable evidence and require zero final Kafka lag for training
 conditions.
 
-The worker may be restarted against its GCP journal after a recoverable service
-failure. It may not reuse local state or regenerate accepted immutable inputs.
+During population, the worker may be restarted explicitly against its GCP
+journal and the trial may be started again from its last committed batch. Once
+the formal matrix begins, an interruption leaves that trial failed or
+interrupted: preserve its evidence and create a fresh trial rather than
+restarting it in place. No recovery path may reuse local state or regenerate
+accepted immutable inputs.
 
 ### 8. Evidence and handoff
 
