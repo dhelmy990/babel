@@ -355,6 +355,9 @@ def _validate_inputs(
     replay: ReplayCorpus,
     universe: CandidateUniverse,
 ) -> None:
+    expected_path = f"/api/v{replay.request_schema_version}/recommendations"
+    if manifest.requestPath != expected_path:
+        raise ValueError("request path differs from frozen replay schema version")
     if replay.sha256 != manifest.requestCorpusSha256:
         raise ValueError("request corpus checksum differs from the manifest")
     if universe.sha256 != manifest.candidateUniverseSha256:

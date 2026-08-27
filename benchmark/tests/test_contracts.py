@@ -10,8 +10,10 @@ from babel_benchmark.contracts import (
     BenchmarkManifestV1,
     CreatedBabelV1,
     ReplayRequestV1,
+    ReplayRequestV2,
     load_jsonl,
 )
+from babel_benchmark.replay import ReplayCorpus
 
 
 ROOT = Path(__file__).parents[2]
@@ -44,6 +46,38 @@ def test_representative_replay_is_deterministic_and_request_ids_are_unique() -> 
     assert [row.scheduleOffsetNs for row in rows] == sorted(
         row.scheduleOffsetNs for row in rows
     )
+
+
+def test_replay_loader_preserves_v2_traversal_requests(tmp_path: Path) -> None:
+    source = tmp_path / "requests-v2.jsonl"
+    source.write_text(
+        json.dumps(
+            {
+                "scheduleOffsetNs": 0,
+                "request": {
+                    "schemaVersion": 2,
+                    "requestId": "00000000-0000-5000-8000-000000000401",
+                    "runId": "00000000-0000-5000-8000-000000000001",
+                    "creatorId": "00000000-0000-5000-8000-000000000101",
+                    "sourceBabelId": "00000000-0000-5000-8000-000000000301",
+                    "sourceArticleKey": "enwiki:5739",
+                    "traversalSessionId": "00000000-0000-5000-8000-000000000501",
+                    "parentRequestId": None,
+                    "traversalDepth": 0,
+                    "title": "Compiler notes",
+                    "text": "An observable note about compiler design.",
+                    "historyBabelIds": [],
+                    "candidateCount": 3,
+                },
+            }
+        )
+        + "\n"
+    )
+
+    corpus = ReplayCorpus.from_jsonl(source)
+
+    assert isinstance(corpus.rows[0], ReplayRequestV2)
+    assert corpus.rows[0].request.schemaVersion == 2
 
 
 def test_candidate_universe_accepts_only_created_synthetic_babels() -> None:

@@ -12,7 +12,6 @@ from .analysis import analyze, render_markdown
 from .contracts import (
     ConditionTelemetryV1,
     CreatedBabelV1,
-    ReplayRequestV1,
     dump_jsonl,
     load_benchmark_manifest,
     load_jsonl,
@@ -98,7 +97,7 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError(
                 f"condition is not in the frozen manifest: {args.condition}"
             )
-        replay = ReplayCorpus.from_jsonl(args.requests, ReplayRequestV1)
+        replay = ReplayCorpus.from_jsonl(args.requests)
         universe = CandidateUniverse.from_jsonl(args.candidate_universe, CreatedBabelV1)
         if args.command == "concurrent-replay":
             max_in_flight = args.max_in_flight or getattr(manifest, "maxInFlight", 8)

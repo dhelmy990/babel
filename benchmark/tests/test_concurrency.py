@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -197,12 +198,46 @@ def test_v2_condition_rejects_backend_or_frozen_snapshot_drift(
     assert all(row.outcome == "error" and row.errorType == "ValueError" for row in rows)
 
 
-def test_activation_condition_accepts_pinned_child_identity_and_v2_cache_origin() -> (
-    None
-):
-    legacy, replay, universe = inputs()
+def test_activation_condition_accepts_pinned_child_identity_and_v2_cache_origin(
+    tmp_path: Path,
+) -> None:
+    legacy, legacy_replay, universe = inputs()
+    request_path = tmp_path / "requests-v2.jsonl"
+    request_path.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "scheduleOffsetNs": row.scheduleOffsetNs,
+                    "request": {
+                        "schemaVersion": 2,
+                        "requestId": str(row.request.requestId),
+                        "runId": str(row.request.runId),
+                        "creatorId": str(row.request.creatorId),
+                        "sourceBabelId": str(row.request.newBabelId),
+                        "sourceArticleKey": row.request.newSourceArticleKey,
+                        "traversalSessionId": str(row.request.requestId),
+                        "parentRequestId": None,
+                        "traversalDepth": 0,
+                        "title": row.request.title,
+                        "text": row.request.text,
+                        "historyBabelIds": [
+                            str(value) for value in row.request.historyBabelIds
+                        ],
+                        "candidateCount": row.request.candidateCount,
+                    },
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+            for row in legacy_replay.rows
+        )
+    )
+    replay = ReplayCorpus.from_jsonl(request_path)
     source = legacy.model_dump(mode="json")
     source["schemaVersion"] = 2
+    source["requestPath"] = "/api/v2/recommendations"
+    source["requestCorpusSha256"] = replay.sha256
     source["scheduleMode"] = "closed_loop"
     source["maxInFlight"] = 2
     source["conditions"] = [
@@ -213,7 +248,7 @@ def test_activation_condition_accepts_pinned_child_identity_and_v2_cache_origin(
                 "activationEnabled": True,
                 "retrievalBackend": "pgvector",
             },
-            "requestCorpusSha256": legacy.requestCorpusSha256,
+            "requestCorpusSha256": replay.sha256,
             "scheduleOffsetsNs": list(legacy.scheduleOffsetsNs),
             "expectedModelId": str(legacy.conditions[0].expectedModelId),
             "expectedModelVersion": 2,
@@ -238,6 +273,8 @@ def test_activation_condition_accepts_pinned_child_identity_and_v2_cache_origin(
 
     class ActivatedTransport(AsyncTransport):
         async def post_json(self, path, payload, timeout_seconds):
+            assert path == "/api/v2/recommendations"
+            assert payload["schemaVersion"] == 2
             status, body = await super().post_json(path, payload, timeout_seconds)
             body.update(
                 {

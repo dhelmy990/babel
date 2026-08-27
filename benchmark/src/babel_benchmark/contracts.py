@@ -203,7 +203,7 @@ class BenchmarkManifestV2(FrozenContract):
     schemaVersion: Literal[2]
     benchmarkRunId: UUID
     endpoint: HttpUrl
-    requestPath: Literal["/api/v1/recommendations"]
+    requestPath: Literal["/api/v1/recommendations", "/api/v2/recommendations"]
     requestCorpusPath: str = Field(min_length=1)
     requestCorpusSha256: str = Field(pattern=_SHA256)
     candidateUniversePath: str = Field(min_length=1)
@@ -255,6 +255,43 @@ class RecommendationRequestV1(FrozenContract):
 class ReplayRequestV1(FrozenContract):
     scheduleOffsetNs: int = Field(ge=0)
     request: RecommendationRequestV1
+
+
+class RecommendationRequestV2(FrozenContract):
+    schemaVersion: Literal[2]
+    requestId: UUID
+    runId: UUID
+    creatorId: UUID
+    sourceBabelId: UUID
+    sourceArticleKey: str = Field(pattern=r"^enwiki:[1-9][0-9]*$")
+    traversalSessionId: UUID
+    parentRequestId: UUID | None
+    traversalDepth: Literal[0, 1]
+    title: str | None = None
+    text: str | None = None
+    historyBabelIds: tuple[UUID, ...]
+    candidateCount: int = Field(gt=0, le=100)
+
+    @model_validator(mode="after")
+    def root_and_existing_source_fields_are_unambiguous(
+        self,
+    ) -> "RecommendationRequestV2":
+        if self.traversalDepth == 0:
+            if self.parentRequestId is not None:
+                raise ValueError("root request cannot have a parent request")
+            if not self.title or not self.text:
+                raise ValueError("root request must carry observable title and text")
+        else:
+            if self.parentRequestId is None:
+                raise ValueError("depth-one request must identify its parent request")
+            if self.title is not None or self.text is not None:
+                raise ValueError("existing-source request loads persisted content")
+        return self
+
+
+class ReplayRequestV2(FrozenContract):
+    scheduleOffsetNs: int = Field(ge=0)
+    request: RecommendationRequestV2
 
 
 class CreatedBabelV1(FrozenContract):
@@ -599,9 +636,11 @@ __all__ = [
     "PerformanceSummaryV1",
     "PercentileSummaryV1",
     "RecommendationRequestV1",
+    "RecommendationRequestV2",
     "RecommendationResponseV1",
     "RecommendationResponseV2",
     "ReplayRequestV1",
+    "ReplayRequestV2",
     "RequestMeasurementV1",
     "RequestMeasurementV2",
     "dump_jsonl",
