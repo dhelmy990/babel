@@ -5,8 +5,10 @@ import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID
 
+import babel_benchmark.trial_bundle as trial_bundle
 import pytest
 
 from babel_benchmark.cli import (
@@ -18,6 +20,7 @@ from babel_benchmark.cli import (
 from babel_benchmark.contracts import RequestMeasurementV1, load_jsonl
 from babel_benchmark.hub import RunBundleReceipt
 from babel_benchmark.resources import ResourceObservationV1
+from babel_benchmark.trial_bundle import FormalPins
 
 
 ROOT = Path(__file__).parents[2]
@@ -197,6 +200,85 @@ def test_trial_bundle_cli_closes_build_and_publish_inputs() -> None:
     assert build.feedback_export_manifest == Path("feedback-export-manifest.json")
     assert publish.command == "trial-bundle-publish"
     assert publish.token_env == "HF_TOKEN"
+
+
+def test_trial_bundle_build_accepts_one_generated_input_manifest(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    trial_id = UUID("00000000-0000-5000-8000-000000000130")
+    inputs_path = tmp_path / "trial-bundle-inputs.json"
+    inputs_path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "trialId": str(trial_id),
+                "selectedConditionIndex": 6,
+                "evidencePaths": [
+                    str(tmp_path / f"condition-{index}.json")
+                    for index in range(1, 10)
+                ],
+                "populationManifest": str(tmp_path / "population.json"),
+                "feedbackParquet": str(tmp_path / "feedback.parquet"),
+                "edgesParquet": str(tmp_path / "edges.parquet"),
+                "feedbackExportManifest": str(tmp_path / "feedback-manifest.json"),
+                "modelManifest": str(tmp_path / "model-manifest.json"),
+                "modelArtifactRoot": str(tmp_path / "model-artifact"),
+                "selectedChild": str(tmp_path / "selected-child.json"),
+                "pins": {
+                    "modelRepository": "owner/model",
+                    "modelRevision": "a" * 40,
+                    "datasetRepository": "owner/dataset",
+                    "datasetRevision": "b" * 40,
+                },
+            }
+        )
+    )
+    calls = []
+
+    def build(output_root, **kwargs):
+        calls.append((output_root, kwargs))
+        root = tmp_path / "accepted/runs" / str(trial_id)
+        return SimpleNamespace(
+            run_id=trial_id,
+            root=root,
+            manifest_path=root / "manifest.json",
+            checksums_path=root / "checksums.json",
+        )
+
+    monkeypatch.setattr(trial_bundle, "build_formal_trial_bundle", build)
+
+    assert main(
+        [
+            "trial-bundle-build",
+            "--output-root",
+            str(tmp_path / "accepted"),
+            "--inputs",
+            str(inputs_path),
+        ]
+    ) == 0
+
+    assert calls == [
+        (
+            tmp_path / "accepted",
+            {
+                "trial_id": trial_id,
+                "evidence_paths": tuple(
+                    tmp_path / f"condition-{index}.json" for index in range(1, 10)
+                ),
+                "population_manifest_path": tmp_path / "population.json",
+                "feedback_parquet": tmp_path / "feedback.parquet",
+                "edges_parquet": tmp_path / "edges.parquet",
+                "feedback_export_manifest_path": tmp_path / "feedback-manifest.json",
+                "model_manifest": tmp_path / "model-manifest.json",
+                "model_artifact_root": tmp_path / "model-artifact",
+                "selected_child_path": tmp_path / "selected-child.json",
+                "pins": FormalPins(
+                    "owner/model", "a" * 40, "owner/dataset", "b" * 40
+                ),
+            },
+        )
+    ]
+    assert json.loads(capsys.readouterr().out)["runId"] == str(trial_id)
 
 
 def test_trial_bundle_publish_retains_full_receipt_and_adds_backend_payload() -> None:

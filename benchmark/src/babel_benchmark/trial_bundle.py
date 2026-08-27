@@ -50,6 +50,21 @@ class FormalPins:
 
 
 @dataclass(frozen=True, slots=True)
+class FormalTrialBundleInputs:
+    trial_id: UUID
+    selected_condition_index: int
+    evidence_paths: tuple[Path, ...]
+    population_manifest: Path
+    feedback_parquet: Path
+    edges_parquet: Path
+    feedback_export_manifest: Path
+    model_manifest: Path
+    model_artifact_root: Path
+    selected_child: Path
+    pins: FormalPins
+
+
+@dataclass(frozen=True, slots=True)
 class _ConditionEvidence:
     condition_id: UUID
     run_id: UUID
@@ -84,6 +99,82 @@ def _object(path: str | Path, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{label} must be a JSON object")
     return value
+
+
+def load_formal_trial_bundle_inputs(path: str | Path) -> FormalTrialBundleInputs:
+    """Load the closed local-path handoff emitted by performance-export."""
+    document = _object(path, "trial bundle inputs")
+    required = {
+        "schemaVersion",
+        "trialId",
+        "selectedConditionIndex",
+        "evidencePaths",
+        "populationManifest",
+        "feedbackParquet",
+        "edgesParquet",
+        "feedbackExportManifest",
+        "modelManifest",
+        "modelArtifactRoot",
+        "selectedChild",
+        "pins",
+    }
+    if set(document) != required or document.get("schemaVersion") != 1:
+        raise ValueError("trial bundle input contract differs")
+    evidence = document.get("evidencePaths")
+    pins = document.get("pins")
+    if (
+        not isinstance(evidence, list)
+        or len(evidence) != 9
+        or not all(isinstance(value, str) and value for value in evidence)
+        or not isinstance(pins, dict)
+        or set(pins)
+        != {
+            "modelRepository",
+            "modelRevision",
+            "datasetRepository",
+            "datasetRevision",
+        }
+    ):
+        raise ValueError("trial bundle input fields differ")
+    path_fields = {
+        name: document.get(name)
+        for name in (
+            "populationManifest",
+            "feedbackParquet",
+            "edgesParquet",
+            "feedbackExportManifest",
+            "modelManifest",
+            "modelArtifactRoot",
+            "selectedChild",
+        )
+    }
+    if any(not isinstance(value, str) or not value for value in path_fields.values()):
+        raise ValueError("trial bundle input paths differ")
+    evidence_paths = tuple(Path(value) for value in evidence)
+    paths = (*evidence_paths, *(Path(value) for value in path_fields.values()))
+    if any(not value.is_absolute() for value in paths):
+        raise ValueError("trial bundle input paths must be absolute")
+    selected_index = int(document["selectedConditionIndex"])
+    if selected_index not in {3, 6, 9}:
+        raise ValueError("selected condition index must identify an activation condition")
+    return FormalTrialBundleInputs(
+        trial_id=UUID(str(document["trialId"])),
+        selected_condition_index=selected_index,
+        evidence_paths=evidence_paths,
+        population_manifest=Path(path_fields["populationManifest"]),
+        feedback_parquet=Path(path_fields["feedbackParquet"]),
+        edges_parquet=Path(path_fields["edgesParquet"]),
+        feedback_export_manifest=Path(path_fields["feedbackExportManifest"]),
+        model_manifest=Path(path_fields["modelManifest"]),
+        model_artifact_root=Path(path_fields["modelArtifactRoot"]),
+        selected_child=Path(path_fields["selectedChild"]),
+        pins=FormalPins(
+            str(pins["modelRepository"]),
+            str(pins["modelRevision"]),
+            str(pins["datasetRepository"]),
+            str(pins["datasetRevision"]),
+        ),
+    )
 
 
 def _sha256(path: Path) -> str:
@@ -663,4 +754,9 @@ def build_formal_trial_bundle(
     )
 
 
-__all__ = ["FormalPins", "build_formal_trial_bundle"]
+__all__ = [
+    "FormalPins",
+    "FormalTrialBundleInputs",
+    "build_formal_trial_bundle",
+    "load_formal_trial_bundle_inputs",
+]

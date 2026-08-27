@@ -33,7 +33,10 @@ from .dataset_bundle import (
     load_demo_dataset_bundle,
     load_scale_dataset_bundle,
 )
-from .performance_export import export_completed_performance_trial
+from .performance_export import (
+    export_completed_performance_trial,
+    write_trial_bundle_inputs,
+)
 from .worker import FridayDemoRuntime, WorkerManager
 from .coordinator import coordinator_from_environment
 from .supervisor import PerRunTopologyManager, build_service_commands
@@ -531,6 +534,10 @@ def _performance_export(argv: list[str]) -> None:
     parser.add_argument("--evidence-root", required=True, type=Path)
     parser.add_argument("--output-root", required=True, type=Path)
     parser.add_argument("--kafka-group")
+    parser.add_argument(
+        "--selected-condition-index", type=int, choices=(3, 6, 9), default=6
+    )
+    parser.add_argument("--bundle-inputs", type=Path)
     arguments = parser.parse_args(argv)
     database = RuntimeDatabase(_required("BABEL_DATABASE_URL"))
     group_id = arguments.kafka_group or (
@@ -551,19 +558,30 @@ def _performance_export(argv: list[str]) -> None:
     finally:
         consumer.close()
     manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
-    print(
-        json.dumps(
-            {
-                "experimentId": str(arguments.experiment_id),
-                "feedbackRecords": int(manifest["records"]),
-                "canonicalEdges": int(manifest["canonicalEdges"]),
-                "feedbackParquet": str(result.parquet_path.resolve()),
-                "edgesParquet": str(result.edge_parquet_path.resolve()),
-                "feedbackExportManifest": str(result.manifest_path.resolve()),
-            },
-            sort_keys=True,
+    receipt = {
+        "experimentId": str(arguments.experiment_id),
+        "feedbackRecords": int(manifest["records"]),
+        "canonicalEdges": int(manifest["canonicalEdges"]),
+        "feedbackParquet": str(result.parquet_path.resolve()),
+        "edgesParquet": str(result.edge_parquet_path.resolve()),
+        "feedbackExportManifest": str(result.manifest_path.resolve()),
+    }
+    if arguments.bundle_inputs is not None:
+        generated = write_trial_bundle_inputs(
+            database=database,
+            experiment_id=arguments.experiment_id,
+            evidence_root=arguments.evidence_root,
+            feedback_parquet=result.parquet_path,
+            edges_parquet=result.edge_parquet_path,
+            feedback_export_manifest=result.manifest_path,
+            selected_condition_index=arguments.selected_condition_index,
+            output_path=arguments.bundle_inputs,
         )
-    )
+        receipt.update(
+            bundleInputs=str(generated.resolve()),
+            selectedConditionIndex=arguments.selected_condition_index,
+        )
+    print(json.dumps(receipt, sort_keys=True))
 
 
 def main(argv: list[str] | None = None) -> int:

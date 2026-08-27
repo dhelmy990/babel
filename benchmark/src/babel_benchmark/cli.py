@@ -89,19 +89,20 @@ def _parser() -> argparse.ArgumentParser:
         "trial-bundle-build", help="validate and build one formal 3x3 trial bundle"
     )
     trial.add_argument("--output-root", required=True, type=Path)
-    trial.add_argument("--trial-id", required=True, type=UUID)
-    trial.add_argument("--evidence", required=True, nargs=9, type=Path)
-    trial.add_argument("--population-manifest", required=True, type=Path)
-    trial.add_argument("--feedback-parquet", required=True, type=Path)
-    trial.add_argument("--edges-parquet", required=True, type=Path)
-    trial.add_argument("--feedback-export-manifest", required=True, type=Path)
-    trial.add_argument("--model-manifest", required=True, type=Path)
-    trial.add_argument("--model-artifact-root", required=True, type=Path)
-    trial.add_argument("--selected-child", required=True, type=Path)
-    trial.add_argument("--model-repository", required=True)
-    trial.add_argument("--model-revision", required=True)
-    trial.add_argument("--dataset-repository", required=True)
-    trial.add_argument("--dataset-revision", required=True)
+    trial.add_argument("--inputs", type=Path)
+    trial.add_argument("--trial-id", type=UUID)
+    trial.add_argument("--evidence", nargs=9, type=Path)
+    trial.add_argument("--population-manifest", type=Path)
+    trial.add_argument("--feedback-parquet", type=Path)
+    trial.add_argument("--edges-parquet", type=Path)
+    trial.add_argument("--feedback-export-manifest", type=Path)
+    trial.add_argument("--model-manifest", type=Path)
+    trial.add_argument("--model-artifact-root", type=Path)
+    trial.add_argument("--selected-child", type=Path)
+    trial.add_argument("--model-repository")
+    trial.add_argument("--model-revision")
+    trial.add_argument("--dataset-repository")
+    trial.add_argument("--dataset-revision")
 
     publish = commands.add_parser(
         "trial-bundle-publish", help="upload and remotely verify one built trial bundle"
@@ -217,25 +218,70 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(attached, sort_keys=True))
         return 0
     if args.command == "trial-bundle-build":
-        from .trial_bundle import FormalPins, build_formal_trial_bundle
+        from .trial_bundle import (
+            FormalPins,
+            build_formal_trial_bundle,
+            load_formal_trial_bundle_inputs,
+        )
+
+        manual_names = (
+            "trial_id",
+            "evidence",
+            "population_manifest",
+            "feedback_parquet",
+            "edges_parquet",
+            "feedback_export_manifest",
+            "model_manifest",
+            "model_artifact_root",
+            "selected_child",
+            "model_repository",
+            "model_revision",
+            "dataset_repository",
+            "dataset_revision",
+        )
+        if args.inputs is not None:
+            if any(getattr(args, name) is not None for name in manual_names):
+                raise ValueError("--inputs cannot be combined with manual bundle fields")
+            inputs = load_formal_trial_bundle_inputs(args.inputs)
+            options = {
+                "trial_id": inputs.trial_id,
+                "evidence_paths": inputs.evidence_paths,
+                "population_manifest_path": inputs.population_manifest,
+                "feedback_parquet": inputs.feedback_parquet,
+                "edges_parquet": inputs.edges_parquet,
+                "feedback_export_manifest_path": inputs.feedback_export_manifest,
+                "model_manifest": inputs.model_manifest,
+                "model_artifact_root": inputs.model_artifact_root,
+                "selected_child_path": inputs.selected_child,
+                "pins": inputs.pins,
+            }
+        else:
+            missing = [name for name in manual_names if getattr(args, name) is None]
+            if missing:
+                raise ValueError(
+                    "manual trial bundle fields are incomplete: " + ", ".join(missing)
+                )
+            options = {
+                "trial_id": args.trial_id,
+                "evidence_paths": args.evidence,
+                "population_manifest_path": args.population_manifest,
+                "feedback_parquet": args.feedback_parquet,
+                "edges_parquet": args.edges_parquet,
+                "feedback_export_manifest_path": args.feedback_export_manifest,
+                "model_manifest": args.model_manifest,
+                "model_artifact_root": args.model_artifact_root,
+                "selected_child_path": args.selected_child,
+                "pins": FormalPins(
+                    args.model_repository,
+                    args.model_revision,
+                    args.dataset_repository,
+                    args.dataset_revision,
+                ),
+            }
 
         bundle = build_formal_trial_bundle(
             args.output_root,
-            trial_id=args.trial_id,
-            evidence_paths=args.evidence,
-            population_manifest_path=args.population_manifest,
-            feedback_parquet=args.feedback_parquet,
-            edges_parquet=args.edges_parquet,
-            feedback_export_manifest_path=args.feedback_export_manifest,
-            model_manifest=args.model_manifest,
-            model_artifact_root=args.model_artifact_root,
-            selected_child_path=args.selected_child,
-            pins=FormalPins(
-                args.model_repository,
-                args.model_revision,
-                args.dataset_repository,
-                args.dataset_revision,
-            ),
+            **options,
         )
         print(
             json.dumps(

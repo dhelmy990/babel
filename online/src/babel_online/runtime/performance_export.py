@@ -76,6 +76,19 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _canonical_json(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
+
+
+def _write_canonical(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(_canonical_json(value), encoding="utf-8")
+    with temporary.open("rb") as source:
+        os.fsync(source.fileno())
+    os.replace(temporary, path)
+
+
 def _range_documents_for_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_partition: dict[tuple[str, int], list[int]] = {}
     for record in records:
@@ -273,4 +286,134 @@ def export_completed_performance_trial(
     return result
 
 
-__all__ = ["export_completed_performance_trial"]
+def write_trial_bundle_inputs(
+    *,
+    database: Any,
+    experiment_id: UUID,
+    evidence_root: str | Path,
+    feedback_parquet: str | Path,
+    edges_parquet: str | Path,
+    feedback_export_manifest: str | Path,
+    selected_condition_index: int,
+    output_path: str | Path,
+) -> Path:
+    """Close one operator-selected activation child into build-ready local inputs."""
+    trial = database.load_performance_experiment(experiment_id)
+    if trial.id != experiment_id or trial.status != "completed":
+        raise ValueError("performance trial must be durably completed")
+    ordered_conditions = tuple(
+        sorted(trial.conditions, key=lambda value: value.condition_index)
+    )
+    if (
+        len(ordered_conditions) != 9
+        or [row.condition_index for row in ordered_conditions] != list(range(1, 10))
+        or any(row.status != "completed" or row.run_id is None for row in ordered_conditions)
+    ):
+        raise ValueError("trial bundle inputs require nine completed bound conditions")
+    matches = [
+        row
+        for row in ordered_conditions
+        if row.condition_index == selected_condition_index
+    ]
+    if (
+        len(matches) != 1
+        or matches[0].status != "completed"
+        or not matches[0].training_enabled
+        or not matches[0].activation_enabled
+        or matches[0].run_id is None
+    ):
+        raise ValueError("selected child must come from one completed activation condition")
+    condition = matches[0]
+    root = Path(evidence_root)
+    evidence_paths = tuple(
+        (root / f"{row.condition_index:02d}" / "live-evidence.json").resolve()
+        for row in ordered_conditions
+    )
+    if len(evidence_paths) != 9 or any(not path.is_file() for path in evidence_paths):
+        raise ValueError("trial bundle inputs require all nine condition evidence files")
+    try:
+        evidence = json.loads(
+            (root / f"{selected_condition_index:02d}" / "live-evidence.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        final = evidence["rawEvidence"]["finalServingIdentity"]
+        model_id = UUID(str(final["modelId"]))
+        model_version = int(final["modelVersion"])
+        embedding_space_id = UUID(str(final["embeddingSpaceId"]))
+        vector_snapshot = str(final["pgvectorSnapshotSha256"])
+        backend_snapshot = str(final["backendSnapshotSha256"])
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError("selected condition final serving identity is invalid") from error
+    if (
+        UUID(str(evidence.get("conditionId"))) != condition.id
+        or UUID(str(evidence.get("runId"))) != condition.run_id
+        or model_version <= 0
+        or len(vector_snapshot) != 64
+        or vector_snapshot != backend_snapshot
+    ):
+        raise ValueError("selected condition final serving identity differs")
+
+    descriptor, descriptor_path = database.load_real_child_artifact(model_id)
+    descriptor_path = Path(descriptor_path).resolve()
+    child = descriptor.childManifest
+    if (
+        not descriptor_path.is_file()
+        or descriptor_path.name != "state-descriptor.json"
+        or child.modelId != model_id
+        or child.parentModelId != trial.starting_model_id
+        or child.producingRunId != condition.run_id
+        or child.embeddingSpace.embeddingSpaceId != embedding_space_id
+        or int(descriptor.modelVersion) != model_version
+        or str(descriptor.vectorSnapshotSha256) != vector_snapshot
+        or descriptor.immutable is not True
+    ):
+        raise ValueError("selected child descriptor differs from final serving identity")
+
+    population = Path(str(trial.population_bundle_path or "")) / "manifest.json"
+    source_paths = (
+        population,
+        Path(feedback_parquet),
+        Path(edges_parquet),
+        Path(feedback_export_manifest),
+    )
+    if any(not path.is_file() for path in source_paths):
+        raise ValueError("trial bundle source evidence is unavailable")
+
+    destination = Path(output_path).resolve()
+    selected_path = destination.parent / "selected-child.json"
+    model_manifest_path = destination.parent / "model-manifest.json"
+    selected_document = {
+        "conditionId": str(condition.id),
+        "runId": str(condition.run_id),
+        "modelId": str(model_id),
+        "parentModelId": str(child.parentModelId),
+        "modelVersion": model_version,
+        "vectorSnapshotSha256": vector_snapshot,
+    }
+    _write_canonical(selected_path, selected_document)
+    _write_canonical(model_manifest_path, child.model_dump(mode="json"))
+    document = {
+        "schemaVersion": 1,
+        "trialId": str(experiment_id),
+        "selectedConditionIndex": selected_condition_index,
+        "evidencePaths": [str(path) for path in evidence_paths],
+        "populationManifest": str(population.resolve()),
+        "feedbackParquet": str(Path(feedback_parquet).resolve()),
+        "edgesParquet": str(Path(edges_parquet).resolve()),
+        "feedbackExportManifest": str(Path(feedback_export_manifest).resolve()),
+        "modelManifest": str(model_manifest_path),
+        "modelArtifactRoot": str(descriptor_path.parent),
+        "selectedChild": str(selected_path),
+        "pins": {
+            "modelRepository": trial.model_repository,
+            "modelRevision": trial.model_revision,
+            "datasetRepository": trial.dataset_repository,
+            "datasetRevision": trial.dataset_revision,
+        },
+    }
+    _write_canonical(destination, document)
+    return destination
+
+
+__all__ = ["export_completed_performance_trial", "write_trial_bundle_inputs"]

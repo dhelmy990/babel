@@ -3,8 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
-from uuid import UUID
+from uuid import UUID, uuid5
 
 import pyarrow.parquet as pq
 import pytest
@@ -38,6 +39,12 @@ def _completed_trial():
     return SimpleNamespace(
         id=EXPERIMENT_ID,
         status="completed",
+        starting_model_id=UUID("11111111-1111-5111-8111-111111111111"),
+        model_repository="owner/model",
+        model_revision="a" * 40,
+        dataset_repository="owner/dataset",
+        dataset_revision="b" * 40,
+        population_bundle_path=None,
         conditions=tuple(conditions),
     )
 
@@ -283,4 +290,126 @@ def test_completed_trial_export_rejects_range_beyond_kafka_high_watermark(tmp_pa
             evidence_root=tmp_path / "conditions",
             output_root=tmp_path / "export",
             feedback_source=source,
+        )
+
+
+def test_bundle_inputs_select_completed_activation_child_from_registry(tmp_path):
+    from babel_online.runtime.performance_export import write_trial_bundle_inputs
+
+    trial = _completed_trial()
+    population = tmp_path / "performance" / str(trial.id) / "population"
+    population.mkdir(parents=True)
+    (population / "manifest.json").write_text("{}")
+    trial.population_bundle_path = str(population)
+    evidence_root = tmp_path / "conditions"
+    bus = InMemoryFeedbackBus()
+    _write_evidence(evidence_root, trial, bus)
+    selected = trial.conditions[5]
+    child_id = uuid5(selected.run_id, "selected-child")
+    embedding_id = UUID("22222222-2222-5222-8222-222222222222")
+    snapshot = "c" * 64
+    selected_path = evidence_root / "06/live-evidence.json"
+    selected_evidence = json.loads(selected_path.read_text())
+    selected_evidence["rawEvidence"]["finalServingIdentity"] = {
+        "modelId": str(child_id),
+        "modelVersion": 7,
+        "embeddingSpaceId": str(embedding_id),
+        "pgvectorSnapshotSha256": snapshot,
+        "backendSnapshotSha256": snapshot,
+    }
+    selected_path.write_text(json.dumps(selected_evidence))
+    artifact_root = tmp_path / "registry" / f"model-{child_id}"
+    artifact_root.mkdir(parents=True)
+    descriptor_path = artifact_root / "state-descriptor.json"
+    descriptor_path.write_text("{}")
+    child_document = {
+        "schemaVersion": 2,
+        "modelId": str(child_id),
+        "parentModelId": str(trial.starting_model_id),
+        "producingRunId": str(selected.run_id),
+        "immutable": True,
+    }
+    child = SimpleNamespace(
+        modelId=child_id,
+        parentModelId=trial.starting_model_id,
+        producingRunId=selected.run_id,
+        embeddingSpace=SimpleNamespace(embeddingSpaceId=embedding_id),
+        model_dump=lambda **_kwargs: child_document,
+    )
+    descriptor = SimpleNamespace(
+        childManifest=child,
+        modelVersion=7,
+        vectorSnapshotSha256=snapshot,
+        immutable=True,
+    )
+    database = SimpleNamespace(
+        load_performance_experiment=lambda _trial_id: trial,
+        load_real_child_artifact=lambda model_id: (
+            (descriptor, descriptor_path)
+            if model_id == child_id
+            else (_ for _ in ()).throw(KeyError(model_id))
+        ),
+    )
+    feedback_root = tmp_path / "feedback-export"
+    feedback_root.mkdir()
+    feedback = feedback_root / "feedback.parquet"
+    edges = feedback_root / "edges.parquet"
+    manifest = feedback_root / "manifest.json"
+    for path in (feedback, edges, manifest):
+        path.write_bytes(b"evidence")
+
+    result = write_trial_bundle_inputs(
+        database=database,
+        experiment_id=trial.id,
+        evidence_root=evidence_root,
+        feedback_parquet=feedback,
+        edges_parquet=edges,
+        feedback_export_manifest=manifest,
+        selected_condition_index=6,
+        output_path=tmp_path / "handoff/trial-bundle-inputs.json",
+    )
+
+    inputs = json.loads(result.read_text())
+    assert inputs["selectedConditionIndex"] == 6
+    assert inputs["trialId"] == str(trial.id)
+    assert inputs["evidencePaths"] == [
+        str((evidence_root / f"{index:02d}/live-evidence.json").resolve())
+        for index in range(1, 10)
+    ]
+    assert inputs["populationManifest"] == str((population / "manifest.json").resolve())
+    assert inputs["modelArtifactRoot"] == str(artifact_root.resolve())
+    assert inputs["pins"] == {
+        "modelRepository": "owner/model",
+        "modelRevision": "a" * 40,
+        "datasetRepository": "owner/dataset",
+        "datasetRevision": "b" * 40,
+    }
+    selected_document = json.loads(Path(inputs["selectedChild"]).read_text())
+    assert selected_document == {
+        "conditionId": str(selected.id),
+        "runId": str(selected.run_id),
+        "modelId": str(child_id),
+        "parentModelId": str(trial.starting_model_id),
+        "modelVersion": 7,
+        "vectorSnapshotSha256": snapshot,
+    }
+    assert json.loads(Path(inputs["modelManifest"]).read_text()) == child_document
+
+
+def test_bundle_inputs_reject_nonactivation_selection(tmp_path):
+    from babel_online.runtime.performance_export import write_trial_bundle_inputs
+
+    trial = _completed_trial()
+    database = SimpleNamespace(load_performance_experiment=lambda _trial_id: trial)
+
+    with pytest.raises(ValueError, match="completed activation condition"):
+        write_trial_bundle_inputs(
+            database=database,
+            experiment_id=trial.id,
+            evidence_root=tmp_path / "conditions",
+            feedback_parquet=tmp_path / "feedback.parquet",
+            edges_parquet=tmp_path / "edges.parquet",
+            feedback_export_manifest=tmp_path / "manifest.json",
+            selected_condition_index=5,
+            output_path=tmp_path / "trial-bundle-inputs.json",
         )
