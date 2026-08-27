@@ -206,6 +206,26 @@ def expected_catalog_schema() -> pa.Schema:
     )
 
 
+def test_bundle_preserves_schedule_metadata_recorded_after_babel_lifecycle(
+    tmp_path: Path, population_rows: tuple[PopulationTransferRow, ...]
+) -> None:
+    rows = list(population_rows)
+    schedule_created_at_ns = rows[0].finalized_at_ns + 1_800_000_000_000_000_000
+    rows[0] = replace(rows[0], schedule_created_at_ns=schedule_created_at_ns)
+
+    files = write_bundle_payloads(
+        PopulationTransferBundleInput(metadata=metadata(), rows=tuple(rows)),
+        tmp_path / "late-schedule-metadata",
+    )
+    verified = verify_bundle(files.root, files.digest)
+    catalog = pq.read_table(verified.catalog).to_pylist()
+    exported = next(item for item in catalog if item["babel_id"] == rows[0].babel_id)
+
+    assert exported["created_at_ns"] <= exported["finalized_at_ns"]
+    assert exported["schedule_created_at_ns"] == schedule_created_at_ns
+    assert exported["schedule_created_at_ns"] > exported["finalized_at_ns"]
+
+
 def resign_bundle(files: BundleFiles, *payload_names: str) -> str:
     manifest_document = json.loads(files.manifest.read_text(encoding="utf-8"))
     for payload_name in payload_names:
@@ -615,7 +635,30 @@ def test_verify_rejects_an_extra_file(
         ),
         ("event", {"event_number": -1}, None, "event number"),
         ("schedule", {"schedule_index": -1}, None, "schedule index"),
-        ("timestamp", {"finalized_at_ns": -1}, None, "timestamp"),
+        (
+            "negative_created_timestamp",
+            {"created_at_ns": -1},
+            None,
+            "created timestamp",
+        ),
+        (
+            "negative_finalized_timestamp",
+            {"finalized_at_ns": -1},
+            None,
+            "finalized timestamp",
+        ),
+        (
+            "negative_schedule_timestamp",
+            {"schedule_created_at_ns": -1},
+            None,
+            "schedule timestamp",
+        ),
+        (
+            "babel_timestamp_order",
+            {"created_at_ns": 9_000_000_000_000_000_000},
+            None,
+            "timestamp order",
+        ),
         ("period", {"period": "2026-08"}, None, "period must"),
         ("source", {"source_article_key": "wiki:1"}, None, "source article key"),
         (

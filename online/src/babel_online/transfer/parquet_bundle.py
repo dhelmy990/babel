@@ -317,7 +317,7 @@ def _validate_population_rows(
             9_223_372_036_854_775_807,
         )
         _require_integer(row.finalized_at_ns, "finalized timestamp", 9_223_372_036_854_775_807)
-        if not row.schedule_created_at_ns <= row.created_at_ns <= row.finalized_at_ns:
+        if row.created_at_ns > row.finalized_at_ns:
             raise PopulationTransferIntegrityError("timestamp order is invalid")
         if not isinstance(row.title, str) or not row.title.strip():
             raise PopulationTransferIntegrityError("title must be non-empty")
