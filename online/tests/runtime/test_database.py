@@ -24,8 +24,10 @@ from babel_online.model.state_distributor import (
     KnownVectorProbeV1,
     export_real_qwen_child,
 )
+from babel_online.observable import CreatedBabel, VectorRecord
 from babel_online.runtime.database import (
     ArtifactConfigurationError,
+    RuntimeDatabase,
     canonical_json_sha256,
     load_configured_model_artifact,
 )
@@ -114,6 +116,8 @@ class RecordingCursor:
         self.queries = []
         self.rows = list(rows)
         self.rowcount = 1
+        self.execute_calls = 0
+        self.executemany_calls = 0
 
     def __enter__(self):
         return self
@@ -122,9 +126,11 @@ class RecordingCursor:
         return False
 
     def execute(self, query, parameters=()):
+        self.execute_calls += 1
         self.queries.append((" ".join(str(query).split()), parameters))
 
     def executemany(self, query, parameters):
+        self.executemany_calls += 1
         self.queries.append((" ".join(str(query).split()), list(parameters)))
 
     def fetchone(self):
@@ -147,6 +153,67 @@ class RecordingConnection:
 
     def cursor(self):
         return self._cursor
+
+
+def vector_record(*, babel_id: UUID, source_key: str) -> VectorRecord:
+    return VectorRecord(
+        babel=CreatedBabel(
+            babelId=babel_id,
+            runId=UUID(int=1),
+            creatorId=UUID(int=2),
+            sourceArticleKey=source_key,
+            title="Batch vector",
+            text="One immutable vector row.",
+            createdAtNs=1,
+        ),
+        catalogContentHash="a" * 64,
+        embeddingSpaceId=UUID(int=3),
+        servingModelId=UUID(int=4),
+        materializedModelVersion=7,
+        vector=tuple(float(index) / 100.0 for index in range(100)),
+    )
+
+
+def test_insert_vectors_uses_one_driver_batch_call_with_exact_parameters() -> None:
+    cursor = RecordingCursor()
+    database = RuntimeDatabase(
+        "unused", connect=lambda: RecordingConnection(cursor)
+    )
+    records = [
+        vector_record(babel_id=UUID(int=10), source_key="enwiki:10"),
+        vector_record(babel_id=UUID(int=11), source_key="enwiki:11"),
+    ]
+
+    database.insert_vectors(records)
+
+    assert cursor.execute_calls == 0
+    assert cursor.executemany_calls == 1
+    assert len(cursor.queries) == 1
+    query, parameters = cursor.queries[0]
+    assert "INSERT INTO babel_embeddings" in query
+    assert "ON CONFLICT DO NOTHING" in query
+    assert len(parameters) == 2
+    assert parameters[0][0:7] == (
+        UUID(int=1),
+        UUID(int=10),
+        UUID(int=2),
+        UUID(int=3),
+        UUID(int=4),
+        7,
+        "a" * 64,
+    )
+    assert parameters[0][7] == "[" + ",".join(
+        format(value, ".9g") for value in records[0].vector
+    ) + "]"
+
+
+def test_insert_vectors_empty_input_does_not_open_a_transaction() -> None:
+    database = RuntimeDatabase(
+        "unused",
+        connect=lambda: (_ for _ in ()).throw(AssertionError("unexpected connect")),
+    )
+
+    database.insert_vectors([])
 
 
 def test_performance_transition_clears_a_stale_failure_on_retry() -> None:

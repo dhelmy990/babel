@@ -149,6 +149,43 @@ class ServingState:
         with self._lock:
             return self._snapshot
 
+    def prepare_sync(
+        self,
+        *,
+        selected_model_id: UUID,
+        materialized_state: MaterializedServingState,
+        candidate_index: CandidateIndex,
+        vector_records: list[VectorRecord],
+        qwen_encoder: Qwen100Encoder | None = None,
+        context_tower: object | None = None,
+    ) -> ServingSnapshot:
+        """Build and validate a replacement without changing the live snapshot."""
+        current = self.snapshot()
+        if qwen_encoder is None and isinstance(current.item_tower, QwenItemTower):
+            qwen_encoder = current.item_tower.encoder
+        return self._build_snapshot(
+            selected_model_id,
+            materialized_state,
+            candidate_index,
+            vector_records,
+            qwen_encoder,
+            context_tower or current.context_tower,
+        )
+
+    def activate_prepared(
+        self,
+        replacement: ServingSnapshot,
+        *,
+        activation_commit: Callable[[], None] | None = None,
+    ) -> None:
+        """Commit the durable pointer and publish one already-prepared snapshot."""
+        if not isinstance(replacement, ServingSnapshot):
+            raise TypeError("activation requires a prepared ServingSnapshot")
+        with self._lock:
+            if activation_commit is not None:
+                activation_commit()
+            self._snapshot = replacement
+
     def apply_sync(
         self,
         *,
@@ -160,22 +197,15 @@ class ServingState:
         context_tower: object | None = None,
         activation_commit: Callable[[], None] | None = None,
     ) -> None:
-        if qwen_encoder is None:
-            current = self.snapshot().item_tower
-            if isinstance(current, QwenItemTower):
-                qwen_encoder = current.encoder
-        replacement = self._build_snapshot(
-            selected_model_id,
-            materialized_state,
-            candidate_index,
-            vector_records,
-            qwen_encoder,
-            context_tower or self.snapshot().context_tower,
+        replacement = self.prepare_sync(
+            selected_model_id=selected_model_id,
+            materialized_state=materialized_state,
+            candidate_index=candidate_index,
+            vector_records=vector_records,
+            qwen_encoder=qwen_encoder,
+            context_tower=context_tower,
         )
-        with self._lock:
-            if activation_commit is not None:
-                activation_commit()
-            self._snapshot = replacement
+        self.activate_prepared(replacement, activation_commit=activation_commit)
 
     def source_is_available(
         self, *, run_id: UUID, creator_id: UUID, source_article_key: str

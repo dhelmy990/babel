@@ -347,12 +347,30 @@ class RunningTopology:
             "schemaVersion", "runId", "modelId", "modelVersion",
             "publishedAtNs", "activatedAtNs", "stalenessNs",
         }
-        if set(document) != required or document["schemaVersion"] != 1:
+        timing = {
+            "requestedAtNs", "preparedAtNs", "stageDurationNs", "switchDurationNs",
+        }
+        keys = set(document)
+        if (
+            not required.issubset(keys)
+            or keys - required not in (set(), timing)
+            or document["schemaVersion"] != 1
+        ):
             raise ValueError("activation receipt contract is invalid")
         published = int(document["publishedAtNs"])
         activated = int(document["activatedAtNs"])
         if int(document["stalenessNs"]) != activated - published:
             raise ValueError("activation receipt staleness is inconsistent")
+        if timing.issubset(keys):
+            requested = int(document["requestedAtNs"])
+            prepared = int(document["preparedAtNs"])
+            if (
+                requested > prepared
+                or prepared > activated
+                or int(document["stageDurationNs"]) != prepared - requested
+                or int(document["switchDurationNs"]) != activated - prepared
+            ):
+                raise ValueError("activation receipt timing is inconsistent")
         self.record_model_evidence(
             published_at_ns=published,
             activated_at_ns=activated,
