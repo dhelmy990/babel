@@ -979,7 +979,7 @@ class RealWorkloadFreezer:
                 client_factory=lambda: (
                     self.client_factory(endpoint)
                     if self.client_factory is not None
-                    else RecommendationClient(endpoint)
+                    else RecommendationClient(endpoint, timeout_seconds=120.0)
                 ),
                 stop_event=StopView(),
                 trace_sink=collector,

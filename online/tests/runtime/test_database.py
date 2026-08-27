@@ -149,6 +149,22 @@ class RecordingConnection:
         return self._cursor
 
 
+def test_performance_transition_clears_a_stale_failure_on_retry() -> None:
+    from babel_online.runtime.database import RuntimeDatabase
+
+    cursor = RecordingCursor(rows=[(UUID(int=1),)])
+    database = RuntimeDatabase(
+        "unused", connect=lambda: RecordingConnection(cursor)
+    )
+
+    database.transition_performance(UUID(int=1), "running")
+
+    query, parameters = cursor.queries[0]
+    assert "failure=%s" in query
+    assert "COALESCE" not in query
+    assert parameters == ("running", None, UUID(int=1))
+
+
 def scaled_run_config() -> RunConfigV2:
     return RunConfigV2(
         schemaVersion=2,

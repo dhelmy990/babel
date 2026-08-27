@@ -599,7 +599,7 @@ class RuntimeDatabase:
             raise ValueError("invalid performance experiment status")
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute(
-                "UPDATE performance_experiments SET status=%s,failure=COALESCE(%s,failure) "
+                "UPDATE performance_experiments SET status=%s,failure=%s "
                 "WHERE id=%s RETURNING id",
                 (status, failure, experiment_id),
             )

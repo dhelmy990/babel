@@ -684,6 +684,9 @@ def test_real_workload_freezer_runs_reference_host_and_coordinator(tmp_path: Pat
             self.values = values
 
         def run(self):
+            client = self.values["client_factory"]()
+            assert client.timeout_seconds == 120.0
+            client.close()
             sink = self.values["trace_sink"]
             scheduled = self.values["schedule"][0]
             request = RecommendationRequestV2(
