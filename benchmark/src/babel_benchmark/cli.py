@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 from dataclasses import asdict
@@ -132,6 +133,19 @@ def _parser() -> argparse.ArgumentParser:
     retrieval.add_argument("--query-count", type=int, default=100)
     retrieval.add_argument("--warmup-passes", type=int, default=1)
     retrieval.add_argument("--measurement-passes", type=int, default=3)
+
+    faults = commands.add_parser(
+        "fault-campaign",
+        help="run explicit bounded same-host faults and write fault-only evidence",
+    )
+    faults.add_argument("--trial", required=True, type=Path)
+    faults.add_argument("--population-manifest", required=True, type=Path)
+    faults.add_argument("--receipt", required=True, type=Path)
+    faults.add_argument("--hooks-factory", required=True)
+    faults.add_argument("--detection-timeout-seconds", type=float, default=10)
+    faults.add_argument("--recovery-timeout-seconds", type=float, default=30)
+    faults.add_argument("--fault-hold-seconds", type=float, default=1)
+    faults.add_argument("--poll-interval-seconds", type=float, default=0.1)
     return parser
 
 
@@ -210,6 +224,34 @@ def _attach_backend_artifact_receipt(
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.command == "fault-campaign":
+        from .faults import (
+            BoundedFaultCampaign,
+            load_accepted_fault_target,
+            load_fault_hooks,
+        )
+
+        target = load_accepted_fault_target(args.trial, args.population_manifest)
+        hooks = load_fault_hooks(args.hooks_factory)
+        receipt = BoundedFaultCampaign(
+            target,
+            hooks,
+            detection_timeout_seconds=args.detection_timeout_seconds,
+            recovery_timeout_seconds=args.recovery_timeout_seconds,
+            fault_hold_seconds=args.fault_hold_seconds,
+            poll_interval_seconds=args.poll_interval_seconds,
+        ).run(args.receipt)
+        print(
+            json.dumps(
+                {
+                    "receipt": str(args.receipt),
+                    "sha256": hashlib.sha256(args.receipt.read_bytes()).hexdigest(),
+                    "status": receipt["status"],
+                },
+                sort_keys=True,
+            )
+        )
+        return 0 if receipt["status"] == "completed" else 2
     if args.command == "retrieval-compare":
         from .retrieval_comparison import run_live_retrieval_comparison
 

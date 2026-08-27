@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
 
+import babel_benchmark.faults as faults
 import babel_benchmark.trial_bundle as trial_bundle
 import pytest
 
@@ -171,6 +172,147 @@ def test_retrieval_comparison_cli_has_no_topology_selector() -> None:
     assert args.warmup_passes == 1
     assert args.measurement_passes == 3
     assert not hasattr(args, "topology")
+
+
+def test_fault_campaign_cli_is_explicit_bounded_and_artifact_first() -> None:
+    args = _parser().parse_args(
+        [
+            "fault-campaign",
+            "--trial",
+            "trial.json",
+            "--population-manifest",
+            "population.json",
+            "--receipt",
+            "faults.json",
+            "--hooks-factory",
+            "operator_faults:build_hooks",
+        ]
+    )
+
+    assert args.command == "fault-campaign"
+    assert args.detection_timeout_seconds == 10
+    assert args.recovery_timeout_seconds == 30
+    assert args.fault_hold_seconds == 1
+    assert args.poll_interval_seconds == 0.1
+    assert not hasattr(args, "topology")
+
+
+def test_fault_campaign_cli_writes_receipt_without_embedding_control_secrets(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    trial_id = UUID("00000000-0000-5000-8000-000000000130")
+    population = tmp_path / "population.json"
+    population.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "experimentId": str(trial_id),
+                "babelCount": 10000,
+                "scheduleCount": 10000,
+                "juneCount": 5000,
+                "julyCount": 5000,
+                "creatorCount": 50,
+                "embeddingDimension": 100,
+                "vectorsSha256": "a" * 64,
+            }
+        )
+    )
+    trial = tmp_path / "trial.json"
+    trial.write_text(
+        json.dumps(
+            {
+                "trial": {
+                    "experimentId": str(trial_id),
+                    "status": "completed",
+                    "operatorApproved": True,
+                    "populationReady": True,
+                    "creatorCount": 50,
+                    "targetCreatedBabels": 10000,
+                    "requiredVectorCount": 10000,
+                    "progress": {"conditionCount": 9},
+                    "results": [{} for _ in range(9)],
+                }
+            }
+        )
+    )
+    receipt = tmp_path / "faults.json"
+
+    class Hooks:
+        def __init__(self):
+            self.serving = True
+            self.trainer = True
+            self.kafka = True
+            self.lag = 0
+
+        def probe(self):
+            return faults.FaultSnapshot(
+                serving_available=self.serving,
+                kafka_lag=self.lag,
+                duplicate_events=0,
+                lost_events=0,
+                trainer_version=1,
+                serving_version=1,
+                trainer_running=self.trainer,
+                kafka_available=self.kafka,
+            )
+
+        def kill_trainer(self):
+            self.trainer = False
+
+        def restart_trainer(self):
+            self.trainer = True
+
+        def pause_kafka(self):
+            self.kafka = False
+            self.lag = 4
+
+        def resume_kafka(self):
+            self.kafka = True
+            self.lag = 0
+
+        def inject_invalid_state(self):
+            return True
+
+        def stop_serving(self):
+            self.serving = False
+
+        def start_serving(self):
+            self.serving = True
+
+        def cleanup(self):
+            self.serving = self.trainer = self.kafka = True
+            self.lag = 0
+
+    monkeypatch.setattr(faults, "load_fault_hooks", lambda _spec: Hooks())
+
+    assert (
+        main(
+            [
+                "fault-campaign",
+                "--trial",
+                str(trial),
+                "--population-manifest",
+                str(population),
+                "--receipt",
+                str(receipt),
+                "--hooks-factory",
+                "operator_faults:build_hooks",
+                "--fault-hold-seconds",
+                "0",
+            ]
+        )
+        == 0
+    )
+
+    written = json.loads(receipt.read_text())
+    output = json.loads(capsys.readouterr().out)
+    assert written["status"] == "completed"
+    assert output["receipt"] == str(receipt)
+    assert (
+        output["sha256"]
+        == __import__("hashlib").sha256(receipt.read_bytes()).hexdigest()
+    )
+    assert "operator_faults" not in receipt.read_text()
 
 
 def test_trial_bundle_cli_closes_build_and_publish_inputs() -> None:

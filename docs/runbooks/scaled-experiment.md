@@ -362,6 +362,46 @@ only to that exact dashboard trial. The selected trial view retains every persis
 condition row, its condition p95, and all three interference ratios; reopening a
 saved trial reloads those database-backed results.
 
+## Bounded same-host fault campaign
+
+Run faults only after the selected formal population has completed and the
+operator has accepted its measurements. This is a separate, explicitly invoked
+campaign: it does not run during population or the topology matrix and it does
+not support topology-performance conclusions.
+
+Provide an operator-owned Python factory that starts bounded request/feedback
+probe traffic over the frozen population and returns lifecycle hooks for the
+already-running local services. `probe` availability must reflect those real
+requests, not just process liveness. The adapter must implement `probe`, trainer
+kill/restart, Kafka pause/resume, invalid child-or-checkpoint injection, serving
+stop/start, and an idempotent `cleanup`. Keep credentials and process controls
+inside that local adapter; neither its factory name nor its secrets are written
+to the receipt. `cleanup` must also stop the probe traffic it started.
+
+```bash
+babel-friday-benchmark fault-campaign \
+  --trial "$SAVED_TRIAL_JSON" \
+  --population-manifest "$POPULATION_MANIFEST" \
+  --receipt "$HANDOFF_ROOT/fault-campaign.json" \
+  --hooks-factory 'operator_faults:build_hooks'
+```
+
+The command first verifies the exact completed, operator-approved 50-, 100-, or
+500-creator trial and its frozen 10,000-vector population. It then runs four
+bounded windows: trainer kill/restart while serving remains available; Kafka
+pause/resume with lag recovery; invalid child/checkpoint rejection while the
+last valid serving version remains active; and serving restart detection and
+recovery. Recovery is attempted after each window and `cleanup` always runs in
+an outer `finally` block.
+
+The atomic JSON receipt records the accepted trial and population SHAs, fault and campaign
+windows, sampled availability, Kafka lag, detection/recovery durations,
+duplicate/lost counts, model versions, invalid-state retention, cleanup status,
+and any failed fault. The CLI prints the receipt SHA-256. Treat the artifact as
+`deploymentScope=same_host` and
+`evidenceUse=fault_only_not_topology_performance`; it must not be mixed into the
+six- or nine-condition latency ratios.
+
 ## Shutdown and recovery boundary
 
 Use **Graceful stop** to stop new work and retain evidence and the last valid
