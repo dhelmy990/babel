@@ -8,6 +8,7 @@ import json
 import math
 import os
 import signal
+import stat
 import subprocess
 import threading
 import time
@@ -609,6 +610,64 @@ class PerformanceJobManager:
         self._phase = "idle"
         self._failure: str | None = None
 
+    def _validate_imported_ready_population(
+        self, trial: PerformanceExperiment
+    ) -> tuple[FrozenPopulationManifestV1, Path]:
+        if (
+            not trial.population_ready
+            or trial.population_run_id is None
+            or trial.population_bundle_path is None
+            or trial.population_manifest_sha256 is None
+        ):
+            raise RuntimeError("validated imported-ready population binding is absent")
+        directory = Path(trial.population_bundle_path)
+        if directory.is_symlink() or not directory.is_dir():
+            raise RuntimeError("imported-ready population directory is unavailable")
+        manifest_path = directory / "manifest.json"
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(manifest_path, flags)
+        except OSError as error:
+            raise RuntimeError(
+                "imported-ready population manifest is unavailable"
+            ) from error
+        try:
+            details = os.fstat(descriptor)
+            if not stat.S_ISREG(details.st_mode):
+                raise RuntimeError(
+                    "imported-ready population manifest is not a regular file"
+                )
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(descriptor, 64 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            manifest_bytes = b"".join(chunks)
+        finally:
+            os.close(descriptor)
+        if (
+            hashlib.sha256(manifest_bytes).hexdigest()
+            != trial.population_manifest_sha256
+        ):
+            raise RuntimeError("imported-ready population manifest checksum differs")
+        manifest = self.population_loader(directory)
+        _validate_population_cohort(trial, manifest)
+        if manifest.sourcePopulationRunId != trial.population_run_id:
+            raise RuntimeError("imported-ready population run binding differs")
+        return manifest, directory
+
+    def _record_imported_population_failure(
+        self, experiment_id: UUID, error: BaseException
+    ) -> None:
+        self.database.transition_performance(
+            experiment_id, "failed", failure=str(error)[:1000]
+        )
+        with self._lock:
+            self._experiment_id = experiment_id
+            self._phase = "failed"
+            self._failure = str(error)
+
     def _launch(self, experiment_id: UUID, operation: Callable[[], None]) -> None:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
@@ -655,43 +714,9 @@ class PerformanceJobManager:
         if trial.population_ready:
             if not self.allow_population_build:
                 try:
-                    if (
-                        trial.population_run_id is None
-                        or trial.population_bundle_path is None
-                        or trial.population_manifest_sha256 is None
-                    ):
-                        raise RuntimeError(
-                            "validated imported-ready population binding is absent"
-                        )
-                    directory = Path(trial.population_bundle_path)
-                    manifest_path = directory / "manifest.json"
-                    try:
-                        manifest_bytes = manifest_path.read_bytes()
-                    except OSError as error:
-                        raise RuntimeError(
-                            "imported-ready population manifest is unavailable"
-                        ) from error
-                    if (
-                        hashlib.sha256(manifest_bytes).hexdigest()
-                        != trial.population_manifest_sha256
-                    ):
-                        raise RuntimeError(
-                            "imported-ready population manifest checksum differs"
-                        )
-                    manifest = self.population_loader(directory)
-                    _validate_population_cohort(trial, manifest)
-                    if manifest.sourcePopulationRunId != trial.population_run_id:
-                        raise RuntimeError(
-                            "imported-ready population run binding differs"
-                        )
+                    self._validate_imported_ready_population(trial)
                 except BaseException as error:
-                    self.database.transition_performance(
-                        experiment_id, "failed", failure=str(error)[:1000]
-                    )
-                    with self._lock:
-                        self._experiment_id = experiment_id
-                        self._phase = "failed"
-                        self._failure = str(error)
+                    self._record_imported_population_failure(experiment_id, error)
                     raise
             with self._lock:
                 self._experiment_id = experiment_id
@@ -702,13 +727,7 @@ class PerformanceJobManager:
                 "validated imported-ready population binding is required when "
                 "population build is disabled"
             )
-            self.database.transition_performance(
-                experiment_id, "failed", failure=str(error)
-            )
-            with self._lock:
-                self._experiment_id = experiment_id
-                self._phase = "failed"
-                self._failure = str(error)
+            self._record_imported_population_failure(experiment_id, error)
             raise error
         if trial.status != "population_pending":
             raise RuntimeError("trial is not ready to build its population")
@@ -787,14 +806,29 @@ class PerformanceJobManager:
             and trial.population_bundle_path is not None
         ):
             raise RuntimeError("durable operator approval is required")
+        imported_population: tuple[FrozenPopulationManifestV1, Path] | None = None
+        if not self.allow_population_build:
+            try:
+                imported_population = self._validate_imported_ready_population(trial)
+            except BaseException as error:
+                self._record_imported_population_failure(experiment_id, error)
+                raise
         with self._lock:
             self._phase = "matrix"
 
         def matrix() -> None:
+            current = self.database.load_performance_experiment(experiment_id)
+            if current.status == "completed" and current.operator_approved:
+                with self._lock:
+                    self._phase = "completed"
+                return
             capture_started = time.monotonic()
-            population_dir = Path(trial.population_bundle_path or "")
-            manifest = self.population_loader(population_dir)
-            _validate_population_cohort(trial, manifest)
+            if imported_population is None:
+                population_dir = Path(trial.population_bundle_path or "")
+                manifest = self.population_loader(population_dir)
+                _validate_population_cohort(trial, manifest)
+            else:
+                manifest, population_dir = imported_population
             self.database.transition_performance(experiment_id, "running")
             self.database.append_performance_progress(
                 experiment_id,

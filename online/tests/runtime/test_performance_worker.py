@@ -304,6 +304,51 @@ def test_population_build_disabled_rejects_drifted_imported_ready_binding(
     assert database.trial.status == "failed"
 
 
+@pytest.mark.parametrize("binding_failure", ["missing_manifest", "drifted_sha"])
+def test_direct_approval_with_invalid_imported_binding_never_starts_matrix(
+    tmp_path: Path, binding_failure: str
+) -> None:
+    database = FakeDatabase()
+    population = _population_manifest()
+    population_dir = tmp_path / "population"
+    population_dir.mkdir()
+    manifest_bytes = population.model_dump_json().encode() + b"\n"
+    if binding_failure != "missing_manifest":
+        (population_dir / "manifest.json").write_bytes(manifest_bytes)
+    database.trial = _trial(
+        status="approved",
+        operator_approved=True,
+        population_ready=True,
+        population_run_id=POPULATION_RUN_ID,
+        population_bundle_path=str(population_dir),
+        population_manifest_sha256=(
+            "f" * 64
+            if binding_failure == "drifted_sha"
+            else hashlib.sha256(manifest_bytes).hexdigest()
+        ),
+    )
+    calls: list[str] = []
+    manager = PerformanceJobManager(
+        database=database,
+        output_root=tmp_path,
+        population_builder=lambda *_args: pytest.fail("population build is disabled"),
+        workload_freezer=lambda *_args: calls.append("freezer"),
+        condition_runner=lambda *_args: calls.append("runner"),
+        population_loader=lambda _path: population,
+        allow_population_build=False,
+    )
+
+    try:
+        manager.approve_next_scale(EXPERIMENT_ID)
+    except RuntimeError:
+        pass
+    else:
+        _wait(manager)
+
+    assert calls == []
+    assert database.trial.status == "failed"
+
+
 def test_population_stop_at_committed_boundary_is_interrupted_not_failed(tmp_path: Path):
     database = FakeDatabase()
     entered = threading.Event()
@@ -399,6 +444,7 @@ def test_approval_clones_once_and_replays_one_frozen_workload_across_3x3(tmp_pat
         )(),
         condition_runner=run,
         population_loader=lambda _path: population,
+        allow_population_build=False,
     )
     manager.approve_next_scale(EXPERIMENT_ID)
     manager.approve_next_scale(EXPERIMENT_ID)  # retry-safe
