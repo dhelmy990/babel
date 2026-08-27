@@ -1,36 +1,47 @@
 # Scaled Recommendation Experiment Handoff
 
-This handoff runs the engineering experiment from the dashboard. It uses the
-real distilled Qwen encoder, real June/July engineering snapshots, pgvector,
-Kafka feedback, and independently selectable immutable model children. It does
-not use the old 80-row fixture or deterministic encoder.
+This is the operator handoff for the real engineering-scale experiment. The
+dashboard controls the run; the loopback performance worker builds the real
+Qwen population and executes the formal matrix. PostgreSQL/pgvector is the
+durable vector store and Kafka is the feedback path. Neither the 80-row fixture
+nor the deterministic encoder is valid formal evidence.
 
-## Fixed identities
+> **Active-run warning:** trial
+> `ce8e54ff-e317-4a89-b7db-90327e02dc43` is already building its population.
+> Do not rerun the launch commands, regenerate its worker token, or restart its
+> backend/worker. The commands below are the reproducible launch procedure for a
+> fresh process or later trial.
 
-- Model repository: `dhelmy990/babel-qwen-navigation-2016-interview`
-- Model commit: `57d949cd634b920cc1a46f27c9b21df094b5240e`
-- Artifact ID: `3f6b43e574eb2bcac55c4ddf95f624e3f42153f97437cfeba703c9b3b110a1f8`
-- Base Qwen revision: `97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3`
-- Dataset repository: `dhelmy990/babel-wikipedia-experiment`
-- June/July release commit: `0d1ab2c7f0e2295682288fcf10077d2d776bf559`
-- Dataset configuration: `crosswalk_2026_06_07`
-- External data root: `/home/dhelmy990/Data/babel-data`
+## Immutable identities
 
-Never replace a pin with `main`. Never paste or print `HF_TOKEN`. Source the
-existing `/home/dhelmy990/Code/babel/.env` only into the local process
-environment.
+| Item | Pinned identity |
+|---|---|
+| Active 50-creator trial | `ce8e54ff-e317-4a89-b7db-90327e02dc43` |
+| Starting model ID | `2c4c48d5-3dcf-5ab9-8191-cd4edc2cbf67` |
+| Trained model | `dhelmy990/babel-qwen-navigation-2016-interview@57d949cd634b920cc1a46f27c9b21df094b5240e` |
+| Artifact ID | `3f6b43e574eb2bcac55c4ddf95f624e3f42153f97437cfeba703c9b3b110a1f8` |
+| Qwen base/tokenizer | `Qwen/Qwen3-Embedding-0.6B@97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3` |
+| June/July dataset | `dhelmy990/babel-wikipedia-experiment@0d1ab2c7f0e2295682288fcf10077d2d776bf559` |
+| Dataset configuration | `crosswalk_2026_06_07` |
 
-## Prepare services and packages
+Never replace a commit with `main`. Keep `HF_TOKEN` in process memory: do not
+print it, paste it into the dashboard, or commit it. Source the existing
+`/home/dhelmy990/Code/babel/.env` only into the local operator environment.
+
+## Start the services
+
+From the integration worktree:
 
 ```bash
 cd /home/dhelmy990/.config/superpowers/worktrees/babel/slices-1-2
 docker compose up -d postgres kafka
 uv sync --project online --extra dev --extra kafka --extra parquet --extra pgvector --extra qwen
 uv pip install --python online/.venv/bin/python -e benchmark
+
 set -a
 source /home/dhelmy990/Code/babel/.env
 set +a
-export BABEL_DATA_ROOT='/home/dhelmy990/Data/babel-data'
+
 export BABEL_DATABASE_URL='postgresql://babel:babel-local-dev@127.0.0.1:54329/babel'
 export BABEL_KAFKA_BOOTSTRAP_SERVERS='127.0.0.1:29092'
 export BABEL_ONLINE_DATASET_REPOSITORY='dhelmy990/babel-wikipedia-experiment'
@@ -39,80 +50,131 @@ export BABEL_ONLINE_DATASET_REVISION='0d1ab2c7f0e2295682288fcf10077d2d776bf559'
 export BABEL_ONLINE_MODEL_MODE='real_qwen'
 export BABEL_ONLINE_QWEN_DEVICE='cpu'
 export BABEL_RUNTIME_TOPOLOGY='same_host_split'
-export BABEL_ONLINE_WORKER_TOKEN="$(openssl rand -hex 32)"
+export BABEL_PERFORMANCE_STATE_ROOT='/home/dhelmy990/Data/babel-data/state/performance'
+export BABEL_ONLINE_HF_CACHE='/home/dhelmy990/Data/babel-data/hf-cache/monthly-2026'
+export BABEL_ONLINE_MODEL_ARTIFACT_CACHE='/home/dhelmy990/.cache/huggingface/hub'
+export BABEL_ONLINE_QWEN_CACHE='/home/dhelmy990/.cache/huggingface/hub'
+export BABEL_PERFORMANCE_WORKER_TOKEN="$(openssl rand -hex 32)"
 export PATH="$PWD/online/.venv/bin:$PATH"
 ```
 
-Use `BABEL_ONLINE_QWEN_DEVICE=cuda` only when the local CUDA runtime is known to
-work. Keep the same randomly generated worker token in the worker and backend
-shells; do not display it.
+Use `BABEL_ONLINE_QWEN_DEVICE=cuda` only after verifying the local CUDA
+runtime. The backend and worker must inherit the same 64-hex performance token.
+Do not regenerate it in the second terminal.
 
-Start the supervisor in terminal 1:
+Start this in terminal 1:
 
 ```bash
-babel-online supervise
+babel-online performance-worker
 ```
 
-In terminal 2, repeat the environment exports with the same worker token, then
-run:
+Start the backend/dashboard with the same exports in terminal 2:
 
 ```bash
 just start
 ```
 
-Open `http://127.0.0.1:8787/admin`.
+Open `http://127.0.0.1:8787/admin`. The worker listens only on
+`127.0.0.1:8792`.
 
-## Dashboard procedure
+## Operate the trial
 
-1. In **Scalability trial**, keep `same_host_split`, the immutable Qwen
-   original, release `0d1ab2…`, and pgvector for the first formal trial.
-2. Defaults are 50 creators, 10,000 target created Babels, 10,000 seeded source
-   identities across the two monthly catalogs, 50 concurrent users, independent
-   0.40 start/continuation draws, traversal depth 2, cap 10, and interleaving on.
-3. Each population control has a safe slider and a numeric custom input. Custom
-   values may exceed the slider range but remain server-validated.
-4. Save the configuration. Population must reach exactly 10,000 created and
-   indexed 100-dimensional vectors with matching model, dataset, and snapshot
-   checksums. Reaching the threshold does not start measurements.
-5. Inspect the population evidence, then explicitly approve the condition
-   matrix. It never auto-advances.
-6. Watch the independent progress panel: phase, condition `n/9`, seeded,
-   created, indexed, requested, completed, elapsed time, recent rate, ETA, and
-   draining state. A progress-display failure does not stop the run.
-7. Watch placement/resources, request stages, walk/edge/cache counters, Kafka
-   lag, trainer loss/steps, checkpoint/synchronization, model staleness, and
-   activation spikes.
-8. **Graceful stop** stops new work, drains captured feedback, checkpoints, and
-   retains the last valid serving model. Do not kill the trainer to perform an
-   ordinary stop.
-9. Reload the saved trial from the dashboard and inspect `Itraining = T/S`,
-   `Ifull = F/S`, and `IActivationIncrement = F/T` plus the raw-artifact link.
+1. Start or load the saved trial from **Scalability trial**. Keep the immutable
+   Qwen original, the pinned June/July release, `same_host_split`, and
+   `pgvector` selected.
+2. The formal defaults are 50 creators, 5,000 June plus 5,000 July identities,
+   10,000 created/indexed Babels, 50 concurrent users, independent 0.40 start
+   and continuation draws, traversal depth 2, cap 10, and interleaving on.
+3. Wait for population status `population_ready`. Confirm exactly 10,000
+   distinct 100-dimensional vectors and matching model, dataset, population,
+   and vector-snapshot checksums.
+4. Population completion does **not** start measurements. Inspect its receipt,
+   then press **Approve formal measurements** once.
+5. Watch phase, condition `n/9`, requested/completed counts, elapsed time, rate,
+   ETA, Kafka lag, trainer progress, synchronization, activation, and resource
+   measurements. The independent progress panel may fail without stopping the
+   trial.
+6. When complete, inspect all three dashboard ratios for each topology:
+   `Itraining = T/S`, `Ifull = F/S`, and `IActivationIncrement = F/T`.
 
-The original model is never replaced. A completed compatible child appears as
-a separate model choice. Select it on a later run to test continued online
-adaptation; select the original to reset the experimental lineage.
+The formal matrix always runs sequentially in this order:
 
-## Smoke, formal, and next scale
+| # | Topology | Load mode |
+|---:|---|---|
+| 1 | `same_process` | serving only |
+| 2 | `same_process` | serving + training, no activation |
+| 3 | `same_process` | serving + training + activation |
+| 4 | `same_host_split` | serving only |
+| 5 | `same_host_split` | serving + training, no activation |
+| 6 | `same_host_split` | serving + training + activation |
+| 7 | `same_host_isolated` | serving only |
+| 8 | `same_host_isolated` | serving + training, no activation |
+| 9 | `same_host_isolated` | serving + training + activation |
 
-- A tiny 3-by-3 run is a wiring smoke only. Its timings are not a performance
-  conclusion.
-- A formal run requires the accepted 10,000-vector population, concurrent
-  workload, complete resource/request evidence, explicit approval, and saved
-  raw results.
-- Run 50 creators first. Approve 100 or 500 only after the 50-creator result is
-  complete and healthy. Cross-host is optional evidence expansion, not a
-  prerequisite.
+Condition 6 is the default child to publish and select for the next run. The
+original remains immutable and separately selectable.
 
-## Publication gate
+## Export, publish, and attach
 
-Do not upload or label a final run bundle until the controlled scale run has
-produced real feedback, directed accepted edges, requests, resources, summary,
-report, model manifest, reusable child state descriptor/checkpoint, population
-evidence, and zero-final-lag receipt. The
-publication helper uploads one immutable `runs/<run-id>/` commit, reloads all
-JSON evidence, every checksummed model-state file, and one row from every
-Parquet file at the returned commit, and rejects secrets or an existing
-accepted path.
+Run this only after the trial and all nine conditions are durably `completed`:
 
-Full operational details are in
-`docs/runbooks/scaled-experiment.md`.
+```bash
+TRIAL_ID='ce8e54ff-e317-4a89-b7db-90327e02dc43'
+PERF_ROOT="$BABEL_PERFORMANCE_STATE_ROOT"
+RUN_ROOT="/home/dhelmy990/Data/babel-data/runs/$TRIAL_ID"
+EXPORT_ROOT="$RUN_ROOT/export"
+HANDOFF_ROOT="$RUN_ROOT/handoff"
+ACCEPTED_ROOT="$RUN_ROOT/accepted"
+
+babel-online performance-export \
+  --experiment-id "$TRIAL_ID" \
+  --evidence-root "$PERF_ROOT/$TRIAL_ID/conditions" \
+  --output-root "$EXPORT_ROOT" \
+  --selected-condition-index 6 \
+  --bundle-inputs "$HANDOFF_ROOT/trial-bundle-inputs.json"
+
+babel-friday-benchmark trial-bundle-build \
+  --output-root "$ACCEPTED_ROOT" \
+  --inputs "$HANDOFF_ROOT/trial-bundle-inputs.json"
+
+babel-friday-benchmark trial-bundle-publish \
+  --bundle-root "$ACCEPTED_ROOT/runs/$TRIAL_ID" \
+  --repo-id 'dhelmy990/babel-wikipedia-experiment' \
+  > "$HANDOFF_ROOT/publication-receipt.json"
+```
+
+The publication command verifies the remote bundle at its returned immutable
+commit. Do not attach an unverified or smoke receipt. Capture the dashboard
+nonce from the currently running local `/admin` page into the environment as
+`BABEL_ADMIN_NONCE` without printing it, then attach the verified receipt:
+
+```bash
+babel-friday-benchmark trial-bundle-attach \
+  --receipt "$HANDOFF_ROOT/publication-receipt.json" \
+  --trial-id "$TRIAL_ID"
+```
+
+The backend accepts only `runs/<TRIAL_ID>` for that saved trial. Reload the
+dashboard and confirm that the remote commit/path and condition-6 child are
+visible while the original model remains selectable.
+
+For the already-running trial, wait until it is durably `completed` before
+stopping any process. Then rebuild/restart the backend from the current branch
+so its artifact-attachment route includes the latest code, capture the new
+per-process admin nonce, and run the attach command. This terminal-state restart
+does not alter the completed trial or published bundle.
+
+## Stop and recovery boundary
+
+Use **Graceful stop** for an ordinary stop. It stops new work and preserves the
+last valid serving state and evidence already written.
+
+Do not restart or kill the performance worker, backend, PostgreSQL, or Kafka
+during population or the formal matrix. The current implementation does **not**
+support resuming an interrupted formal matrix in place. A stop or failure after
+the matrix begins leaves that trial interrupted/failed; preserve its evidence
+and create a new formal trial. Do not reuse its condition IDs or present a
+partial matrix as a completed result.
+
+See `docs/runbooks/scaled-experiment.md` for the validation and troubleshooting
+details.
