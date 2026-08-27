@@ -153,16 +153,127 @@ def test_import_rejects_origin_identity_after_trust_verification_before_adapter(
         )
 
 
-def test_preexisting_database_identity_requires_preexisting_matching_receipt() -> None:
-    with pytest.raises(
-        PopulationTransferIntegrityError, match="without a pre-existing import receipt"
-    ):
-        _validate_import_presence((True, True), receipt_preexisted=False)
+def test_two_invocation_collision_never_adopts_rows_without_attempt_binding() -> None:
+    attempt_id = uuid4()
 
-    assert _validate_import_presence((False, False), receipt_preexisted=False) is False
-    assert _validate_import_presence((True, True), receipt_preexisted=True) is True
+    for _invocation in range(2):
+        with pytest.raises(
+            PopulationTransferIntegrityError, match="import attempt binding"
+        ):
+            _validate_import_presence(
+                (True, True, None), expected_attempt_id=attempt_id
+            )
+
+    assert (
+        _validate_import_presence(
+            (False, False, None), expected_attempt_id=attempt_id
+        )
+        is False
+    )
+    assert (
+        _validate_import_presence(
+            (True, True, str(attempt_id)), expected_attempt_id=attempt_id
+        )
+        is True
+    )
     with pytest.raises(PopulationTransferIntegrityError, match="partial quarantined"):
-        _validate_import_presence((True, False), receipt_preexisted=True)
+        _validate_import_presence(
+            (True, False, str(attempt_id)), expected_attempt_id=attempt_id
+        )
+
+
+def test_two_import_invocations_reject_foreign_rows_after_planned_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact_manifest = tmp_path / "artifact-manifest.json"
+    artifact_manifest.write_bytes(b"artifact")
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    receipt_path = tmp_path / "import-receipt.json"
+    fresh_trial = uuid4()
+    fresh_run = uuid5(fresh_trial, "population")
+    transfer = SimpleNamespace(
+        originTrialId=UUID("ce8e54ff-e317-4a89-b7db-90327e02dc43"),
+        originRunId=UUID("7f4ad291-e6d0-5bb9-9658-3605c634a3a9"),
+        datasetRepository="dhelmy990/babel-wikipedia-experiment",
+        datasetConfiguration="20231101.en",
+        datasetRevision="0d1ab2c7f0e2295682288fcf10077d2d776bf559",
+        servingModelId=UUID("2c4c48d5-3dcf-5ab9-8191-cd4edc2cbf67"),
+        orderedPopulationSha256="b" * 64,
+        snapshotSha256="c" * 64,
+    )
+    verified = SimpleNamespace(
+        digest="a" * 64,
+        manifest_contract=transfer,
+    )
+
+    class CollisionCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, statement, _parameters):
+            assert "telemetry->>'importAttemptId'" in statement
+
+        def fetchone(self):
+            return (True, True, None)
+
+    class CollisionConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return CollisionCursor()
+
+    monkeypatch.setattr(
+        "babel_online.transfer.database._ARTIFACT_MANIFEST_SHA256",
+        hashlib.sha256(artifact_manifest.read_bytes()).hexdigest(),
+    )
+    monkeypatch.setattr(
+        "babel_online.transfer.database._load_verified_transfer_rows", lambda _verified: []
+    )
+    monkeypatch.setattr(
+        "babel_online.transfer.database.materialize_rebound_frozen_population",
+        lambda *_args: (object(), tmp_path / "frozen", "d" * 64),
+    )
+    monkeypatch.setattr(
+        "babel_online.transfer.database._connect_psycopg",
+        lambda _url: CollisionConnection(),
+    )
+    monkeypatch.setattr("pgvector.psycopg.register_vector", lambda _connection: None)
+
+    arguments = dict(
+        database_url="postgresql://collision",
+        verified=verified,
+        fresh_trial_id=fresh_trial,
+        fresh_run_id=fresh_run,
+        model_artifact_manifest=artifact_manifest,
+        model_checkpoint_root=checkpoint,
+        frozen_output_root=tmp_path / "output",
+        import_receipt_path=receipt_path,
+    )
+    for _invocation in range(2):
+        with pytest.raises(
+            PopulationTransferIntegrityError, match="import attempt binding"
+        ):
+            _import_verified_bundle(**arguments)
+
+    protected = ImportReceiptV1.model_validate_json(receipt_path.read_text())
+    assert protected.state == "planned"
+    assert protected.importAttemptId.version == 4
+    for recovery_state in ("quarantined", "ready"):
+        receipt_path.write_text(
+            protected.model_copy(update={"state": recovery_state}).model_dump_json()
+        )
+        with pytest.raises(
+            PopulationTransferIntegrityError, match="import attempt binding"
+        ):
+            _import_verified_bundle(**arguments)
 
 
 def test_import_rejects_operator_receipt_or_downloaded_object_drift(
@@ -233,6 +344,7 @@ def test_import_verifies_trust_root_before_calling_database_adapter(
             originRunId=UUID("7f4ad291-e6d0-5bb9-9658-3605c634a3a9"),
             freshTrialId=trial_id,
             freshPopulationRunId=run_id,
+            importAttemptId=uuid4(),
             rowCount=10_000,
             orderedVectorSha256="b" * 64,
             snapshotSha256="c" * 64,

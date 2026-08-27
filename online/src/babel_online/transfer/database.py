@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
-from uuid import UUID, uuid5
+from uuid import UUID, uuid4, uuid5
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -128,6 +128,7 @@ class ImportReceiptV1(BaseModel):
     originRunId: UUID
     freshTrialId: UUID
     freshPopulationRunId: UUID
+    importAttemptId: UUID
     rowCount: Literal[10_000]
     orderedVectorSha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     snapshotSha256: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -149,6 +150,13 @@ class ImportReceiptV1(BaseModel):
     def fresh_run_is_uuid5(cls, value: UUID) -> UUID:
         if value.version != 5:
             raise ValueError("freshPopulationRunId must be UUIDv5")
+        return value
+
+    @field_validator("importAttemptId")
+    @classmethod
+    def import_attempt_is_uuid4(cls, value: UUID) -> UUID:
+        if value.version != 4:
+            raise ValueError("importAttemptId must be UUIDv4")
         return value
 
     @field_validator("originTrialId")
@@ -1267,18 +1275,33 @@ def _ready_database_state_matches(
 
 
 def _validate_import_presence(
-    present: Sequence[object], *, receipt_preexisted: bool
+    present: Sequence[object], *, expected_attempt_id: UUID
 ) -> bool:
-    """Allow adoption only when a protected receipt predates this invocation."""
+    """Allow adoption only when durable DB state carries the receipt's nonce."""
 
-    normalized = tuple(bool(value) for value in present)
+    if len(present) != 3:
+        raise PopulationTransferIntegrityError(
+            "fresh import identity presence row has an unexpected shape"
+        )
+    normalized = tuple(bool(value) for value in present[:2])
     if normalized not in {(False, False), (True, True)}:
         raise PopulationTransferIntegrityError(
             "partial quarantined import identity exists"
         )
-    if normalized == (True, True) and not receipt_preexisted:
+    if normalized == (True, True):
+        try:
+            database_attempt_id = UUID(str(present[2]))
+        except (TypeError, ValueError, AttributeError) as error:
+            raise PopulationTransferIntegrityError(
+                "existing import attempt binding is absent or invalid"
+            ) from error
+        if database_attempt_id != expected_attempt_id:
+            raise PopulationTransferIntegrityError(
+                "existing import attempt binding differs from receipt"
+            )
+    elif present[2] is not None:
         raise PopulationTransferIntegrityError(
-            "fresh import identity exists without a pre-existing import receipt"
+            "orphan import attempt binding exists without fresh identities"
         )
     return normalized == (True, True)
 
@@ -1318,7 +1341,10 @@ def _import_verified_bundle(
     )
     transfer = verified.manifest_contract
 
-    def receipt(state: Literal["planned", "quarantined", "ready"]) -> ImportReceiptV1:
+    def receipt(
+        state: Literal["planned", "quarantined", "ready"],
+        import_attempt_id: UUID,
+    ) -> ImportReceiptV1:
         return ImportReceiptV1(
             schemaVersion=1,
             state=state,
@@ -1327,6 +1353,7 @@ def _import_verified_bundle(
             originRunId=transfer.originRunId,
             freshTrialId=fresh_trial_id,
             freshPopulationRunId=fresh_run_id,
+            importAttemptId=import_attempt_id,
             rowCount=10_000,
             orderedVectorSha256=transfer.orderedPopulationSha256,
             snapshotSha256=transfer.snapshotSha256,
@@ -1348,14 +1375,18 @@ def _import_verified_bundle(
             )
         except Exception as error:
             raise PopulationTransferIntegrityError("import receipt is invalid") from error
-        expected = receipt(existing.state)
+        import_attempt_id = existing.importAttemptId
+        expected = receipt(existing.state, import_attempt_id)
         if existing != expected:
             raise PopulationTransferIntegrityError(
                 "existing import receipt differs from requested import"
             )
         existing_state = existing.state
     else:
-        _write_import_receipt(receipt("planned"), import_receipt_path)
+        import_attempt_id = uuid4()
+        _write_import_receipt(
+            receipt("planned", import_attempt_id), import_receipt_path
+        )
         existing_state = "planned"
 
     run_seed = int.from_bytes(
@@ -1417,14 +1448,46 @@ def _import_verified_bundle(
             raise RuntimeError("population import requires babel-online[pgvector]") from error
         register(connection)
 
+    if existing_state != "planned":
+        with _connect_psycopg(database_url) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT
+                      EXISTS(SELECT 1 FROM performance_experiments WHERE id=%s),
+                      EXISTS(SELECT 1 FROM experiment_runs WHERE id=%s),
+                      (SELECT telemetry->>'importAttemptId'
+                         FROM performance_progress_snapshots
+                        WHERE experiment_id=%s AND sequence=0)
+                    """,
+                    (fresh_trial_id, fresh_run_id, fresh_trial_id),
+                )
+                present = cursor.fetchone()
+                if present is None:
+                    raise PopulationTransferIntegrityError(
+                        "fresh import identity presence query returned no row"
+                    )
+                if not _validate_import_presence(
+                    present, expected_attempt_id=import_attempt_id
+                ):
+                    raise PopulationTransferIntegrityError(
+                        "advanced import receipt has no matching quarantined database state"
+                    )
+
     if existing_state == "planned":
         with _connect_psycopg(database_url) as connection:
             register_vector(connection)
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "SELECT EXISTS(SELECT 1 FROM performance_experiments WHERE id=%s),"
-                    "EXISTS(SELECT 1 FROM experiment_runs WHERE id=%s)",
-                    (fresh_trial_id, fresh_run_id),
+                    """
+                    SELECT
+                      EXISTS(SELECT 1 FROM performance_experiments WHERE id=%s),
+                      EXISTS(SELECT 1 FROM experiment_runs WHERE id=%s),
+                      (SELECT telemetry->>'importAttemptId'
+                         FROM performance_progress_snapshots
+                        WHERE experiment_id=%s AND sequence=0)
+                    """,
+                    (fresh_trial_id, fresh_run_id, fresh_trial_id),
                 )
                 present = cursor.fetchone()
                 if present is None:
@@ -1432,7 +1495,7 @@ def _import_verified_bundle(
                         "fresh import identity presence query returned no row"
                     )
                 import_exists = _validate_import_presence(
-                    present, receipt_preexisted=receipt_preexisted
+                    present, expected_attempt_id=import_attempt_id
                 )
                 if not import_exists:
                     cursor.execute(
@@ -1611,6 +1674,7 @@ def _import_verified_bundle(
                             json.dumps(
                                 {
                                     "bundleDigest": verified.digest,
+                                    "importAttemptId": str(import_attempt_id),
                                     "state": "quarantined",
                                 },
                                 sort_keys=True,
@@ -1737,7 +1801,9 @@ def _import_verified_bundle(
                             transfer.snapshotSha256,
                         ),
                     )
-        _write_import_receipt(receipt("quarantined"), import_receipt_path)
+        _write_import_receipt(
+            receipt("quarantined", import_attempt_id), import_receipt_path
+        )
 
     expected_vectors = [vector_f32le(row.vector) for row in rows]
     samples = _deterministic_sample_ordinals(
@@ -1904,6 +1970,7 @@ def _import_verified_bundle(
                 json.dumps(
                     {
                         "bundleDigest": verified.digest,
+                        "importAttemptId": str(import_attempt_id),
                         "frozenManifestSha256": frozen_manifest_sha,
                         "hnswIndex": "babel_embeddings_cosine_hnsw",
                         "sampleCount": 100,
@@ -1914,7 +1981,7 @@ def _import_verified_bundle(
                 fresh_trial_id,
             ),
         )
-    ready = receipt("ready")
+    ready = receipt("ready", import_attempt_id)
     _write_import_receipt(ready, import_receipt_path)
     return ready
 

@@ -178,6 +178,7 @@ def test_import_cli_requires_exact_contract_and_passes_database_url_by_env(
             originRunId=ORIGIN_RUN_ID,
             freshTrialId=trial_id,
             freshPopulationRunId=run_id,
+            importAttemptId=uuid4(),
             rowCount=10_000,
             orderedVectorSha256="b" * 64,
             snapshotSha256="c" * 64,
