@@ -90,8 +90,12 @@
   function createScalabilityController(options) {
     const documentRef = options.document;
     const fetchImpl = options.fetchImpl || root.fetch.bind(root);
+    const progressApiImpl = options.progressApi || progressApi;
     const setIntervalImpl = options.setIntervalImpl || root.setInterval.bind(root);
     const clearIntervalImpl = options.clearIntervalImpl || root.clearInterval.bind(root);
+    if (!progressApiImpl?.createTrialProgressPoller || !progressApiImpl?.progressView) {
+      throw new Error('The read-only trial progress component is unavailable');
+    }
     const ids = [
       'performance-status', 'performance-topology', 'performance-model',
       'performance-backend', 'performance-dataset', 'performance-creators', 'performance-seeded-slider',
@@ -129,7 +133,16 @@
         const term = documentRef.createElement('dt');
         const description = documentRef.createElement('dd');
         term.textContent = label;
-        description.textContent = value == null ? 'pending' : String(value);
+        if (value?.kind === 'link') {
+          const link = documentRef.createElement('a');
+          link.href = value.href;
+          link.textContent = value.label;
+          link.target = '_blank';
+          link.rel = 'noopener noreferrer';
+          description.appendChild(link);
+        } else {
+          description.textContent = value == null ? 'pending' : String(value);
+        }
         item.appendChild(term); item.appendChild(description); element.appendChild(item);
       }
     }
@@ -139,14 +152,30 @@
       return typeof value === 'object' ? JSON.stringify(value) : String(value);
     }
 
+    function artifactLink(trial) {
+      const repository = String(trial.datasetRepository || '');
+      const commit = String(trial.remoteHfCommitSha || '');
+      const rawPath = String(trial.remoteHfBundlePath || '');
+      if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)
+          || !/^[0-9a-f]{40,64}$/.test(commit) || !rawPath) return null;
+      const segments = rawPath.split('/').filter((segment) => segment && segment !== '.' && segment !== '..');
+      if (!segments.length) return null;
+      const path = segments.map((segment) => encodeURIComponent(segment)).join('/');
+      return {
+        kind: 'link',
+        href: `https://huggingface.co/datasets/${repository}/tree/${commit}/${path}`,
+        label: `${commit.slice(0, 12)} · ${rawPath}`,
+      };
+    }
+
     function renderProgress(view) {
-      elements['performance-phase'].textContent = `${view.phase} · condition ${view.condition} · created ${view.created} · indexed ${view.indexed}`;
+      elements['performance-phase'].textContent = `${view.phase} · condition ${view.condition} · seeded ${view.seeded} · created ${view.created} · indexed ${view.indexed}`;
       elements['performance-progress'].value = view.percent;
       elements['performance-progress'].textContent = `${view.percent}%`;
       elements['performance-rate'].textContent = `${view.completed}/${view.requested} requests complete · ${view.rate} · elapsed ${view.elapsed} · ETA ${view.eta}${view.draining ? ' · draining' : ''}`;
     }
 
-    function renderTrial(trial) {
+    function renderTrial(trial, persistedProgressView = null) {
       current = trial;
       if (!trial) {
         setStatus('No scalability trial has been saved');
@@ -159,7 +188,8 @@
         || trial.status !== 'population_ready';
       elements['performance-stop'].disabled = pending || !['approved', 'running'].includes(trial.status);
       elements['performance-create'].disabled = pending || ['running', 'draining'].includes(trial.status);
-      if (trial.progress && progressApi) renderProgress(progressApi.progressView(trial.progress));
+      if (persistedProgressView) renderProgress(persistedProgressView);
+      else if (trial.progress) renderProgress(progressApiImpl.progressView(trial.progress));
       const telemetry = trial.progress?.telemetry || {};
       const latestResult = Array.isArray(trial.results) && trial.results.length
         ? trial.results[trial.results.length - 1] : null;
@@ -181,17 +211,27 @@
         ['PIDs / resources', `${display(trial.placement?.processes)} · ${display(trial.resources)}`],
         ['Request latency stages', display(telemetry.requestLatencyStages)],
         ['Events / actions / edges', display(telemetry.eventCounts)],
+        ['Traversal starts / continuation rolls', `starts ${display(telemetry.traversalStarts)} · rolls ${display(telemetry.continuationRolls)}`],
+        ['Walk depth / cap outcomes', `depth ${display(telemetry.depthOutcomes)} · cap ${display(telemetry.capOutcomes)}`],
+        ['Walk requests / walks', `requests ${display(telemetry.walkRequestCount)} · walks ${display(telemetry.walkCount)} · requests/walk ${display(telemetry.requestsPerWalk)}`],
         ['Kafka', `lag ${display(telemetry.kafkaLag)} · offsets ${display(telemetry.kafkaOffsets)}`],
         ['Trainer', `steps ${display(telemetry.trainerSteps)} · loss ${display(telemetry.rollingRankLoss)}`],
         ['Vector cache origins', display(telemetry.sourceVectorOrigins)],
         ['Checkpoint / sync', `${display(telemetry.checkpoint)} · ${display(telemetry.synchronization)}`],
         ['Model staleness', display(telemetry.modelStaleness)],
         ['Activation spikes', display(telemetry.activationSpikes)],
-        ['Artifact', trial.remoteHfCommitSha
-          ? `${trial.remoteHfCommitSha}:${trial.remoteHfBundlePath}` : 'local evidence pending upload'],
+        ['Artifact', artifactLink(trial) || 'local evidence pending upload'],
         ['Run activity log', trial.runId ? `/admin/api/v1/experiment/runs/${trial.runId}/logs` : 'pending'],
       ]);
     }
+
+    const progressPoller = progressApiImpl.createTrialProgressPoller({
+      fetchImpl,
+      render(view, trial) {
+        if (!trial || trial.experimentId !== current?.experimentId) return;
+        renderTrial(trial, view);
+      },
+    });
 
     function renderSaved(trials) {
       elements['performance-trials'].replaceChildren();
@@ -288,7 +328,15 @@
     async function initialize() {
       try {
         await loadModels(); await loadSaved();
-        timer = setIntervalImpl(() => current && loadTrial(current.experimentId).catch((error) => setStatus(error.message, true)), 1000);
+        timer = setIntervalImpl(() => {
+          const experimentId = current?.experimentId;
+          if (!experimentId) return Promise.resolve();
+          return progressPoller.poll(experimentId).catch(() => {
+            if (current?.experimentId === experimentId) {
+              elements['performance-rate'].textContent = 'Progress temporarily unavailable; trial continues independently.';
+            }
+          });
+        }, 1000);
       } catch (error) {
         setStatus(error.message, true);
       }

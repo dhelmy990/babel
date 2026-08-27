@@ -2,6 +2,100 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const dashboard = require('../../backend/admin/scalability-dashboard.js');
+const progress = require('../../backend/admin/trial-progress.js');
+
+function createElement(tagName = 'div') {
+  const listeners = new Map();
+  return {
+    tagName: tagName.toUpperCase(),
+    value: '', min: '0', max: '10000', checked: false, disabled: false,
+    textContent: '', children: [],
+    classList: { toggle() {} },
+    addEventListener(name, callback) { listeners.set(name, callback); },
+    appendChild(child) { this.children.push(child); return child; },
+    replaceChildren(...children) { this.children = children; },
+    dispatch(name) { return listeners.get(name)?.(); },
+  };
+}
+
+function createDocument() {
+  const elements = new Map();
+  return {
+    createElement,
+    getElementById(id) {
+      if (!elements.has(id)) elements.set(id, createElement());
+      return elements.get(id);
+    },
+    querySelector(selector) {
+      return selector === 'meta[name="babel-admin-nonce"]' ? { content: 'nonce' } : null;
+    },
+  };
+}
+
+function response(payload, { ok = true, status = 200 } = {}) {
+  return { ok, status, json: async () => payload };
+}
+
+function trialFixture() {
+  return {
+    experimentId: 'trial-1', status: 'running', topology: 'same_host_split',
+    targetCreatedBabels: 10000, populationReady: true, operatorApproved: true,
+    datasetRepository: 'dhelmy990/babel-wikipedia-experiment',
+    remoteHfCommitSha: 'a'.repeat(40),
+    remoteHfBundlePath: 'runs/trial-1/evidence bundle',
+    progress: {
+      phase: 'measuring', conditionIndex: 2, conditionCount: 9,
+      seededArticles: 8000, targetSeededArticles: 10000,
+      createdBabels: 4000, targetCreatedBabels: 10000, indexedBabels: 3900,
+      requested: 1200, completed: 1150, elapsedSeconds: 60, recentRate: 20,
+      telemetry: {
+        traversalStarts: 320,
+        continuationRolls: { attempted: 510, succeeded: 205 },
+        depthOutcomes: { reachedDepthTwo: 180, depthLimit: 25 },
+        capOutcomes: { requestCapReached: 7 },
+        walkRequestCount: 1200, walkCount: 320, requestsPerWalk: 3.75,
+      },
+    },
+    results: [],
+  };
+}
+
+function definitionRows(element) {
+  return new Map(element.children.map((row) => [
+    row.children[0].textContent,
+    row.children[1],
+  ]));
+}
+
+async function initializeController({ failPoll = false } = {}) {
+  const document = createDocument();
+  const calls = [];
+  let detailReads = 0;
+  let intervalCallback;
+  const trial = trialFixture();
+  const fetchImpl = async (url, options = {}) => {
+    calls.push([url, options]);
+    if (url === '/admin/api/v1/experiment/models') {
+      return response({ models: [{ modelId: 'model-1', label: 'Qwen', immutable: true }] });
+    }
+    if (url === '/admin/api/v1/performance?limit=25') {
+      return response({ trials: [trial] });
+    }
+    if (url === '/admin/api/v1/performance/trial-1') {
+      detailReads += 1;
+      if (failPoll && detailReads > 1) return response({}, { ok: false, status: 503 });
+      return response({ trial });
+    }
+    throw new Error(`unexpected request: ${url}`);
+  };
+  const controller = dashboard.createScalabilityController({
+    document, fetchImpl, progressApi: progress,
+    setIntervalImpl(callback) { intervalCallback = callback; return 17; },
+    clearIntervalImpl() {},
+  });
+  await controller.initialize();
+  return { calls, controller, document, intervalCallback, trial };
+}
 
 test('trial defaults preserve the real split Qwen experiment', () => {
   assert.deepEqual(dashboard.trialDefaults(), {
@@ -67,4 +161,53 @@ test('population gate rejects mismatched model or dataset provenance', () => {
     },
   };
   assert.equal(dashboard.populationGateView(trial).canRunFormalTrial, false);
+});
+
+test('dashboard polling renders persisted seeded, walk, and Hugging Face evidence', async () => {
+  const context = await initializeController();
+
+  await context.intervalCallback();
+
+  const phase = context.document.getElementById('performance-phase').textContent;
+  assert.match(phase, /seeded 8000\/10000/);
+  const telemetry = definitionRows(context.document.getElementById('performance-telemetry'));
+  assert.equal(telemetry.get('Traversal starts / continuation rolls').textContent,
+    'starts 320 · rolls {"attempted":510,"succeeded":205}');
+  assert.equal(telemetry.get('Walk depth / cap outcomes').textContent,
+    'depth {"reachedDepthTwo":180,"depthLimit":25} · cap {"requestCapReached":7}');
+  assert.equal(telemetry.get('Walk requests / walks').textContent,
+    'requests 1200 · walks 320 · requests/walk 3.75');
+
+  const artifact = telemetry.get('Artifact');
+  assert.equal(artifact.children.length, 1);
+  assert.equal(artifact.children[0].tagName, 'A');
+  assert.equal(artifact.children[0].href,
+    `https://huggingface.co/datasets/dhelmy990/babel-wikipedia-experiment/tree/${'a'.repeat(40)}/runs/trial-1/evidence%20bundle`);
+  assert.equal(artifact.children[0].target, '_blank');
+  assert.equal(artifact.children[0].rel, 'noopener noreferrer');
+
+  assert.deepEqual(context.calls.at(-1), [
+    '/admin/api/v1/performance/trial-1',
+    { method: 'GET', headers: { Accept: 'application/json' } },
+  ]);
+});
+
+test('independent progress polling failure cannot mutate or stop a trial', async () => {
+  const context = await initializeController({ failPoll: true });
+  const before = {
+    approve: context.document.getElementById('performance-approve').disabled,
+    stop: context.document.getElementById('performance-stop').disabled,
+    create: context.document.getElementById('performance-create').disabled,
+  };
+
+  await context.intervalCallback();
+
+  assert.match(context.document.getElementById('performance-rate').textContent,
+    /progress temporarily unavailable; trial continues independently/i);
+  assert.deepEqual({
+    approve: context.document.getElementById('performance-approve').disabled,
+    stop: context.document.getElementById('performance-stop').disabled,
+    create: context.document.getElementById('performance-create').disabled,
+  }, before);
+  assert.equal(context.calls.some(([, options]) => options.method === 'POST'), false);
 });
