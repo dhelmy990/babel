@@ -22,6 +22,18 @@ from .distilled_artifact import (
     DistilledArtifactV1,
 )
 from .qwen_encoder import Qwen100Encoder, format_article_input
+from .population import (
+    PopulationIdentity,
+    PopulationIntegrityError,
+    PopulationReceipt,
+    PopulationSource,
+    populate_created_babel_vectors,
+)
+from .source_vector_cache import (
+    ResolvedSourceVector,
+    SourceVectorResolver,
+    VectorCacheKey,
+)
 
 __all__ = [
     "CreatorContextTower",
@@ -40,9 +52,17 @@ __all__ = [
     "MaterializedServingState",
     "LoadedArtifact",
     "ModelRegistry",
+    "PopulationIdentity",
+    "PopulationIntegrityError",
+    "PopulationReceipt",
+    "PopulationSource",
     "Qwen100Encoder",
+    "ResolvedSourceVector",
     "RetrievedCandidate",
+    "SourceVectorResolver",
+    "VectorCacheKey",
     "load_artifact",
     "model_manifest_sha256",
+    "populate_created_babel_vectors",
     "format_article_input",
 ]

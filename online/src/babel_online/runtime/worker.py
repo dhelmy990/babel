@@ -263,16 +263,21 @@ class FridayDemoRuntime:
 
     def _materialized_records(self, version: int) -> list[VectorRecord]:
         return [
-            VectorRecord(
-                babel=babel,
-                catalogContentHash=self._content_hashes[babel.babelId],
-                embeddingSpaceId=self.starting_model.embeddingSpace.embeddingSpaceId,
-                servingModelId=self.starting_model.modelId,
-                materializedModelVersion=version,
-                vector=tuple(float(value) for value in self._serving_vectors[babel.babelId]),
-            )
+            self._materialized_record(babel, version)
             for babel in self._created
         ]
+
+    def _materialized_record(
+        self, babel: CreatedBabel, version: int
+    ) -> VectorRecord:
+        return VectorRecord(
+            babel=babel,
+            catalogContentHash=self._content_hashes[babel.babelId],
+            embeddingSpaceId=self.starting_model.embeddingSpace.embeddingSpaceId,
+            servingModelId=self.starting_model.modelId,
+            materializedModelVersion=version,
+            vector=tuple(float(value) for value in self._serving_vectors[babel.babelId]),
+        )
 
     def _state(self, version: int, sha: str) -> MaterializedServingState:
         return MaterializedServingState(
@@ -355,7 +360,29 @@ class FridayDemoRuntime:
 
     def _materialize_new_babel(self) -> None:
         """Index a new Babel without exposing unsynchronized trainer state."""
-        self._persist_and_activate(self._serving_version, synchronize=False)
+        if not self._created:
+            raise RuntimeError("a new finalized Babel is required for materialization")
+        record = self._materialized_record(self._created[-1], self._serving_version)
+        # Insert only the new row.  Rebuilding every prior VectorRecord here made
+        # a run quadratic before recommendation retrieval even began.
+        self.database.insert_vectors([record])
+        self._records.append(record)
+        sha = _snapshot_sha(self._records)
+        state = self._state(self._serving_version, sha)
+        self.database.activate_embedding_state(
+            run_id=self.config.runId,
+            model_id=self.starting_model.modelId,
+            model_version=self._serving_version,
+            embedding_space_id=self.starting_model.embeddingSpace.embeddingSpaceId,
+            pgvector_sha256=sha,
+            backend_sha256=sha,
+        )
+        self.serving.apply_sync(
+            selected_model_id=self.starting_model.modelId,
+            materialized_state=state,
+            candidate_index=self.index,
+            vector_records=self._records,
+        )
 
     def _record_recommendation(self, babel: CreatedBabel, response: Any, event: FeedbackEventV1, client_ns: int) -> None:
         actions = {"include": [], "exclude": [], "ignore": []}

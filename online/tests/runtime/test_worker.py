@@ -9,6 +9,7 @@ import pytest
 from babel_online.feedback import InMemoryFeedbackBus
 from babel_online.runtime.worker import RunScopedConsumer, WorkerManager, isolate_new_run_offsets
 from babel_online.runtime.worker import FridayDemoRuntime
+from babel_online.observable import CreatedBabel
 from babel_online.runtime.dataset_bundle import (
     DEMO_DATASET_CONFIG,
     DEMO_DATASET_REPOSITORY,
@@ -118,20 +119,54 @@ def test_worker_rejects_loaded_bundle_identity_mismatch_before_claim(bundle_upda
     assert database.claimed is False
 
 
-def test_new_babel_materialization_keeps_serving_at_last_sync_version() -> None:
+def test_new_babel_materialization_inserts_only_new_row_at_last_sync_version() -> None:
+    run_id = uuid4()
+    creator_id = uuid4()
+    old = CreatedBabel(
+        babelId=uuid4(), runId=run_id, creatorId=creator_id,
+        sourceArticleKey="enwiki:1", title="Old", text="Old lead", createdAtNs=1,
+    )
+    new = CreatedBabel(
+        babelId=uuid4(), runId=run_id, creatorId=creator_id,
+        sourceArticleKey="enwiki:2", title="New", text="New lead", createdAtNs=2,
+    )
+    inserted = []
+    activated = []
+    applied = []
     runtime = object.__new__(FridayDemoRuntime)
     runtime._serving_version = 3
     runtime.trainer = SimpleNamespace(training_version=9)
-    calls = []
-    runtime._persist_and_activate = (  # type: ignore[method-assign]
-        lambda version, *, synchronize: calls.append((version, synchronize))
+    runtime.config = SimpleNamespace(runId=run_id)
+    runtime.starting_model = SimpleNamespace(
+        modelId=UUID("00000000-0000-5000-8000-000000000002"),
+        embeddingSpace=SimpleNamespace(
+            embeddingSpaceId=UUID("00000000-0000-5000-8000-000000000003")
+        ),
     )
+    runtime._created = [old, new]
+    runtime._records = []
+    runtime._content_hashes = {old.babelId: "a" * 64, new.babelId: "b" * 64}
+    runtime._serving_vectors = {
+        old.babelId: np.eye(100, dtype=np.float32)[0],
+        new.babelId: np.eye(100, dtype=np.float32)[1],
+    }
+    runtime.database = SimpleNamespace(
+        insert_vectors=lambda records: inserted.append(list(records)),
+        activate_embedding_state=lambda **values: activated.append(values),
+    )
+    runtime.serving = SimpleNamespace(
+        apply_sync=lambda **values: applied.append(values)
+    )
+    runtime.index = object()
 
     runtime._materialize_new_babel()
 
     assert runtime.trainer.training_version == 9
     assert runtime._serving_version == 3
-    assert calls == [(3, False)]
+    assert [[record.babel.babelId for record in batch] for batch in inserted] == [[new.babelId]]
+    assert [record.babel.babelId for record in runtime._records] == [new.babelId]
+    assert activated[0]["model_version"] == 3
+    assert [record.babel.babelId for record in applied[0]["vector_records"]] == [new.babelId]
 
 
 def test_worker_sync_uses_one_locked_training_capture_for_version_vectors_and_state() -> None:

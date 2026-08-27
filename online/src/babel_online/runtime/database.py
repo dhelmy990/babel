@@ -13,6 +13,12 @@ from uuid import UUID
 
 from ..contracts import ActivityLogV1, ModelManifestV1, RunConfigV1
 from ..model.artifact import LoadedArtifact, load_artifact
+from ..model.population import (
+    PopulationIdentity,
+    PopulationIntegrityError,
+    PopulationSource,
+)
+from ..model.source_vector_cache import VectorCacheKey
 from ..observable import CreatedBabel, VectorRecord, reject_hidden_fields
 
 
@@ -365,6 +371,372 @@ class RuntimeDatabase:
             )
             for row in rows
         ]
+
+    def population_sources(
+        self,
+        run_id: UUID,
+        *,
+        after_babel_id: UUID | None,
+        limit: int,
+    ) -> list[PopulationSource]:
+        """Read only finalized synthetic-created Babels in bounded ID order."""
+        if limit <= 0:
+            raise ValueError("population source limit must be positive")
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT babel_id, creator_id, source_article_key, title, article_text,
+                       catalog_content_hash,
+                       (extract(epoch from created_at) * 1000000000)::bigint
+                FROM experiment_babels
+                WHERE run_id=%s
+                  AND finalized_at IS NOT NULL
+                  AND article_text IS NOT NULL
+                  AND catalog_content_hash IS NOT NULL
+                  AND (%s::uuid IS NULL OR babel_id > %s::uuid)
+                ORDER BY babel_id
+                LIMIT %s
+                """,
+                (run_id, after_babel_id, after_babel_id, limit),
+            )
+            rows = cursor.fetchall()
+        return [
+            PopulationSource(
+                babel=CreatedBabel(
+                    babelId=row[0],
+                    runId=run_id,
+                    creatorId=row[1],
+                    sourceArticleKey=row[2],
+                    title=row[3],
+                    text=row[4],
+                    createdAtNs=max(0, int(row[6])),
+                ),
+                catalog_content_hash=str(row[5]),
+            )
+            for row in rows
+        ]
+
+    @staticmethod
+    def _vector_literal(values: Sequence[float]) -> str:
+        if len(values) != 100:
+            raise PopulationIntegrityError("population vector dimension is not 100")
+        return "[" + ",".join(format(float(value), ".9g") for value in values) + "]"
+
+    @staticmethod
+    def _vector_text_bytes(value: object) -> bytes:
+        import numpy as np
+
+        text = str(value).strip()
+        if not text.startswith("[") or not text.endswith("]"):
+            raise PopulationIntegrityError("pgvector returned malformed vector text")
+        try:
+            vector = np.asarray(
+                [float(item) for item in text[1:-1].split(",")], dtype="<f4"
+            )
+        except ValueError as error:
+            raise PopulationIntegrityError("pgvector returned malformed vector values") from error
+        if vector.shape != (100,) or not np.isfinite(vector).all():
+            raise PopulationIntegrityError("pgvector row is not finite 100d float32")
+        return vector.tobytes()
+
+    def write_population_batch(
+        self,
+        records: Sequence[VectorRecord],
+        expected: PopulationIdentity,
+    ) -> None:
+        """Insert one batch or prove every pre-existing row is byte-identical."""
+        if not records:
+            return
+        with self._connect() as connection, connection.cursor() as cursor:
+            for record in records:
+                babel = record.babel
+                if (
+                    babel.runId != expected.run_id
+                    or record.servingModelId != expected.model_id
+                    or record.materializedModelVersion != expected.model_version
+                    or record.embeddingSpaceId != expected.embedding_space_id
+                ):
+                    raise PopulationIntegrityError("population record identity differs")
+                cursor.execute(
+                    """
+                    SELECT creator_id, source_article_key, title, article_text,
+                           catalog_content_hash
+                    FROM experiment_babels
+                    WHERE run_id=%s AND babel_id=%s AND finalized_at IS NOT NULL
+                    FOR SHARE
+                    """,
+                    (babel.runId, babel.babelId),
+                )
+                source = cursor.fetchone()
+                if source is None or (
+                    source[0] != babel.creatorId
+                    or str(source[1]) != babel.sourceArticleKey
+                    or str(source[2]) != babel.title
+                    or str(source[3]) != babel.text
+                    or str(source[4]) != record.catalogContentHash
+                ):
+                    raise PopulationIntegrityError(
+                        "population record no longer matches finalized created content"
+                    )
+                cursor.execute(
+                    """
+                    SELECT creator_id, embedding_space_id, serving_model_id,
+                           catalog_content_hash, embedding::text
+                    FROM babel_embeddings
+                    WHERE run_id=%s AND babel_id=%s
+                      AND materialized_model_version=%s
+                    FOR SHARE
+                    """,
+                    (babel.runId, babel.babelId, record.materializedModelVersion),
+                )
+                existing = cursor.fetchone()
+                expected_bytes = self._vector_text_bytes(
+                    self._vector_literal(record.vector)
+                )
+                if existing is not None:
+                    if (
+                        existing[0] != babel.creatorId
+                        or existing[1] != record.embeddingSpaceId
+                        or existing[2] != record.servingModelId
+                        or str(existing[3]) != record.catalogContentHash
+                        or self._vector_text_bytes(existing[4]) != expected_bytes
+                    ):
+                        raise PopulationIntegrityError(
+                            "existing vector bytes or identity differ"
+                        )
+                    continue
+                cursor.execute(
+                    """
+                    INSERT INTO babel_embeddings(
+                      run_id,babel_id,creator_id,embedding_space_id,serving_model_id,
+                      materialized_model_version,catalog_content_hash,embedding
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s::public.vector)
+                    """,
+                    (
+                        babel.runId,
+                        babel.babelId,
+                        babel.creatorId,
+                        record.embeddingSpaceId,
+                        record.servingModelId,
+                        record.materializedModelVersion,
+                        record.catalogContentHash,
+                        self._vector_literal(record.vector),
+                    ),
+                )
+
+    def population_vectors(
+        self,
+        expected: PopulationIdentity,
+        *,
+        after_babel_id: UUID | None,
+        limit: int,
+    ) -> list[VectorRecord]:
+        if limit <= 0:
+            raise ValueError("population vector limit must be positive")
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT xb.babel_id, xb.creator_id, xb.source_article_key, xb.title,
+                       xb.article_text, xb.catalog_content_hash,
+                       (extract(epoch from xb.created_at) * 1000000000)::bigint,
+                       eb.embedding::text
+                FROM babel_embeddings AS eb
+                JOIN experiment_babels AS xb
+                  ON xb.run_id=eb.run_id AND xb.babel_id=eb.babel_id
+                WHERE eb.run_id=%s
+                  AND eb.serving_model_id=%s
+                  AND eb.materialized_model_version=%s
+                  AND eb.embedding_space_id=%s
+                  AND xb.finalized_at IS NOT NULL
+                  AND (%s::uuid IS NULL OR eb.babel_id > %s::uuid)
+                ORDER BY eb.babel_id
+                LIMIT %s
+                """,
+                (
+                    expected.run_id,
+                    expected.model_id,
+                    expected.model_version,
+                    expected.embedding_space_id,
+                    after_babel_id,
+                    after_babel_id,
+                    limit,
+                ),
+            )
+            rows = cursor.fetchall()
+        result: list[VectorRecord] = []
+        for row in rows:
+            vector_text = str(row[7]).strip()[1:-1]
+            result.append(
+                VectorRecord(
+                    babel=CreatedBabel(
+                        babelId=row[0],
+                        runId=expected.run_id,
+                        creatorId=row[1],
+                        sourceArticleKey=row[2],
+                        title=row[3],
+                        text=row[4],
+                        createdAtNs=max(0, int(row[6])),
+                    ),
+                    catalogContentHash=str(row[5]),
+                    embeddingSpaceId=expected.embedding_space_id,
+                    servingModelId=expected.model_id,
+                    materializedModelVersion=expected.model_version,
+                    vector=tuple(float(item) for item in vector_text.split(",")),
+                )
+            )
+        return result
+
+    def activate_population(
+        self,
+        expected: PopulationIdentity,
+        *,
+        snapshot_sha256: str,
+    ) -> None:
+        """Activate only a transactionally exact created/indexed identity set."""
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                WITH created AS (
+                  SELECT babel_id, creator_id, catalog_content_hash
+                  FROM experiment_babels
+                  WHERE run_id=%s AND finalized_at IS NOT NULL
+                    AND article_text IS NOT NULL AND catalog_content_hash IS NOT NULL
+                ), indexed AS (
+                  SELECT babel_id, creator_id, catalog_content_hash
+                  FROM babel_embeddings
+                  WHERE run_id=%s AND serving_model_id=%s
+                    AND materialized_model_version=%s AND embedding_space_id=%s
+                )
+                SELECT
+                  (SELECT count(*) FROM created),
+                  (SELECT count(*) FROM indexed),
+                  (SELECT count(*) FROM (
+                    (SELECT * FROM created EXCEPT SELECT * FROM indexed)
+                    UNION ALL
+                    (SELECT * FROM indexed EXCEPT SELECT * FROM created)
+                  ) AS differences)
+                """,
+                (
+                    expected.run_id,
+                    expected.run_id,
+                    expected.model_id,
+                    expected.model_version,
+                    expected.embedding_space_id,
+                ),
+            )
+            created_count, indexed_count, differences = cursor.fetchone()
+            if created_count != indexed_count or differences != 0:
+                raise PopulationIntegrityError(
+                    "created and indexed IDs are not transactionally equal"
+                )
+            cursor.execute(
+                """
+                INSERT INTO run_embedding_states(
+                  run_id,active_model_id,active_model_version,embedding_space_id,
+                  pgvector_snapshot_sha256,backend_snapshot_sha256
+                ) VALUES (%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (run_id) DO UPDATE SET
+                  active_model_id=EXCLUDED.active_model_id,
+                  active_model_version=EXCLUDED.active_model_version,
+                  embedding_space_id=EXCLUDED.embedding_space_id,
+                  pgvector_snapshot_sha256=EXCLUDED.pgvector_snapshot_sha256,
+                  backend_snapshot_sha256=EXCLUDED.backend_snapshot_sha256,
+                  synchronized_at=now()
+                """,
+                (
+                    expected.run_id,
+                    expected.model_id,
+                    expected.model_version,
+                    expected.embedding_space_id,
+                    snapshot_sha256,
+                    snapshot_sha256,
+                ),
+            )
+
+    def load_active_source_vector(self, key: VectorCacheKey):
+        """Load one exact active pgvector row without normalization or conversion."""
+        import numpy as np
+
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT eb.embedding::text
+                FROM run_embedding_states AS rs
+                JOIN babel_embeddings AS eb
+                  ON eb.run_id=rs.run_id
+                 AND eb.serving_model_id=rs.active_model_id
+                 AND eb.materialized_model_version=rs.active_model_version
+                 AND eb.embedding_space_id=rs.embedding_space_id
+                WHERE rs.run_id=%s AND eb.babel_id=%s
+                  AND rs.active_model_id=%s AND rs.active_model_version=%s
+                  AND rs.embedding_space_id=%s
+                """,
+                (
+                    key.run_id,
+                    key.babel_id,
+                    key.model_id,
+                    key.model_version,
+                    key.embedding_space_id,
+                ),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise KeyError(f"active source vector does not exist: {key.babel_id}")
+        values = str(row[0]).strip()[1:-1]
+        result = np.asarray([float(item) for item in values.split(",")], dtype="<f4")
+        if result.shape != (100,) or not np.isfinite(result).all():
+            raise PopulationIntegrityError("active source vector is invalid")
+        return result
+
+    def population_storage_bytes(self) -> dict[str, int]:
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_table_size('babel_embeddings'), "
+                "pg_indexes_size('babel_embeddings')"
+            )
+            row = cursor.fetchone()
+        return {"table_bytes": int(row[0]), "index_bytes": int(row[1])}
+
+    def explain_population_query(self, expected: PopulationIdentity) -> object:
+        from ..model.pgvector_index import PGVECTOR_CREATED_BABEL_QUERY
+
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT eb.embedding::text, rs.pgvector_snapshot_sha256
+                FROM run_embedding_states AS rs
+                JOIN babel_embeddings AS eb
+                  ON eb.run_id=rs.run_id
+                 AND eb.serving_model_id=rs.active_model_id
+                 AND eb.materialized_model_version=rs.active_model_version
+                 AND eb.embedding_space_id=rs.embedding_space_id
+                WHERE rs.run_id=%s
+                ORDER BY eb.babel_id LIMIT 1
+                """,
+                (expected.run_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            parameters = {
+                "query": row[0],
+                "run_id": expected.run_id,
+                "model_id": expected.model_id,
+                "model_version": expected.model_version,
+                "embedding_space_id": expected.embedding_space_id,
+                "snapshot_sha256": row[1],
+                "exclude_creator_id": UUID(int=0),
+                "limit": 10,
+            }
+            cursor.execute("SET LOCAL hnsw.ef_search = 100")
+            cursor.execute("SET LOCAL hnsw.iterative_scan = strict_order")
+            cursor.execute(
+                "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "
+                + PGVECTOR_CREATED_BABEL_QUERY,
+                parameters,
+            )
+            plan = cursor.fetchone()[0]
+        return json.loads(plan) if isinstance(plan, str) else plan
 
     def query_candidates(
         self,

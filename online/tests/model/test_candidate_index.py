@@ -3,6 +3,7 @@ from __future__ import annotations
 from uuid import UUID
 
 import numpy as np
+import pytest
 
 from babel_online.model.candidate_index import (
     InMemoryCreatedBabelIndex,
@@ -90,8 +91,10 @@ def test_fixture_index_returns_only_other_creators_created_babels() -> None:
 def test_pgvector_query_joins_created_babels_not_catalog_candidates() -> None:
     lowered = " ".join(PGVECTOR_CREATED_BABEL_QUERY.casefold().split())
     assert "join experiment_babels" in lowered
-    assert "join run_embedding_states" not in lowered
-    assert "any(%(babel_ids)s::uuid[])" in lowered
+    assert "from run_embedding_states" in lowered
+    assert "active_model_version" in lowered
+    assert "pgvector_snapshot_sha256" in lowered
+    assert "any(%(babel_ids)s::uuid[])" not in lowered
     assert "catalog_embeddings" not in lowered
     assert "eb.creator_id <>" in lowered
 
@@ -123,15 +126,17 @@ def test_pgvector_adapter_applies_cosine_hnsw_settings() -> None:
 
     assert tuple(captured["settings"]) == PGVECTOR_TRANSACTION_SETTINGS
     assert captured["sql"] == PGVECTOR_CREATED_BABEL_QUERY
-    assert captured["parameters"]["babel_ids"] == [eligible[0].babel.babelId]
+    assert "babel_ids" not in captured["parameters"]
     assert result[0].creator_id == CREATOR_B
 
 
-def test_pgvector_old_and_new_snapshots_keep_separate_candidate_membership() -> None:
+def test_pgvector_activation_rejects_superseded_run_snapshot() -> None:
     captured = []
 
     def query_rows(_settings, _sql, parameters):
-        captured.append(tuple(parameters["babel_ids"]))
+        captured.append(
+            (parameters["model_version"], parameters["snapshot_sha256"])
+        )
         return []
 
     old_state = state()
@@ -149,16 +154,20 @@ def test_pgvector_old_and_new_snapshots_keep_separate_candidate_membership() -> 
     index.activate(old_state, [old_record])
     index.activate(new_state, [old_record, new_record])
 
-    for snapshot in (old_state, new_state):
+    with pytest.raises(ValueError, match="does not match"):
         index.search(
             np.asarray(vector(0), dtype=np.float32),
             run_id=RUN,
-            state=snapshot,
+            state=old_state,
             exclude_creator_id=CREATOR_C,
             k=3,
         )
+    index.search(
+        np.asarray(vector(0), dtype=np.float32),
+        run_id=RUN,
+        state=new_state,
+        exclude_creator_id=CREATOR_C,
+        k=3,
+    )
 
-    assert captured == [
-        (old_record.babel.babelId,),
-        (old_record.babel.babelId, new_record.babel.babelId),
-    ]
+    assert captured == [(1, "c" * 64)]
