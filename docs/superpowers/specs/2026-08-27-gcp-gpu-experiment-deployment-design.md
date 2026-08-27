@@ -240,9 +240,11 @@ a one-vector-only check cannot prove population viability.
 
 ### 5. Service acceptance
 
-Require healthy PostgreSQL, Kafka, backend, performance worker, and
-recommendation-server boundaries. Verify the dashboard through the IAP tunnel
-and verify that no public application port is reachable.
+Require healthy PostgreSQL, Kafka, backend, and performance-worker boundaries.
+Verify the dashboard through the IAP tunnel and verify that no public
+application port is reachable. The recommendation server is created per formal
+matrix condition, so its health is required and recorded inside every
+condition rather than before population.
 
 ### 6. Formal population
 
@@ -270,8 +272,8 @@ Before approval, require:
 Approve the matrix only after the population gate passes. Run the existing nine
 conditions sequentially without changing topology, training, activation,
 warmup, measurement, request, or workload semantics. Require each condition to
-produce durable evidence and require zero final Kafka lag for training
-conditions.
+record a healthy recommendation-server boundary, produce durable evidence, and
+require zero final Kafka lag for training conditions.
 
 During population, the worker may be restarted explicitly against its GCP
 journal and the trial may be started again from its last committed batch. Once
