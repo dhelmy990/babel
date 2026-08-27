@@ -35,6 +35,44 @@ _ROOT_FILES = {
     "trial-results.json",
     "trial-summary.json",
 }
+_CONDITION_IDENTITIES = (
+    {
+        "topology": "same_process",
+        "trainingEnabled": False,
+        "activationEnabled": False,
+        "retrievalBackend": "pgvector",
+    },
+    {
+        "topology": "same_process",
+        "trainingEnabled": True,
+        "activationEnabled": False,
+        "retrievalBackend": "pgvector",
+    },
+    {
+        "topology": "same_process",
+        "trainingEnabled": True,
+        "activationEnabled": True,
+        "retrievalBackend": "pgvector",
+    },
+    {
+        "topology": "same_host_split",
+        "trainingEnabled": False,
+        "activationEnabled": False,
+        "retrievalBackend": "pgvector",
+    },
+    {
+        "topology": "same_host_split",
+        "trainingEnabled": True,
+        "activationEnabled": False,
+        "retrievalBackend": "pgvector",
+    },
+    {
+        "topology": "same_host_split",
+        "trainingEnabled": True,
+        "activationEnabled": True,
+        "retrievalBackend": "pgvector",
+    },
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,6 +199,47 @@ def _condition_path(evidence_root: Path, index: int) -> Path:
     return present[0]
 
 
+def _validate_completed_condition(
+    raw: dict[str, Any], *, index: int, request_count: int
+) -> None:
+    expected_identity = _CONDITION_IDENTITIES[index - 1]
+    if raw.get("conditionIdentity") != expected_identity:
+        raise ValueError("representative evidence is not the ordered 2x3 matrix")
+    measurements = raw.get("measurements")
+    if (
+        not isinstance(measurements, list)
+        or not measurements
+        or any(
+            not isinstance(row, dict) or row.get("outcome") != "success"
+            for row in measurements
+        )
+        or sum(row.get("isWarmup") is False for row in measurements) != request_count
+    ):
+        raise ValueError("representative condition did not complete successfully")
+    feedback = raw.get("feedbackKafka")
+    final_state = (
+        feedback.get("finalTrainerState") if isinstance(feedback, dict) else None
+    )
+    if (
+        not isinstance(final_state, dict)
+        or final_state.get("available") is not True
+        or final_state.get("kafkaLag") != 0
+    ):
+        raise ValueError("representative condition must have zero final Kafka lag")
+    record_count = feedback.get("recordCount")
+    if (
+        isinstance(record_count, bool)
+        or not isinstance(record_count, int)
+        or record_count < request_count
+    ):
+        raise ValueError("representative condition feedback evidence is incomplete")
+    if (
+        expected_identity["trainingEnabled"] is True
+        and final_state.get("offsetsCoverPublishedRanges") is not True
+    ):
+        raise ValueError("representative training offsets are not completely covered")
+
+
 def _validate_sources(
     *,
     trial_id: UUID,
@@ -251,6 +330,7 @@ def _validate_sources(
             or float(p95_ms) < 0
         ):
             raise ValueError(f"representative condition {index} result is incomplete")
+        _validate_completed_condition(raw, index=index, request_count=request_count)
         evidence.append(document)
     return manifest, evidence, feedback_rows, edge_rows
 

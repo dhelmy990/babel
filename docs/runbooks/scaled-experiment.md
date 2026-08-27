@@ -305,8 +305,10 @@ BUNDLE_ROOT="$(jq -r '.bundleRoot' "$BUILD_RECEIPT")"
 
 The builder rechecks the trial ID, exact `formalPerformanceClaim=false` value,
 the `representative_` evidence scope, both declared Parquet checksums and row
-counts, and the six condition bindings. It stages the raw export and condition
-evidence with generated trial summary/results and model-lineage documents,
+counts, the exact ordered 2×3 condition identities, successful measurements,
+complete training-offset coverage, and zero final Kafka lag. It stages the raw
+export and condition evidence with generated trial summary/results and
+model-lineage documents,
 report markdown, and a complete checksum inventory. Its content-addressed local
 path is always
 `representative-runs/<TRIAL_ID>/<checksum-inventory-sha256>/`; it never writes
