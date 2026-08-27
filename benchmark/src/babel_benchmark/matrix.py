@@ -263,14 +263,16 @@ def _execute_with_timeout(
     elif worker.is_alive():
         worker.terminate()
     worker.join(0.05)
+    if isolated_group is not None:
+        # The group leader may have honored SIGTERM while a descendant ignored
+        # it. Escalate the group regardless of the leader's liveness.
+        try:
+            os.killpg(isolated_group, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    elif worker.is_alive():  # pragma: no cover - pre-isolation startup failure
+        worker.kill()
     if worker.is_alive():
-        if isolated_group is not None:
-            try:
-                os.killpg(isolated_group, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        else:  # pragma: no cover - pre-isolation startup failure
-            worker.kill()
         worker.join()
     if timed_out:
         receive.close()

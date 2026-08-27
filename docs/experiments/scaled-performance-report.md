@@ -19,7 +19,8 @@ performance claim false**.
   handshake. The suite then reserves a cooperative-cancellation window,
   terminates/kills the whole group, and reaps the worker before returning; a
   late condition prevents receipt publication and cannot leave a callback
-  subprocess running.
+  subprocess running. Group `SIGKILL` escalation occurs even if the worker
+  leader already exited after `SIGTERM`.
 - Receipt: positive requests/edges, startup/cleanup, progress, ratios, trainer-
   failure serving availability, and an existing nonempty raw-result file are
   mandatory, with

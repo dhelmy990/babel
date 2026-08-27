@@ -93,7 +93,9 @@ worker-only Linux process group and receives a cancellation event; the callback
 cannot start before that isolation handshake. The runner reserves a
 cooperative-cancellation window, then terminates or kills the whole group and
 reaps its worker before returning; neither the callback nor a subprocess it
-launched remains active after `TimeoutError`. A successful condition requires
+launched remains active after `TimeoutError`. `SIGKILL` is sent to the verified
+group after the TERM grace even when its worker leader already exited, covering
+TERM-ignoring descendants. A successful condition requires
 positive requests and edges, all required health observations, and an existing
 nonempty raw evidence file. `DashboardPerformanceHttpClient` maps saved-trial
 creation and graceful stop to the Task 10 loopback admin endpoints; its caller

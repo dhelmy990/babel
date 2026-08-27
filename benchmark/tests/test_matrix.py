@@ -215,6 +215,44 @@ def test_timeout_terminates_executor_process_group_descendants(tmp_path) -> None
     assert not delayed_side_effect.exists()
 
 
+def test_timeout_sigkills_descendant_that_ignores_sigterm(tmp_path) -> None:
+    plan = tiny_smoke_plan(timeout_seconds=0.08)
+    descendant_pid_path = tmp_path / "sigterm-immune.pid"
+    delayed_side_effect = tmp_path / "sigterm-immune-side-effect"
+
+    def launches_sigterm_immune_descendant(
+        _condition, _limit, _timeout, _cancel
+    ):
+        script = (
+            "import os,signal,time,pathlib; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            f"pathlib.Path({str(descendant_pid_path)!r}).write_text(str(os.getpid())); "
+            "time.sleep(0.25); "
+            f"pathlib.Path({str(delayed_side_effect)!r}).write_text('bad'); "
+            "time.sleep(10)"
+        )
+        subprocess.Popen([sys.executable, "-c", script])
+        while True:
+            time.sleep(1)
+
+    with pytest.raises(TimeoutError, match="strict suite timeout"):
+        run_tiny_smoke(
+            plan,
+            launches_sigterm_immune_descendant,
+            receipt_path=tmp_path / "receipt.json",
+        )
+
+    assert descendant_pid_path.is_file()
+    descendant_pid = int(descendant_pid_path.read_text(encoding="utf-8"))
+    descendant_proc = Path(f"/proc/{descendant_pid}")
+    deadline = time.monotonic() + 0.5
+    while time.monotonic() < deadline and descendant_proc.exists():
+        time.sleep(0.01)
+    assert not descendant_proc.exists()
+    time.sleep(0.3)
+    assert not delayed_side_effect.exists()
+
+
 def test_timeout_recovers_late_process_group_handshake(
     tmp_path, monkeypatch
 ) -> None:
