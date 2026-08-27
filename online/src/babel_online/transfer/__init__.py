@@ -23,6 +23,7 @@ from .parquet_bundle import (
     verify_bundle,
     write_bundle_payloads,
 )
+from .database import ExportReceiptV1, export_population
 
 __all__ = [
     "CATALOG_ARROW_SCHEMA",
@@ -44,4 +45,6 @@ __all__ = [
     "vector_f32le",
     "verify_bundle",
     "write_bundle_payloads",
+    "ExportReceiptV1",
+    "export_population",
 ]
