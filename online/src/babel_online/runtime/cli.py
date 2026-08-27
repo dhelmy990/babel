@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.metadata
+import json
 import os
 import signal
 import sys
@@ -23,6 +24,7 @@ from ..model.distilled_artifact import (
     DistilledArtifactV1,
 )
 from ..model.qwen_encoder import Qwen100Encoder
+from ..feedback import KafkaFeedbackConsumer
 from .control import create_control_app
 from .database import RuntimeDatabase, load_configured_model_artifact
 from .dataset_bundle import (
@@ -31,6 +33,7 @@ from .dataset_bundle import (
     load_demo_dataset_bundle,
     load_scale_dataset_bundle,
 )
+from .performance_export import export_completed_performance_trial
 from .worker import FridayDemoRuntime, WorkerManager
 from .coordinator import coordinator_from_environment
 from .supervisor import PerRunTopologyManager, build_service_commands
@@ -521,6 +524,47 @@ def _performance_command(argv: list[str]) -> None:
             )
 
 
+def _performance_export(argv: list[str]) -> None:
+    """Export one completed formal matrix from exact acknowledged Kafka ranges."""
+    parser = argparse.ArgumentParser(prog="babel-online performance-export")
+    parser.add_argument("--experiment-id", required=True, type=UUID)
+    parser.add_argument("--evidence-root", required=True, type=Path)
+    parser.add_argument("--output-root", required=True, type=Path)
+    parser.add_argument("--kafka-group")
+    arguments = parser.parse_args(argv)
+    database = RuntimeDatabase(_required("BABEL_DATABASE_URL"))
+    group_id = arguments.kafka_group or (
+        f"babel-performance-export-{arguments.experiment_id}"
+    )
+    consumer = KafkaFeedbackConsumer(
+        os.environ.get("BABEL_KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:29092"),
+        group_id=group_id,
+    )
+    try:
+        result = export_completed_performance_trial(
+            database=database,
+            experiment_id=arguments.experiment_id,
+            evidence_root=arguments.evidence_root,
+            output_root=arguments.output_root,
+            feedback_source=consumer,
+        )
+    finally:
+        consumer.close()
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    print(
+        json.dumps(
+            {
+                "experimentId": str(arguments.experiment_id),
+                "feedbackRecords": int(manifest["records"]),
+                "canonicalEdges": int(manifest["canonicalEdges"]),
+                "feedbackParquet": str(result.parquet_path.resolve()),
+                "edgesParquet": str(result.edge_parquet_path.resolve()),
+            },
+            sort_keys=True,
+        )
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     values = list(sys.argv[1:] if argv is None else argv)
     command = values.pop(0) if values else "supervise"
@@ -540,6 +584,8 @@ def main(argv: list[str] | None = None) -> int:
         _performance_condition(values)
     elif command == "performance-command":
         _performance_command(values)
+    elif command == "performance-export":
+        _performance_export(values)
     else:
         raise SystemExit(f"unsupported babel-online command: {command}")
     return 0

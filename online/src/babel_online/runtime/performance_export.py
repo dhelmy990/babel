@@ -26,8 +26,14 @@ class _VerifiedFeedbackSource:
         self.source = source
         self.expected = expected
         self.seen: set[tuple[str, int, int]] = set()
+        high_watermarks = getattr(source, "high_watermarks", None)
+        self.high_watermarks = high_watermarks() if callable(high_watermarks) else None
 
     def records(self, offset_range: OffsetRange) -> tuple[FeedbackRecord, ...]:
+        if self.high_watermarks is not None:
+            high_watermark = self.high_watermarks.get(offset_range.topic_partition)
+            if high_watermark is None or high_watermark < offset_range.end_exclusive:
+                raise ValueError("feedback range exceeds the Kafka high watermark")
         records = self.source.records(offset_range)
         expected_offsets = {
             key

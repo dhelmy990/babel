@@ -8,7 +8,7 @@ from uuid import UUID
 import pyarrow.parquet as pq
 import pytest
 
-from babel_online.feedback import InMemoryFeedbackBus
+from babel_online.feedback import InMemoryFeedbackBus, TopicPartition
 from babel_online.feedback.export import reconstruct_canonical_edges
 from babel_online.runtime.performance_worker import PerformanceCondition
 from tests.feedback.test_bus import feedback_event_v2
@@ -241,4 +241,29 @@ def test_completed_trial_export_requires_exact_topology_mode_matrix(tmp_path):
             evidence_root=tmp_path / "conditions",
             output_root=tmp_path / "export",
             feedback_source=bus,
+        )
+
+
+def test_completed_trial_export_rejects_range_beyond_kafka_high_watermark(tmp_path):
+    from babel_online.runtime.performance_export import export_completed_performance_trial
+
+    trial = _completed_trial()
+    bus = InMemoryFeedbackBus()
+    events = _write_evidence(tmp_path / "conditions", trial, bus)
+    source = SimpleNamespace(
+        high_watermarks=lambda: {TopicPartition("babel.feedback.v1", 0): 0},
+        records=bus.records,
+    )
+    database = SimpleNamespace(
+        load_performance_experiment=lambda _trial_id: trial,
+        canonical_edges=lambda run_id: reconstruct_canonical_edges([events[run_id]]),
+    )
+
+    with pytest.raises(ValueError, match="high watermark"):
+        export_completed_performance_trial(
+            database=database,
+            experiment_id=trial.id,
+            evidence_root=tmp_path / "conditions",
+            output_root=tmp_path / "export",
+            feedback_source=source,
         )

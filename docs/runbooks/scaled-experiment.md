@@ -132,6 +132,25 @@ matching checksums. The bundle builder adds `manifest.json` and
 `checksums.json`, including persisted progress, topology/placement, hardware,
 original/child model ledger, and 100-dimensional vector-snapshot evidence.
 
+After all nine conditions and the trial are durably `completed`, replay only
+their acknowledged Kafka ranges and compare the reconstructed directed edges
+with PostgreSQL:
+
+```bash
+TRIAL_ID='<saved-trial-uuid>'
+babel-online performance-export \
+  --experiment-id "$TRIAL_ID" \
+  --evidence-root "${BABEL_PERFORMANCE_STATE_ROOT:-state/performance}/$TRIAL_ID/conditions" \
+  --output-root "/home/dhelmy990/Data/babel-data/runs/$TRIAL_ID"
+```
+
+The command prints a JSON receipt containing canonical absolute paths and row
+counts, never database credentials or Kafka configuration. Its
+`feedbackParquet` and `edgesParquet` values are the accepted inputs to the
+bundle builder. On an operator retry, use a new empty output root; a custom
+consumer group may be supplied with `--kafka-group` but does not change the
+evidence-bounded offsets.
+
 Use `FeedbackExport.publication_files()` for the canonical feedback and edge
 inputs. The bundle's model ledger records the selected immutable original,
 child lineage, and any already-returned model commits. Then call
