@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
+import os
 import stat
 import struct
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,6 +31,8 @@ from babel_online.transfer.contracts import (
 )
 from babel_online.transfer.database import (
     _SourceEvidence,
+    _install_bundle_create_only,
+    _rename_directory_noreplace,
     _validate_evidence,
     _write_authoritative_bundle,
     export_population,
@@ -46,6 +51,22 @@ ORDERED_SHA = hashlib.sha256(UNIT_F32LE * 10_000).hexdigest()
 VECTOR_WIRE = struct.pack(">hh", 100, 0) + np.frombuffer(
     UNIT_F32LE, dtype="<f4"
 ).astype(">f4").tobytes()
+PORTABLE_PAYLOADS = {
+    "SHA256SUMS": (b"checksums", 0o600),
+    "babel_catalog.parquet": (b"catalog", 0o640),
+    "babel_embeddings.parquet": (b"embeddings", 0o600),
+    "import_population.py": (b"launcher", 0o700),
+    "manifest.json": (b"manifest", 0o644),
+}
+
+
+def portable_source(root: Path) -> Path:
+    root.mkdir()
+    for name, (content, mode) in PORTABLE_PAYLOADS.items():
+        path = root / name
+        path.write_bytes(content)
+        path.chmod(mode)
+    return root
 
 
 def frozen_manifest() -> FrozenPopulationManifestV1:
@@ -400,9 +421,7 @@ def test_bundle_installs_create_only_under_its_digest(
     manifest = frozen_manifest()
 
     def staged_writer(_source, root):
-        root = Path(root)
-        root.mkdir()
-        (root / "sentinel").write_text("verified")
+        root = portable_source(Path(root))
         return SimpleNamespace(root=root, digest=digest)
 
     verified_contract = SimpleNamespace(
@@ -415,10 +434,25 @@ def test_bundle_installs_create_only_under_its_digest(
     monkeypatch.setattr(
         "babel_online.transfer.database.write_bundle_payloads", staged_writer
     )
+    verified_roots: list[Path] = []
+
+    def verify(root, trusted):
+        root = Path(root)
+        verified_roots.append(root)
+        assert trusted == digest
+        assert set(path.name for path in root.iterdir()) == set(PORTABLE_PAYLOADS)
+        for name, (content, mode) in PORTABLE_PAYLOADS.items():
+            assert root.joinpath(name).read_bytes() == content
+            assert stat.S_IMODE(root.joinpath(name).stat().st_mode) == mode
+        return SimpleNamespace(
+            root=root, digest=trusted, manifest_contract=verified_contract
+        )
+
+    monkeypatch.setattr("babel_online.transfer.database.verify_bundle", verify)
     monkeypatch.setattr(
-        "babel_online.transfer.database.verify_bundle",
-        lambda root, trusted: SimpleNamespace(
-            root=Path(root), digest=trusted, manifest_contract=verified_contract
+        "babel_online.transfer.database._rename_directory_noreplace",
+        lambda *_args: (_ for _ in ()).throw(
+            OSError(errno.EINVAL, os.strerror(errno.EINVAL))
         ),
     )
 
@@ -427,11 +461,229 @@ def test_bundle_installs_create_only_under_its_digest(
     )
 
     assert installed.root == output_root / digest
-    assert installed.root.joinpath("sentinel").read_text() == "verified"
+    assert verified_roots[-1] == installed.root
     assert stat.S_IMODE(output_root.stat().st_mode) == 0o700
     with pytest.raises(PopulationTransferIntegrityError, match="collision"):
         _write_authoritative_bundle(SimpleNamespace(), output_root, manifest)
-    assert installed.root.joinpath("sentinel").read_text() == "verified"
+    assert set(path.name for path in installed.root.iterdir()) == set(PORTABLE_PAYLOADS)
+
+
+@pytest.mark.parametrize("existing", ["empty", "nonempty", "file", "symlink"])
+def test_portable_install_hard_fails_without_mutating_existing_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, existing: str
+) -> None:
+    source = portable_source(tmp_path / "source")
+    destination = tmp_path / ("a" * 64)
+    if existing == "empty":
+        destination.mkdir()
+    elif existing == "nonempty":
+        destination.mkdir()
+        destination.joinpath("foreign").write_text("untouched")
+    elif existing == "file":
+        destination.write_text("untouched")
+    else:
+        target = tmp_path / "foreign-target"
+        target.mkdir()
+        target.joinpath("foreign").write_text("untouched")
+        destination.symlink_to(target, target_is_directory=True)
+    existing_path = destination.resolve() if destination.is_symlink() else destination
+    original = (
+        {path.name: path.read_bytes() for path in existing_path.iterdir()}
+        if existing_path.is_dir()
+        else {"$file": existing_path.read_bytes()}
+    )
+    monkeypatch.setattr(
+        "babel_online.transfer.database.verify_bundle",
+        lambda *_args: pytest.fail("existing destinations must never be verified or adopted"),
+    )
+
+    with pytest.raises(PopulationTransferIntegrityError, match="collision"):
+        _install_bundle_create_only(source, destination, "a" * 64)
+
+    current_path = destination.resolve() if destination.is_symlink() else destination
+    current = (
+        {path.name: path.read_bytes() for path in current_path.iterdir()}
+        if current_path.is_dir()
+        else {"$file": current_path.read_bytes()}
+    )
+    assert current == original
+
+
+def test_portable_install_cleans_only_its_destination_after_partial_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = portable_source(tmp_path / "source")
+    destination = tmp_path / ("a" * 64)
+    from babel_online.transfer import database as transfer_database
+
+    copy_file = transfer_database._copy_regular_file_create_only
+    copied: list[str] = []
+
+    def fail_second_copy(source_fd, destination_fd, name, created_names):
+        copied.append(name)
+        if len(copied) == 2:
+            raise OSError(errno.EIO, "injected partial-copy failure")
+        return copy_file(source_fd, destination_fd, name, created_names)
+
+    monkeypatch.setattr(
+        transfer_database, "_copy_regular_file_create_only", fail_second_copy
+    )
+
+    with pytest.raises(OSError, match="partial-copy"):
+        _install_bundle_create_only(source, destination, "a" * 64)
+
+    assert copied == ["babel_catalog.parquet", "babel_embeddings.parquet"]
+    assert not destination.exists()
+    assert {
+        path.name: path.read_bytes() for path in source.iterdir()
+    } == {name: content for name, (content, _mode) in PORTABLE_PAYLOADS.items()}
+
+
+def test_portable_install_cleans_its_directory_when_open_fails_after_create(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = portable_source(tmp_path / "source")
+    destination = tmp_path / ("a" * 64)
+    real_open = os.open
+
+    def fail_destination_directory_open(path, flags, *args, dir_fd=None, **kwargs):
+        if path == destination.name and flags & os.O_DIRECTORY and dir_fd is not None:
+            raise OSError(errno.EIO, "injected destination-open failure")
+        return real_open(path, flags, *args, dir_fd=dir_fd, **kwargs)
+
+    monkeypatch.setattr("babel_online.transfer.database.os.open", fail_destination_directory_open)
+
+    with pytest.raises(OSError, match="destination-open"):
+        _install_bundle_create_only(source, destination, "a" * 64)
+
+    assert not destination.exists()
+
+
+def test_portable_install_cleans_unaccepted_destination_after_verify_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = portable_source(tmp_path / "source")
+    destination = tmp_path / ("a" * 64)
+    monkeypatch.setattr(
+        "babel_online.transfer.database.verify_bundle",
+        lambda *_args: (_ for _ in ()).throw(
+            PopulationTransferIntegrityError("injected final verification failure")
+        ),
+    )
+
+    with pytest.raises(PopulationTransferIntegrityError, match="final verification"):
+        _install_bundle_create_only(source, destination, "a" * 64)
+
+    assert not destination.exists()
+
+
+def test_portable_install_has_one_concurrent_winner_and_checksum_marker_last(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = portable_source(tmp_path / "source")
+    destination = tmp_path / ("a" * 64)
+    from babel_online.transfer import database as transfer_database
+
+    copy_file = transfer_database._copy_regular_file_create_only
+    copy_order: list[str] = []
+    copy_lock = threading.Lock()
+
+    def record_copy(source_fd, destination_fd, name, created_names):
+        with copy_lock:
+            copy_order.append(name)
+        return copy_file(source_fd, destination_fd, name, created_names)
+
+    monkeypatch.setattr(transfer_database, "_copy_regular_file_create_only", record_copy)
+    monkeypatch.setattr(
+        transfer_database,
+        "verify_bundle",
+        lambda root, digest: SimpleNamespace(root=Path(root), digest=digest),
+    )
+    gate = threading.Barrier(3)
+    results: list[SimpleNamespace] = []
+    errors: list[BaseException] = []
+
+    def install() -> None:
+        gate.wait()
+        try:
+            results.append(_install_bundle_create_only(source, destination, "a" * 64))
+        except BaseException as error:
+            errors.append(error)
+
+    workers = [threading.Thread(target=install) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    gate.wait()
+    for worker in workers:
+        worker.join(timeout=5)
+
+    assert all(not worker.is_alive() for worker in workers)
+    assert len(results) == 1
+    assert len(errors) == 1
+    assert isinstance(errors[0], PopulationTransferIntegrityError)
+    assert "collision" in str(errors[0])
+    assert copy_order == [
+        "babel_catalog.parquet",
+        "babel_embeddings.parquet",
+        "import_population.py",
+        "manifest.json",
+        "SHA256SUMS",
+    ]
+    assert set(path.name for path in destination.iterdir()) == set(PORTABLE_PAYLOADS)
+
+
+def test_portable_install_rejects_a_symlinked_staged_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = portable_source(tmp_path / "source-target")
+    source = tmp_path / "source"
+    source.symlink_to(target, target_is_directory=True)
+    destination = tmp_path / ("a" * 64)
+    monkeypatch.setattr(
+        "babel_online.transfer.database.verify_bundle",
+        lambda *_args: pytest.fail("symlinked source must fail before verification"),
+    )
+
+    with pytest.raises(PopulationTransferIntegrityError, match="root"):
+        _install_bundle_create_only(source, destination, "a" * 64)
+
+    assert not destination.exists()
+
+
+def test_portable_install_rejects_a_symlinked_staged_file_and_cleans_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = portable_source(tmp_path / "source")
+    manifest = source / "manifest.json"
+    manifest.unlink()
+    target = tmp_path / "foreign-manifest"
+    target.write_bytes(b"foreign")
+    manifest.symlink_to(target)
+    destination = tmp_path / ("a" * 64)
+    monkeypatch.setattr(
+        "babel_online.transfer.database.verify_bundle",
+        lambda *_args: pytest.fail("symlinked file must fail before verification"),
+    )
+
+    with pytest.raises(PopulationTransferIntegrityError, match="manifest.json"):
+        _install_bundle_create_only(source, destination, "a" * 64)
+
+    assert not destination.exists()
+    assert target.read_bytes() == b"foreign"
+
+
+def test_missing_renameat2_reports_a_portable_fallback_capability_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "babel_online.transfer.database.ctypes.CDLL",
+        lambda *_args, **_kwargs: SimpleNamespace(),
+    )
+
+    with pytest.raises(OSError) as raised:
+        _rename_directory_noreplace(tmp_path / "source", tmp_path / "destination")
+
+    assert raised.value.errno == errno.ENOSYS
 
 
 @pytest.mark.parametrize(

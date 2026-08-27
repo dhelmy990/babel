@@ -68,6 +68,16 @@ _SOURCE_DATASET_MANIFEST_SHA256 = (
     "069c84e32195d7e175968aa0c569fe5bebc3a148247dbf9e7e34918ef3a22c0f"
 )
 _SHA256 = frozenset("0123456789abcdef")
+_BUNDLE_INSTALL_ORDER = (
+    "babel_catalog.parquet",
+    "babel_embeddings.parquet",
+    "import_population.py",
+    "manifest.json",
+    "SHA256SUMS",
+)
+_PORTABLE_INSTALL_ERRNOS = frozenset(
+    {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}
+)
 
 
 def _utc_now() -> datetime:
@@ -683,9 +693,11 @@ def _rename_directory_noreplace(source: Path, destination: Path) -> None:
 
     library = ctypes.CDLL(None, use_errno=True)
     renameat2 = getattr(library, "renameat2", None)
-    if renameat2 is None:  # pragma: no cover - Linux deployment requirement
-        raise PopulationTransferIntegrityError(
-            "create-only atomic bundle installation is unavailable"
+    if renameat2 is None:
+        raise OSError(
+            errno.ENOSYS,
+            "create-only atomic directory rename is unavailable",
+            str(destination),
         )
     renameat2.argtypes = (
         ctypes.c_int,
@@ -712,6 +724,189 @@ def _rename_directory_noreplace(source: Path, destination: Path) -> None:
             "bundle digest destination collision"
         )
     raise OSError(error_number, os.strerror(error_number), str(destination))
+
+
+def _copy_regular_file_create_only(
+    source_directory_fd: int,
+    destination_directory_fd: int,
+    name: str,
+    created_names: set[str],
+) -> None:
+    read_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        source_fd = os.open(name, read_flags, dir_fd=source_directory_fd)
+    except OSError as error:
+        raise PopulationTransferIntegrityError(
+            f"staged bundle file {name} is unavailable"
+        ) from error
+    try:
+        before = os.fstat(source_fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise PopulationTransferIntegrityError(
+                f"staged bundle file {name} is not regular"
+            )
+        write_flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            destination_fd = os.open(
+                name,
+                write_flags,
+                stat.S_IMODE(before.st_mode),
+                dir_fd=destination_directory_fd,
+            )
+        except FileExistsError as error:
+            raise PopulationTransferIntegrityError(
+                "bundle digest destination collision"
+            ) from error
+        created_names.add(name)
+        copied = 0
+        try:
+            while True:
+                chunk = os.read(source_fd, 1024 * 1024)
+                if not chunk:
+                    break
+                pending = memoryview(chunk)
+                while pending:
+                    written = os.write(destination_fd, pending)
+                    if written <= 0:
+                        raise OSError(errno.EIO, "bundle copy made no progress")
+                    copied += written
+                    pending = pending[written:]
+            os.fchmod(destination_fd, stat.S_IMODE(before.st_mode))
+            os.fsync(destination_fd)
+        finally:
+            os.close(destination_fd)
+        after = os.fstat(source_fd)
+        if (
+            copied != before.st_size
+            or after.st_size != before.st_size
+            or after.st_mtime_ns != before.st_mtime_ns
+            or after.st_ctime_ns != before.st_ctime_ns
+        ):
+            raise PopulationTransferIntegrityError(
+                f"staged bundle file {name} changed during installation"
+            )
+    finally:
+        os.close(source_fd)
+
+
+def _install_bundle_create_only(
+    source: Path, destination: Path, trusted_digest: str
+) -> BundleFiles:
+    """Portably install a bundle, accepting it only after complete re-verification.
+
+    A process crash can leave an incomplete digest directory. Such a directory is
+    always a collision and requires deliberate operator cleanup before retry.
+    """
+
+    expected_names = frozenset(_BUNDLE_INSTALL_ORDER)
+    source_lstat = os.lstat(source)
+    if stat.S_ISLNK(source_lstat.st_mode) or not stat.S_ISDIR(source_lstat.st_mode):
+        raise PopulationTransferIntegrityError("staged bundle root is not a directory")
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    source_fd: int | None = None
+    parent_fd: int | None = None
+    destination_fd: int | None = None
+    destination_identity: tuple[int, int] | None = None
+    destination_created = False
+    created_names: set[str] = set()
+    try:
+        source_fd = os.open(source, directory_flags)
+        parent_fd = os.open(destination.parent, directory_flags)
+        opened_source = os.fstat(source_fd)
+        if (opened_source.st_dev, opened_source.st_ino) != (
+            source_lstat.st_dev,
+            source_lstat.st_ino,
+        ):
+            raise PopulationTransferIntegrityError(
+                "staged bundle root changed while opening"
+            )
+        if set(os.listdir(source_fd)) != expected_names:
+            raise PopulationTransferIntegrityError(
+                "staged bundle does not contain exactly five files"
+            )
+        try:
+            os.mkdir(destination.name, mode=0o700, dir_fd=parent_fd)
+        except FileExistsError as error:
+            raise PopulationTransferIntegrityError(
+                "bundle digest destination collision; incomplete destinations "
+                "require deliberate cleanup"
+            ) from error
+        destination_created = True
+        created_destination = os.stat(
+            destination.name, dir_fd=parent_fd, follow_symlinks=False
+        )
+        if not stat.S_ISDIR(created_destination.st_mode):
+            raise PopulationTransferIntegrityError(
+                "created bundle destination is not a directory"
+            )
+        destination_identity = (
+            created_destination.st_dev,
+            created_destination.st_ino,
+        )
+        destination_fd = os.open(
+            destination.name, directory_flags, dir_fd=parent_fd
+        )
+        opened_destination = os.fstat(destination_fd)
+        if (
+            opened_destination.st_dev,
+            opened_destination.st_ino,
+        ) != destination_identity:
+            raise PopulationTransferIntegrityError(
+                "created bundle destination changed while opening"
+            )
+        for name in _BUNDLE_INSTALL_ORDER:
+            _copy_regular_file_create_only(
+                source_fd, destination_fd, name, created_names
+            )
+        os.fsync(destination_fd)
+        installed = verify_bundle(destination, trusted_digest)
+        current = os.stat(
+            destination.name, dir_fd=parent_fd, follow_symlinks=False
+        )
+        if (current.st_dev, current.st_ino) != destination_identity:
+            raise PopulationTransferIntegrityError(
+                "bundle digest destination changed during installation"
+            )
+        return installed
+    except Exception:
+        if destination_fd is not None:
+            for name in created_names:
+                try:
+                    os.unlink(name, dir_fd=destination_fd)
+                except FileNotFoundError:
+                    pass
+            try:
+                os.fsync(destination_fd)
+            except OSError:
+                pass
+        if destination_created and parent_fd is not None:
+            try:
+                current = os.stat(
+                    destination.name, dir_fd=parent_fd, follow_symlinks=False
+                )
+                if (
+                    stat.S_ISDIR(current.st_mode)
+                    and (
+                        destination_identity is None
+                        or (current.st_dev, current.st_ino) == destination_identity
+                    )
+                ):
+                    os.rmdir(destination.name, dir_fd=parent_fd)
+            except (FileNotFoundError, OSError):
+                pass
+        raise
+    finally:
+        if destination_fd is not None:
+            os.close(destination_fd)
+        if parent_fd is not None:
+            os.close(parent_fd)
+        if source_fd is not None:
+            os.close(source_fd)
 
 
 def _write_authoritative_bundle(
@@ -768,7 +963,14 @@ def _write_authoritative_bundle(
                     f"exported {label} differs from frozen population"
                 )
         destination = output_parent / verified.digest
-        _rename_directory_noreplace(staged, destination)
+        try:
+            _rename_directory_noreplace(staged, destination)
+        except OSError as error:
+            if error.errno not in _PORTABLE_INSTALL_ERRNOS:
+                raise
+            return _install_bundle_create_only(
+                staged, destination, verified.digest
+            )
         return verify_bundle(destination, verified.digest)
     finally:
         shutil.rmtree(temporary_parent, ignore_errors=True)
