@@ -333,6 +333,8 @@ def test_split_placement_refreshes_from_shared_activation_receipt(tmp_path) -> N
     (activation_dir / "receipt-v00000004.json").write_text(json.dumps({
         "schemaVersion": 1, "runId": str(uuid4()), "modelId": str(uuid4()),
         "modelVersion": 4, "publishedAtNs": 100, "activatedAtNs": 130,
+        "requestedAtNs": 110, "preparedAtNs": 120,
+        "stageDurationNs": 10, "switchDurationNs": 10,
         "stalenessNs": 30,
     }))
     try:

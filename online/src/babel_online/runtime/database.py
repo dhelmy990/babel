@@ -1572,15 +1572,15 @@ class RuntimeDatabase:
         if not records:
             return
         with self._connect() as connection, connection.cursor() as cursor:
-            for record in records:
-                cursor.execute(
-                    """
-                    INSERT INTO babel_embeddings(
-                      run_id,babel_id,creator_id,embedding_space_id,serving_model_id,
-                      materialized_model_version,catalog_content_hash,embedding
-                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s::public.vector)
-                    ON CONFLICT DO NOTHING
-                    """,
+            cursor.executemany(
+                """
+                INSERT INTO babel_embeddings(
+                  run_id,babel_id,creator_id,embedding_space_id,serving_model_id,
+                  materialized_model_version,catalog_content_hash,embedding
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s::public.vector)
+                ON CONFLICT DO NOTHING
+                """,
+                [
                     (
                         record.babel.runId,
                         record.babel.babelId,
@@ -1590,8 +1590,10 @@ class RuntimeDatabase:
                         record.materializedModelVersion,
                         record.catalogContentHash,
                         "[" + ",".join(format(value, ".9g") for value in record.vector) + "]",
-                    ),
-                )
+                    )
+                    for record in records
+                ],
+            )
 
     def activate_embedding_state(
         self,

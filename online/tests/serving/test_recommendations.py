@@ -6,6 +6,7 @@ import time
 from uuid import UUID
 
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 
 from babel_online.contracts import (
@@ -78,6 +79,49 @@ def serving_state(
         {str(row.babelId) for row in created},
         {row.sourceArticleKey for row in created},
     )
+
+
+def child_replacement(registry: ModelRegistry):
+    original = registry.original
+    child_data = original.model_dump(mode="json")
+    child_data.update(
+        {
+            "modelId": "00000000-0000-5000-8000-000000000099",
+            "label": "Selected child",
+            "parentModelId": str(original.modelId),
+            "producingRunId": "00000000-0000-5000-8000-000000000001",
+            "trainingExamples": 12,
+            "checkpointPath": "models/child/model.safetensors",
+            "checkpointSha256": "e" * 64,
+        }
+    )
+    child = ModelManifestV1.model_validate(child_data)
+    registry.register_child(child)
+    created = [
+        CreatedBabel.model_validate(row)
+        for row in read_jsonl(FIXTURE / "observable/created-babels.jsonl")
+    ]
+    tower = ItemTower(child.embeddingSpace)
+    records = [
+        VectorRecord(
+            babel=row,
+            catalogContentHash="a" * 64,
+            embeddingSpaceId=child.embeddingSpace.embeddingSpaceId,
+            servingModelId=child.modelId,
+            materializedModelVersion=1,
+            vector=tuple(float(value) for value in tower.encode(row.text)),
+        )
+        for row in created
+    ]
+    materialized = MaterializedServingState(
+        run_id=created[0].runId,
+        model_id=child.modelId,
+        model_version=1,
+        embedding_space_id=child.embeddingSpace.embeddingSpaceId,
+        pgvector_snapshot_sha256="c" * 64,
+        backend_snapshot_sha256="c" * 64,
+    )
+    return child, materialized, InMemoryCreatedBabelIndex(records), records
 
 
 def test_post_recommends_only_current_run_created_babels_with_timings() -> None:
@@ -217,48 +261,11 @@ def test_apply_sync_selects_child_without_replacing_original() -> None:
     state, registry, _created_ids, _created_sources = serving_state()
     held_snapshot = state.snapshot()
     original = registry.original
-    child_data = original.model_dump(mode="json")
-    child_data.update(
-        {
-            "modelId": "00000000-0000-5000-8000-000000000099",
-            "label": "Selected child",
-            "parentModelId": str(original.modelId),
-            "producingRunId": "00000000-0000-5000-8000-000000000001",
-            "trainingExamples": 12,
-            "checkpointPath": "models/child/model.safetensors",
-            "checkpointSha256": "e" * 64,
-        }
-    )
-    child = ModelManifestV1.model_validate(child_data)
-    registry.register_child(child)
-    created = [
-        CreatedBabel.model_validate(row)
-        for row in read_jsonl(FIXTURE / "observable/created-babels.jsonl")
-    ]
-    tower = ItemTower(child.embeddingSpace)
-    records = [
-        VectorRecord(
-            babel=row,
-            catalogContentHash="a" * 64,
-            embeddingSpaceId=child.embeddingSpace.embeddingSpaceId,
-            servingModelId=child.modelId,
-            materializedModelVersion=1,
-            vector=tuple(float(value) for value in tower.encode(row.text)),
-        )
-        for row in created
-    ]
-    materialized = MaterializedServingState(
-        run_id=created[0].runId,
-        model_id=child.modelId,
-        model_version=1,
-        embedding_space_id=child.embeddingSpace.embeddingSpaceId,
-        pgvector_snapshot_sha256="c" * 64,
-        backend_snapshot_sha256="c" * 64,
-    )
+    child, materialized, index, records = child_replacement(registry)
     state.apply_sync(
         selected_model_id=child.modelId,
         materialized_state=materialized,
-        candidate_index=InMemoryCreatedBabelIndex(records),
+        candidate_index=index,
         vector_records=records,
     )
 
@@ -267,6 +274,56 @@ def test_apply_sync_selects_child_without_replacing_original() -> None:
     assert held_snapshot.model.modelId == original.modelId
     assert held_snapshot.materialized_state.model_version == 0
     assert registry.original.modelId == original.modelId
+
+
+def test_prepare_sync_does_not_publish_until_atomic_activation() -> None:
+    state, registry, _created_ids, _created_sources = serving_state()
+    previous = state.snapshot()
+    child, materialized, index, records = child_replacement(registry)
+
+    prepared = state.prepare_sync(
+        selected_model_id=child.modelId,
+        materialized_state=materialized,
+        candidate_index=index,
+        vector_records=records,
+    )
+
+    assert state.snapshot() is previous
+    commits: list[str] = []
+
+    def commit() -> None:
+        assert state.snapshot() is previous
+        commits.append("committed")
+
+    state.activate_prepared(
+        prepared,
+        activation_commit=commit,
+    )
+    assert state.snapshot() is prepared
+    assert commits == ["committed"]
+
+
+def test_failed_activation_commit_retains_exact_previous_snapshot() -> None:
+    state, registry, _created_ids, _created_sources = serving_state()
+    previous = state.snapshot()
+    child, materialized, index, records = child_replacement(registry)
+    prepared = state.prepare_sync(
+        selected_model_id=child.modelId,
+        materialized_state=materialized,
+        candidate_index=index,
+        vector_records=records,
+    )
+    commits: list[str] = []
+
+    def fail_commit() -> None:
+        commits.append("attempted")
+        raise RuntimeError("database activation failed")
+
+    with pytest.raises(RuntimeError, match="database activation failed"):
+        state.activate_prepared(prepared, activation_commit=fail_commit)
+
+    assert state.snapshot() is previous
+    assert commits == ["attempted"]
 
 
 def test_v2_resolves_root_and_existing_sources_and_filters_source_itself(

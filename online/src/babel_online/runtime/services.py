@@ -83,6 +83,31 @@ class PublishedUpdate:
     vector_snapshot_sha256: str
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedServingUpdate:
+    child: ModelManifestV2
+    materialized_state: Any
+    snapshot: Any
+    descriptor_root: Path | None
+    descriptor: RealQwenChildStateV1 | None
+    probe_model: Any
+    stage_started_at_ns: int
+    prepared_at_ns: int
+
+
+def _activate_prepared_snapshot(
+    *,
+    state: Any,
+    prepared_snapshot: Any,
+    activation_commit: Callable[[], None],
+) -> None:
+    """Publish the prebuilt snapshot without repeating record preparation."""
+    state.activate_prepared(
+        prepared_snapshot,
+        activation_commit=activation_commit,
+    )
+
+
 class TrainerRole:
     """Own online updates and publish state only through immutable files."""
 
@@ -259,8 +284,12 @@ class ServingRole:
                 "runId": str(self.expected_run_id),
                 "modelId": str(receipt.modelId),
                 "modelVersion": receipt.modelVersion,
-                "publishedAtNs": int(request["publishedAtNs"]),
+                "publishedAtNs": receipt.publishedAtNs,
+                "requestedAtNs": receipt.requestedAtNs,
+                "preparedAtNs": receipt.preparedAtNs,
                 "activatedAtNs": receipt.activatedAtNs,
+                "stageDurationNs": receipt.stageDurationNs,
+                "switchDurationNs": receipt.switchDurationNs,
                 "stalenessNs": receipt.stalenessNs,
             },
         )
@@ -693,19 +722,25 @@ def serving_main(argv: list[str] | None = None) -> int:
             else None
         ),
     )
-    active_prepared: dict[str, Any] = {
-        "value": (
-            loaded.manifest,
-            active,
-            index,
-            records,
-            None,
-            None,
-            state.snapshot().context_tower,
+    initial_timestamp_ns = time.time_ns()
+    initial_snapshot = state.snapshot()
+    active_prepared: dict[str, PreparedServingUpdate] = {
+        "value": PreparedServingUpdate(
+            child=loaded.manifest,
+            materialized_state=active,
+            snapshot=initial_snapshot,
+            descriptor_root=None,
+            descriptor=None,
+            probe_model=initial_snapshot.context_tower,
+            stage_started_at_ns=initial_timestamp_ns,
+            prepared_at_ns=initial_timestamp_ns,
         )
     }
 
-    def prepare(descriptor: RealQwenChildStateV1, root: Path):
+    def prepare(
+        descriptor: RealQwenChildStateV1, root: Path
+    ) -> PreparedServingUpdate:
+        stage_started_at_ns = time.time_ns()
         child = descriptor.childManifest
         identity = PopulationIdentity.from_real_model(
             run_id=arguments.run_id,
@@ -742,29 +777,41 @@ def serving_main(argv: list[str] | None = None) -> int:
             for record in child_records
         ):
             raise ValueError("online state does not reproduce child vectors")
-        return (
-            child,
-            child_state,
-            PgvectorCandidateIndex(database.query_candidates),
-            child_records,
-            root,
-            descriptor,
-            probe_model,
+        prepared_snapshot = state.prepare_sync(
+            selected_model_id=child.modelId,
+            materialized_state=child_state,
+            candidate_index=PgvectorCandidateIndex(database.query_candidates),
+            vector_records=child_records,
+            context_tower=probe_model,
+        )
+        return PreparedServingUpdate(
+            child=child,
+            materialized_state=child_state,
+            snapshot=prepared_snapshot,
+            descriptor_root=root,
+            descriptor=descriptor,
+            probe_model=probe_model,
+            stage_started_at_ns=stage_started_at_ns,
+            prepared_at_ns=time.time_ns(),
         )
 
-    def probe(prepared, known: KnownVectorProbeV1) -> bool:
-        descriptor_root = prepared[4]
+    def probe(prepared: PreparedServingUpdate, known: KnownVectorProbeV1) -> bool:
+        descriptor_root = prepared.descriptor_root
+        if descriptor_root is None:
+            return False
         state_path = descriptor_root / "online-state.json"
-        probe_model = prepared[6]
+        probe_model = prepared.probe_model
         actual = probe_model.semantic_probe(known.inputVector)
         return (
             state_path.is_file()
             and semantic_vector_sha256(actual) == known.expectedSemanticSha256
-            and bool(prepared[3])
+            and bool(prepared.snapshot.vectors_by_babel_id)
         )
 
-    def activate(prepared) -> None:
-        child, child_state, child_index, child_records = prepared[:4]
+    def activate(prepared: PreparedServingUpdate) -> None:
+        child = prepared.child
+        child_state = prepared.materialized_state
+
         def commit_pointer() -> None:
             database.activate_embedding_state(
                 run_id=arguments.run_id,
@@ -781,21 +828,19 @@ def serving_main(argv: list[str] | None = None) -> int:
                 active_model_version=child_state.model_version,
             )
 
-        state.apply_sync(
-            selected_model_id=child.modelId,
-            materialized_state=child_state,
-            candidate_index=child_index,
-            vector_records=child_records,
-            context_tower=prepared[6],
+        switch_started_at_ns = time.time_ns()
+        _activate_prepared_snapshot(
+            state=state,
+            prepared_snapshot=prepared.snapshot,
             activation_commit=commit_pointer,
         )
+        activated_at_ns = time.time_ns()
         active_prepared["value"] = prepared
-        if prepared[5] is None:
+        if prepared.descriptor is None:
             # Rollback to the original/previous prepared snapshot. It has no
             # child descriptor and must remain selectable without child logs.
             return
-        descriptor = prepared[5]
-        activated_at_ns = time.time_ns()
+        descriptor = prepared.descriptor
         online_state = Path(descriptor.onlineStatePath)
         database.append_activity(
             ActivityLogV1(
@@ -812,7 +857,14 @@ def serving_main(argv: list[str] | None = None) -> int:
                 ),
                 metrics={
                     "publishedAtNs": descriptor.createdAtNs,
+                    "preparedAtNs": prepared.prepared_at_ns,
                     "activatedAtNs": activated_at_ns,
+                    "stageDurationNs": max(
+                        0, prepared.prepared_at_ns - prepared.stage_started_at_ns
+                    ),
+                    "switchDurationNs": max(
+                        0, activated_at_ns - switch_started_at_ns
+                    ),
                     "stalenessNs": max(0, activated_at_ns - descriptor.createdAtNs),
                 },
                 details=SynchronizationActivityV1(

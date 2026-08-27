@@ -77,12 +77,13 @@ def test_distributor_validates_then_probes_before_atomic_activation(
     exported = _export(tmp_path, real_model_manifest, registry)
     selected = {"value": "original"}
     persisted = []
+    timestamps = iter((500, 560, 590))
     distributor = ModelStateDistributor(
         registry=registry,
         current_state=lambda: selected["value"],
         activate_state=lambda state: selected.__setitem__("value", state),
         register_persistent=lambda descriptor, path: persisted.append((descriptor, path)),
-        clock_ns=lambda: 500,
+        clock_ns=lambda: next(timestamps),
     )
 
     receipt = distributor.activate(
@@ -92,13 +93,19 @@ def test_distributor_validates_then_probes_before_atomic_activation(
             prepared.startswith("prepared:")
             and probe.expectedSemanticSha256 == "a" * 64
         ),
+        published_at_ns=400,
     )
 
     assert receipt.status == "activated"
     assert selected["value"].startswith("prepared:")
     assert persisted[0][0].childManifest.modelId == receipt.modelId
+    assert receipt.publishedAtNs == 400
     assert receipt.requestedAtNs == 500
-    assert receipt.activatedAtNs == 500
+    assert receipt.preparedAtNs == 560
+    assert receipt.activatedAtNs == 590
+    assert receipt.stageDurationNs == 60
+    assert receipt.switchDurationNs == 30
+    assert receipt.stalenessNs == 190
 
 
 def test_failed_probe_keeps_previous_and_original_selectable(

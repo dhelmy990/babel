@@ -12,6 +12,7 @@ from babel_online.feedback.bus import TopicPartition
 from babel_online.model.state_distributor import ModelStateDistributor
 from babel_online.observable import CreatedBabel, VectorRecord
 from babel_online.runtime.services import (
+    _activate_prepared_snapshot,
     ServingRole,
     TrainerRole,
     serving_main,
@@ -28,6 +29,26 @@ from babel_online.runtime.services import (
 )
 from babel_online.training.torch_working import TorchOnlineRecommender
 import pytest
+
+
+def test_split_activation_passes_the_prebuilt_snapshot_without_rebuilding() -> None:
+    prepared_snapshot = object()
+    activated = []
+    commits = []
+
+    class State:
+        def activate_prepared(self, replacement, *, activation_commit):
+            activation_commit()
+            activated.append(replacement)
+
+    _activate_prepared_snapshot(
+        state=State(),
+        prepared_snapshot=prepared_snapshot,
+        activation_commit=lambda: commits.append("committed"),
+    )
+
+    assert activated == [prepared_snapshot]
+    assert commits == ["committed"]
 
 
 def test_standalone_trainer_publishes_file_handoff_and_serving_explicitly_activates(
@@ -128,6 +149,9 @@ def test_standalone_trainer_publishes_file_handoff_and_serving_explicitly_activa
     assert receipt_document["modelId"] == str(receipt.modelId)
     assert receipt_document["modelVersion"] == 2
     assert receipt_document["activatedAtNs"] >= receipt_document["publishedAtNs"]
+    assert receipt_document["preparedAtNs"] >= receipt_document["publishedAtNs"]
+    assert receipt_document["stageDurationNs"] >= 0
+    assert receipt_document["switchDurationNs"] >= 0
 
 
 def test_serving_role_stays_on_last_valid_state_when_no_trainer_update(tmp_path) -> None:

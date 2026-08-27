@@ -95,8 +95,12 @@ class ActivationReceipt:
     modelVersion: int
     status: Literal["activated"]
     descriptorSha256: str
+    publishedAtNs: int
     requestedAtNs: int
+    preparedAtNs: int
     activatedAtNs: int
+    stageDurationNs: int
+    switchDurationNs: int
     stalenessNs: int
 
 
@@ -323,6 +327,7 @@ class ModelStateDistributor:
             raise ActivationError("known-vector probe failed") from error
         if not probe_ok:
             raise ActivationError("known-vector probe rejected child state")
+        prepared_at = self.clock_ns()
         previous = self.current_state()
         try:
             self.activate_state(prepared)
@@ -342,8 +347,12 @@ class ModelStateDistributor:
             modelVersion=descriptor.modelVersion,
             status="activated",
             descriptorSha256=descriptor_sha,
+            publishedAtNs=published,
             requestedAtNs=requested,
+            preparedAtNs=prepared_at,
             activatedAtNs=activated,
+            stageDurationNs=max(0, prepared_at - requested),
+            switchDurationNs=max(0, activated - prepared_at),
             stalenessNs=max(0, activated - published),
         )
 
