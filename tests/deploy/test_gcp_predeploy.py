@@ -467,6 +467,125 @@ def test_cli_uses_database_url_only_from_env_and_emits_canonical_json(
     assert "secret-value" not in captured.out + captured.err
 
 
+def _ready_import_receipt(vector_sha: str, snapshot_sha: str) -> dict[str, object]:
+    return {
+        "schemaVersion": 1,
+        "state": "ready",
+        "importAttemptId": str(uuid4()),
+        "originTrialId": "ce8e54ff-e317-4a89-b7db-90327e02dc43",
+        "originRunId": "7f4ad291-e6d0-5bb9-9658-3605c634a3a9",
+        "freshTrialId": str(TRIAL_ID),
+        "freshPopulationRunId": str(RUN_ID),
+        "rowCount": 10_000,
+        "sampleCount": 100,
+        "orderedVectorSha256": vector_sha,
+        "snapshotSha256": snapshot_sha,
+        "hnswIndex": "babel_embeddings_cosine_hnsw",
+        "bundleDigest": "c" * 64,
+        "frozenManifestSha256": "d" * 64,
+        "modelCheckpointRoot": "/var/lib/babel-online/cache/model-artifact",
+        "modelArtifactManifestPath": "/var/lib/babel-online/cache/model-artifact/artifact_manifest.json",
+    }
+
+
+def test_reuse_validation_checks_receipt_and_metadata_without_vector_rows(
+    predeploy, valid_snapshot, tmp_path: Path
+) -> None:
+    metadata, _vectors, vector_sha, snapshot_sha = valid_snapshot
+    metadata = metadata | {
+        "sample_creator_id": UUID(int=10_001),
+        "trial_population_manifest_sha256": "d" * 64,
+    }
+    receipt_path = tmp_path / "import-receipt.json"
+    receipt_path.write_bytes(
+        predeploy.canonical_json(_ready_import_receipt(vector_sha, snapshot_sha))
+    )
+
+    evidence = predeploy.validate_reuse_snapshot(
+        metadata,
+        import_receipt_path=receipt_path,
+        trial_id=TRIAL_ID,
+        run_id=RUN_ID,
+        expected_vector_sha256=vector_sha,
+        expected_snapshot_sha256=snapshot_sha,
+    )
+
+    assert evidence["verified"] is True
+    assert evidence["validationMode"] == "reuse_without_vector_rehash"
+    assert evidence["activeEmbeddingCount"] == 10_000
+    assert evidence["orderedVectorSha256"] == vector_sha
+    assert evidence["pgvectorSnapshotSha256"] == snapshot_sha
+    assert len(evidence["importReceiptSha256"]) == 64
+
+
+def test_reuse_cli_never_invokes_full_vector_scan(
+    predeploy, valid_snapshot, tmp_path: Path, monkeypatch, capsys
+) -> None:
+    metadata, _vectors, vector_sha, snapshot_sha = valid_snapshot
+    metadata = metadata | {
+        "sample_creator_id": UUID(int=10_001),
+        "trial_population_manifest_sha256": "d" * 64,
+    }
+    receipt_path = tmp_path / "import-receipt.json"
+    receipt_path.write_bytes(
+        predeploy.canonical_json(_ready_import_receipt(vector_sha, snapshot_sha))
+    )
+    monkeypatch.setenv("BABEL_DATABASE_URL", "postgresql://secret-value")
+    monkeypatch.setattr(
+        predeploy,
+        "read_database_snapshot",
+        lambda *_args, **_kwargs: pytest.fail("reuse mode must not scan vectors"),
+    )
+    monkeypatch.setattr(
+        predeploy,
+        "read_database_reuse_snapshot",
+        lambda *_args, **_kwargs: metadata,
+    )
+
+    result = predeploy.main(
+        [
+            "--trial-id",
+            str(TRIAL_ID),
+            "--run-id",
+            str(RUN_ID),
+            "--population-vector-sha256",
+            vector_sha,
+            "--population-snapshot-sha256",
+            snapshot_sha,
+            "--reuse-import-receipt",
+            str(receipt_path),
+        ]
+    )
+
+    assert result == 0
+    assert json.loads(capsys.readouterr().out)["validationMode"] == (
+        "reuse_without_vector_rehash"
+    )
+
+
+def test_reuse_database_boundary_never_reads_vector_payloads(
+    predeploy, valid_snapshot
+) -> None:
+    metadata, vectors, _vector_sha, _snapshot_sha_value = valid_snapshot
+    cursor = _FakeCursor(metadata | {"sample_creator_id": UUID(int=10_001)}, vectors)
+    connection = _FakeConnection(cursor)
+
+    snapshot = predeploy.read_database_reuse_snapshot(
+        "postgresql://not-logged",
+        trial_id=TRIAL_ID,
+        run_id=RUN_ID,
+        connect=lambda _dsn: connection,
+    )
+
+    assert snapshot["embedding_count"] == 10_000
+    assert len(cursor.executions) == 2
+    query, parameters = cursor.executions[1]
+    assert parameters == (TRIAL_ID, RUN_ID)
+    assert "vector_send" not in query
+    assert "embedding::" not in query
+    assert "eb.embedding" not in query
+
+
 def test_cli_fails_closed_without_database_url(predeploy, monkeypatch, capsys) -> None:
     monkeypatch.delenv("BABEL_DATABASE_URL", raising=False)
     result = predeploy.main(

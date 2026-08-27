@@ -49,6 +49,7 @@ install -m 0700 rollout.sh "$NEW_RELEASE/rollout.sh"
 install -m 0700 rollout_supervisor.sh "$NEW_RELEASE/rollout_supervisor.sh"
 install -m 0700 release.py "$NEW_RELEASE/release.py"
 install -m 0700 predeploy.py "$NEW_RELEASE/predeploy.py"
+install -m 0700 condition3_gate.sh "$NEW_RELEASE/condition3_gate.sh"
 install -m 0600 compose.yaml "$NEW_RELEASE/compose.yaml"
 install -d -m 0750 -o 10001 -g 10001 /var/lib/babel-online
 
@@ -56,6 +57,7 @@ compose_for() {
   local release_dir=$1
   shift
   docker compose --project-name "$PROJECT" \
+    --profile matrix \
     --env-file "$release_dir/release.env" \
     --file "$release_dir/compose.yaml" "$@"
 }
@@ -82,16 +84,21 @@ fi
 attest_containers() {
   local release_dir=$1
   local source_commit model_revision dataset_revision service key expected_ref container_id actual_ref actual_id expected_id revision compose_revision compose_model_revision compose_dataset_revision running_count
+  local -a services=(backend serving trainer)
   if ! source_commit="$(release_value "$release_dir" BABEL_SOURCE_COMMIT)" \
      || ! model_revision="$(release_value "$release_dir" BABEL_MODEL_REVISION)" \
      || ! dataset_revision="$(release_value "$release_dir" BABEL_DATASET_REVISION)"; then
     return 1
   fi
-  for service in backend serving trainer; do
+  if [[ -n "$(release_value "$release_dir" BABEL_PERFORMANCE_WORKER_IMAGE)" ]]; then
+    services+=(performance-worker)
+  fi
+  for service in "${services[@]}"; do
     case "$service" in
       backend) key=BABEL_BACKEND_IMAGE ;;
       serving) key=BABEL_SERVING_IMAGE ;;
       trainer) key=BABEL_TRAINER_IMAGE ;;
+      performance-worker) key=BABEL_PERFORMANCE_WORKER_IMAGE ;;
     esac
     if ! expected_ref="$(release_value "$release_dir" "$key")" \
        || ! running_count="$(compose_for "$release_dir" ps --status running --services | grep -cx "$service")" \
@@ -174,19 +181,31 @@ babel_install_rollout_traps
 
 compose pull
 source "$NEW_RELEASE/release.env"
-docker run --rm --gpus all "$BABEL_SERVING_IMAGE" \
-  python -c 'import torch; assert torch.cuda.is_available(), "CUDA is unavailable"'
+population_build_guard="$(
+  compose run --rm --no-deps --entrypoint /bin/sh performance-worker \
+    -c 'printf %s "$BABEL_ONLINE_ALLOW_POPULATION_BUILD"'
+)"
+if [[ "$population_build_guard" != false ]]; then
+  echo "BABEL_ONLINE_ALLOW_POPULATION_BUILD=false is required" >&2
+  exit 1
+fi
+compose run --rm --no-deps performance-worker performance-worker --check-runtime \
+  >"$NEW_RELEASE/performance-worker-runtime.json"
+docker run --rm --gpus all --entrypoint python "$BABEL_SERVING_IMAGE" \
+  -c 'import torch; assert torch.cuda.is_available(), "CUDA is unavailable"'
 
 # Demo CD permits only the unchanged 326b840 migration set. These forward-only,
 # idempotent migrations run before promotion; CI rejects migration-file changes.
 compose run --rm --no-deps backend migrate
 docker run --rm --network host --env-file "$RUNTIME_ENV" \
   --volume "$NEW_RELEASE/predeploy.py:/opt/babel-predeploy.py:ro" \
+  --volume /var/lib/babel-gpu/evidence/import-receipt.json:/var/lib/babel-gpu/evidence/import-receipt.json:ro \
   --entrypoint python "$BABEL_TRAINER_IMAGE" /opt/babel-predeploy.py \
   --trial-id "$BABEL_GCP_TRIAL_ID" \
   --run-id "$BABEL_GCP_RUN_ID" \
   --population-vector-sha256 "$BABEL_POPULATION_VECTOR_SHA256" \
   --population-snapshot-sha256 "$BABEL_POPULATION_SNAPSHOT_SHA256" \
+  --reuse-import-receipt /var/lib/babel-gpu/evidence/import-receipt.json \
   >"$NEW_RELEASE/predeploy-evidence.json"
 
 PROMOTION_STARTED=true

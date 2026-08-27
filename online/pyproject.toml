@@ -30,6 +30,10 @@ kafka = [
 parquet = [
   "pyarrow>=17,<26",
 ]
+benchmark = [
+  "httpx>=0.28,<0.29",
+  "psutil>=5.9,<8",
+]
 qwen = [
   "accelerate>=1.5,<2",
   "peft>=0.15,<0.16",

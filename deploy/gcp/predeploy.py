@@ -9,9 +9,11 @@ import json
 import math
 import os
 import re
+import stat
 import struct
 import sys
 from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
 from typing import Any
 from uuid import UUID, RFC_4122, uuid5
 
@@ -191,6 +193,111 @@ ORDER BY eb.babel_id
 """
 
 
+# Subsequent deployments trust the immutable ready import receipt and stored
+# population hashes.  This query deliberately never selects, casts, sends, or
+# hashes the vector payload column.
+REUSE_METADATA_SQL = """
+WITH expected AS (
+  SELECT %s::uuid AS trial_id, %s::uuid AS run_id
+),
+trial_row AS (
+  SELECT p.* FROM performance_experiments AS p
+  JOIN expected AS e ON p.id=e.trial_id
+),
+run_row AS (
+  SELECT r.* FROM experiment_runs AS r
+  JOIN expected AS e ON r.id=e.run_id
+),
+model_row AS (
+  SELECT m.* FROM recommender_models AS m
+  JOIN run_row AS r ON m.id=r.starting_model_id
+),
+state_row AS (
+  SELECT s.* FROM run_embedding_states AS s
+  JOIN expected AS e ON s.run_id=e.run_id
+),
+index_row AS (
+  SELECT am.amname AS method, i.indisvalid AS is_valid, i.indisready AS is_ready
+  FROM pg_catalog.pg_class AS idx
+  JOIN pg_catalog.pg_index AS i ON i.indexrelid=idx.oid
+  JOIN pg_catalog.pg_class AS tbl ON tbl.oid=i.indrelid
+  JOIN pg_catalog.pg_namespace AS ns ON ns.oid=tbl.relnamespace
+  JOIN pg_catalog.pg_am AS am ON am.oid=idx.relam
+  WHERE ns.nspname='public' AND tbl.relname='babel_embeddings'
+    AND idx.relname='babel_embeddings_cosine_hnsw'
+)
+SELECT
+  (SELECT count(*) FROM trial_row) AS trial_row_count,
+  (SELECT id FROM trial_row) AS trial_id,
+  (SELECT status FROM trial_row) AS trial_status,
+  (SELECT population_ready FROM trial_row) AS trial_population_ready,
+  (SELECT run_id FROM trial_row) AS trial_run_id,
+  (SELECT starting_model_id FROM trial_row) AS trial_starting_model_id,
+  (SELECT model_repository FROM trial_row) AS trial_model_repository,
+  (SELECT model_revision FROM trial_row) AS trial_model_revision,
+  (SELECT dataset_repository FROM trial_row) AS trial_dataset_repository,
+  (SELECT dataset_revision FROM trial_row) AS trial_dataset_revision,
+  (SELECT retrieval_backend FROM trial_row) AS trial_retrieval_backend,
+  (SELECT target_created_babels FROM trial_row) AS trial_target_count,
+  (SELECT population_vector_count FROM trial_row) AS trial_population_count,
+  (SELECT population_vector_sha256 FROM trial_row) AS trial_population_vector_sha256,
+  (SELECT population_model_repository FROM trial_row) AS trial_population_model_repository,
+  (SELECT population_model_revision FROM trial_row) AS trial_population_model_revision,
+  (SELECT population_model_sha256 FROM trial_row) AS trial_population_model_sha256,
+  (SELECT population_dataset_repository FROM trial_row) AS trial_population_dataset_repository,
+  (SELECT population_dataset_revision FROM trial_row) AS trial_population_dataset_revision,
+  (SELECT population_dataset_sha256 FROM trial_row) AS trial_population_dataset_sha256,
+  (SELECT population_manifest_sha256 FROM trial_row) AS trial_population_manifest_sha256,
+  (SELECT count(*) FROM run_row) AS run_row_count,
+  (SELECT id FROM run_row) AS run_id,
+  (SELECT status FROM run_row) AS run_status,
+  (SELECT retrieval_backend FROM run_row) AS run_retrieval_backend,
+  (SELECT contract_version FROM run_row) AS run_contract_version,
+  (SELECT scenario FROM run_row) AS run_scenario,
+  (SELECT environment_sequence FROM run_row) AS run_environment_sequence,
+  (SELECT target_created_babels FROM run_row) AS run_target_count,
+  (SELECT created_babel_count FROM run_row) AS run_created_count,
+  (SELECT starting_model_id FROM run_row) AS run_starting_model_id,
+  (SELECT active_model_id FROM run_row) AS run_active_model_id,
+  (SELECT active_model_version FROM run_row) AS run_active_model_version,
+  (SELECT dataset_repository FROM run_row) AS run_dataset_repository,
+  (SELECT dataset_config FROM run_row) AS run_dataset_config,
+  (SELECT dataset_revision FROM run_row) AS run_dataset_revision,
+  (SELECT count(*) FROM model_row) AS model_row_count,
+  (SELECT id FROM model_row) AS model_id,
+  (SELECT parent_model_id FROM model_row) AS model_parent_model_id,
+  (SELECT producing_run_id FROM model_row) AS model_producing_run_id,
+  (SELECT encoder_repo FROM model_row) AS model_encoder_repository,
+  (SELECT encoder_revision FROM model_row) AS model_encoder_revision,
+  (SELECT dataset_repo FROM model_row) AS model_dataset_repository,
+  (SELECT dataset_revision FROM model_row) AS model_dataset_revision,
+  (SELECT training_examples FROM model_row) AS model_training_examples,
+  (SELECT checkpoint_sha256 FROM model_row) AS model_checkpoint_sha256,
+  (SELECT embedding_space FROM model_row) AS model_embedding_space,
+  (SELECT immutable FROM model_row) AS model_immutable,
+  (SELECT count(*) FROM state_row) AS state_row_count,
+  (SELECT active_model_id FROM state_row) AS state_active_model_id,
+  (SELECT active_model_version FROM state_row) AS state_active_model_version,
+  (SELECT embedding_space_id FROM state_row) AS state_embedding_space_id,
+  (SELECT pgvector_snapshot_sha256 FROM state_row) AS state_pgvector_snapshot_sha256,
+  (SELECT backend_snapshot_sha256 FROM state_row) AS state_backend_snapshot_sha256,
+  (SELECT count(*) FROM experiment_babels AS xb, expected AS e
+   WHERE xb.run_id=e.run_id) AS catalog_count,
+  (SELECT count(DISTINCT xb.babel_id) FROM experiment_babels AS xb, expected AS e
+   WHERE xb.run_id=e.run_id) AS catalog_unique_babel_count,
+  (SELECT min(xb.creator_id::text) FROM experiment_babels AS xb, expected AS e
+   WHERE xb.run_id=e.run_id) AS sample_creator_id,
+  (SELECT count(*) FROM babel_embeddings AS eb, expected AS e
+   WHERE eb.run_id=e.run_id) AS embedding_count,
+  (SELECT count(DISTINCT eb.babel_id) FROM babel_embeddings AS eb, expected AS e
+   WHERE eb.run_id=e.run_id) AS embedding_unique_babel_count,
+  (SELECT count(*) FROM index_row) AS hnsw_index_count,
+  (SELECT min(method) FROM index_row) AS hnsw_index_method,
+  (SELECT bool_and(is_valid) FROM index_row) AS hnsw_index_valid,
+  (SELECT bool_and(is_ready) FROM index_row) AS hnsw_index_ready
+"""
+
+
 EXPLAIN_SQL = """
 EXPLAIN (FORMAT JSON)
 SELECT eb.babel_id
@@ -259,6 +366,25 @@ def read_database_snapshot(
     return metadata, vectors
 
 
+def read_database_reuse_snapshot(
+    database_url: str,
+    *,
+    trial_id: UUID,
+    run_id: UUID,
+    connect: Callable[[str], Any] | None = None,
+) -> dict[str, object]:
+    """Read provenance/count/index metadata without touching vector payloads."""
+    connector = connect or _default_connect
+    with connector(database_url) as connection, connection.cursor() as cursor:
+        cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        cursor.execute(REUSE_METADATA_SQL, (trial_id, run_id))
+        row = cursor.fetchone()
+        if row is None or cursor.description is None:
+            raise PredeployValidationError("reuse metadata query returned no evidence")
+        columns = [description.name for description in cursor.description]
+        return dict(zip(columns, row, strict=True))
+
+
 def _value(metadata: Mapping[str, object], field: str) -> object:
     try:
         return metadata[field]
@@ -316,15 +442,14 @@ def _validate_ids(trial_id: UUID, run_id: UUID) -> None:
         raise PredeployValidationError("run_id must be UUIDv5(trial_id, 'population')")
 
 
-def _validate_metadata(
-    metadata: Mapping[str, object],
+def _expected_metadata(
     *,
     trial_id: UUID,
     run_id: UUID,
     expected_vector_sha256: str,
     expected_snapshot_sha256: str,
-) -> None:
-    expected = {
+) -> dict[str, object]:
+    return {
         "trial_row_count": 1,
         "trial_id": trial_id,
         "trial_status": "population_ready",
@@ -392,6 +517,22 @@ def _validate_metadata(
         "hnsw_index_ready": True,
         "hnsw_plan_uses_named_index": True,
     }
+
+
+def _validate_metadata(
+    metadata: Mapping[str, object],
+    *,
+    trial_id: UUID,
+    run_id: UUID,
+    expected_vector_sha256: str,
+    expected_snapshot_sha256: str,
+) -> None:
+    expected = _expected_metadata(
+        trial_id=trial_id,
+        run_id=run_id,
+        expected_vector_sha256=expected_vector_sha256,
+        expected_snapshot_sha256=expected_snapshot_sha256,
+    )
     for field, value in expected.items():
         _expect(metadata, field, value)
     _require_sha(
@@ -550,6 +691,142 @@ def validate_snapshot(
     }
 
 
+def _load_ready_import_receipt(path: Path) -> tuple[dict[str, object], str]:
+    if path.is_symlink():
+        raise PredeployValidationError("import receipt must not be a symlink")
+    try:
+        details = path.stat()
+        payload = path.read_bytes()
+        document = json.loads(payload)
+    except (OSError, json.JSONDecodeError) as error:
+        raise PredeployValidationError("ready import receipt is unavailable") from error
+    if not stat.S_ISREG(details.st_mode) or not isinstance(document, dict):
+        raise PredeployValidationError("ready import receipt is not a regular JSON object")
+    if canonical_json(document) != payload:
+        raise PredeployValidationError("ready import receipt is not canonical JSON")
+    expected_keys = {
+        "schemaVersion",
+        "state",
+        "importAttemptId",
+        "originTrialId",
+        "originRunId",
+        "freshTrialId",
+        "freshPopulationRunId",
+        "rowCount",
+        "sampleCount",
+        "orderedVectorSha256",
+        "snapshotSha256",
+        "hnswIndex",
+        "bundleDigest",
+        "frozenManifestSha256",
+        "modelCheckpointRoot",
+        "modelArtifactManifestPath",
+    }
+    if set(document) != expected_keys:
+        raise PredeployValidationError("ready import receipt schema differs")
+    return document, hashlib.sha256(payload).hexdigest()
+
+
+def validate_reuse_snapshot(
+    metadata: Mapping[str, object],
+    *,
+    import_receipt_path: Path,
+    trial_id: UUID,
+    run_id: UUID,
+    expected_vector_sha256: str,
+    expected_snapshot_sha256: str,
+) -> dict[str, object]:
+    """Validate an accepted import without reading or rehashing vector payloads."""
+    _validate_ids(trial_id, run_id)
+    expected_vector_sha256 = _require_sha(
+        expected_vector_sha256, "expected ordered vector SHA-256"
+    )
+    expected_snapshot_sha256 = _require_sha(
+        expected_snapshot_sha256, "expected snapshot SHA-256"
+    )
+    expected = _expected_metadata(
+        trial_id=trial_id,
+        run_id=run_id,
+        expected_vector_sha256=expected_vector_sha256,
+        expected_snapshot_sha256=expected_snapshot_sha256,
+    )
+    full_scan_only = {
+        "catalog_valid_count",
+        "embedding_exact_active_count",
+        "embedding_valid_vector_count",
+        "embedding_catalog_match_count",
+        "hnsw_plan_uses_named_index",
+    }
+    reuse_expected = {
+        field: value
+        for field, value in expected.items()
+        if field not in full_scan_only
+    }
+    missing = set(reuse_expected) - set(metadata)
+    if missing:
+        raise PredeployValidationError(
+            f"reuse metadata is incomplete: {sorted(missing)[0]}"
+        )
+    for field, value in reuse_expected.items():
+        _expect(metadata, field, value)
+    sample_creator_id = _uuid(
+        _value(metadata, "sample_creator_id"), "sample_creator_id"
+    )
+    manifest_sha = _require_sha(
+        _value(metadata, "trial_population_manifest_sha256"),
+        "trial_population_manifest_sha256",
+    )
+    receipt, receipt_sha = _load_ready_import_receipt(import_receipt_path)
+    receipt_expected = {
+        "schemaVersion": 1,
+        "state": "ready",
+        "originTrialId": str(ORIGIN_TRIAL_ID),
+        "originRunId": str(ORIGIN_RUN_ID),
+        "freshTrialId": str(trial_id),
+        "freshPopulationRunId": str(run_id),
+        "rowCount": EXPECTED_COUNT,
+        "sampleCount": 100,
+        "orderedVectorSha256": expected_vector_sha256,
+        "snapshotSha256": expected_snapshot_sha256,
+        "hnswIndex": HNSW_INDEX_NAME,
+        "frozenManifestSha256": manifest_sha,
+    }
+    for field, value in receipt_expected.items():
+        if receipt.get(field) != value:
+            raise PredeployValidationError(f"import receipt {field} differs")
+    for field in ("importAttemptId", "bundleDigest"):
+        value = receipt[field]
+        if field == "importAttemptId":
+            _uuid(value, "import receipt importAttemptId")
+        else:
+            _require_sha(value, "import receipt bundleDigest")
+    return {
+        "schemaVersion": 1,
+        "verified": True,
+        "validationMode": "reuse_without_vector_rehash",
+        "trialId": str(trial_id),
+        "runId": str(run_id),
+        "sampleCreatorId": str(sample_creator_id),
+        "catalogCount": EXPECTED_COUNT,
+        "activeEmbeddingCount": EXPECTED_COUNT,
+        "embeddingDimension": EXPECTED_DIMENSION,
+        "modelId": str(MODEL_ID),
+        "modelRepository": MODEL_REPOSITORY,
+        "modelRevision": MODEL_REVISION,
+        "datasetRepository": DATASET_REPOSITORY,
+        "datasetConfig": DATASET_CONFIG,
+        "datasetRevision": DATASET_REVISION,
+        "embeddingSpaceId": str(EMBEDDING_SPACE_ID),
+        "materializedModelVersion": 0,
+        "orderedVectorSha256": expected_vector_sha256,
+        "pgvectorSnapshotSha256": expected_snapshot_sha256,
+        "importReceiptSha256": receipt_sha,
+        "hnswIndexName": HNSW_INDEX_NAME,
+        "hnswIndexValid": True,
+        "hnswIndexReady": True,
+    }
+
+
 def _parse_uuid(value: str, field: str) -> UUID:
     try:
         parsed = UUID(value)
@@ -566,6 +843,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--population-vector-sha256", required=True)
     parser.add_argument("--population-snapshot-sha256", required=True)
+    parser.add_argument("--reuse-import-receipt", type=Path)
     arguments = parser.parse_args(argv)
     try:
         database_url = os.environ.get("BABEL_DATABASE_URL")
@@ -573,17 +851,30 @@ def main(argv: list[str] | None = None) -> int:
             raise PredeployValidationError("BABEL_DATABASE_URL is required")
         trial_id = _parse_uuid(arguments.trial_id, "trial ID")
         run_id = _parse_uuid(arguments.run_id, "run ID")
-        metadata, vectors = read_database_snapshot(
-            database_url, trial_id=trial_id, run_id=run_id
-        )
-        evidence = validate_snapshot(
-            metadata,
-            vectors,
-            trial_id=trial_id,
-            run_id=run_id,
-            expected_vector_sha256=arguments.population_vector_sha256,
-            expected_snapshot_sha256=arguments.population_snapshot_sha256,
-        )
+        if arguments.reuse_import_receipt is not None:
+            metadata = read_database_reuse_snapshot(
+                database_url, trial_id=trial_id, run_id=run_id
+            )
+            evidence = validate_reuse_snapshot(
+                metadata,
+                import_receipt_path=arguments.reuse_import_receipt,
+                trial_id=trial_id,
+                run_id=run_id,
+                expected_vector_sha256=arguments.population_vector_sha256,
+                expected_snapshot_sha256=arguments.population_snapshot_sha256,
+            )
+        else:
+            metadata, vectors = read_database_snapshot(
+                database_url, trial_id=trial_id, run_id=run_id
+            )
+            evidence = validate_snapshot(
+                metadata,
+                vectors,
+                trial_id=trial_id,
+                run_id=run_id,
+                expected_vector_sha256=arguments.population_vector_sha256,
+                expected_snapshot_sha256=arguments.population_snapshot_sha256,
+            )
     except PredeployValidationError as error:
         print(str(error), file=sys.stderr)
         return 1

@@ -197,6 +197,97 @@ class LiveConditionEvidence:
             raise ValueError("live condition requires requests and positive p95")
 
 
+def validate_condition3_gate_evidence(
+    raw_evidence: dict[str, Any],
+) -> dict[str, Any]:
+    """Accept only a clean same-process training-and-activation receipt."""
+    identity = raw_evidence.get("conditionIdentity")
+    if identity != {
+        "topology": "same_process",
+        "trainingEnabled": True,
+        "activationEnabled": True,
+        "retrievalBackend": "pgvector",
+    }:
+        raise ValueError("Condition 3 identity differs from the approved gate")
+    measurements = raw_evidence.get("measurements")
+    if (
+        not isinstance(measurements, list)
+        or not measurements
+        or any(
+            not isinstance(row, dict) or row.get("outcome") != "success"
+            for row in measurements
+        )
+    ):
+        raise ValueError("Condition 3 contains unsuccessful measurements")
+    placement = raw_evidence.get("placement")
+    processes = placement.get("processes") if isinstance(placement, dict) else None
+    if (
+        not isinstance(placement, dict)
+        or placement.get("requestedTopology") != "same_process"
+        or placement.get("actualTopology") != "same_process"
+        or not isinstance(processes, list)
+        or len(processes) != 2
+        or {row.get("role") for row in processes if isinstance(row, dict)}
+        != {"serving", "trainer"}
+        or len({row.get("pid") for row in processes if isinstance(row, dict)}) != 1
+    ):
+        raise ValueError("Condition 3 placement or role evidence differs")
+    activation = raw_evidence.get("observedActivationTargets")
+    final_serving = raw_evidence.get("finalServingIdentity")
+    if (
+        not isinstance(activation, list)
+        or not activation
+        or not isinstance(final_serving, dict)
+        or type(final_serving.get("modelVersion")) is not int
+        or int(final_serving["modelVersion"]) <= 0
+    ):
+        raise ValueError("Condition 3 activation evidence is incomplete")
+    feedback = raw_evidence.get("feedbackKafka")
+    final = feedback.get("finalTrainerState") if isinstance(feedback, dict) else None
+    if (
+        not isinstance(feedback, dict)
+        or type(feedback.get("recordCount")) is not int
+        or int(feedback["recordCount"]) <= 0
+        or not isinstance(feedback.get("offsetRanges"), list)
+        or not feedback["offsetRanges"]
+        or not isinstance(final, dict)
+        or final.get("available") is not True
+    ):
+        raise ValueError("Condition 3 Kafka offset evidence is incomplete")
+    try:
+        ranges = {
+            (str(row["topic"]), int(row["partition"])): (
+                int(row["startInclusive"]), int(row["endExclusive"])
+            )
+            for row in feedback["offsetRanges"]
+        }
+        next_offsets = {
+            (str(row["topic"]), int(row["partition"])): int(row["nextOffset"])
+            for row in final.get("nextOffsets", [])
+        }
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("Condition 3 Kafka offset coverage is malformed") from error
+    if (
+        len(ranges) != len(feedback["offsetRanges"])
+        or sum(end - start for start, end in ranges.values())
+        != feedback["recordCount"]
+        or any(start < 0 or end <= start for start, end in ranges.values())
+        or any(next_offsets.get(key, -1) < end for key, (_start, end) in ranges.items())
+    ):
+        raise ValueError("Condition 3 Kafka offset coverage is incomplete")
+    if type(final.get("kafkaLag")) is not int or final["kafkaLag"] != 0:
+        raise ValueError("Condition 3 requires exactly zero final Kafka lag")
+    if (
+        final.get("offsetsCoverPublishedRanges") is not True
+        or not isinstance(final.get("nextOffsets"), list)
+        or not final["nextOffsets"]
+        or not isinstance(final.get("checkpointManifestSha256"), str)
+        or len(final["checkpointManifestSha256"]) != 64
+    ):
+        raise ValueError("Condition 3 Kafka offset coverage is incomplete")
+    return raw_evidence
+
+
 class PerformanceDatabase(Protocol):
     def load_performance_experiment(self, experiment_id: UUID) -> PerformanceExperiment: ...
 
@@ -1042,6 +1133,167 @@ class PerformanceJobManager:
 
         self._launch(experiment_id, matrix)
 
+    def run_condition3_gate(self, experiment_id: UUID) -> None:
+        """Run only a fresh representative rerun's exact Condition 3.
+
+        This deliberately leaves the gate trial interrupted after preserving its
+        evidence.  The formal nine-condition trial is a separate operator action.
+        """
+        trial = self.database.load_performance_experiment(experiment_id)
+        trial.validate_runnable_contract()
+        if (
+            trial.evidence_scope != "representative_same_process_vs_split"
+            or trial.status != "population_ready"
+            or trial.operator_approved
+            or trial.warmup_seconds != 30
+            or trial.duration_seconds != 120
+            or trial.target_rps != 5.0
+            or trial.concurrent_users != 50
+            or trial.training_micro_batch_size != 8
+            or trial.sync_every_steps != 10
+        ):
+            raise ValueError(
+                "Condition 3 gate requires a fresh unapproved 30s/120s/5RPS "
+                "frozen-population rerun"
+            )
+        selected = [
+            row
+            for row in trial.conditions
+            if row.condition_index == 3
+            and row.topology == "same_process"
+            and row.training_enabled
+            and row.activation_enabled
+            and row.run_id is None
+            and row.status == "pending"
+        ]
+        if len(selected) != 1:
+            raise ValueError("Condition 3 gate binding is missing, dirty, or ambiguous")
+        manifest, population_dir = self._validate_imported_ready_population(trial)
+        condition = selected[0]
+        run_id = uuid5(experiment_id, "condition:3")
+
+        def gate() -> None:
+            workload = self.workload_freezer(
+                trial, manifest, population_dir, self._stop.is_set
+            )
+            self.database.create_condition_run(trial, condition, run_id)
+            self.database.clone_performance_population(trial, condition, run_id)
+            self.database.bind_performance_condition(
+                str(experiment_id), str(condition.id), run_id
+            )
+            self.database.transition_performance(experiment_id, "running")
+            self.database.transition_performance_condition(
+                experiment_id, condition.id, "running"
+            )
+            try:
+                evidence = self.condition_runner(
+                    trial, condition, run_id, workload, self._stop.is_set
+                )
+                if (
+                    evidence.condition_id != condition.id
+                    or evidence.run_id != run_id
+                ):
+                    raise ValueError("Condition 3 gate returned drifted execution identity")
+                validate_condition3_gate_evidence(evidence.raw_evidence)
+            except BaseException as error:
+                self.database.transition(run_id, "failed", failure=str(error)[:1000])
+                self.database.transition_performance_condition(
+                    experiment_id, condition.id, "failed"
+                )
+                raise
+            self.database.transition(run_id, "completed")
+            self.database.transition_performance_condition(
+                experiment_id, condition.id, "completed"
+            )
+            receipt = {
+                "schemaVersion": 1,
+                "status": "passed",
+                "condition": "same_process.training_and_activation.pgvector",
+                "experimentId": str(experiment_id),
+                "conditionId": str(condition.id),
+                "runId": str(run_id),
+                "requestCount": evidence.request_count,
+                "p95Ms": evidence.p95_ms,
+                "cleanupVerified": True,
+                "activationVerified": True,
+                "offsetCoverageVerified": True,
+                "finalKafkaLag": 0,
+                "formalPerformanceClaim": False,
+                "autoContinued": False,
+            }
+            gate_path = self.output_root / str(experiment_id) / "condition-3-gate.json"
+            gate_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = gate_path.with_suffix(".json.tmp")
+            temporary.write_text(
+                json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            temporary.replace(gate_path)
+            self.database.append_performance_progress(
+                experiment_id,
+                phase="condition3_gate_passed",
+                condition_index=3,
+                condition_count=trial.condition_count,
+                seeded_articles=10_000,
+                created_babels=10_000,
+                indexed_babels=10_000,
+                requested=evidence.request_count,
+                completed=evidence.request_count,
+                elapsed_seconds=0.0,
+                recent_rate=0.0,
+                draining=False,
+                telemetry=receipt,
+            )
+            # Existing schemas intentionally have no gate-passed terminal state.
+            # "interrupted" makes the six-condition rerun non-publishable while
+            # preserving the successful bounded receipt.
+            self.database.transition_performance(experiment_id, "interrupted")
+            with self._lock:
+                self._phase = "condition3_gate_passed"
+
+        self._launch(experiment_id, gate)
+
+    def prepare_condition3_gate(
+        self, *, source_trial_id: UUID, gate_trial_id: UUID
+    ) -> None:
+        """Freeze the source workload and provision a separate bounded gate trial."""
+        from .performance_rerun import create_representative_rerun
+
+        if source_trial_id == gate_trial_id:
+            raise ValueError("Condition 3 gate trial must use a fresh identity")
+        source = self.database.load_performance_experiment(source_trial_id)
+        source.validate_formal_defaults()
+        if (
+            source.status != "population_ready"
+            or source.operator_approved
+            or source.warmup_seconds != 30
+            or source.duration_seconds != 120
+            or source.target_rps != 5.0
+            or source.training_micro_batch_size != 8
+            or source.sync_every_steps != 10
+        ):
+            raise ValueError("Condition 3 source trial differs from the formal gate")
+        manifest, population_dir = self._validate_imported_ready_population(source)
+
+        def prepare() -> None:
+            self.workload_freezer(
+                source, manifest, population_dir, self._stop.is_set
+            )
+            create_representative_rerun(
+                database=self.database,
+                source_trial_id=source_trial_id,
+                rerun_id=gate_trial_id,
+                state_root=self.output_root,
+                warmup_seconds=30,
+                duration_seconds=120,
+                target_rps=5.0,
+            )
+            with self._lock:
+                self._experiment_id = gate_trial_id
+                self._phase = "condition3_gate_ready"
+
+        self._launch(source_trial_id, prepare)
+
     def request_stop(self, experiment_id: UUID) -> None:
         trial = self.database.load_performance_experiment(experiment_id)
         with self._lock:
@@ -1196,6 +1448,40 @@ def create_performance_control_app(
         authorize(x_babel_worker_token)
         return invoke(lambda: manager.approve_next_scale(experiment_id))
 
+    @app.post(
+        "/v1/performance/{source_trial_id}/prepare-condition-3-gate/{gate_trial_id}",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def prepare_condition3_gate(
+        source_trial_id: UUID,
+        gate_trial_id: UUID,
+        x_babel_worker_token: str | None = Header(default=None),
+    ) -> Response:
+        authorize(x_babel_worker_token)
+        return invoke(
+            lambda: manager.prepare_condition3_gate(
+                source_trial_id=source_trial_id, gate_trial_id=gate_trial_id
+            )
+        )
+
+    @app.post(
+        "/v1/performance/{experiment_id}/condition-3-gate",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def condition3_gate(
+        experiment_id: UUID,
+        x_babel_worker_token: str | None = Header(default=None),
+    ) -> Response:
+        authorize(x_babel_worker_token)
+        return invoke(lambda: manager.run_condition3_gate(experiment_id))
+
+    @app.get("/v1/performance/status")
+    def worker_status(
+        x_babel_worker_token: str | None = Header(default=None),
+    ) -> dict[str, str | None]:
+        authorize(x_babel_worker_token)
+        return manager.status
+
     return app
 
 
@@ -1208,4 +1494,5 @@ __all__ = [
     "PerformanceJobManager",
     "RealPopulationBuilder",
     "create_performance_control_app",
+    "validate_condition3_gate_evidence",
 ]

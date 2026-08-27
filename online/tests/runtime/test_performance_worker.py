@@ -27,6 +27,7 @@ from babel_online.runtime.performance_worker import (
     PerformanceConditionCommandRunner,
     RealPopulationBuilder,
     create_performance_control_app,
+    validate_condition3_gate_evidence,
 )
 
 
@@ -188,6 +189,219 @@ class FakeDatabase:
 
 def _wait(manager: PerformanceJobManager) -> None:
     manager.wait(timeout=5)
+
+
+def _condition3_gate_raw_evidence() -> dict[str, object]:
+    return {
+        "conditionIdentity": {
+            "topology": "same_process",
+            "trainingEnabled": True,
+            "activationEnabled": True,
+            "retrievalBackend": "pgvector",
+        },
+        "measurements": [{"outcome": "success"}],
+        "placement": {
+            "requestedTopology": "same_process",
+            "actualTopology": "same_process",
+            "processes": [
+                {"role": "serving", "pid": 123},
+                {"role": "trainer", "pid": 123},
+            ],
+        },
+        "feedbackKafka": {
+            "recordCount": 1,
+            "offsetRanges": [
+                {
+                    "topic": "babel.feedback.v1",
+                    "partition": 0,
+                    "startInclusive": 11,
+                    "endExclusive": 12,
+                }
+            ],
+            "finalTrainerState": {
+                "available": True,
+                "kafkaLag": 0,
+                "offsetsCoverPublishedRanges": True,
+                "nextOffsets": [
+                    {
+                        "topic": "babel.feedback.v1",
+                        "partition": 0,
+                        "nextOffset": 12,
+                    }
+                ],
+                "checkpointManifestSha256": SHA,
+            },
+        },
+        "observedActivationTargets": [[str(MODEL_ID), 1, SHA, SHA]],
+        "finalServingIdentity": {"modelId": str(MODEL_ID), "modelVersion": 1},
+    }
+
+
+def test_condition3_gate_evidence_hard_fails_dirty_activation_or_kafka_state() -> None:
+    raw = _condition3_gate_raw_evidence()
+    assert validate_condition3_gate_evidence(raw) == raw
+
+    for mutation, message in (
+        (
+            lambda value: value["feedbackKafka"]["finalTrainerState"].__setitem__(
+                "kafkaLag", 1
+            ),
+            "zero final Kafka lag",
+        ),
+        (
+            lambda value: value.__setitem__("observedActivationTargets", []),
+            "activation",
+        ),
+        (
+            lambda value: value["feedbackKafka"]["finalTrainerState"].__setitem__(
+                "offsetsCoverPublishedRanges", False
+            ),
+            "offset",
+        ),
+    ):
+        candidate = json.loads(json.dumps(raw))
+        mutation(candidate)
+        with pytest.raises(ValueError, match=message):
+            validate_condition3_gate_evidence(candidate)
+
+
+def test_condition3_gate_runs_only_prepared_condition_three_without_population_build(
+    tmp_path: Path,
+) -> None:
+    gate_id = UUID("dddddddd-dddd-5ddd-8ddd-dddddddddddd")
+    database = FakeDatabase()
+    population = _population_manifest()
+    population_dir = tmp_path / "population"
+    population_dir.mkdir()
+    manifest_bytes = population.model_dump_json().encode() + b"\n"
+    (population_dir / "manifest.json").write_bytes(manifest_bytes)
+    conditions = tuple(
+        replace(row, id=uuid5(gate_id, f"condition:{row.condition_index}"))
+        for row in _conditions()[:6]
+    )
+    database.trial = replace(
+        _trial(),
+        id=gate_id,
+        status="population_ready",
+        evidence_scope="representative_same_process_vs_split",
+        source_trial_id=EXPERIMENT_ID,
+        source_workload_path=str(tmp_path / "source-workload"),
+        source_workload_identity=(SHA,) * 6,
+        replay_request_limit=750,
+        duration_seconds=120,
+        population_ready=True,
+        population_run_id=POPULATION_RUN_ID,
+        population_bundle_path=str(population_dir),
+        population_manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+        conditions=conditions,
+    )
+    frozen = tmp_path / "source-workload"
+    frozen.mkdir()
+    observed: list[tuple[int, str, bool, bool]] = []
+
+    def run(trial, condition, run_id, workload, stop):
+        observed.append(
+            (
+                condition.condition_index,
+                condition.topology,
+                condition.training_enabled,
+                condition.activation_enabled,
+            )
+        )
+        return LiveConditionEvidence(
+            condition_id=condition.id,
+            run_id=run_id,
+            request_count=600,
+            p95_ms=20.0,
+            raw_evidence=_condition3_gate_raw_evidence(),
+        )
+
+    manager = PerformanceJobManager(
+        database=database,
+        output_root=tmp_path,
+        population_builder=lambda *_args: pytest.fail("population build is disabled"),
+        workload_freezer=lambda *_args: type(
+            "Frozen", (), {"path": frozen, "identity": (SHA,) * 6}
+        )(),
+        condition_runner=run,
+        population_loader=lambda _path: population,
+        allow_population_build=False,
+    )
+    manager.run_condition3_gate(gate_id)
+    _wait(manager)
+
+    assert observed == [(3, "same_process", True, True)]
+    assert len(database.clones) == 1
+    assert len(database.bound_conditions) == 1
+    assert database.run_transitions == [(uuid5(gate_id, "condition:3"), "completed")]
+    assert database.trial.status == "interrupted"
+    assert manager.status["phase"] == "condition3_gate_passed"
+    receipt = json.loads(
+        (tmp_path / str(gate_id) / "condition-3-gate.json").read_text()
+    )
+    assert receipt["status"] == "passed"
+    assert receipt["cleanupVerified"] is True
+    assert receipt["finalKafkaLag"] == 0
+
+
+def test_condition3_gate_preparation_freezes_source_without_starting_matrix(
+    tmp_path: Path, monkeypatch
+) -> None:
+    gate_id = UUID("eeeeeeee-eeee-5eee-8eee-eeeeeeeeeeee")
+    database = FakeDatabase()
+    population = _population_manifest()
+    population_dir = tmp_path / "population"
+    population_dir.mkdir()
+    manifest_bytes = population.model_dump_json().encode() + b"\n"
+    (population_dir / "manifest.json").write_bytes(manifest_bytes)
+    database.trial = _trial(
+        status="population_ready",
+        duration_seconds=120,
+        population_ready=True,
+        population_run_id=POPULATION_RUN_ID,
+        population_bundle_path=str(population_dir),
+        population_manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+    )
+    frozen = tmp_path / str(EXPERIMENT_ID) / "workload"
+    frozen.mkdir(parents=True)
+    calls: list[tuple[str, object]] = []
+
+    def create_rerun(**values):
+        calls.append(("create", values))
+
+    monkeypatch.setattr(
+        "babel_online.runtime.performance_rerun.create_representative_rerun",
+        create_rerun,
+    )
+    manager = PerformanceJobManager(
+        database=database,
+        output_root=tmp_path,
+        population_builder=lambda *_args: pytest.fail("population build is disabled"),
+        workload_freezer=lambda *_args: (
+            calls.append(("freeze", EXPERIMENT_ID))
+            or type("Frozen", (), {"path": frozen, "identity": (SHA,) * 6})()
+        ),
+        condition_runner=lambda *_args: pytest.fail("gate is a separate action"),
+        population_loader=lambda _path: population,
+        allow_population_build=False,
+    )
+    manager.prepare_condition3_gate(
+        source_trial_id=EXPERIMENT_ID, gate_trial_id=gate_id
+    )
+    _wait(manager)
+
+    assert [name for name, _value in calls] == ["freeze", "create"]
+    create_values = calls[1][1]
+    assert create_values["source_trial_id"] == EXPERIMENT_ID
+    assert create_values["rerun_id"] == gate_id
+    assert create_values["warmup_seconds"] == 30
+    assert create_values["duration_seconds"] == 120
+    assert create_values["target_rps"] == 5.0
+    assert manager.status == {
+        "experimentId": str(gate_id),
+        "phase": "condition3_gate_ready",
+        "failure": None,
+    }
 
 
 def test_start_builds_exact_population_then_waits_for_durable_approval(tmp_path: Path):

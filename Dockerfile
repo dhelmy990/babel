@@ -58,7 +58,7 @@ WORKDIR /opt/babel/online
 COPY online/pyproject.toml online/uv.lock ./
 COPY online/src ./src
 RUN uv sync --frozen --no-dev \
-      --extra pgvector --extra kafka --extra parquet --extra qwen \
+      --extra pgvector --extra kafka --extra parquet --extra qwen --extra benchmark \
     && chown -R 10001:10001 /opt/babel/online /var/lib/babel-online
 ENV PATH="/opt/babel/online/.venv/bin:${PATH}" \
     PYTHONUNBUFFERED=1 \
@@ -72,3 +72,15 @@ ENTRYPOINT ["babel-recommendation-server"]
 
 FROM online-runtime AS trainer
 ENTRYPOINT ["babel-online-trainer"]
+
+FROM online-runtime AS performance-worker
+USER root
+WORKDIR /opt/babel/benchmark
+COPY benchmark/pyproject.toml ./
+COPY benchmark/src ./src
+RUN uv pip install --no-cache --no-deps . \
+    && chown -R 10001:10001 /opt/babel/benchmark
+WORKDIR /opt/babel/online
+USER 10001:10001
+ENTRYPOINT ["babel-online"]
+CMD ["performance-worker"]

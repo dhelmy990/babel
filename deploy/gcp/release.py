@@ -24,6 +24,7 @@ REQUIRED_KEYS = frozenset(
         "BABEL_BACKEND_IMAGE",
         "BABEL_SERVING_IMAGE",
         "BABEL_TRAINER_IMAGE",
+        "BABEL_PERFORMANCE_WORKER_IMAGE",
         "BABEL_MODEL_REVISION",
         "BABEL_DATASET_REVISION",
         "BABEL_GCP_TRIAL_ID",
@@ -34,6 +35,7 @@ REQUIRED_KEYS = frozenset(
         "BABEL_DEPLOYMENT_RUN_ATTEMPT",
     }
 )
+THREE_IMAGE_KEYS = REQUIRED_KEYS - {"BABEL_PERFORMANCE_WORKER_IMAGE"}
 SHA40 = re.compile(r"^[a-f0-9]{40}$")
 SHA256 = re.compile(r"^[a-f0-9]{64}$")
 DOCKER_TIMESTAMP = re.compile(
@@ -81,7 +83,12 @@ def validate_release(values: dict[str, str]) -> dict[str, str]:
         raise ValueError("release values must be non-empty single-line strings")
     if SHA40.fullmatch(values["BABEL_SOURCE_COMMIT"]) is None:
         raise ValueError("BABEL_SOURCE_COMMIT must be a lowercase 40-hex commit")
-    for name in ("BABEL_BACKEND_IMAGE", "BABEL_SERVING_IMAGE", "BABEL_TRAINER_IMAGE"):
+    for name in (
+        "BABEL_BACKEND_IMAGE",
+        "BABEL_SERVING_IMAGE",
+        "BABEL_TRAINER_IMAGE",
+        "BABEL_PERFORMANCE_WORKER_IMAGE",
+    ):
         if IMAGE.fullmatch(values[name]) is None:
             raise ValueError(f"{name} must be an Artifact Registry sha256 digest reference")
     if values["BABEL_MODEL_REVISION"] != MODEL_REVISION:
@@ -223,7 +230,14 @@ def validate_deployment_predecessor(
     valid_candidate = validate_release(candidate)
     if previous is None:
         return valid_candidate
-    valid_previous = validate_release(previous)
+    if set(previous) == THREE_IMAGE_KEYS:
+        validate_release(
+            previous
+            | {"BABEL_PERFORMANCE_WORKER_IMAGE": previous["BABEL_TRAINER_IMAGE"]}
+        )
+        valid_previous = previous
+    else:
+        valid_previous = validate_release(previous)
     require_newer_deployment(
         int(valid_candidate["BABEL_DEPLOYMENT_RUN_ID"]),
         int(valid_candidate["BABEL_DEPLOYMENT_RUN_ATTEMPT"]),
@@ -248,6 +262,9 @@ def deployment_receipt(values: dict[str, str], *, deployed_at: str) -> dict[str,
         "backendImageDigest": valid["BABEL_BACKEND_IMAGE"].rsplit("@", 1)[1],
         "servingImageDigest": valid["BABEL_SERVING_IMAGE"].rsplit("@", 1)[1],
         "trainerImageDigest": valid["BABEL_TRAINER_IMAGE"].rsplit("@", 1)[1],
+        "performanceWorkerImageDigest": valid[
+            "BABEL_PERFORMANCE_WORKER_IMAGE"
+        ].rsplit("@", 1)[1],
         "modelRevision": valid["BABEL_MODEL_REVISION"],
         "datasetRevision": valid["BABEL_DATASET_REVISION"],
         "trialId": valid["BABEL_GCP_TRIAL_ID"],

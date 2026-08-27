@@ -436,7 +436,30 @@ def _performance_condition(argv: list[str]) -> None:
             signal.signal(selected, handler)
 
 
-def _performance_worker() -> None:
+def _performance_worker(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(prog="babel-online performance-worker")
+    parser.add_argument("--check-runtime", action="store_true")
+    arguments = parser.parse_args([] if argv is None else argv)
+    if arguments.check_runtime:
+        import httpx
+        import psutil
+        import babel_benchmark
+
+        print(
+            json.dumps(
+                {
+                    "status": "ok",
+                    "imports": [
+                        babel_benchmark.__name__,
+                        httpx.__name__,
+                        psutil.__name__,
+                    ],
+                    "entrypoint": "babel-online performance-worker",
+                },
+                sort_keys=True,
+            )
+        )
+        return
     import uvicorn
 
     from .performance_condition import RealWorkloadFreezer
@@ -449,18 +472,11 @@ def _performance_worker() -> None:
 
     database = RuntimeDatabase(_required("BABEL_DATABASE_URL"))
     token = _required("HF_TOKEN")
-    real, encoder = _load_real_launch(
-        database,
-        token=token,
-        artifact_cache_dir=os.environ.get(
-            "BABEL_ONLINE_MODEL_ARTIFACT_CACHE",
-            "state/online/cache/model-artifact",
-        ),
-        model_cache_dir=os.environ.get(
-            "BABEL_ONLINE_QWEN_CACHE", "state/online/cache/qwen-base"
-        ),
-        device=os.environ.get("BABEL_ONLINE_QWEN_DEVICE", "cpu"),
+    configured_population_build = _required(
+        "BABEL_ONLINE_ALLOW_POPULATION_BUILD"
     )
+    if configured_population_build not in {"true", "false"}:
+        raise SystemExit("BABEL_ONLINE_ALLOW_POPULATION_BUILD must be true or false")
     dataset_repo = _required("BABEL_ONLINE_DATASET_REPOSITORY")
     dataset_revision = _required("BABEL_ONLINE_DATASET_REVISION")
     dataset_root = acquire_pinned_bundle(
@@ -482,16 +498,34 @@ def _performance_worker() -> None:
     )
     kafka = os.environ.get("BABEL_KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:29092")
     serving_port = int(os.environ.get("BABEL_RECOMMENDATION_PORT", "8791"))
-    manager = PerformanceJobManager(
-        database=database,
-        output_root=output_root,
-        population_builder=RealPopulationBuilder(
+    if configured_population_build == "true":
+        real, encoder = _load_real_launch(
+            database,
+            token=token,
+            artifact_cache_dir=os.environ.get(
+                "BABEL_ONLINE_MODEL_ARTIFACT_CACHE",
+                "state/online/cache/model-artifact",
+            ),
+            model_cache_dir=os.environ.get(
+                "BABEL_ONLINE_QWEN_CACHE", "state/online/cache/qwen-base"
+            ),
+            device=os.environ.get("BABEL_ONLINE_QWEN_DEVICE", "cpu"),
+        )
+        population_builder = RealPopulationBuilder(
             database=database,
             bundle=bundle,
             model=real.manifest,
             encoder=encoder,
             output_root=output_root,
-        ),
+        )
+    else:
+        def population_builder(*_args, **_kwargs):
+            raise RuntimeError("population build is disabled for this worker")
+
+    manager = PerformanceJobManager(
+        database=database,
+        output_root=output_root,
+        population_builder=population_builder,
         workload_freezer=RealWorkloadFreezer(
             database=database,
             bundle=bundle,
@@ -503,6 +537,7 @@ def _performance_worker() -> None:
             output_root=output_root,
             executable=os.environ.get("BABEL_ONLINE_EXECUTABLE", "babel-online"),
         ),
+        allow_population_build=configured_population_build == "true",
     )
     app = create_performance_control_app(
         manager, token=_required("BABEL_PERFORMANCE_WORKER_TOKEN")
@@ -685,8 +720,9 @@ def main(argv: list[str] | None = None) -> int:
         _supervise()
     elif command == "performance-worker":
         if values:
-            raise SystemExit("performance-worker does not accept positional arguments")
-        _performance_worker()
+            _performance_worker(values)
+        else:
+            _performance_worker()
     elif command == "performance-condition":
         _performance_condition(values)
     elif command == "performance-command":

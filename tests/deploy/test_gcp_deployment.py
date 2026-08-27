@@ -45,6 +45,7 @@ def _valid_release() -> dict[str, str]:
         "BABEL_BACKEND_IMAGE": f"{registry}/babel-backend@sha256:{'1' * 64}",
         "BABEL_SERVING_IMAGE": f"{registry}/babel-serving@sha256:{'2' * 64}",
         "BABEL_TRAINER_IMAGE": f"{registry}/babel-trainer@sha256:{'3' * 64}",
+        "BABEL_PERFORMANCE_WORKER_IMAGE": f"{registry}/babel-performance-worker@sha256:{'6' * 64}",
         "BABEL_MODEL_REVISION": "57d949cd634b920cc1a46f27c9b21df094b5240e",
         "BABEL_DATASET_REVISION": "0d1ab2c7f0e2295682288fcf10077d2d776bf559",
         "BABEL_GCP_TRIAL_ID": str(trial_id),
@@ -102,6 +103,7 @@ def test_receipt_is_canonical_and_records_exact_image_digests() -> None:
         "backendImageDigest": "sha256:" + "1" * 64,
         "servingImageDigest": "sha256:" + "2" * 64,
         "trainerImageDigest": "sha256:" + "3" * 64,
+        "performanceWorkerImageDigest": "sha256:" + "6" * 64,
         "modelRevision": "57d949cd634b920cc1a46f27c9b21df094b5240e",
         "datasetRevision": "0d1ab2c7f0e2295682288fcf10077d2d776bf559",
         "trialId": "4b8ba3f2-4464-4da8-adf0-7a8cb8aa1a70",
@@ -132,7 +134,9 @@ def test_workflow_is_wif_only_digest_deployment_from_demo_branch() -> None:
     assert "@sha256:" in workflow
     assert "git pull" not in workflow
     assert "deploy/gcp/rollout.sh" in workflow
-    assert "performance-worker" not in workflow
+    assert "target: performance-worker" in workflow
+    assert "babel-performance-worker:${{ github.sha }}" in workflow
+    assert "performance-worker --check-runtime" in workflow
     assert "github.ref == 'refs/heads/demo'" in workflow
     assert "GITHUB_RUN_ID" in workflow
     assert "BABEL_GCP_TRIAL_ID" in workflow
@@ -203,7 +207,7 @@ def test_deployment_ownership_accepts_only_a_newer_github_attempt() -> None:
         release.require_newer_deployment(11, 1, previous_run_id=11, previous_attempt=1)
 
 
-def test_deployment_predecessor_allows_clean_first_deploy_and_rejects_legacy_release() -> None:
+def test_deployment_predecessor_allows_clean_first_deploy_and_exact_three_image_release() -> None:
     release = _load_release_module()
     candidate = _valid_release()
     assert release.validate_deployment_predecessor(candidate, previous=None) == candidate
@@ -211,17 +215,15 @@ def test_deployment_predecessor_allows_clean_first_deploy_and_rejects_legacy_rel
     legacy = {
         key: value
         for key, value in candidate.items()
-        if key
-        not in {
-            "BABEL_GCP_TRIAL_ID",
-            "BABEL_POPULATION_VECTOR_SHA256",
-            "BABEL_POPULATION_SNAPSHOT_SHA256",
-            "BABEL_DEPLOYMENT_RUN_ID",
-            "BABEL_DEPLOYMENT_RUN_ATTEMPT",
-        }
+        if key != "BABEL_PERFORMANCE_WORKER_IMAGE"
     }
+    legacy["BABEL_DEPLOYMENT_RUN_ATTEMPT"] = "1"
+    assert release.validate_deployment_predecessor(candidate, previous=legacy) == candidate
+
     with pytest.raises(ValueError, match="exact keys"):
-        release.validate_deployment_predecessor(candidate, previous=legacy)
+        release.validate_deployment_predecessor(
+            candidate, previous=legacy | {"UNKNOWN": "value"}
+        )
 
 
 def test_trainer_readiness_is_bound_to_run_and_current_rollout() -> None:
@@ -322,6 +324,10 @@ def test_multistage_image_and_compose_preserve_compute_boundary() -> None:
     assert " AS backend" in dockerfile
     assert " AS serving" in dockerfile
     assert " AS trainer" in dockerfile
+    assert " AS performance-worker" in dockerfile
+    assert "COPY benchmark/pyproject.toml" in dockerfile
+    assert "COPY benchmark/src" in dockerfile
+    assert 'CMD ["performance-worker"]' in dockerfile
     assert "-DBABEL_MIGRATION_DIRECTORY=/opt/babel/migrations" in dockerfile
     assert "-DBABEL_ADMIN_ASSET_DIRECTORY=/opt/babel/admin" in dockerfile
     assert "--depth 1" not in dockerfile
@@ -335,13 +341,21 @@ def test_multistage_image_and_compose_preserve_compute_boundary() -> None:
     assert "${BABEL_BACKEND_IMAGE:?" in compose
     assert "${BABEL_SERVING_IMAGE:?" in compose
     assert "${BABEL_TRAINER_IMAGE:?" in compose
+    assert "${BABEL_PERFORMANCE_WORKER_IMAGE:?" in compose
     assert "BABEL_ONLINE_QWEN_DEVICE: cuda" in compose
     assert "gpus: all" in compose
-    trainer = compose.split("  trainer:", 1)[1]
+    trainer = compose.split("  trainer:", 1)[1].split(
+        "  performance-worker:", 1
+    )[0]
     assert "gpus: all" not in trainer
-    assert "performance-worker" not in compose
+    worker = compose.split("  performance-worker:", 1)[1]
+    assert 'profiles: ["matrix"]' in worker
+    assert "BABEL_ONLINE_ALLOW_POPULATION_BUILD: \"false\"" in worker
+    assert "BABEL_ONLINE_QWEN_DEVICE: cuda" in worker
+    assert "gpus: all" in worker
+    assert '127.0.0.1:8792' in compose
     assert "BABEL_ONLINE_WORKER_ENDPOINT: http://127.0.0.1:9" in compose
-    assert "BABEL_PERFORMANCE_WORKER_ENDPOINT: http://127.0.0.1:9" in compose
+    assert "BABEL_PERFORMANCE_WORKER_ENDPOINT: http://127.0.0.1:8792" in compose
 
 
 def test_rollout_validates_before_migration_and_rolls_back_on_failed_health() -> None:
@@ -377,10 +391,39 @@ def test_rollout_validates_before_migration_and_rolls_back_on_failed_health() ->
     assert "rollback_current_release || true" not in script
     assert "docker compose down -v" not in script
     assert "rm -rf" not in script
+    assert 'BABEL_ONLINE_ALLOW_POPULATION_BUILD=false' in script
+    assert '--profile matrix' in script
+    assert 'performance-worker --check-runtime' in script
+    assert 'docker run --rm --gpus all --entrypoint python "$BABEL_SERVING_IMAGE"' in script
+    assert '"$BABEL_SERVING_IMAGE" \\\n  -c \'import torch;' in script
+
+
+def test_condition3_operator_is_bounded_and_never_auto_continues_matrix() -> None:
+    script = (DEPLOY / "condition3_gate.sh").read_text()
+    worker_source = (
+        ROOT / "online/src/babel_online/runtime/performance_worker.py"
+    ).read_text()
+    assert "condition-3-gate" in script
+    assert "source.warmup_seconds != 30" in worker_source
+    assert "source.duration_seconds != 120" in worker_source
+    assert "source.target_rps != 5.0" in worker_source
+    assert "BABEL_ONLINE_ALLOW_POPULATION_BUILD" in script
+    assert "approve-next-scale" not in script
+    assert "condition-4" not in script
+    result = subprocess.run(
+        ["bash", "-n", os.fspath(DEPLOY / "condition3_gate.sh")],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_rollout_predeploy_argv_is_accepted_end_to_end(monkeypatch, capsys) -> None:
     script = (DEPLOY / "rollout.sh").read_text()
+    assert (
+        "--volume /var/lib/babel-gpu/evidence/import-receipt.json:"
+        "/var/lib/babel-gpu/evidence/import-receipt.json:ro"
+    ) in script
     command = script.split(
         '--entrypoint python "$BABEL_TRAINER_IMAGE" /opt/babel-predeploy.py', 1
     )[1].split(
@@ -392,14 +435,15 @@ def test_rollout_predeploy_argv_is_accepted_end_to_end(monkeypatch, capsys) -> N
         "--run-id",
         "--population-vector-sha256",
         "--population-snapshot-sha256",
+        "--reuse-import-receipt",
     ]
 
     predeploy = _load_predeploy_module()
     monkeypatch.setenv("BABEL_DATABASE_URL", "postgresql://not-logged")
-    monkeypatch.setattr(predeploy, "read_database_snapshot", lambda *_a, **_k: ({}, []))
+    monkeypatch.setattr(predeploy, "read_database_reuse_snapshot", lambda *_a, **_k: {})
     monkeypatch.setattr(
         predeploy,
-        "validate_snapshot",
+        "validate_reuse_snapshot",
         lambda *_a, **_k: {"schemaVersion": 1, "verified": True},
     )
     values = {
@@ -407,6 +451,7 @@ def test_rollout_predeploy_argv_is_accepted_end_to_end(monkeypatch, capsys) -> N
         "--run-id": _valid_release()["BABEL_GCP_RUN_ID"],
         "--population-vector-sha256": "4" * 64,
         "--population-snapshot-sha256": "5" * 64,
+        "--reuse-import-receipt": "/var/lib/babel-gpu/evidence/import-receipt.json",
     }
     argv = [part for flag in flags for part in (flag, values[flag])]
     assert predeploy.main(argv) == 0
@@ -414,7 +459,11 @@ def test_rollout_predeploy_argv_is_accepted_end_to_end(monkeypatch, capsys) -> N
 
 
 def test_shell_scripts_parse() -> None:
-    for path in (DEPLOY / "rollout.sh", DEPLOY / "rollout_supervisor.sh"):
+    for path in (
+        DEPLOY / "rollout.sh",
+        DEPLOY / "rollout_supervisor.sh",
+        DEPLOY / "condition3_gate.sh",
+    ):
         result = subprocess.run(
             ["bash", "-n", os.fspath(path)], capture_output=True, text=True
         )

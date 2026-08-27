@@ -4,9 +4,9 @@ services:
     network_mode: host
     env_file: /etc/babel/runtime.env
     environment:
-      # Fail closed: the population/performance worker is deliberately absent.
+      # The ordinary online worker remains disabled; matrix control is loopback-only.
       BABEL_ONLINE_WORKER_ENDPOINT: http://127.0.0.1:9
-      BABEL_PERFORMANCE_WORKER_ENDPOINT: http://127.0.0.1:9
+      BABEL_PERFORMANCE_WORKER_ENDPOINT: http://127.0.0.1:8792
     command: ["serve"]
     restart: unless-stopped
     labels:
@@ -44,6 +44,28 @@ services:
     command:
       ["--run-id", "${BABEL_GCP_RUN_ID}", "--activation-enabled", "true"]
     restart: unless-stopped
+    volumes:
+      - /var/lib/babel-online:/var/lib/babel-online
+    labels:
+      dev.babel.source-commit: ${BABEL_SOURCE_COMMIT}
+      dev.babel.model-revision: ${BABEL_MODEL_REVISION}
+      dev.babel.dataset-revision: ${BABEL_DATASET_REVISION}
+
+  performance-worker:
+    profiles: ["matrix"]
+    image: ${BABEL_PERFORMANCE_WORKER_IMAGE:?BABEL_PERFORMANCE_WORKER_IMAGE must be an immutable digest}
+    network_mode: host
+    env_file: /etc/babel/runtime.env
+    environment:
+      BABEL_ONLINE_ALLOW_POPULATION_BUILD: "false"
+      BABEL_ONLINE_QWEN_DEVICE: cuda
+      BABEL_ONLINE_STATE_ROOT: /var/lib/babel-online/state
+      BABEL_PERFORMANCE_STATE_ROOT: /var/lib/babel-online/performance
+      BABEL_ONLINE_MODEL_ARTIFACT_CACHE: /var/lib/babel-online/cache/model-artifact
+      BABEL_ONLINE_QWEN_CACHE: /var/lib/babel-online/cache/qwen-base
+    command: ["performance-worker"]
+    restart: unless-stopped
+    gpus: all
     volumes:
       - /var/lib/babel-online:/var/lib/babel-online
     labels:

@@ -61,6 +61,10 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+benchmark = [
+    { name = "httpx" },
+    { name = "psutil" },
+]
 dev = [
     { name = "httpx" },
     { name = "pytest" },
@@ -88,11 +92,13 @@ requires-dist = [
     { name = "accelerate", marker = "extra == 'qwen'", specifier = ">=1.5,<2" },
     { name = "confluent-kafka", marker = "extra == 'kafka'", specifier = ">=2.6,<3" },
     { name = "fastapi", specifier = ">=0.115,<0.116" },
+    { name = "httpx", marker = "extra == 'benchmark'", specifier = ">=0.28,<0.29" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.28,<0.29" },
     { name = "huggingface-hub", specifier = ">=0.30,<1" },
     { name = "numpy", specifier = ">=2.2,<2.3" },
     { name = "peft", marker = "extra == 'qwen'", specifier = ">=0.15,<0.16" },
     { name = "pgvector", marker = "extra == 'pgvector'", specifier = ">=0.3,<0.4" },
+    { name = "psutil", marker = "extra == 'benchmark'", specifier = ">=5.9,<8" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'pgvector'", specifier = ">=3.2,<3.3" },
     { name = "pyarrow", marker = "extra == 'parquet'", specifier = ">=17,<26" },
     { name = "pydantic", specifier = ">=2.10,<2.11" },
@@ -102,7 +108,7 @@ requires-dist = [
     { name = "transformers", marker = "extra == 'qwen'", specifier = ">=4.51,<4.52" },
     { name = "uvicorn", specifier = ">=0.34,<0.35" },
 ]
-provides-extras = ["dev", "pgvector", "kafka", "parquet", "qwen"]
+provides-extras = ["dev", "pgvector", "kafka", "parquet", "benchmark", "qwen"]
 
 [[package]]
 name = "certifi"
