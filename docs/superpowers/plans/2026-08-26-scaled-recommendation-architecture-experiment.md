@@ -75,6 +75,47 @@ Tasks 6-13: real integration, graph, topology, dashboard, experiments
 Elapsed time, a partial checkpoint, or unrelated user activity never passes a
 gate. Only an explicit user message does.
 
+## Execution Checkpoint — 27 August 2026
+
+Both human training gates have passed. The independent training agent published
+the immutable original to
+`dhelmy990/babel-qwen-navigation-2016-interview@57d949cd634b920cc1a46f27c9b21df094b5240e`
+with artifact ID
+`3f6b43e574eb2bcac55c4ddf95f624e3f42153f97437cfeba703c9b3b110a1f8`.
+The real June/July engineering release is pinned at
+`dhelmy990/babel-wikipedia-experiment@0d1ab2c7f0e2295682288fcf10077d2d776bf559`.
+
+Tasks 6–11 have a real-model implementation: serving loads the pinned Qwen
+LoRA/projection, pgvector contains only 10,000 synthetic-created Babel vectors,
+directed include edges and bounded walks are durable, all same-host topologies
+exist, and the dashboard controls saved trials. Population run
+`7f4ad291-e6d0-5bb9-9658-3605c634a3a9` passed its independent 10,000-vector
+gate.
+
+The first full cohort-50 attempt,
+`ce8e54ff-e317-4a89-b7db-90327e02dc43`, is preserved as a failed non-formal
+control run. Conditions 1 and 2 produced clean real-Qwen evidence; condition 3
+failed its Kafka drain because the superseded demo updater processed one event
+per step while publishing 68 large snapshots. Conditions 4–9 never ran. See
+`docs/experiments/scaled-performance-report.md` for exact evidence.
+
+Corrective execution order:
+
+1. Use the reviewed PyTorch online head from commit `83d0e3c` and live progress
+   telemetry from `326b840`.
+2. From the authenticated dashboard, create a fresh explicitly non-formal 2×3
+   rerun comparing `same_process` with `same_host_split` across the three load
+   modes. Reuse the checksum-identical frozen population and a bounded prefix of
+   the frozen workload under a new identity; do not re-encode 10,000 articles.
+3. Require zero request errors, zero final Kafka lag, durable original/child
+   lineage, all three interference ratios, and saved progress/results.
+4. Publish or attach only through a bundle contract matching the run's honest
+   `representative` label. Never pass a 2×3 rerun to the formal cohort-50 3×3
+   publisher.
+5. After the representative comparison is secured, decide whether remaining
+   time justifies a complete 3×3 run, retrieval comparison, fault campaign, or
+   higher creator cohort. These must not block the default split evidence.
+
 ## Orchestrator Fleet Map
 
 Maximum concurrency: orchestrator plus three workers. Orchestrator owns gates,
