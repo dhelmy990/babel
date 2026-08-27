@@ -547,6 +547,7 @@ independence and semantic parity.
 - [ ] Add controls for topology, model, dataset, backend, walk probability/depth/cap, sync/training, warmup/duration/RPS/safety. Add paired slider+numeric input for seeded articles, target created Babels, concurrent simulated users; valid custom numbers may exceed slider range.
 - [ ] `trial-progress.js` polls persisted status only and imports no trainer/Kafka/serving/benchmark code. Show phase, condition `n/9`, seeded/created/indexed/requested/completed, elapsed, recent rate, ETA, draining.
 - [ ] Show graph/walk/cache, placement/resources, Kafka/trainer, trainer-vs-serving staleness, activation spikes, and artifact links.
+- [ ] Persist a `population_ready` state after the accepted 10,000-row vector snapshot is frozen. Starting measurements requires an explicit operator approval; reaching the population threshold never auto-starts the condition matrix.
 - [ ] Expose protected endpoints using existing nonce/Host/Origin checks; auto-advance false:
 
 ```text
@@ -623,8 +624,12 @@ git commit -m "feat: benchmark concurrent topology interference"
 **Files:**
 - Create: `benchmark/src/babel_benchmark/matrix.py`
 - Create: `benchmark/src/babel_benchmark/scale.py`
+- Create: `benchmark/src/babel_benchmark/faults.py`
+- Create: `benchmark/src/babel_benchmark/backpressure.py`
 - Create: `benchmark/tests/test_matrix.py`
 - Create: `benchmark/tests/test_scale.py`
+- Create: `benchmark/tests/test_faults.py`
+- Create: `benchmark/tests/test_backpressure.py`
 - Create: `docs/experiments/scaled-performance-report.md`
 - Modify: `docs/runbooks/online-experiment.md`
 
@@ -634,10 +639,11 @@ git commit -m "feat: benchmark concurrent topology interference"
 
 - [ ] Test tiny matrix uses exactly nine conditions, at most 20 requests each/180 total, current fixture, strict timeout, and `formal_performance_claim=False`.
 - [ ] Run smoke first; verify startup/cleanup, edges, progress, raw persistence, ratios, and trainer-failure availability. Never wait for full population in automated tests.
-- [ ] From dashboard populate default 10,000 distinct created/indexed Babels using real model. Save manifest/checksum; formal measurement requires created=indexed≥threshold.
+- [ ] From the dashboard create 5,000 June plus 5,000 July Babels round-robin across 50 creators, retaining one cross-month used-source set per creator so `(run,creator,source)` remains unique. Freeze the 10,000 distinct Babel IDs and real-Qwen vectors once, save their ordered manifest/checksum, and clone those exact Babel/vector bytes into condition runs; never repeat Qwen population nine times. Formal measurement requires created=indexed≥threshold.
+- [ ] Freeze one live reference workload containing request, feedback, creator-local schedule, event-mix, and separate 0.40 start/continuation draws. Replay that exact workload across conditions rather than regenerating walks from condition-specific recommendations.
 - [ ] At first approved cohort run all three topologies × three conditions with identical schedules. At higher cohorts compare monolith against selected split to bound matrix size.
-- [ ] Inject trainer kill/restart, Kafka pause/resume, invalid state, serving restart; record availability, lag, detection/recovery, duplicates/loss, versions.
-- [ ] Advance nested cohorts manually `50→100→500`, optionally `1,000→5,000→10,000`. Stop on memory >90% sustained, disk <10 GiB, errors/timeouts >5% for two windows, increasing lag at max backpressure, or process/checkpoint failure.
+- [ ] Implement a small `FaultController` over Task 9 lifecycle hooks. Inject trainer kill/restart, Kafka pause/resume, invalid state, and serving restart; record availability, lag, detection/recovery, duplicates/loss, and versions.
+- [ ] Implement persisted bounded trainer backpressure controls (micro-batch/delay within dashboard limits) so “maximum backpressure” has one observable meaning. Advance cohorts manually `50→100→500`, optionally `1,000→5,000→10,000`. Stop on memory >90% for the configured safety window (default 30 seconds), disk <10 GiB, errors/timeouts >5% for two windows, increasing lag for two windows at verified maximum backpressure, or process/checkpoint/activation failure.
 - [ ] After real pgvector HNSW is observed, run fixed-topology hnswlib comparison and report preparation/memory/steady latency/throughput/recall separately.
 - [ ] Write report distinguishing smoke, population, topology, retrieval, scale, and faults; label same-host limitations.
 - [ ] Test and commit:
