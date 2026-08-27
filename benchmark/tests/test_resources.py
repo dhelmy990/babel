@@ -9,6 +9,7 @@ from babel_benchmark.resources import (
     ResourceSampler,
 )
 from babel_benchmark.cache import (
+    ExactCosineOracleEvidence,
     RetrievalRunEvidence,
     compare_retrieval_backends,
     retrieval_input_identity,
@@ -80,13 +81,18 @@ def test_retrieval_comparison_requires_identical_inputs_and_separates_preparatio
 ):
     identity = retrieval_input_identity(["a", "b"], b"vectors", "c" * 64, b"queries")
     exact = tuple(str(index) for index in range(60))
+    reversed_exact = tuple(reversed(exact))
+    oracle = ExactCosineOracleEvidence(
+        inputIdentity=identity,
+        neighborsByQuery=(exact, reversed_exact),
+    )
     pgvector = RetrievalRunEvidence(
         backend="pgvector",
         inputIdentity=identity,
         preparationNs=10,
         steadyLatencyNs=(2, 3),
         memoryBytes=100,
-        neighbors=exact,
+        neighborsByQuery=(exact, reversed_exact[1:] + reversed_exact[:1]),
     )
     hnswlib = RetrievalRunEvidence(
         backend="hnswlib",
@@ -94,10 +100,13 @@ def test_retrieval_comparison_requires_identical_inputs_and_separates_preparatio
         preparationNs=20,
         steadyLatencyNs=(1, 1),
         memoryBytes=80,
-        neighbors=exact,
+        neighborsByQuery=(exact[:9] + ("missing",) + exact[10:], reversed_exact),
     )
-    comparison = compare_retrieval_backends(pgvector, hnswlib)
-    assert comparison.recallAt10 == comparison.recallAt50 == 1.0
+    comparison = compare_retrieval_backends(oracle, pgvector, hnswlib)
+    assert comparison.pgvectorRecallAt10 == 0.95
+    assert comparison.pgvectorRecallAt50 == 0.99
+    assert comparison.hnswlibRecallAt10 == 0.95
+    assert comparison.hnswlibRecallAt50 == 0.99
     assert comparison.pgvectorPreparationNs == 10
     assert comparison.hnswlibPreparationNs == 20
 

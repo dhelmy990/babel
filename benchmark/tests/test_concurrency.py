@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import pytest
 
@@ -145,7 +146,7 @@ def test_closed_loop_schedule_preserves_stable_identity_and_timeout_rows() -> No
 
 
 @pytest.mark.parametrize(
-    ("retrieval_backend", "dataset_sha", "backend_sha"),
+    ("retrieval_backend", "pgvector_sha", "backend_sha"),
     [
         ("hnswlib", "a" * 64, "a" * 64),
         ("pgvector", "d" * 64, "a" * 64),
@@ -153,7 +154,7 @@ def test_closed_loop_schedule_preserves_stable_identity_and_timeout_rows() -> No
     ],
 )
 def test_v2_condition_rejects_backend_or_frozen_snapshot_drift(
-    retrieval_backend: str, dataset_sha: str, backend_sha: str
+    retrieval_backend: str, pgvector_sha: str, backend_sha: str
 ) -> None:
     legacy, replay, universe = inputs()
     source = legacy.model_dump(mode="json")
@@ -171,10 +172,12 @@ def test_v2_condition_rejects_backend_or_frozen_snapshot_drift(
             "requestCorpusSha256": legacy.requestCorpusSha256,
             "scheduleOffsetsNs": list(legacy.scheduleOffsetsNs),
             "expectedModelId": str(legacy.conditions[0].expectedModelId),
+            "expectedModelVersion": 2,
             "expectedEmbeddingSpaceId": str(
                 legacy.conditions[0].expectedEmbeddingSpaceId
             ),
-            "expectedDatasetSnapshotSha256": dataset_sha,
+            "expectedDatasetSnapshotSha256": legacy.candidateUniverseSha256,
+            "expectedPgvectorSnapshotSha256": pgvector_sha,
             "expectedBackendSnapshotSha256": backend_sha,
         }
     ]
@@ -194,7 +197,9 @@ def test_v2_condition_rejects_backend_or_frozen_snapshot_drift(
     assert all(row.outcome == "error" and row.errorType == "ValueError" for row in rows)
 
 
-def test_activation_condition_allows_versioned_backend_snapshot_change() -> None:
+def test_activation_condition_accepts_pinned_child_identity_and_v2_cache_origin() -> (
+    None
+):
     legacy, replay, universe = inputs()
     source = legacy.model_dump(mode="json")
     source["schemaVersion"] = 2
@@ -211,11 +216,22 @@ def test_activation_condition_allows_versioned_backend_snapshot_change() -> None
             "requestCorpusSha256": legacy.requestCorpusSha256,
             "scheduleOffsetsNs": list(legacy.scheduleOffsetsNs),
             "expectedModelId": str(legacy.conditions[0].expectedModelId),
+            "expectedModelVersion": 2,
             "expectedEmbeddingSpaceId": str(
                 legacy.conditions[0].expectedEmbeddingSpaceId
             ),
-            "expectedDatasetSnapshotSha256": "a" * 64,
+            "expectedDatasetSnapshotSha256": legacy.candidateUniverseSha256,
+            "expectedPgvectorSnapshotSha256": "a" * 64,
             "expectedBackendSnapshotSha256": "a" * 64,
+            "activationTargets": [
+                {
+                    "modelId": "00000000-0000-5000-8000-000000000099",
+                    "parentModelId": str(legacy.conditions[0].expectedModelId),
+                    "modelVersion": 3,
+                    "pgvectorSnapshotSha256": "c" * 64,
+                    "backendSnapshotSha256": "d" * 64,
+                }
+            ],
         }
     ]
     manifest = BenchmarkManifestV2.model_validate(source)
@@ -223,7 +239,16 @@ def test_activation_condition_allows_versioned_backend_snapshot_change() -> None
     class ActivatedTransport(AsyncTransport):
         async def post_json(self, path, payload, timeout_seconds):
             status, body = await super().post_json(path, payload, timeout_seconds)
-            body["backendSnapshotSha256"] = "c" * 64
+            body.update(
+                {
+                    "schemaVersion": 2,
+                    "modelId": "00000000-0000-5000-8000-000000000099",
+                    "modelVersion": 3,
+                    "pgvectorSnapshotSha256": "c" * 64,
+                    "backendSnapshotSha256": "d" * 64,
+                    "sourceVectorOrigin": "cache_hit",
+                }
+            )
             return status, body
 
     rows = asyncio.run(
@@ -235,11 +260,20 @@ def test_activation_condition_allows_versioned_backend_snapshot_change() -> None
             transport=ActivatedTransport(),
             schedule_mode="closed_loop",
             max_in_flight=2,
-            trainer_model_version=3,
+            trainer_model_version=4,
         )
     )
     assert all(row.outcome == "success" for row in rows)
     assert all(
-        row.servingModelVersion == 2 and row.versionStaleness == 1 for row in rows
+        row.modelId == UUID("00000000-0000-5000-8000-000000000099")
+        and row.servingModelVersion == 3
+        and row.versionStaleness == 1
+        for row in rows
     )
-    assert {row.backendSnapshotSha256 for row in rows} == {"c" * 64}
+    assert {row.datasetSnapshotSha256 for row in rows} == {
+        legacy.candidateUniverseSha256
+    }
+    assert {row.pgvectorSnapshotSha256 for row in rows} == {"c" * 64}
+    assert {row.backendSnapshotSha256 for row in rows} == {"d" * 64}
+    assert {row.sourceVectorOrigin for row in rows} == {"cache_hit"}
+    assert {row.cacheStatus for row in rows} == {"hit"}

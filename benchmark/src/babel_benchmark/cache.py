@@ -23,13 +23,23 @@ class RetrievalRunEvidence:
     preparationNs: int
     steadyLatencyNs: tuple[int, ...]
     memoryBytes: int
-    neighbors: tuple[str, ...]
+    neighborsByQuery: tuple[tuple[str, ...], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ExactCosineOracleEvidence:
+    """Exact cosine neighbors for the same frozen vectors and queries."""
+
+    inputIdentity: RetrievalInputIdentity
+    neighborsByQuery: tuple[tuple[str, ...], ...]
 
 
 @dataclass(frozen=True, slots=True)
 class RetrievalComparison:
-    recallAt10: float
-    recallAt50: float
+    pgvectorRecallAt10: float
+    pgvectorRecallAt50: float
+    hnswlibRecallAt10: float
+    hnswlibRecallAt50: float
     pgvectorPreparationNs: int
     hnswlibPreparationNs: int
     pgvectorSteadyLatencyNs: tuple[int, ...]
@@ -62,15 +72,37 @@ def recall_at(exact: Sequence[str], approximate: Iterable[str], k: int) -> float
 
 
 def compare_retrieval_backends(
-    pgvector: RetrievalRunEvidence, hnswlib: RetrievalRunEvidence
+    oracle: ExactCosineOracleEvidence,
+    pgvector: RetrievalRunEvidence,
+    hnswlib: RetrievalRunEvidence,
 ) -> RetrievalComparison:
     if pgvector.backend != "pgvector" or hnswlib.backend != "hnswlib":
         raise ValueError("retrieval evidence must keep pgvector and hnswlib separate")
-    if pgvector.inputIdentity != hnswlib.inputIdentity:
+    if not (oracle.inputIdentity == pgvector.inputIdentity == hnswlib.inputIdentity):
         raise ValueError("retrieval comparison requires checksum-identical inputs")
+    query_count = len(oracle.neighborsByQuery)
+    if query_count == 0 or any(
+        len(rows) != query_count
+        for rows in (pgvector.neighborsByQuery, hnswlib.neighborsByQuery)
+    ):
+        raise ValueError("retrieval comparison requires one result list per query")
+
+    def mean_recall(evidence: RetrievalRunEvidence, k: int) -> float:
+        return (
+            sum(
+                recall_at(exact, approximate, k)
+                for exact, approximate in zip(
+                    oracle.neighborsByQuery, evidence.neighborsByQuery, strict=True
+                )
+            )
+            / query_count
+        )
+
     return RetrievalComparison(
-        recallAt10=recall_at(pgvector.neighbors, hnswlib.neighbors, 10),
-        recallAt50=recall_at(pgvector.neighbors, hnswlib.neighbors, 50),
+        pgvectorRecallAt10=mean_recall(pgvector, 10),
+        pgvectorRecallAt50=mean_recall(pgvector, 50),
+        hnswlibRecallAt10=mean_recall(hnswlib, 10),
+        hnswlibRecallAt50=mean_recall(hnswlib, 50),
         pgvectorPreparationNs=pgvector.preparationNs,
         hnswlibPreparationNs=hnswlib.preparationNs,
         pgvectorSteadyLatencyNs=pgvector.steadyLatencyNs,
@@ -82,6 +114,7 @@ def compare_retrieval_backends(
 
 __all__ = [
     "RetrievalComparison",
+    "ExactCosineOracleEvidence",
     "RetrievalInputIdentity",
     "RetrievalRunEvidence",
     "compare_retrieval_backends",

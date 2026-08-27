@@ -16,6 +16,7 @@ from .contracts import (
     ConditionSpecV2,
     ConditionTelemetryV1,
     RecommendationResponseV1,
+    RecommendationResponseV2,
     RequestMeasurementV1,
     RequestMeasurementV2,
 )
@@ -213,6 +214,81 @@ class ConcurrentConditionResult(Sequence[RequestMeasurementV2]):
         return iter(self.measurements)
 
 
+def _parse_recommendation_response(
+    body: dict[str, Any],
+) -> RecommendationResponseV1 | RecommendationResponseV2:
+    contract = (
+        RecommendationResponseV2
+        if body.get("schemaVersion") == 2
+        else RecommendationResponseV1
+    )
+    return contract.model_validate(body)
+
+
+def _cache_evidence(
+    response: RecommendationResponseV1 | RecommendationResponseV2,
+) -> tuple[str, str | None]:
+    if not isinstance(response, RecommendationResponseV2):
+        return "unavailable", None
+    cache_status = {
+        "cache_hit": "hit",
+        "qwen_encode": "miss",
+        "pgvector_load": "bypass",
+    }[response.sourceVectorOrigin]
+    return cache_status, response.sourceVectorOrigin
+
+
+def _validate_serving_identity(
+    condition: ConditionSpecV1 | ConditionSpecV2,
+    response: RecommendationResponseV1 | RecommendationResponseV2,
+) -> None:
+    identity = (
+        condition.identity
+        if isinstance(condition, ConditionSpecV2)
+        else infer_v1_condition_identity(condition)
+    )
+    if response.embeddingSpaceId != condition.expectedEmbeddingSpaceId:
+        raise ValueError("recommendation embedding space differs from condition")
+    if response.retrievalBackend != identity.retrievalBackend:
+        raise ValueError("retrieval backend differs from condition")
+    if isinstance(condition, ConditionSpecV1):
+        if response.modelId != condition.expectedModelId:
+            raise ValueError("recommendation model identity differs from condition")
+        if (
+            not condition.syncEnabled
+            and response.pgvectorSnapshotSha256
+            != condition.expectedPgvectorSnapshotSha256
+        ):
+            raise ValueError("pgvector snapshot differs from condition")
+        return
+
+    permitted = {
+        (
+            condition.expectedModelId,
+            condition.expectedModelVersion,
+            condition.expectedPgvectorSnapshotSha256,
+            condition.expectedBackendSnapshotSha256,
+        ),
+        *(
+            (
+                target.modelId,
+                target.modelVersion,
+                target.pgvectorSnapshotSha256,
+                target.backendSnapshotSha256,
+            )
+            for target in condition.activationTargets
+        ),
+    }
+    returned = (
+        response.modelId,
+        response.modelVersion,
+        response.pgvectorSnapshotSha256,
+        response.backendSnapshotSha256,
+    )
+    if returned not in permitted:
+        raise ValueError("serving state is outside the pinned model lineage")
+
+
 def _failed_measurement(
     manifest: BenchmarkManifestV1 | BenchmarkManifestV2,
     condition: ConditionSpecV1 | ConditionSpecV2,
@@ -372,45 +448,13 @@ def run_condition(
                     )
                     continue
 
-                response = RecommendationResponseV1.model_validate(body)
+                response = _parse_recommendation_response(body)
                 if (
                     response.requestId != replay_row.request.requestId
                     or response.runId != replay_row.request.runId
                 ):
                     raise ValueError("recommendation response identity mismatch")
-                if response.modelId != condition.expectedModelId:
-                    raise ValueError(
-                        "recommendation model identity differs from condition"
-                    )
-                if response.embeddingSpaceId != condition.expectedEmbeddingSpaceId:
-                    raise ValueError(
-                        "recommendation embedding space differs from condition"
-                    )
-                condition_identity = (
-                    condition.identity
-                    if isinstance(condition, ConditionSpecV2)
-                    else infer_v1_condition_identity(condition)
-                )
-                if response.retrievalBackend != condition_identity.retrievalBackend:
-                    raise ValueError("retrieval backend differs from condition")
-                if isinstance(condition, ConditionSpecV2):
-                    if (
-                        response.pgvectorSnapshotSha256
-                        != condition.expectedDatasetSnapshotSha256
-                    ):
-                        raise ValueError("dataset snapshot differs from condition")
-                    if (
-                        not condition.syncEnabled
-                        and response.backendSnapshotSha256
-                        != condition.expectedBackendSnapshotSha256
-                    ):
-                        raise ValueError("backend snapshot differs from condition")
-                elif (
-                    not condition.syncEnabled
-                    and response.pgvectorSnapshotSha256
-                    != condition.expectedPgvectorSnapshotSha256
-                ):
-                    raise ValueError("pgvector snapshot differs from condition")
+                _validate_serving_identity(condition, response)
                 universe.validate_candidates(
                     requester=replay_row.request.creatorId,
                     response_rows=response.candidates,
@@ -526,35 +570,13 @@ async def run_concurrent_condition(
                         )
                     )
                     return
-                response = RecommendationResponseV1.model_validate(body)
+                response = _parse_recommendation_response(body)
                 if (
                     response.requestId != replay_row.request.requestId
                     or response.runId != replay_row.request.runId
-                    or response.modelId != condition.expectedModelId
-                    or response.embeddingSpaceId != condition.expectedEmbeddingSpaceId
                 ):
                     raise ValueError("recommendation response identity mismatch")
-                if isinstance(condition, ConditionSpecV2):
-                    if (
-                        response.pgvectorSnapshotSha256
-                        != condition.expectedDatasetSnapshotSha256
-                    ):
-                        raise ValueError("dataset snapshot differs from condition")
-                elif (
-                    not condition.syncEnabled
-                    and response.pgvectorSnapshotSha256
-                    != condition.expectedPgvectorSnapshotSha256
-                ):
-                    raise ValueError("candidate snapshot differs from condition")
-                if response.retrievalBackend != identity.retrievalBackend:
-                    raise ValueError("retrieval backend differs from condition")
-                if (
-                    isinstance(condition, ConditionSpecV2)
-                    and not condition.syncEnabled
-                    and response.backendSnapshotSha256
-                    != condition.expectedBackendSnapshotSha256
-                ):
-                    raise ValueError("backend snapshot differs from condition")
+                _validate_serving_identity(condition, response)
                 universe.validate_candidates(
                     requester=replay_row.request.creatorId,
                     response_rows=response.candidates,
@@ -563,6 +585,7 @@ async def run_concurrent_condition(
                 if trainer_model_version is not None:
                     staleness = max(0, trainer_model_version - response.modelVersion)
                 client_total = completed - started
+                cache_status, source_vector_origin = _cache_evidence(response)
                 measurements.append(
                     RequestMeasurementV2(
                         **common,
@@ -573,12 +596,18 @@ async def run_concurrent_condition(
                         outcome="success",
                         httpStatus=status,
                         serverTimingsNs=response.timingsNs,
-                        cacheStatus=body.get("cacheStatus", "unavailable"),
+                        cacheStatus=cache_status,
+                        sourceVectorOrigin=source_vector_origin,
                         modelId=response.modelId,
                         servingModelVersion=response.modelVersion,
                         versionStaleness=staleness,
                         retrievalBackend=response.retrievalBackend,
-                        datasetSnapshotSha256=response.pgvectorSnapshotSha256,
+                        datasetSnapshotSha256=(
+                            condition.expectedDatasetSnapshotSha256
+                            if isinstance(condition, ConditionSpecV2)
+                            else universe.sha256
+                        ),
+                        pgvectorSnapshotSha256=response.pgvectorSnapshotSha256,
                         backendSnapshotSha256=response.backendSnapshotSha256,
                         queryVectorSha256=response.queryVectorSha256,
                         candidateCount=len(response.candidates),

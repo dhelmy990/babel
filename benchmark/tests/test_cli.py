@@ -166,8 +166,22 @@ def test_v2_concurrent_replays_feed_the_three_ratio_report(tmp_path: Path) -> No
                     "scheduleOffsetsNs": legacy["scheduleOffsetsNs"],
                     "expectedModelId": source["expectedModelId"],
                     "expectedEmbeddingSpaceId": source["expectedEmbeddingSpaceId"],
-                    "expectedDatasetSnapshotSha256": "a" * 64,
+                    "expectedDatasetSnapshotSha256": legacy["candidateUniverseSha256"],
+                    "expectedPgvectorSnapshotSha256": "a" * 64,
                     "expectedBackendSnapshotSha256": "a" * 64,
+                    "activationTargets": (
+                        [
+                            {
+                                "modelId": "00000000-0000-5000-8000-000000000099",
+                                "parentModelId": source["expectedModelId"],
+                                "modelVersion": 1,
+                                "pgvectorSnapshotSha256": "c" * 64,
+                                "backendSnapshotSha256": "c" * 64,
+                            }
+                        ]
+                        if activation
+                        else []
+                    ),
                 }
             )
         manifest = {

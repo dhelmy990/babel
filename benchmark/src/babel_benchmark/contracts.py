@@ -65,6 +65,16 @@ class ConditionIdentityV2(FrozenContract):
         return self
 
 
+class ActivationTargetV1(FrozenContract):
+    """One immutable child state permitted during an activation condition."""
+
+    modelId: UUID
+    parentModelId: UUID
+    modelVersion: int = Field(gt=0)
+    pgvectorSnapshotSha256: str = Field(pattern=_SHA256)
+    backendSnapshotSha256: str = Field(pattern=_SHA256)
+
+
 class ConditionSpecV1(FrozenContract):
     name: LegacyConditionName
     trainingEnabled: bool
@@ -143,9 +153,12 @@ class ConditionSpecV2(FrozenContract):
     requestCorpusSha256: str = Field(pattern=_SHA256)
     scheduleOffsetsNs: tuple[int, ...]
     expectedModelId: UUID
+    expectedModelVersion: int = Field(default=0, ge=0)
     expectedEmbeddingSpaceId: UUID
     expectedDatasetSnapshotSha256: str = Field(pattern=_SHA256)
+    expectedPgvectorSnapshotSha256: str = Field(pattern=_SHA256)
     expectedBackendSnapshotSha256: str = Field(pattern=_SHA256)
+    activationTargets: tuple[ActivationTargetV1, ...] = ()
 
     @field_validator("scheduleOffsetsNs")
     @classmethod
@@ -164,9 +177,26 @@ class ConditionSpecV2(FrozenContract):
     def syncEnabled(self) -> bool:
         return self.identity.activationEnabled
 
-    @property
-    def expectedPgvectorSnapshotSha256(self) -> str:
-        return self.expectedDatasetSnapshotSha256
+    @model_validator(mode="after")
+    def activation_targets_form_a_pinned_lineage(self) -> "ConditionSpecV2":
+        if bool(self.activationTargets) != self.identity.activationEnabled:
+            raise ValueError(
+                "activation targets must exist only for activation conditions"
+            )
+        lineage = {self.expectedModelId}
+        versions = {self.expectedModelVersion}
+        for target in self.activationTargets:
+            if target.modelId in lineage:
+                raise ValueError("activation model IDs must be unique")
+            if target.parentModelId not in lineage:
+                raise ValueError(
+                    "activation target parent is outside the pinned lineage"
+                )
+            if target.modelVersion in versions:
+                raise ValueError("activation model versions must be unique")
+            lineage.add(target.modelId)
+            versions.add(target.modelVersion)
+        return self
 
 
 class BenchmarkManifestV2(FrozenContract):
@@ -202,6 +232,10 @@ class BenchmarkManifestV2(FrozenContract):
                 raise ValueError("every condition must use the frozen request corpus")
             if condition.scheduleOffsetsNs != self.scheduleOffsetsNs:
                 raise ValueError("every condition must use the frozen request schedule")
+            if condition.expectedDatasetSnapshotSha256 != self.candidateUniverseSha256:
+                raise ValueError(
+                    "condition dataset snapshot must match candidate universe"
+                )
         return self
 
 
@@ -274,6 +308,11 @@ class RecommendationResponseV1(FrozenContract):
         if value["serverTotal"] < sum(value[stage] for stage in _STAGES):
             raise ValueError("server total must cover every stage")
         return value
+
+
+class RecommendationResponseV2(RecommendationResponseV1):
+    schemaVersion: Literal[2]
+    sourceVectorOrigin: Literal["qwen_encode", "cache_hit", "pgvector_load"]
 
 
 class RequestMeasurementV1(FrozenContract):
@@ -359,12 +398,16 @@ class RequestMeasurementV2(FrozenContract):
     errorType: str | None = None
     serverTimingsNs: dict[str, int] | None = None
     cacheStatus: Literal["hit", "miss", "bypass", "unavailable"] = "unavailable"
+    sourceVectorOrigin: Literal["qwen_encode", "cache_hit", "pgvector_load"] | None = (
+        None
+    )
     modelId: UUID | None = None
     servingModelVersion: int | None = Field(default=None, ge=0)
     trainerModelVersion: int | None = Field(default=None, ge=0)
     versionStaleness: int | None = Field(default=None, ge=0)
     retrievalBackend: RetrievalBackendName | None = None
     datasetSnapshotSha256: str | None = Field(default=None, pattern=_SHA256)
+    pgvectorSnapshotSha256: str | None = Field(default=None, pattern=_SHA256)
     backendSnapshotSha256: str | None = Field(default=None, pattern=_SHA256)
     queryVectorSha256: str | None = Field(default=None, pattern=_SHA256)
     candidateCount: int | None = Field(default=None, ge=0)
@@ -402,6 +445,7 @@ class RequestMeasurementV2(FrozenContract):
                 self.servingModelVersion,
                 self.retrievalBackend,
                 self.datasetSnapshotSha256,
+                self.pgvectorSnapshotSha256,
                 self.backendSnapshotSha256,
                 self.queryVectorSha256,
                 self.candidateCount,
@@ -543,6 +587,7 @@ def load_benchmark_manifest(
 __all__ = [
     "BenchmarkManifestV1",
     "BenchmarkManifestV2",
+    "ActivationTargetV1",
     "ConditionIdentityV2",
     "ConditionName",
     "ConditionSpecV1",
@@ -555,6 +600,7 @@ __all__ = [
     "PercentileSummaryV1",
     "RecommendationRequestV1",
     "RecommendationResponseV1",
+    "RecommendationResponseV2",
     "ReplayRequestV1",
     "RequestMeasurementV1",
     "RequestMeasurementV2",

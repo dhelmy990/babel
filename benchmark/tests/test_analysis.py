@@ -173,6 +173,7 @@ def test_concurrent_v2_rows_are_analyzed_by_generalized_condition_identity() -> 
             servingModelVersion=0,
             retrievalBackend="pgvector",
             datasetSnapshotSha256="a" * 64,
+            pgvectorSnapshotSha256="a" * 64,
             backendSnapshotSha256="a" * 64,
             queryVectorSha256="b" * 64,
             candidateCount=1,

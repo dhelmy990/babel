@@ -67,7 +67,8 @@ def test_v2_manifest_persists_generalized_condition_and_bounded_schedule() -> No
             "expectedEmbeddingSpaceId": str(
                 legacy.conditions[0].expectedEmbeddingSpaceId
             ),
-            "expectedDatasetSnapshotSha256": "a" * 64,
+            "expectedDatasetSnapshotSha256": legacy.candidateUniverseSha256,
+            "expectedPgvectorSnapshotSha256": "a" * 64,
             "expectedBackendSnapshotSha256": "a" * 64,
         }
     ]
