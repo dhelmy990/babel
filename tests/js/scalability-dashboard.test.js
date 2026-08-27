@@ -193,8 +193,10 @@ test('dashboard polling renders persisted seeded, walk, and Hugging Face evidenc
   ]);
 });
 
-test('graceful stop remains available while the population is being built', async () => {
-  for (const status of ['population_pending', 'population_ready', 'approved', 'running']) {
+test('graceful stop remains available while active and after a persisted dispatch request', async () => {
+  for (const status of [
+    'population_pending', 'population_ready', 'approved', 'running', 'stop_requested',
+  ]) {
     const context = await initializeController({ status });
     assert.equal(context.document.getElementById('performance-stop').disabled, false,
       `stop should be enabled for ${status}`);

@@ -187,7 +187,7 @@
       elements['performance-approve'].disabled = pending || !trial.populationReady
         || trial.status !== 'population_ready';
       elements['performance-stop'].disabled = pending || ![
-        'population_pending', 'population_ready', 'approved', 'running',
+        'population_pending', 'population_ready', 'approved', 'running', 'stop_requested',
       ].includes(trial.status);
       elements['performance-create'].disabled = pending || ['running', 'draining'].includes(trial.status);
       if (persistedProgressView) renderProgress(persistedProgressView);
