@@ -40,6 +40,7 @@ class FaultEvidenceBundle:
     manifest_path: Path
     checksums_path: Path
     receipt_path: Path
+    artifact_sha256: str
 
     @property
     def bundle_path(self) -> str:
@@ -70,6 +71,124 @@ def _canonical(value: object) -> bytes:
         )
         + "\n"
     ).encode("utf-8")
+
+
+def _exact_object(value: object, fields: set[str], label: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ValueError(f"fault receipt {label} schema differs")
+    return value
+
+
+def _nonnegative_integer(value: object, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"fault receipt {label} schema differs")
+    return value
+
+
+def _validate_fault_row(row: object, expected_fault: str) -> None:
+    document = _exact_object(
+        row,
+        {
+            "fault",
+            "invalidStateKind",
+            "status",
+            "failure",
+            "faultWindow",
+            "detectionNs",
+            "recoveryNs",
+            "availability",
+            "kafkaLag",
+            "duplicates",
+            "lost",
+            "eventCounterResetDetected",
+            "versions",
+            "invalidStateRejected",
+            "lastValidServingVersionRetained",
+        },
+        "fault row",
+    )
+    if (
+        document["fault"] != expected_fault
+        or document["status"] != "completed"
+        or document["failure"] is not None
+    ):
+        raise ValueError("fault receipt fault row schema differs")
+    window = _exact_object(
+        document["faultWindow"],
+        {"startedNs", "detectedNs", "recoveryStartedNs", "recoveredNs", "endedNs"},
+        "fault window",
+    )
+    window_values = [
+        _nonnegative_integer(window[field], f"fault window {field}")
+        for field in ("startedNs", "detectedNs", "recoveryStartedNs", "recoveredNs", "endedNs")
+    ]
+    if window_values != sorted(window_values):
+        raise ValueError("fault receipt fault window schema differs")
+    _nonnegative_integer(document["detectionNs"], "detection duration")
+    _nonnegative_integer(document["recoveryNs"], "recovery duration")
+    availability = _exact_object(
+        document["availability"],
+        {
+            "availableSamples",
+            "totalSamples",
+            "availableRatio",
+            "availableDuringFault",
+            "availableAfterRecovery",
+        },
+        "availability",
+    )
+    available = _nonnegative_integer(availability["availableSamples"], "available samples")
+    total = _nonnegative_integer(availability["totalSamples"], "total samples")
+    ratio = availability["availableRatio"]
+    if (
+        total <= 0
+        or available > total
+        or isinstance(ratio, bool)
+        or not isinstance(ratio, (int, float))
+        or not 0 <= float(ratio) <= 1
+        or any(
+            not isinstance(availability[field], bool)
+            for field in ("availableDuringFault", "availableAfterRecovery")
+        )
+    ):
+        raise ValueError("fault receipt availability schema differs")
+    kafka = _exact_object(
+        document["kafkaLag"],
+        {"before", "maximum", "after", "recoveredToBaseline"},
+        "Kafka lag",
+    )
+    before = _nonnegative_integer(kafka["before"], "Kafka lag before")
+    maximum = _nonnegative_integer(kafka["maximum"], "Kafka lag maximum")
+    _nonnegative_integer(kafka["after"], "Kafka lag after")
+    if maximum < before or not isinstance(kafka["recoveredToBaseline"], bool):
+        raise ValueError("fault receipt Kafka lag schema differs")
+    _nonnegative_integer(document["duplicates"], "duplicate count")
+    _nonnegative_integer(document["lost"], "lost count")
+    if not isinstance(document["eventCounterResetDetected"], bool):
+        raise ValueError("fault receipt event counter schema differs")
+    versions = _exact_object(
+        document["versions"],
+        {"trainerBefore", "trainerAfter", "servingBefore", "servingAfter"},
+        "versions",
+    )
+    for field, value in versions.items():
+        _nonnegative_integer(value, f"version {field}")
+    if expected_fault == "invalid_model_state":
+        if (
+            document["invalidStateKind"] != "child_or_checkpoint"
+            or document["invalidStateRejected"] is not True
+            or document["lastValidServingVersionRetained"] is not True
+        ):
+            raise ValueError("fault receipt invalid-state schema differs")
+    elif any(
+        document[field] is not None
+        for field in (
+            "invalidStateKind",
+            "invalidStateRejected",
+            "lastValidServingVersionRetained",
+        )
+    ):
+        raise ValueError("fault receipt non-invalid-state schema differs")
 
 
 def _validate_receipt(document: dict[str, Any], *, trial_id: UUID) -> tuple[UUID, int]:
@@ -122,21 +241,44 @@ def _validate_receipt(document: dict[str, Any], *, trial_id: UUID) -> tuple[UUID
         or document.get("failedFault") is not None
     ):
         raise ValueError("only a completed fault campaign can be published")
-    cleanup = document.get("cleanup")
-    if not isinstance(cleanup, dict) or cleanup.get("verified") is not True:
-        raise ValueError("fault receipt cleanup is not verified")
+    campaign = _exact_object(
+        document.get("campaignWindow"),
+        {
+            "startedNs",
+            "endedNs",
+            "detectionTimeoutNs",
+            "recoveryTimeoutNs",
+            "faultHoldNs",
+        },
+        "campaign window",
+    )
+    started = _nonnegative_integer(campaign["startedNs"], "campaign start")
+    ended = _nonnegative_integer(campaign["endedNs"], "campaign end")
+    if ended < started:
+        raise ValueError("fault receipt campaign window schema differs")
+    for field in ("detectionTimeoutNs", "recoveryTimeoutNs", "faultHoldNs"):
+        _nonnegative_integer(campaign[field], f"campaign {field}")
+    cleanup = _exact_object(
+        document.get("cleanup"),
+        {"verified", "error", "duplicateEvents", "lostEvents"},
+        "cleanup",
+    )
+    if (
+        cleanup["verified"] is not True
+        or cleanup["error"] is not None
+        or _nonnegative_integer(cleanup["duplicateEvents"], "cleanup duplicates") != 0
+        or _nonnegative_integer(cleanup["lostEvents"], "cleanup lost events") != 0
+    ):
+        raise ValueError("fault receipt cleanup schema differs")
     faults = document.get("faults")
     if not isinstance(faults, list) or tuple(
         row.get("fault") for row in faults if isinstance(row, dict)
     ) != _FAULTS:
         raise ValueError("fault receipt does not contain the exact fault order")
-    if len(faults) != len(_FAULTS) or any(
-        not isinstance(row, dict)
-        or row.get("status") != "completed"
-        or row.get("failure") is not None
-        for row in faults
-    ):
-        raise ValueError("fault receipt contains an incomplete fault")
+    if len(faults) != len(_FAULTS):
+        raise ValueError("fault receipt fault row schema differs")
+    for row, expected_fault in zip(faults, _FAULTS, strict=True):
+        _validate_fault_row(row, expected_fault)
     return run_id, creator_count
 
 
@@ -159,6 +301,14 @@ def _validate_model(
     ):
         raise ValueError("fault model identity differs from condition 6")
     return model_id, parent_id
+
+
+def _reject_symlinked_path(path: Path) -> None:
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        if current.is_symlink():
+            raise ValueError(f"fault evidence path contains a symbolic link: {current}")
 
 
 def build_fault_evidence_bundle(
@@ -188,8 +338,11 @@ def build_fault_evidence_bundle(
     campaign_id = actual_receipt_sha
     final = Path(output_root) / "fault-runs" / str(trial_id) / campaign_id
     partial = final.with_name(f"{campaign_id}.partial")
-    if final.exists():
+    _reject_symlinked_path(final.parent)
+    if os.path.lexists(final):
         raise AcceptedRunExists(f"accepted local fault campaign already exists: {campaign_id}")
+    if partial.is_symlink():
+        raise ValueError("fault evidence partial path cannot be a symbolic link")
     if partial.exists():
         shutil.rmtree(partial)
     partial.mkdir(parents=True)
@@ -238,6 +391,7 @@ def build_fault_evidence_bundle(
         }
         checksums_path = partial / "checksums.json"
         checksums_path.write_bytes(_canonical(checksums))
+        artifact_sha256 = _sha256(checksums_path)
         for path in partial.iterdir():
             _reject_secret(path)
             with path.open("rb") as source:
@@ -255,7 +409,48 @@ def build_fault_evidence_bundle(
         manifest_path=final / "manifest.json",
         checksums_path=final / "checksums.json",
         receipt_path=final / "fault-receipt.json",
+        artifact_sha256=artifact_sha256,
     )
+
+
+def _validate_local_bundle(bundle: FaultEvidenceBundle) -> dict[str, str]:
+    expected_files = {
+        "checksums.json",
+        "fault-receipt.json",
+        "manifest.json",
+        "report.md",
+    }
+    _reject_symlinked_path(bundle.root)
+    paths = {path.name: path for path in bundle.root.iterdir()}
+    if set(paths) != expected_files:
+        raise ValueError("fault bundle file inventory differs from the closed inventory")
+    for path in paths.values():
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("fault bundle inventory may contain only regular files")
+        _reject_secret(path)
+    if _sha256(paths["checksums.json"]) != bundle.artifact_sha256:
+        raise ValueError("fault bundle immutable checksum inventory changed after build")
+    checksums_document = _json_object(paths["checksums.json"], "fault checksums")
+    if set(checksums_document) != expected_files - {"checksums.json"}:
+        raise ValueError("fault bundle checksum inventory is incomplete")
+    checksums: dict[str, str] = {}
+    for name, digest in checksums_document.items():
+        if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
+            raise ValueError("fault bundle checksum inventory contains an invalid SHA")
+        if _sha256(paths[name]) != digest:
+            raise ValueError(f"fault bundle immutable content changed after build: {name}")
+        checksums[name] = digest
+    if _sha256(paths["fault-receipt.json"]) != bundle.campaign_id:
+        raise ValueError("fault receipt no longer matches its content-addressed campaign")
+    manifest = _json_object(paths["manifest.json"], "fault manifest")
+    if (
+        manifest.get("trialId") != str(bundle.trial_id)
+        or manifest.get("campaignId") != bundle.campaign_id
+        or manifest.get("modelId") != str(bundle.model_id)
+        or manifest.get("receiptSha256") != bundle.campaign_id
+    ):
+        raise ValueError("fault bundle immutable identity changed after build")
+    return checksums
 
 
 def _operations(api: Any, bundle: FaultEvidenceBundle) -> list[Any]:
@@ -285,6 +480,7 @@ def publish_fault_evidence_bundle(
     revision: str = "main",
 ) -> FaultEvidencePublicationReceipt:
     """Upload one content-addressed fault campaign and verify its remote bytes."""
+    _validate_local_bundle(bundle)
     prefix = bundle.bundle_path
     remote_files = api.list_repo_files(
         repo_id=repo_id,
@@ -294,10 +490,6 @@ def publish_fault_evidence_bundle(
     )
     if any(path == prefix or path.startswith(prefix + "/") for path in remote_files):
         raise AcceptedRunExists(f"remote fault campaign already exists: {prefix}")
-    for path in bundle.root.iterdir():
-        if not path.is_file():
-            raise ValueError("fault bundle may contain only files")
-        _reject_secret(path)
     result = api.create_commit(
         repo_id=repo_id,
         repo_type="dataset",
@@ -321,7 +513,7 @@ def publish_fault_evidence_bundle(
         revision=commit_sha,
         token=token,
     )
-    if _sha256(remote_checksums_path) != _sha256(bundle.checksums_path):
+    if _sha256(remote_checksums_path) != bundle.artifact_sha256:
         raise ValueError("remote checksum inventory differs from fault bundle")
     checksums = _json_object(remote_checksums_path, "remote fault checksums")
     if set(checksums) != {"fault-receipt.json", "manifest.json", "report.md"}:
@@ -344,6 +536,7 @@ def publish_fault_evidence_bundle(
         manifest.get("trialId") != str(bundle.trial_id)
         or manifest.get("campaignId") != bundle.campaign_id
         or manifest.get("modelId") != str(bundle.model_id)
+        or _sha256(loaded["fault-receipt.json"]) != bundle.campaign_id
         or manifest.get("receiptSha256") != _sha256(loaded["fault-receipt.json"])
         or receipt.get("experimentId") != str(bundle.trial_id)
         or not loaded["report.md"].read_text(encoding="utf-8").strip()
@@ -353,12 +546,15 @@ def publish_fault_evidence_bundle(
         repository=repo_id,
         commit_sha=commit_sha,
         bundle_path=prefix,
-        artifact_sha256=_sha256(bundle.checksums_path),
+        artifact_sha256=bundle.artifact_sha256,
         receipt_sha256=bundle.campaign_id,
         campaign_id=bundle.campaign_id,
         trial_id=bundle.trial_id,
         model_id=bundle.model_id,
-        verified_files={name: str(digest) for name, digest in checksums.items()},
+        verified_files={
+            **{name: str(digest) for name, digest in checksums.items()},
+            "checksums.json": bundle.artifact_sha256,
+        },
     )
 
 

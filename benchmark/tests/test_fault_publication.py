@@ -239,6 +239,59 @@ def test_build_rejects_secret_markers(tmp_path: Path) -> None:
         )
 
 
+def test_build_rejects_symlinked_or_dangling_fault_destinations(tmp_path: Path) -> None:
+    receipt, model, receipt_sha = _inputs(tmp_path)
+    output = tmp_path / "accepted"
+    formal = output / "runs" / str(TRIAL_ID)
+    formal.mkdir(parents=True)
+    (output / "fault-runs").symlink_to(output / "runs", target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symbolic link"):
+        build_fault_evidence_bundle(
+            output,
+            receipt_path=receipt,
+            expected_receipt_sha256=receipt_sha,
+            trial_id=TRIAL_ID,
+            model_manifest_path=model,
+        )
+    assert not (formal / receipt_sha).exists()
+
+    (output / "fault-runs").unlink()
+    campaign_parent = output / "fault-runs" / str(TRIAL_ID)
+    campaign_parent.mkdir(parents=True)
+    (campaign_parent / receipt_sha).symlink_to(tmp_path / "missing")
+    with pytest.raises(AcceptedRunExists):
+        build_fault_evidence_bundle(
+            output,
+            receipt_path=receipt,
+            expected_receipt_sha256=receipt_sha,
+            trial_id=TRIAL_ID,
+            model_manifest_path=model,
+        )
+
+
+def test_build_rejects_incomplete_nested_fault_schema(tmp_path: Path) -> None:
+    receipt, model, _receipt_sha = _inputs(tmp_path)
+    document = json.loads(receipt.read_text())
+    document["campaignWindow"] = None
+    document["cleanup"] = {"verified": True}
+    document["faults"] = [
+        {"fault": row["fault"], "status": "completed", "failure": None}
+        for row in document["faults"]
+    ]
+    receipt.write_text(json.dumps(document, sort_keys=True) + "\n")
+    changed_sha = hashlib.sha256(receipt.read_bytes()).hexdigest()
+
+    with pytest.raises(ValueError, match="schema"):
+        build_fault_evidence_bundle(
+            tmp_path / "accepted",
+            receipt_path=receipt,
+            expected_receipt_sha256=changed_sha,
+            trial_id=TRIAL_ID,
+            model_manifest_path=model,
+        )
+
+
 class FakeHubApi:
     def __init__(self, remote: Path) -> None:
         self.remote = remote
@@ -330,3 +383,56 @@ def test_remote_reload_rejects_corrupted_fault_receipt(tmp_path: Path) -> None:
             repo_id="dhelmy990/babel-wikipedia-experiment",
             token="test-token-is-never-written",
         )
+
+
+def test_publish_rejects_mutated_content_at_original_campaign_id(tmp_path: Path) -> None:
+    receipt, model, receipt_sha = _inputs(tmp_path)
+    bundle = build_fault_evidence_bundle(
+        tmp_path / "accepted",
+        receipt_path=receipt,
+        expected_receipt_sha256=receipt_sha,
+        trial_id=TRIAL_ID,
+        model_manifest_path=model,
+    )
+    changed = json.loads(bundle.receipt_path.read_text())
+    changed["campaignWindow"]["endedNs"] += 1
+    bundle.receipt_path.write_text(json.dumps(changed, sort_keys=True) + "\n")
+    changed_sha = hashlib.sha256(bundle.receipt_path.read_bytes()).hexdigest()
+    manifest = json.loads(bundle.manifest_path.read_text())
+    manifest["receiptSha256"] = changed_sha
+    bundle.manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n")
+    checksums = {
+        name: hashlib.sha256((bundle.root / name).read_bytes()).hexdigest()
+        for name in ("fault-receipt.json", "manifest.json", "report.md")
+    }
+    bundle.checksums_path.write_text(json.dumps(checksums, sort_keys=True) + "\n")
+
+    with pytest.raises(ValueError, match="campaign|immutable"):
+        publish_fault_evidence_bundle(
+            FakeHubApi(tmp_path / "remote"),
+            bundle,
+            repo_id="dhelmy990/babel-wikipedia-experiment",
+            token="test-token-is-never-written",
+        )
+
+
+def test_publish_rejects_files_outside_closed_inventory(tmp_path: Path) -> None:
+    receipt, model, receipt_sha = _inputs(tmp_path)
+    bundle = build_fault_evidence_bundle(
+        tmp_path / "accepted",
+        receipt_path=receipt,
+        expected_receipt_sha256=receipt_sha,
+        trial_id=TRIAL_ID,
+        model_manifest_path=model,
+    )
+    (bundle.root / "untracked.txt").write_text("not in checksums\n")
+    api = FakeHubApi(tmp_path / "remote")
+
+    with pytest.raises(ValueError, match="inventory"):
+        publish_fault_evidence_bundle(
+            api,
+            bundle,
+            repo_id="dhelmy990/babel-wikipedia-experiment",
+            token="test-token-is-never-written",
+        )
+    assert api.commits == []
