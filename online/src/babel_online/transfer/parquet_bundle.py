@@ -331,13 +331,6 @@ def _validate_population_rows(
             raise PopulationTransferIntegrityError("root Babel ID differs from Babel ID")
         if row.event_number != row.schedule_index:
             raise PopulationTransferIntegrityError("event number differs from schedule index")
-        if (
-            hashlib.sha256(row.article_text.encode("utf-8")).hexdigest()
-            != row.catalog_content_hash
-        ):
-            raise PopulationTransferIntegrityError(
-                "catalog content hash differs from article text"
-            )
         if row.serving_model_id != str(metadata.servingModelId):
             raise PopulationTransferIntegrityError("row serving model differs from metadata")
         if row.materialized_model_version != metadata.materializedModelVersion:

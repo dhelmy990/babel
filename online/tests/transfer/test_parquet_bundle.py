@@ -38,6 +38,9 @@ EMBEDDING_SPACE_ID = "f3665769-b470-5228-8df4-08004e252aa4"
 MODEL_ARTIFACT_ID = "3f6b43e574eb2bcac55c4ddf95f624e3f42153f97437cfeba703c9b3b110a1f8"
 DATASET_REVISION = "0d1ab2c7f0e2295682288fcf10077d2d776bf559"
 UNIT_VECTOR = np.concatenate((np.ones(1, dtype=np.float32), np.zeros(99, dtype=np.float32)))
+DATASET_FIXTURE = (
+    Path(__file__).parents[3] / "fixtures/monthly/demo/june/articles.jsonl"
+)
 
 
 def metadata() -> PopulationTransferMetadataV1:
@@ -442,6 +445,58 @@ def test_write_bundle_is_deterministic_complete_and_uses_exact_parquet_contract(
     assert verify_bundle(first.root, first.digest) == first
 
 
+def test_write_accepts_lead_text_bound_to_the_full_source_article_hash(
+    tmp_path: Path, population_rows: tuple[PopulationTransferRow, ...]
+) -> None:
+    with DATASET_FIXTURE.open(encoding="utf-8") as fixture:
+        article = json.loads(next(fixture))
+    assert article["lead_text"] != article["article_text"]
+    assert hashlib.sha256(article["article_text"].encode()).hexdigest() == article[
+        "content_hash"
+    ]
+    assert hashlib.sha256(article["lead_text"].encode()).hexdigest() != article[
+        "content_hash"
+    ]
+
+    original = population_rows[0]
+    workload = {
+        "creatorEventNumber": original.creator_event_number,
+        "creatorId": original.creator_id,
+        "period": original.period,
+        "rootBabelId": original.root_babel_id,
+        "runId": str(ORIGIN_RUN_ID),
+        "sourceArticleKey": article["article_key"],
+        "workId": original.work_id,
+    }
+    fixture_row = replace(
+        original,
+        source_article_key=article["article_key"],
+        title=article["canonical_title"],
+        article_text=article["lead_text"],
+        catalog_content_hash=article["content_hash"],
+        workload_sha256=hashlib.sha256(
+            json.dumps(workload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+    )
+    source = PopulationTransferBundleInput(
+        metadata=metadata(), rows=(fixture_row, *population_rows[1:])
+    )
+
+    bundle = write_bundle_payloads(source, tmp_path / "lead-text-bundle")
+
+    exported = next(
+        item
+        for item in pq.read_table(bundle.catalog).to_pylist()
+        if item["source_article_key"] == article["article_key"]
+        and item["creator_id"] == original.creator_id
+    )
+    assert exported["article_text"] == article["lead_text"]
+    assert exported["catalog_content_hash"] == article["content_hash"]
+    assert json.loads(exported["dataset_row_reference"])["catalogContentHash"] == article[
+        "content_hash"
+    ]
+
+
 def test_write_requires_exactly_ten_thousand_rows(
     tmp_path: Path, population_rows: tuple[PopulationTransferRow, ...]
 ) -> None:
@@ -546,7 +601,7 @@ def test_verify_rejects_an_extra_file(
             "content_hash",
             {"catalog_content_hash": "a" * 64},
             {"catalog_content_hash": "a" * 64},
-            "catalog content hash",
+            "snapshotSha256",
         ),
         ("empty_title", {"title": ""}, None, "title"),
         (
