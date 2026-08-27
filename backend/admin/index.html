@@ -172,6 +172,32 @@
           <button id="performance-stop" class="secondary" type="button" disabled>Graceful stop</button>
         </div>
 
+        <h3>Corrective rerun from frozen population</h3>
+        <p class="contract-note">Reuses the selected trial's verified 10k population and captured workload without encoding again. It creates a new saved trial and never edits the source. Results are representative, not formal 3×3 evidence, and still require the approval button above.</p>
+        <div class="experiment-grid performance-controls">
+          <label>Source trial
+            <output id="performance-rerun-source">Select a population-ready saved trial</output>
+          </label>
+          <label>Representative matrix
+            <select id="performance-rerun-matrix">
+              <option value="2x3">2×3 · monolith vs split (default)</option>
+              <option value="split-smoke">1×3 · split smoke only</option>
+            </select>
+          </label>
+          <label>Warmup seconds
+            <input id="performance-rerun-warmup" type="number" min="0" max="3600" value="5">
+          </label>
+          <label>Duration seconds
+            <input id="performance-rerun-duration" type="number" min="1" max="86400" value="25">
+          </label>
+          <label>Target requests / second
+            <input id="performance-rerun-rps" type="number" min="0.01" step="0.25" value="5">
+          </label>
+        </div>
+        <div class="experiment-actions">
+          <button id="performance-rerun" class="secondary" type="button" disabled>Prepare corrective rerun</button>
+        </div>
+
         <div class="trial-progress" aria-live="polite">
           <p id="performance-phase">No trial selected</p>
           <progress id="performance-progress" max="100" value="0">0%</progress>

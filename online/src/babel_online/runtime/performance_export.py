@@ -204,6 +204,8 @@ def _formal_condition_order(creator_cohort: int) -> tuple[tuple[str, bool, bool]
 
 
 def _completed_formal_conditions(trial: Any) -> tuple[Any, ...]:
+    if getattr(trial, "evidence_scope", "formal") != "formal":
+        raise ValueError("non-formal representative trial cannot enter formal export")
     creator_cohort = int(trial.creator_count)
     expected_order = _formal_condition_order(creator_cohort)
     ordered = tuple(sorted(trial.conditions, key=lambda row: row.condition_index))
@@ -223,20 +225,50 @@ def _completed_formal_conditions(trial: Any) -> tuple[Any, ...]:
     return ordered
 
 
-def export_completed_performance_trial(
+def _completed_representative_conditions(trial: Any) -> tuple[Any, ...]:
+    scope = getattr(trial, "evidence_scope", "formal")
+    if scope == "representative_same_process_vs_split":
+        topologies = ("same_process", "same_host_split")
+    elif scope == "representative_split_smoke":
+        topologies = ("same_host_split",)
+    else:
+        raise ValueError("performance trial is not an explicitly representative rerun")
+    expected_order = tuple(
+        (topology, training_enabled, activation_enabled)
+        for topology in topologies
+        for training_enabled, activation_enabled in (
+            (False, False),
+            (True, False),
+            (True, True),
+        )
+    )
+    ordered = tuple(sorted(trial.conditions, key=lambda row: row.condition_index))
+    actual_order = tuple(
+        (row.topology, row.training_enabled, row.activation_enabled) for row in ordered
+    )
+    if (
+        len(ordered) != len(expected_order)
+        or [row.condition_index for row in ordered]
+        != list(range(1, len(expected_order) + 1))
+        or any(row.status != "completed" or row.run_id is None for row in ordered)
+        or actual_order != expected_order
+    ):
+        raise ValueError("representative trial lacks its exact completed condition matrix")
+    return ordered
+
+
+def _export_completed_conditions(
     *,
     database: Any,
+    trial: Any,
     experiment_id: UUID,
+    conditions: tuple[Any, ...],
+    evidence_scope: str,
     evidence_root: str | Path,
     output_root: str | Path,
     feedback_source: Any,
 ) -> FeedbackExport:
-    """Validate one formal live cohort and export its exact Kafka/edge evidence."""
-    trial = database.load_performance_experiment(experiment_id)
-    if trial.id != experiment_id or trial.status != "completed":
-        raise ValueError("performance trial must be durably completed")
     creator_cohort = int(trial.creator_count)
-    conditions = _completed_formal_conditions(trial)
     condition_count = len(conditions)
 
     expected: dict[tuple[str, int, int], _ExpectedAcknowledgement] = {}
@@ -283,6 +315,8 @@ def export_completed_performance_trial(
             "experimentId": str(experiment_id),
             "creatorCohort": creator_cohort,
             "conditionCount": condition_count,
+            "evidenceScope": evidence_scope,
+            "formalPerformanceClaim": evidence_scope == "formal",
             "conditions": [
                 {"conditionId": str(row.id), "runId": str(row.run_id)}
                 for row in conditions
@@ -306,6 +340,56 @@ def export_completed_performance_trial(
     with result.manifest_path.open("rb") as source:
         os.fsync(source.fileno())
     return result
+
+
+def export_completed_performance_trial(
+    *,
+    database: Any,
+    experiment_id: UUID,
+    evidence_root: str | Path,
+    output_root: str | Path,
+    feedback_source: Any,
+) -> FeedbackExport:
+    """Validate one formal live cohort and export its exact Kafka/edge evidence."""
+    trial = database.load_performance_experiment(experiment_id)
+    if trial.id != experiment_id or trial.status != "completed":
+        raise ValueError("performance trial must be durably completed")
+    conditions = _completed_formal_conditions(trial)
+    return _export_completed_conditions(
+        database=database,
+        trial=trial,
+        experiment_id=experiment_id,
+        conditions=conditions,
+        evidence_scope="formal",
+        evidence_root=evidence_root,
+        output_root=output_root,
+        feedback_source=feedback_source,
+    )
+
+
+def export_completed_representative_trial(
+    *,
+    database: Any,
+    experiment_id: UUID,
+    evidence_root: str | Path,
+    output_root: str | Path,
+    feedback_source: Any,
+) -> FeedbackExport:
+    """Export a completed rerun while preserving its non-formal evidence label."""
+    trial = database.load_performance_experiment(experiment_id)
+    if trial.id != experiment_id or trial.status != "completed":
+        raise ValueError("performance trial must be durably completed")
+    conditions = _completed_representative_conditions(trial)
+    return _export_completed_conditions(
+        database=database,
+        trial=trial,
+        experiment_id=experiment_id,
+        conditions=conditions,
+        evidence_scope=trial.evidence_scope,
+        evidence_root=evidence_root,
+        output_root=output_root,
+        feedback_source=feedback_source,
+    )
 
 
 def write_trial_bundle_inputs(
@@ -447,4 +531,8 @@ def write_trial_bundle_inputs(
     return destination
 
 
-__all__ = ["export_completed_performance_trial", "write_trial_bundle_inputs"]
+__all__ = [
+    "export_completed_performance_trial",
+    "export_completed_representative_trial",
+    "write_trial_bundle_inputs",
+]

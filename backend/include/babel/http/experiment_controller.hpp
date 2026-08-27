@@ -27,6 +27,9 @@ class ExperimentController final {
   void performance(const drogon::HttpRequestPtr&, std::string experiment_id,
                    Callback) const;
   void createPerformance(const drogon::HttpRequestPtr&, Callback) const;
+  void preparePerformanceRerun(const drogon::HttpRequestPtr&,
+                               std::string source_experiment_id,
+                               Callback) const;
   void performanceGracefulStop(const drogon::HttpRequestPtr&,
                                std::string experiment_id, Callback) const;
   void approveNextScale(const drogon::HttpRequestPtr&, std::string experiment_id,

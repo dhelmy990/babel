@@ -35,6 +35,7 @@ from .dataset_bundle import (
 )
 from .performance_export import (
     export_completed_performance_trial,
+    export_completed_representative_trial,
     write_trial_bundle_inputs,
 )
 from .worker import FridayDemoRuntime, WorkerManager
@@ -543,6 +544,11 @@ def _performance_export(argv: list[str]) -> None:
     parser.add_argument("--output-root", required=True, type=Path)
     parser.add_argument("--kafka-group")
     parser.add_argument(
+        "--representative",
+        action="store_true",
+        help="export an explicitly non-formal representative rerun",
+    )
+    parser.add_argument(
         "--selected-condition-index", type=int, choices=(3, 6, 9), default=6
     )
     parser.add_argument("--bundle-inputs", type=Path)
@@ -556,7 +562,12 @@ def _performance_export(argv: list[str]) -> None:
         group_id=group_id,
     )
     try:
-        result = export_completed_performance_trial(
+        exporter = (
+            export_completed_representative_trial
+            if arguments.representative
+            else export_completed_performance_trial
+        )
+        result = exporter(
             database=database,
             experiment_id=arguments.experiment_id,
             evidence_root=arguments.evidence_root,
@@ -568,12 +579,20 @@ def _performance_export(argv: list[str]) -> None:
     manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
     receipt = {
         "experimentId": str(arguments.experiment_id),
+        "evidenceScope": manifest.get("evidenceScope", "formal"),
+        "formalPerformanceClaim": bool(
+            manifest.get("formalPerformanceClaim", not arguments.representative)
+        ),
         "feedbackRecords": int(manifest["records"]),
         "canonicalEdges": int(manifest["canonicalEdges"]),
         "feedbackParquet": str(result.parquet_path.resolve()),
         "edgesParquet": str(result.edge_parquet_path.resolve()),
         "feedbackExportManifest": str(result.manifest_path.resolve()),
     }
+    if arguments.bundle_inputs is not None and arguments.representative:
+        raise SystemExit(
+            "representative reruns cannot build the formal accepted-model bundle"
+        )
     if arguments.bundle_inputs is not None:
         generated = write_trial_bundle_inputs(
             database=database,
@@ -590,6 +609,67 @@ def _performance_export(argv: list[str]) -> None:
             selectedConditionIndex=arguments.selected_condition_index,
         )
     print(json.dumps(receipt, sort_keys=True))
+
+
+def _performance_rerun_create(argv: list[str]) -> None:
+    """Prepare a checksum-verified, unapproved rerun from frozen trial bytes."""
+    from .performance_rerun import (
+        REPRESENTATIVE_SCOPE,
+        SPLIT_SMOKE_SCOPE,
+        create_representative_rerun,
+    )
+
+    parser = argparse.ArgumentParser(prog="babel-online performance-rerun-create")
+    parser.add_argument("--source-trial-id", required=True, type=UUID)
+    parser.add_argument(
+        "--state-root",
+        type=Path,
+        default=Path(os.environ.get("BABEL_PERFORMANCE_STATE_ROOT", "state/performance")),
+    )
+    identity = parser.add_mutually_exclusive_group(required=True)
+    identity.add_argument("--rerun-id", type=UUID)
+    identity.add_argument("--nonce")
+    parser.add_argument("--matrix", choices=("2x3", "split-smoke"), default="2x3")
+    parser.add_argument("--warmup-seconds", type=int, default=5)
+    parser.add_argument("--duration-seconds", type=int, default=25)
+    parser.add_argument("--target-rps", type=float, default=5.0)
+    arguments = parser.parse_args(argv)
+    scope = (
+        REPRESENTATIVE_SCOPE
+        if arguments.matrix == "2x3"
+        else SPLIT_SMOKE_SCOPE
+    )
+    receipt = create_representative_rerun(
+        database=RuntimeDatabase(_required("BABEL_DATABASE_URL")),
+        source_trial_id=arguments.source_trial_id,
+        rerun_id=arguments.rerun_id,
+        nonce=arguments.nonce,
+        state_root=arguments.state_root,
+        evidence_scope=scope,
+        warmup_seconds=arguments.warmup_seconds,
+        duration_seconds=arguments.duration_seconds,
+        target_rps=arguments.target_rps,
+    )
+    print(
+        json.dumps(
+            {
+                "trialId": str(receipt.rerun_id),
+                "sourceTrialId": str(receipt.source_trial_id),
+                "evidenceScope": receipt.evidence_scope,
+                "conditionCount": 6 if receipt.evidence_scope == REPRESENTATIVE_SCOPE else 3,
+                "requestLimit": receipt.request_limit,
+                "warmupSeconds": receipt.warmup_seconds,
+                "durationSeconds": receipt.duration_seconds,
+                "targetRps": receipt.target_rps,
+                "populationManifestSha256": receipt.population_manifest_sha256,
+                "workloadIdentity": list(receipt.workload_identity),
+                "formalPerformanceClaim": False,
+                "operatorApprovalRequired": True,
+                "dashboardTrialPath": f"/admin/api/v1/performance/{receipt.rerun_id}",
+            },
+            sort_keys=True,
+        )
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -613,6 +693,8 @@ def main(argv: list[str] | None = None) -> int:
         _performance_command(values)
     elif command == "performance-export":
         _performance_export(values)
+    elif command == "performance-rerun-create":
+        _performance_rerun_create(values)
     else:
         raise SystemExit(f"unsupported babel-online command: {command}")
     return 0

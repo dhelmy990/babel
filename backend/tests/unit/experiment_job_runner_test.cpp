@@ -95,10 +95,17 @@ TEST_CASE("loopback performance worker authenticates all explicit commands") {
               "33333333-3333-5333-8333-333333333333").has_value());
   REQUIRE(worker.approveNextScale(
               "33333333-3333-5333-8333-333333333333").has_value());
-  REQUIRE(calls.size() == 3);
+  REQUIRE(worker.prepareRerun(
+              "33333333-3333-5333-8333-333333333333",
+              babel::PerformanceRerunRequest{
+                  .rerun_id = "44444444-4444-5444-8444-444444444444"})
+              .has_value());
+  REQUIRE(calls.size() == 4);
   CHECK(calls[0].url == "http://127.0.0.1:8792/v1/performance/33333333-3333-5333-8333-333333333333/start");
   CHECK(calls[1].url == "http://127.0.0.1:8792/v1/performance/33333333-3333-5333-8333-333333333333/graceful-stop");
   CHECK(calls[2].url == "http://127.0.0.1:8792/v1/performance/33333333-3333-5333-8333-333333333333/approve-next-scale");
+  CHECK(calls[3].url ==
+        "http://127.0.0.1:8792/v1/performance/33333333-3333-5333-8333-333333333333/prepare-rerun/44444444-4444-5444-8444-444444444444?matrix=2x3&warmup_seconds=5&duration_seconds=25&target_rps=5");
   CHECK(calls[0].token == std::string(64, 'b'));
 }
 

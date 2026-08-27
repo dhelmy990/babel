@@ -14,6 +14,7 @@ from babel_online.runtime.performance_condition import (
     VerifiedLiveIdentityLedger,
     build_live_condition_plan,
     execute_live_condition,
+    _select_replay_subset,
 )
 from babel_online.runtime.performance_worker import PerformanceCondition
 from babel_online.contracts import CandidateActionV1, FeedbackEventV2, RecommendationRequestV2
@@ -638,6 +639,43 @@ def test_live_condition_rebinds_workload_and_publishes_exact_feedback(
     assert progress[-1].submitted == progress[-1].completed == 1
 
 
+def test_representative_replay_subset_is_bounded_and_request_aligned(tmp_path: Path):
+    root = tmp_path / "workload"
+    root.mkdir()
+    requests = [
+        {"scheduleOffsetNs": index, "request": {"requestId": str(UUID(int=index + 1))}}
+        for index in range(4)
+    ]
+    feedback = [
+        {"requestId": str(UUID(int=index + 1)), "value": index}
+        for index in range(4)
+    ]
+    (root / "requests.template.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in requests), encoding="utf-8"
+    )
+    (root / "feedback.template.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in feedback), encoding="utf-8"
+    )
+
+    source_snapshot = {
+        path.name: (path.read_bytes(), path.stat().st_mtime_ns) for path in root.iterdir()
+    }
+    selected_path, selected_feedback, source_count = _select_replay_subset(
+        root, tmp_path / "condition-replay", 2
+    )
+
+    assert source_count == 4
+    assert len(selected_path.read_text().splitlines()) == 2
+    assert [row["requestId"] for row in selected_feedback] == [
+        str(UUID(int=1)),
+        str(UUID(int=2)),
+    ]
+    assert {
+        path.name: (path.read_bytes(), path.stat().st_mtime_ns) for path in root.iterdir()
+    } == source_snapshot
+    assert selected_path.parent == tmp_path / "condition-replay"
+
+
 def test_real_workload_freezer_runs_reference_host_and_coordinator(tmp_path: Path):
     experiment_id, creator, root, candidate = uuid4(), uuid4(), uuid4(), uuid4()
     calls = []
@@ -889,3 +927,65 @@ def test_real_workload_freezer_honors_dashboard_stop_after_boundary(tmp_path: Pa
         )
 
     assert transitions == ["interrupted", "producer_closed", "host_stopped"]
+
+
+def test_real_workload_freezer_reuses_declared_source_without_capture(
+    tmp_path: Path, monkeypatch
+):
+    identity = tuple(str(index) * 64 for index in range(6))
+    source = tmp_path / "source-workload"
+    source.mkdir()
+    (source / "manifest.json").write_text("{}\n", encoding="utf-8")
+    loaded = SimpleNamespace(path=source, identity=identity)
+    monkeypatch.setattr(
+        "babel_benchmark.workload.load_frozen_workload", lambda path: loaded
+    )
+
+    class Database:
+        def __getattr__(self, name):
+            raise AssertionError(f"reuse must not touch database population: {name}")
+
+    freezer = RealWorkloadFreezer(
+        database=Database(), bundle=object(), output_root=tmp_path / "output"
+    )
+    result = freezer(
+        SimpleNamespace(
+            id=uuid4(),
+            evidence_scope="representative_same_host_split",
+            source_workload_path=str(source),
+            source_workload_identity=identity,
+        ),
+        object(),
+        tmp_path / "population",
+        lambda: False,
+    )
+
+    assert result.path == source
+    assert result.identity == identity
+
+
+def test_real_workload_freezer_rejects_reused_workload_identity_drift(
+    tmp_path: Path, monkeypatch
+):
+    source = tmp_path / "source-workload"
+    source.mkdir()
+    monkeypatch.setattr(
+        "babel_benchmark.workload.load_frozen_workload",
+        lambda _path: SimpleNamespace(path=source, identity=("a" * 64,) * 6),
+    )
+    freezer = RealWorkloadFreezer(
+        database=object(), bundle=object(), output_root=tmp_path / "output"
+    )
+
+    with pytest.raises(ValueError, match="identity differs"):
+        freezer(
+            SimpleNamespace(
+                id=uuid4(),
+                evidence_scope="representative_same_host_split",
+                source_workload_path=str(source),
+                source_workload_identity=("b" * 64,) * 6,
+            ),
+            object(),
+            tmp_path / "population",
+            lambda: False,
+        )

@@ -58,6 +58,9 @@ class PerformanceExperimentWorker {
   virtual Result<void> start(std::string_view experiment_id) = 0;
   virtual Result<void> requestGracefulStop(std::string_view experiment_id) = 0;
   virtual Result<void> approveNextScale(std::string_view experiment_id) = 0;
+  virtual Result<void> prepareRerun(
+      std::string_view source_experiment_id,
+      const PerformanceRerunRequest&) = 0;
 };
 
 }  // namespace babel

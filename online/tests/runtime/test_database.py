@@ -298,6 +298,15 @@ def test_database_loads_saved_performance_trial_and_exact_3x3_conditions() -> No
         None,
         None,
         None,
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        "{}",
     )
     cursor = RecordingCursor(rows=[trial_row, *condition_rows])
     database = __import__(
@@ -313,6 +322,72 @@ def test_database_loads_saved_performance_trial_and_exact_3x3_conditions() -> No
     trial.validate_formal_defaults()
     assert "FROM performance_experiments" in cursor.queries[0][0]
     assert "ORDER BY condition_index" in cursor.queries[1][0]
+
+
+def test_database_creates_labelled_unapproved_split_rerun_from_locked_source(
+    tmp_path: Path,
+) -> None:
+    from babel_online.runtime.performance_rerun import (
+        REPRESENTATIVE_SCOPE,
+        RepresentativeRerunBinding,
+    )
+
+    source_id = UUID(int=101)
+    rerun_id = UUID(int=102)
+    population_run_id = UUID(int=103)
+    binding = RepresentativeRerunBinding(
+        rerun_id=rerun_id,
+        source_trial_id=source_id,
+        evidence_scope=REPRESENTATIVE_SCOPE,
+        population_run_id=population_run_id,
+        population_path=(tmp_path / "source" / "population").resolve(),
+        population_manifest_sha256="a" * 64,
+        workload_path=(tmp_path / "source" / "workload").resolve(),
+        workload_identity=tuple(str(index) * 64 for index in range(6)),
+        warmup_seconds=5,
+        duration_seconds=25,
+        target_rps=5.0,
+        request_limit=150,
+    )
+    cursor = RecordingCursor(rows=[(rerun_id,)])
+    database = __import__(
+        "babel_online.runtime.database", fromlist=["RuntimeDatabase"]
+    ).RuntimeDatabase("unused", connect=lambda: RecordingConnection(cursor))
+
+    saved = database.create_representative_performance_rerun(binding)
+
+    assert saved == binding
+    create_query, create_parameters = cursor.queries[0]
+    assert "FOR SHARE" in create_query
+    assert "population_ready=true" in create_query
+    assert "operator_approved" in create_query
+    assert "false" in create_query
+    assert "request_identity" in create_query
+    assert 5 in create_parameters and 25 in create_parameters
+    assert json.loads(create_parameters[-1])["requestLimit"] == 150
+    assert create_parameters[:4] == (
+        source_id,
+        population_run_id,
+        "a" * 64,
+        rerun_id,
+    )
+    condition_query, condition_parameters = cursor.queries[1]
+    assert "performance_conditions" in condition_query
+    assert len(condition_parameters) == 6
+    assert [row[2] for row in condition_parameters] == [1, 2, 3, 4, 5, 6]
+    assert [row[3] for row in condition_parameters] == [
+        "same_process", "same_process", "same_process",
+        "same_host_split", "same_host_split", "same_host_split",
+    ]
+    assert [(row[4], row[5]) for row in condition_parameters] == [
+        (False, False),
+        (True, False),
+        (True, True),
+        (False, False),
+        (True, False),
+        (True, True),
+    ]
+    assert "population_ready" in cursor.queries[2][0]
 
 
 def test_database_persists_performance_progress_and_result_ratios() -> None:

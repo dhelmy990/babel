@@ -11,7 +11,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from ..contracts import (
     ActivityLogV1,
@@ -408,7 +408,12 @@ class RuntimeDatabase:
                        interleave_creation_and_recommendations,warmup_seconds,duration_seconds,
                        target_rps,training_micro_batch_size,sync_every_steps,
                        operator_approved,population_ready,run_id,
-                       population_bundle_path,population_manifest_sha256
+                       population_bundle_path,population_manifest_sha256,
+                       population_vector_count,population_vector_sha256,
+                       population_model_repository,population_model_revision,
+                       population_model_sha256,population_dataset_repository,
+                       population_dataset_revision,population_dataset_sha256,
+                       request_identity
                 FROM performance_experiments WHERE id=%s
                 """,
                 (experiment_id,),
@@ -438,6 +443,12 @@ class RuntimeDatabase:
             )
             for value in condition_rows
         )
+        request_identity = (
+            dict(row[33])
+            if isinstance(row[33], Mapping)
+            else json.loads(str(row[33]))
+        )
+        workload_identity = request_identity.get("workloadIdentity")
         return PerformanceExperiment(
             id=UUID(str(row[0])),
             status=str(row[1]),
@@ -466,7 +477,182 @@ class RuntimeDatabase:
             population_bundle_path=None if row[23] is None else str(row[23]),
             population_manifest_sha256=None if row[24] is None else str(row[24]),
             conditions=conditions,
+            evidence_scope=str(request_identity.get("evidenceScope", "formal")),
+            source_trial_id=(
+                UUID(str(request_identity["sourceTrialId"]))
+                if request_identity.get("sourceTrialId")
+                else None
+            ),
+            source_workload_path=request_identity.get("sourceWorkloadPath"),
+            source_workload_identity=(
+                tuple(str(value) for value in workload_identity)
+                if isinstance(workload_identity, list)
+                else None
+            ),
+            population_vector_count=0 if row[25] is None else int(row[25]),
+            population_vector_sha256=None if row[26] is None else str(row[26]),
+            population_model_repository=None if row[27] is None else str(row[27]),
+            population_model_revision=None if row[28] is None else str(row[28]),
+            population_model_sha256=None if row[29] is None else str(row[29]),
+            population_dataset_repository=None if row[30] is None else str(row[30]),
+            population_dataset_revision=None if row[31] is None else str(row[31]),
+            population_dataset_sha256=None if row[32] is None else str(row[32]),
+            replay_request_limit=(
+                int(request_identity["requestLimit"])
+                if request_identity.get("requestLimit") is not None
+                else None
+            ),
         )
+
+    def create_representative_performance_rerun(self, binding: Any) -> Any:
+        """Atomically copy only immutable launch/population identity into a new trial."""
+        request_identity = json.dumps(
+            {
+                "evidenceScope": binding.evidence_scope,
+                "sourceTrialId": str(binding.source_trial_id),
+                "sourceWorkloadPath": str(binding.workload_path),
+                "workloadIdentity": list(binding.workload_identity),
+                "requestLimit": binding.request_limit,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                WITH source AS (
+                  SELECT * FROM performance_experiments
+                  WHERE id=%s AND population_ready=true AND run_id=%s
+                    AND population_manifest_sha256=%s
+                  FOR SHARE
+                ), inserted AS (
+                  INSERT INTO performance_experiments(
+                    id,status,topology,starting_model_id,model_repository,
+                    model_revision,dataset_repository,dataset_revision,
+                    retrieval_backend,creator_count,seeded_articles,
+                    target_created_babels,concurrent_users,
+                    recommendation_start_probability,continuation_probability,
+                    maximum_traversal_depth,maximum_requests_per_traversal,
+                    training_micro_batch_size,sync_every_steps,
+                    interleave_creation_and_recommendations,auto_advance,
+                    warmup_seconds,duration_seconds,target_rps,
+                    latency_safety_threshold_ms,hardware_identity,resource_identity,
+                    request_identity,feedback_identity,population_ready,
+                    population_vector_count,population_vector_sha256,
+                    population_model_repository,population_model_revision,
+                    population_model_sha256,population_dataset_repository,
+                    population_dataset_revision,population_dataset_sha256,
+                    operator_approved,run_id,population_manifest_sha256,
+                    population_bundle_path
+                  )
+                  SELECT %s,'population_ready','same_host_split',starting_model_id,
+                    model_repository,model_revision,dataset_repository,dataset_revision,
+                    retrieval_backend,creator_count,seeded_articles,target_created_babels,
+                    concurrent_users,recommendation_start_probability,
+                    continuation_probability,maximum_traversal_depth,
+                    maximum_requests_per_traversal,training_micro_batch_size,
+                    sync_every_steps,interleave_creation_and_recommendations,false,
+                    %s,%s,%s,
+                    latency_safety_threshold_ms,hardware_identity,resource_identity,
+                    %s::jsonb,feedback_identity,true,population_vector_count,
+                    population_vector_sha256,population_model_repository,
+                    population_model_revision,population_model_sha256,
+                    population_dataset_repository,population_dataset_revision,
+                    population_dataset_sha256,false,run_id,
+                    population_manifest_sha256,population_bundle_path
+                  FROM source
+                  ON CONFLICT (id) DO NOTHING
+                  RETURNING id
+                ) SELECT id FROM inserted
+                """,
+                (
+                    binding.source_trial_id,
+                    binding.population_run_id,
+                    binding.population_manifest_sha256,
+                    binding.rerun_id,
+                    binding.warmup_seconds,
+                    binding.duration_seconds,
+                    binding.target_rps,
+                    request_identity,
+                ),
+            )
+            if cursor.fetchone() is None:
+                raise PerformanceBindingConflict(
+                    "representative rerun source changed or destination already exists"
+                )
+            topologies = (
+                ("same_process", "same_host_split")
+                if binding.evidence_scope == "representative_same_process_vs_split"
+                else ("same_host_split",)
+            )
+            conditions = []
+            condition_values = (
+                (topology, training, activation)
+                for topology in topologies
+                for training, activation in (
+                    (False, False),
+                    (True, False),
+                    (True, True),
+                )
+            )
+            for index, (topology, training, activation) in enumerate(
+                condition_values, start=1
+            ):
+                config = {
+                    "schemaVersion": 1,
+                    "experimentId": str(binding.rerun_id),
+                    "conditionIndex": index,
+                    "topology": topology,
+                    "trainingEnabled": training,
+                    "synchronizationEnabled": activation,
+                    "evidenceScope": binding.evidence_scope,
+                    "sourceTrialId": str(binding.source_trial_id),
+                }
+                encoded = json.dumps(config, sort_keys=True, separators=(",", ":"))
+                conditions.append(
+                    (
+                        uuid5(binding.rerun_id, f"condition:{index}"),
+                        binding.rerun_id,
+                        index,
+                        topology,
+                        training,
+                        activation,
+                        encoded,
+                        hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+                    )
+                )
+            cursor.executemany(
+                """
+                INSERT INTO performance_conditions(
+                  id,experiment_id,condition_index,topology,training_enabled,
+                  synchronization_enabled,launch_config,launch_sha256
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb,%s)
+                """,
+                conditions,
+            )
+            cursor.execute(
+                """
+                INSERT INTO performance_progress_snapshots(
+                  experiment_id,sequence,phase,condition_count,seeded_articles,
+                  created_babels,indexed_babels,telemetry
+                ) VALUES (%s,0,'population_ready',%s,10000,10000,10000,%s::jsonb)
+                """,
+                (
+                    binding.rerun_id,
+                    len(conditions),
+                    json.dumps(
+                        {
+                            "evidenceScope": binding.evidence_scope,
+                            "sourceTrialId": str(binding.source_trial_id),
+                            "workloadIdentity": list(binding.workload_identity),
+                            "requestLimit": binding.request_limit,
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                ),
+            )
+        return binding
 
     def append_performance_progress(
         self,
@@ -568,9 +754,15 @@ class RuntimeDatabase:
         if trial.population_bundle_path is None or trial.population_run_id is None:
             raise PerformanceBindingConflict("performance population is not bound")
         manifest = load_frozen_population(trial.population_bundle_path)
+        expected_experiment_id = (
+            trial.source_trial_id
+            if trial.evidence_scope.startswith("representative_")
+            else trial.id
+        )
         if (
             manifest.sourcePopulationRunId != trial.population_run_id
-            or manifest.experimentId != str(trial.id)
+            or expected_experiment_id is None
+            or manifest.experimentId != str(expected_experiment_id)
         ):
             raise PerformanceBindingConflict(
                 "frozen population differs from the saved trial binding"

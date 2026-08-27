@@ -165,6 +165,14 @@ struct PerformancePopulationEvidence {
   std::string dataset_sha256;
 };
 
+struct PerformanceRerunRequest {
+  std::string rerun_id;
+  std::string matrix{"2x3"};
+  std::uint64_t warmup_seconds{5};
+  std::uint64_t duration_seconds{25};
+  double target_rps{5};
+};
+
 struct PerformanceArtifactReceipt {
   std::string artifact_sha256;
   std::string remote_hf_commit_sha;

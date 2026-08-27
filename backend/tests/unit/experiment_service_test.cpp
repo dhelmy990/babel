@@ -255,12 +255,21 @@ class FakePerformanceWorker final : public PerformanceExperimentWorker {
     if (events) events->push_back("command-approval");
     return {};
   }
+  Result<void> prepareRerun(
+      std::string_view experiment_id,
+      const PerformanceRerunRequest& request) override {
+    prepared_source = experiment_id;
+    prepared_request = request;
+    return {};
+  }
 
   std::vector<std::string>* events;
   std::optional<ApplicationError> start_error;
   std::string started;
   std::string stopped;
   std::string approved;
+  std::string prepared_source;
+  std::optional<PerformanceRerunRequest> prepared_request;
   int start_calls{0};
   int stop_calls{0};
   int stop_failures_remaining{0};
@@ -563,6 +572,29 @@ TEST_CASE("formal performance approval is blocked until exact population evidenc
       repository.performance.experiment_id);
   REQUIRE(approved.has_value());
   CHECK(approved->operator_approved);
+}
+
+TEST_CASE("representative rerun preparation delegates to worker and remains unapproved") {
+  FakeRepository repository;
+  repository.performance.population_ready = true;
+  repository.performance.run_id = ExperimentRunId::parse(
+      "55555555-5555-5555-8555-555555555555").value();
+  repository.performance.population_manifest_sha256 = std::string(64, 'a');
+  repository.performance.population_bundle_path = "/verified/population";
+  FakeWorker worker;
+  FakePerformanceWorker performance_worker;
+  ExperimentService service(repository, worker, sourcePin(), &performance_worker);
+  const PerformanceRerunRequest request{
+      .rerun_id = "44444444-4444-5444-8444-444444444444"};
+
+  const auto prepared = service.preparePerformanceRerun(
+      repository.performance.experiment_id, request);
+
+  REQUIRE(prepared.has_value());
+  CHECK(performance_worker.prepared_source == repository.performance.experiment_id);
+  REQUIRE(performance_worker.prepared_request.has_value());
+  CHECK(performance_worker.prepared_request->matrix == "2x3");
+  CHECK(prepared->operator_approved == false);
 }
 
 TEST_CASE("population ready receipt must match frozen model dataset and vector target") {

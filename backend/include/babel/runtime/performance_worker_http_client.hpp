@@ -17,6 +17,8 @@ class PerformanceWorkerHttpClient final : public PerformanceExperimentWorker {
   Result<void> start(std::string_view experiment_id) override;
   Result<void> requestGracefulStop(std::string_view experiment_id) override;
   Result<void> approveNextScale(std::string_view experiment_id) override;
+  Result<void> prepareRerun(std::string_view source_experiment_id,
+                            const PerformanceRerunRequest&) override;
 
  private:
   Result<void> command(std::string_view experiment_id, std::string_view action);

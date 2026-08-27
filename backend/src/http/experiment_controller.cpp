@@ -456,6 +456,33 @@ Result<PerformanceLaunchRequest> performanceLaunchRequest(
   }
 }
 
+Result<PerformanceRerunRequest> performanceRerunRequest(
+    const drogon::HttpRequestPtr& request) {
+  auto payload = Json::parse(request->body(), nullptr, false);
+  if (!payload.is_object()) return invalidArgument("performance rerun must be JSON");
+  const std::set<std::string> allowed{
+      "rerunId", "matrix", "warmupSeconds", "durationSeconds", "targetRps"};
+  for (const auto& [key, value] : payload.items()) {
+    static_cast<void>(value);
+    if (!allowed.contains(key)) return invalidArgument("unknown performance rerun field");
+  }
+  if (!payload.contains("rerunId") || !payload.at("rerunId").is_string()) {
+    return invalidArgument("rerunId is required");
+  }
+  try {
+    PerformanceRerunRequest defaults;
+    return PerformanceRerunRequest{
+        .rerun_id = payload.at("rerunId").get<std::string>(),
+        .matrix = payload.value("matrix", defaults.matrix),
+        .warmup_seconds = payload.value("warmupSeconds", defaults.warmup_seconds),
+        .duration_seconds = payload.value("durationSeconds", defaults.duration_seconds),
+        .target_rps = payload.value("targetRps", defaults.target_rps),
+    };
+  } catch (const std::exception&) {
+    return invalidArgument("performance rerun field has invalid type");
+  }
+}
+
 Result<PerformanceArtifactReceipt> performanceArtifactReceipt(
     const drogon::HttpRequestPtr& request) {
   auto payload = Json::parse(request->body(), nullptr, false);
@@ -658,6 +685,29 @@ void ExperimentController::createPerformance(const drogon::HttpRequestPtr& reque
   auto created = service_.createPerformanceExperiment(*parsed);
   if (!created) {
     callback(failure(created.error(), "Performance trial could not be created"));
+    return;
+  }
+  callback(jsonResponse(drogon::k201Created,
+                        Json{{"trial", performanceJson(*created)}}));
+}
+
+void ExperimentController::preparePerformanceRerun(
+    const drogon::HttpRequestPtr& request, std::string source_experiment_id,
+    Callback callback) const {
+  if (!security_.authorizeMutation(request)) {
+    callback(jsonResponse(drogon::k403Forbidden,
+                          Json{{"error", Json{{"code", "forbidden"},
+                                               {"message", "Performance request rejected"}}}}));
+    return;
+  }
+  auto parsed = performanceRerunRequest(request);
+  if (!parsed) {
+    callback(failure(parsed.error(), "Invalid representative rerun"));
+    return;
+  }
+  auto created = service_.preparePerformanceRerun(source_experiment_id, *parsed);
+  if (!created) {
+    callback(failure(created.error(), "Representative rerun could not be prepared"));
     return;
   }
   callback(jsonResponse(drogon::k201Created,

@@ -247,6 +247,43 @@ serving/training topology conclusion.
 
 ## Export feedback and build the accepted bundle
 
+### Deadline corrective rerun from the frozen 10k trial
+
+The dashboard can reuse the completed, checksum-verified population and captured
+request corpus from trial `ce8e54ff-e317-4a89-b7db-90327e02dc43`. Select that
+saved trial, leave **2×3 · monolith vs split** selected, set the bounded warmup,
+duration, and RPS (the defaults are 5 seconds, 25 seconds, and 5 RPS), and click
+**Prepare corrective rerun**. This creates a fresh saved trial in
+`population_ready`; it does not encode vectors or mutate the source. Inspect the
+new trial and then click **Approve this cohort's measurements** to start its six
+conditions. The optional split-only selection is a three-condition smoke test.
+
+The dashboard and database retain progress and condition results. Raw condition
+evidence is stored at:
+
+```text
+$BABEL_PERFORMANCE_STATE_ROOT/<new-trial-id>/conditions/<condition-index>/live-evidence.json
+```
+
+After all six representative conditions complete, export their exact feedback
+and accepted-edge evidence with an unmistakably non-formal manifest:
+
+```bash
+RERUN_ID='<new-trial-id>'
+RUN_ROOT="/home/dhelmy990/Data/babel-data/runs/$RERUN_ID"
+
+babel-online performance-export \
+  --representative \
+  --experiment-id "$RERUN_ID" \
+  --evidence-root "$BABEL_PERFORMANCE_STATE_ROOT/$RERUN_ID/conditions" \
+  --output-root "$RUN_ROOT/representative-export"
+```
+
+The resulting manifest records `formalPerformanceClaim=false` and the exact
+representative evidence scope. It cannot enter the formal accepted-model bundle
+or be attached through the formal publisher. Rolling Hugging Face publication
+may copy this directory later under a clearly named representative path.
+
 Do not begin this phase until the trial's complete formal matrix is durably
 `completed` (nine conditions at cohort 50; six at cohorts 100/500), training
 conditions report zero final Kafka lag, and the selected child is present in

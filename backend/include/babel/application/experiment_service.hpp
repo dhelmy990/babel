@@ -30,6 +30,9 @@ class ExperimentService final {
       std::string_view experiment_id);
   Result<PerformanceExperimentDto> approvePerformanceNextScale(
       std::string_view experiment_id);
+  Result<PerformanceExperimentDto> preparePerformanceRerun(
+      std::string_view source_experiment_id,
+      const PerformanceRerunRequest&);
   Result<PerformanceExperimentDto> markPerformancePopulationReady(
       std::string_view experiment_id, const PerformancePopulationEvidence&);
   Result<PerformanceExperimentDto> attachPerformanceArtifact(
