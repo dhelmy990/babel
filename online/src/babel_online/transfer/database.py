@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import fcntl
 import hashlib
 import json
 import os
 import shutil
 import stat
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1145,6 +1147,8 @@ def _validate_operator_receipt(
 
 def _write_import_receipt(receipt: ImportReceiptV1, destination: Path) -> None:
     destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if destination.parent.is_symlink():
+        raise PermissionError("import receipt directory must not be a symlink")
     if stat.S_IMODE(destination.parent.stat().st_mode) & 0o077:
         raise PermissionError("import receipt directory must be mode 0700 or stricter")
     payload = (
@@ -1174,6 +1178,122 @@ def _write_import_receipt(receipt: ImportReceiptV1, destination: Path) -> None:
             pass
         temporary.unlink(missing_ok=True)
         raise
+
+
+def _acquire_initial_import_receipt(
+    candidate: ImportReceiptV1, destination: Path
+) -> tuple[ImportReceiptV1, bool]:
+    """Atomically publish one complete planned receipt or read its winner."""
+
+    if candidate.state != "planned":
+        raise ValueError("initial import receipt must be planned")
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if destination.parent.is_symlink():
+        raise PermissionError("import receipt directory must not be a symlink")
+    if stat.S_IMODE(destination.parent.stat().st_mode) & 0o077:
+        raise PermissionError("import receipt directory must be mode 0700 or stricter")
+    payload = (
+        json.dumps(
+            candidate.model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+    temporary_fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.acquire.", dir=destination.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(temporary_fd, 0o600)
+        with os.fdopen(temporary_fd, "wb", closefd=True) as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.link(temporary, destination, follow_symlinks=False)
+        except FileExistsError:
+            try:
+                existing = ImportReceiptV1.model_validate(
+                    _read_regular_json(destination, "import receipt")
+                )
+            except Exception as error:
+                raise PopulationTransferIntegrityError(
+                    "import receipt is invalid"
+                ) from error
+            return existing, False
+        directory_fd = os.open(
+            destination.parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        return candidate, True
+    except Exception:
+        try:
+            os.close(temporary_fd)
+        except OSError:
+            pass
+        raise
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+@contextmanager
+def _exclusive_import_receipt_lock(destination: Path) -> Iterator[None]:
+    """Serialize one receipt state machine across processes and crash recovery."""
+
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if destination.parent.is_symlink():
+        raise PermissionError("import receipt directory must not be a symlink")
+    if stat.S_IMODE(destination.parent.stat().st_mode) & 0o077:
+        raise PermissionError("import receipt directory must be mode 0700 or stricter")
+    lock_path = destination.with_name(f".{destination.name}.lock")
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(lock_path, flags, 0o600)
+    try:
+        details = os.fstat(descriptor)
+        if not stat.S_ISREG(details.st_mode) or stat.S_IMODE(details.st_mode) & 0o077:
+            raise PermissionError("import receipt lock must be a private regular file")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def _advance_import_receipt(
+    target: ImportReceiptV1, destination: Path
+) -> ImportReceiptV1:
+    """Advance one locked receipt monotonically without rewriting its winner."""
+
+    try:
+        current = ImportReceiptV1.model_validate(
+            _read_regular_json(destination, "import receipt")
+        )
+    except Exception as error:
+        raise PopulationTransferIntegrityError("import receipt is invalid") from error
+    if current != target.model_copy(update={"state": current.state}):
+        raise PopulationTransferIntegrityError(
+            "existing import receipt differs from requested import"
+        )
+    ranks = {"planned": 0, "quarantined": 1, "ready": 2}
+    if ranks[current.state] >= ranks[target.state]:
+        return current
+    _write_import_receipt(target, destination)
+    return target
+
+
+def _import_advisory_lock_key(fresh_trial_id: UUID, fresh_run_id: UUID) -> int:
+    """Derive the signed PostgreSQL advisory-lock key for one fresh import."""
+
+    digest = hashlib.sha256(
+        b"babel-population-import-v1\0" + fresh_trial_id.bytes + fresh_run_id.bytes
+    ).digest()
+    return int.from_bytes(digest[:8], "big", signed=True)
 
 
 def _validate_quarantined_catalog_rows(
@@ -1306,7 +1426,7 @@ def _validate_import_presence(
     return normalized == (True, True)
 
 
-def _import_verified_bundle(
+def _import_verified_bundle_locked(
     *,
     database_url: str,
     verified: BundleFiles,
@@ -1364,30 +1484,17 @@ def _import_verified_bundle(
             modelCheckpointRoot=str(model_checkpoint_root),
         )
 
-    existing_state: Literal["planned", "quarantined", "ready"] | None = None
-    receipt_preexisted = (
-        import_receipt_path.exists() or import_receipt_path.is_symlink()
+    candidate_attempt_id = uuid4()
+    existing, _created = _acquire_initial_import_receipt(
+        receipt("planned", candidate_attempt_id), import_receipt_path
     )
-    if receipt_preexisted:
-        try:
-            existing = ImportReceiptV1.model_validate(
-                _read_regular_json(import_receipt_path, "import receipt")
-            )
-        except Exception as error:
-            raise PopulationTransferIntegrityError("import receipt is invalid") from error
-        import_attempt_id = existing.importAttemptId
-        expected = receipt(existing.state, import_attempt_id)
-        if existing != expected:
-            raise PopulationTransferIntegrityError(
-                "existing import receipt differs from requested import"
-            )
-        existing_state = existing.state
-    else:
-        import_attempt_id = uuid4()
-        _write_import_receipt(
-            receipt("planned", import_attempt_id), import_receipt_path
+    import_attempt_id = existing.importAttemptId
+    expected = receipt(existing.state, import_attempt_id)
+    if existing != expected:
+        raise PopulationTransferIntegrityError(
+            "existing import receipt differs from requested import"
         )
-        existing_state = "planned"
+    existing_state = existing.state
 
     run_seed = int.from_bytes(
         hashlib.sha256(f"{fresh_trial_id}:population".encode("utf-8")).digest()[:8],
@@ -1478,6 +1585,10 @@ def _import_verified_bundle(
         with _connect_psycopg(database_url) as connection:
             register_vector(connection)
             with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT pg_advisory_xact_lock(%s)",
+                    (_import_advisory_lock_key(fresh_trial_id, fresh_run_id),),
+                )
                 cursor.execute(
                     """
                     SELECT
@@ -1801,7 +1912,7 @@ def _import_verified_bundle(
                             transfer.snapshotSha256,
                         ),
                     )
-        _write_import_receipt(
+        _advance_import_receipt(
             receipt("quarantined", import_attempt_id), import_receipt_path
         )
 
@@ -1982,8 +2093,32 @@ def _import_verified_bundle(
             ),
         )
     ready = receipt("ready", import_attempt_id)
-    _write_import_receipt(ready, import_receipt_path)
+    _advance_import_receipt(ready, import_receipt_path)
     return ready
+
+
+def _import_verified_bundle(
+    *,
+    database_url: str,
+    verified: BundleFiles,
+    fresh_trial_id: UUID,
+    fresh_run_id: UUID,
+    model_artifact_manifest: Path,
+    model_checkpoint_root: Path,
+    frozen_output_root: Path,
+    import_receipt_path: Path,
+) -> ImportReceiptV1:
+    with _exclusive_import_receipt_lock(import_receipt_path):
+        return _import_verified_bundle_locked(
+            database_url=database_url,
+            verified=verified,
+            fresh_trial_id=fresh_trial_id,
+            fresh_run_id=fresh_run_id,
+            model_artifact_manifest=model_artifact_manifest,
+            model_checkpoint_root=model_checkpoint_root,
+            frozen_output_root=frozen_output_root,
+            import_receipt_path=import_receipt_path,
+        )
 
 
 def import_population(
@@ -2006,7 +2141,7 @@ def import_population(
         raise PopulationTransferIntegrityError(
             "fresh run ID must equal uuid5(fresh trial ID,'population')"
         )
-    root = Path(bundle_root).resolve()
+    root = Path(bundle_root).absolute()
     _validate_operator_receipt(Path(operator_receipt), root, trusted_digest)
     verified = verify_bundle(root, trusted_digest)
     if fresh_trial_id == verified.manifest_contract.originTrialId:
@@ -2022,12 +2157,11 @@ def import_population(
         verified=verified,
         fresh_trial_id=fresh_trial_id,
         fresh_run_id=fresh_run_id,
-        model_artifact_manifest=Path(model_artifact_manifest).resolve(),
-        model_checkpoint_root=Path(model_checkpoint_root).resolve(),
-        frozen_output_root=Path(frozen_output_root).resolve(),
-        import_receipt_path=Path(import_receipt).resolve(),
+        model_artifact_manifest=Path(model_artifact_manifest).absolute(),
+        model_checkpoint_root=Path(model_checkpoint_root).absolute(),
+        frozen_output_root=Path(frozen_output_root).absolute(),
+        import_receipt_path=Path(import_receipt).absolute(),
     )
-    _write_import_receipt(receipt, Path(import_receipt))
     return receipt
 
 

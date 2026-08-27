@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID, uuid4, uuid5
@@ -10,8 +11,12 @@ import pytest
 
 from babel_online.transfer.database import (
     ImportReceiptV1,
+    _acquire_initial_import_receipt,
+    _advance_import_receipt,
     _build_rebound_frozen_manifest,
     _deterministic_sample_ordinals,
+    _exclusive_import_receipt_lock,
+    _import_advisory_lock_key,
     _import_verified_bundle,
     _load_verified_transfer_rows,
     _ready_database_state_matches,
@@ -63,6 +68,27 @@ def _bundle(tmp_path: Path, digest: str = "a" * 64) -> Path:
     return root
 
 
+def _planned_import_receipt(attempt_id: UUID) -> ImportReceiptV1:
+    return ImportReceiptV1(
+        schemaVersion=1,
+        state="planned",
+        bundleDigest="a" * 64,
+        originTrialId=UUID("ce8e54ff-e317-4a89-b7db-90327e02dc43"),
+        originRunId=UUID("7f4ad291-e6d0-5bb9-9658-3605c634a3a9"),
+        freshTrialId=UUID("4b8ba3f2-4464-4da8-adf0-7a8cb8aa1a70"),
+        freshPopulationRunId=UUID("15a452ee-f560-59bb-80e9-ff21e8a82c44"),
+        importAttemptId=attempt_id,
+        rowCount=10_000,
+        orderedVectorSha256="b" * 64,
+        snapshotSha256="c" * 64,
+        frozenManifestSha256="d" * 64,
+        sampleCount=100,
+        hnswIndex="babel_embeddings_cosine_hnsw",
+        modelArtifactManifestPath="/models/artifact_manifest.json",
+        modelCheckpointRoot="/models/checkpoint",
+    )
+
+
 def test_deterministic_samples_are_unique_bounded_and_digest_stable() -> None:
     first = _deterministic_sample_ordinals("a" * 64, row_count=10_000, count=100)
     second = _deterministic_sample_ordinals("a" * 64, row_count=10_000, count=100)
@@ -73,6 +99,116 @@ def test_deterministic_samples_are_unique_bounded_and_digest_stable() -> None:
     assert first != _deterministic_sample_ordinals(
         "b" * 64, row_count=10_000, count=100
     )
+
+
+def test_concurrent_initial_receipt_acquisition_converges_without_overwrite(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "receipts" / "import.json"
+    candidates = [_planned_import_receipt(uuid4()) for _ in range(2)]
+    barrier = threading.Barrier(2)
+    results: list[tuple[ImportReceiptV1, bool]] = []
+
+    def contend(candidate: ImportReceiptV1) -> None:
+        barrier.wait()
+        results.append(_acquire_initial_import_receipt(candidate, destination))
+
+    threads = [
+        threading.Thread(target=contend, args=(candidate,))
+        for candidate in candidates
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert len(results) == 2
+    assert sum(created for _receipt, created in results) == 1
+    assert results[0][0] == results[1][0]
+    winner = next(receipt for receipt, created in results if created)
+    assert ImportReceiptV1.model_validate_json(destination.read_text()) == winner
+
+
+def test_import_advisory_lock_key_is_stable_and_scoped_to_both_ids() -> None:
+    trial_id = uuid4()
+    run_id = uuid5(trial_id, "population")
+
+    assert _import_advisory_lock_key(trial_id, run_id) == _import_advisory_lock_key(
+        trial_id, run_id
+    )
+    assert _import_advisory_lock_key(
+        trial_id, run_id
+    ) != _import_advisory_lock_key(uuid4(), run_id)
+    assert _import_advisory_lock_key(
+        trial_id, run_id
+    ) != _import_advisory_lock_key(trial_id, uuid4())
+    assert -(1 << 63) <= _import_advisory_lock_key(trial_id, run_id) < (1 << 63)
+
+
+def test_receipt_lock_serializes_contenders_without_service_mutation(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "receipts" / "import.json"
+    first_entered = threading.Event()
+    second_attempted = threading.Event()
+    second_entered = threading.Event()
+    release_first = threading.Event()
+
+    def first() -> None:
+        with _exclusive_import_receipt_lock(destination):
+            first_entered.set()
+            assert release_first.wait(2)
+
+    def second() -> None:
+        assert first_entered.wait(2)
+        second_attempted.set()
+        with _exclusive_import_receipt_lock(destination):
+            second_entered.set()
+
+    threads = [threading.Thread(target=first), threading.Thread(target=second)]
+    for thread in threads:
+        thread.start()
+    assert second_attempted.wait(2)
+    assert not second_entered.wait(0.05)
+    release_first.set()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert second_entered.is_set()
+    assert all(not thread.is_alive() for thread in threads)
+
+
+def test_receipt_advance_does_not_rewrite_an_already_won_state(tmp_path: Path) -> None:
+    destination = tmp_path / "receipts" / "import.json"
+    planned = _planned_import_receipt(uuid4())
+    acquired, created = _acquire_initial_import_receipt(planned, destination)
+    assert created and acquired == planned
+    ready = planned.model_copy(update={"state": "ready"})
+
+    assert _advance_import_receipt(ready, destination) == ready
+    won_stat = destination.stat()
+    assert _advance_import_receipt(ready, destination) == ready
+    unchanged_stat = destination.stat()
+
+    assert (unchanged_stat.st_ino, unchanged_stat.st_mtime_ns) == (
+        won_stat.st_ino,
+        won_stat.st_mtime_ns,
+    )
+
+
+def test_initial_receipt_acquisition_rejects_lexical_symlink(tmp_path: Path) -> None:
+    private = tmp_path / "receipts"
+    private.mkdir(mode=0o700)
+    target = private / "target.json"
+    target.write_text("operator-owned\n")
+    destination = private / "import.json"
+    destination.symlink_to(target)
+
+    with pytest.raises(PopulationTransferIntegrityError, match="receipt"):
+        _acquire_initial_import_receipt(_planned_import_receipt(uuid4()), destination)
+
+    assert target.read_text() == "operator-owned\n"
 
 
 @pytest.mark.parametrize(
@@ -206,6 +342,7 @@ def test_two_import_invocations_reject_foreign_rows_after_planned_receipt(
         digest="a" * 64,
         manifest_contract=transfer,
     )
+    statements: list[str] = []
 
     class CollisionCursor:
         def __enter__(self):
@@ -215,7 +352,11 @@ def test_two_import_invocations_reject_foreign_rows_after_planned_receipt(
             return None
 
         def execute(self, statement, _parameters):
-            assert "telemetry->>'importAttemptId'" in statement
+            statements.append(statement)
+            assert (
+                "pg_advisory_xact_lock" in statement
+                or "telemetry->>'importAttemptId'" in statement
+            )
 
         def fetchone(self):
             return (True, True, None)
@@ -266,6 +407,7 @@ def test_two_import_invocations_reject_foreign_rows_after_planned_receipt(
     protected = ImportReceiptV1.model_validate_json(receipt_path.read_text())
     assert protected.state == "planned"
     assert protected.importAttemptId.version == 4
+    assert sum("pg_advisory_xact_lock" in statement for statement in statements) == 2
     for recovery_state in ("quarantined", "ready"):
         receipt_path.write_text(
             protected.model_copy(update={"state": recovery_state}).model_dump_json()
@@ -374,8 +516,8 @@ def test_import_verifies_trust_root_before_calling_database_adapter(
     assert observed["verified"] is verified
     assert observed["fresh_trial_id"] == trial_id
     assert observed["fresh_run_id"] == run_id
-    assert destination_receipt.is_file()
-    assert destination_receipt.stat().st_mode & 0o777 == 0o600
+    assert observed["import_receipt_path"] == destination_receipt.absolute()
+    assert not destination_receipt.exists()
 
 
 def test_verified_parquet_rows_merge_by_identity_and_keep_float32_vectors(
