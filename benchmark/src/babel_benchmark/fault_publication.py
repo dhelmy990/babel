@@ -304,8 +304,9 @@ def _validate_model(
 
 
 def _reject_symlinked_path(path: Path) -> None:
-    current = Path(path.anchor)
-    for part in path.parts[1:]:
+    absolute = path if path.is_absolute() else Path.cwd() / path
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
         current /= part
         if current.is_symlink():
             raise ValueError(f"fault evidence path contains a symbolic link: {current}")
@@ -454,7 +455,10 @@ def _validate_local_bundle(bundle: FaultEvidenceBundle) -> dict[str, str]:
 
 
 def _operations(api: Any, bundle: FaultEvidenceBundle) -> list[Any]:
-    paths = sorted(bundle.root.iterdir(), key=lambda path: path.name)
+    paths = [
+        bundle.root / name
+        for name in ("checksums.json", "fault-receipt.json", "manifest.json", "report.md")
+    ]
     if type(api).__module__.startswith("huggingface_hub"):
         from huggingface_hub import CommitOperationAdd
 
@@ -488,6 +492,7 @@ def publish_fault_evidence_bundle(
         revision=revision,
         token=token,
     )
+    _validate_local_bundle(bundle)
     if any(path == prefix or path.startswith(prefix + "/") for path in remote_files):
         raise AcceptedRunExists(f"remote fault campaign already exists: {prefix}")
     result = api.create_commit(

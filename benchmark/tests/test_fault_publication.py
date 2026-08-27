@@ -270,6 +270,28 @@ def test_build_rejects_symlinked_or_dangling_fault_destinations(tmp_path: Path) 
         )
 
 
+def test_build_rejects_relative_output_root_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    receipt, model, receipt_sha = _inputs(tmp_path)
+    accepted = tmp_path / "accepted"
+    formal = accepted / "runs" / str(TRIAL_ID)
+    formal.mkdir(parents=True)
+    (accepted / "fault-runs").symlink_to(accepted / "runs", target_is_directory=True)
+    (tmp_path / "alias").symlink_to(accepted, target_is_directory=True)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValueError, match="symbolic link"):
+        build_fault_evidence_bundle(
+            Path("alias"),
+            receipt_path=receipt,
+            expected_receipt_sha256=receipt_sha,
+            trial_id=TRIAL_ID,
+            model_manifest_path=model,
+        )
+    assert not (formal / receipt_sha).exists()
+
+
 def test_build_rejects_incomplete_nested_fault_schema(tmp_path: Path) -> None:
     receipt, model, _receipt_sha = _inputs(tmp_path)
     document = json.loads(receipt.read_text())
@@ -428,6 +450,34 @@ def test_publish_rejects_files_outside_closed_inventory(tmp_path: Path) -> None:
     (bundle.root / "untracked.txt").write_text("not in checksums\n")
     api = FakeHubApi(tmp_path / "remote")
 
+    with pytest.raises(ValueError, match="inventory"):
+        publish_fault_evidence_bundle(
+            api,
+            bundle,
+            repo_id="dhelmy990/babel-wikipedia-experiment",
+            token="test-token-is-never-written",
+        )
+    assert api.commits == []
+
+
+def test_publish_rejects_file_added_after_initial_validation(tmp_path: Path) -> None:
+    receipt, model, receipt_sha = _inputs(tmp_path)
+    bundle = build_fault_evidence_bundle(
+        tmp_path / "accepted",
+        receipt_path=receipt,
+        expected_receipt_sha256=receipt_sha,
+        trial_id=TRIAL_ID,
+        model_manifest_path=model,
+    )
+    api = FakeHubApi(tmp_path / "remote")
+    original = api.list_repo_files
+
+    def add_late_file(**kwargs: object) -> list[str]:
+        files = original(**kwargs)
+        (bundle.root / "untracked.txt").write_text("appeared after validation\n")
+        return files
+
+    api.list_repo_files = add_late_file  # type: ignore[method-assign]
     with pytest.raises(ValueError, match="inventory"):
         publish_fault_evidence_bundle(
             api,
