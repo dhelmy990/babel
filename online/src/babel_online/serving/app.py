@@ -15,7 +15,6 @@ from ..contracts import (
     RecommendationResponseV1,
 )
 from ..model.context_tower import CreatorContextTower
-from ..model.item_tower import ItemTower
 from .state import ServingState
 from .timings import server_timing_header
 
@@ -51,9 +50,9 @@ def create_app(state: ServingState, *, max_concurrent_requests: int = 8) -> Fast
                 )
 
             started = perf_counter_ns()
-            item_tower = ItemTower(snapshot.model.embeddingSpace)
-            new_vector = item_tower.encode(f"{request.title}\n\n{request.text}")
+            new_vector = snapshot.item_tower.encode_article(request.title, request.text)
             encode_ns = perf_counter_ns() - started
+            encoder_identity = snapshot.item_tower.execution_identity(batch_size=1)
 
             started = perf_counter_ns()
             try:
@@ -142,7 +141,14 @@ def create_app(state: ServingState, *, max_concurrent_requests: int = 8) -> Fast
             return Response(
                 content=payload,
                 media_type="application/json",
-                headers={"Server-Timing": server_timing_header(timings)},
+                headers={
+                    "Server-Timing": server_timing_header(timings),
+                    "X-Babel-Model-Manifest-Sha256": snapshot.model_manifest_sha256,
+                    "X-Babel-Encoder-Mode": encoder_identity.mode,
+                    "X-Babel-Encoder-Device": encoder_identity.device,
+                    "X-Babel-Encoder-Batch-Size": str(encoder_identity.batch_size),
+                    "X-Babel-Encoder-Cache-Identity": encoder_identity.cache_identity,
+                },
             )
         finally:
             semaphore.release()

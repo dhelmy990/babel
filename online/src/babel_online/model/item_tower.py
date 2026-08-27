@@ -4,11 +4,22 @@ from __future__ import annotations
 
 import hashlib
 import re
+from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 from numpy.typing import NDArray
 
 from ..contracts import EmbeddingSpaceV1
+from .qwen_encoder import Qwen100Encoder, format_article_input
+
+
+@dataclass(frozen=True)
+class EncoderExecutionIdentity:
+    mode: Literal["fixture", "real_qwen"]
+    device: str
+    cache_identity: str
+    batch_size: int
 
 
 class ItemTower:
@@ -44,5 +55,42 @@ class ItemTower:
             norm = 1.0
         return np.asarray(vector / norm, dtype="<f4")
 
+    def encode_article(self, title: str, lead_text: str) -> NDArray[np.float32]:
+        return self.encode(f"{title}\n\n{lead_text}")
 
-__all__ = ["ItemTower"]
+    def execution_identity(self, *, batch_size: int) -> EncoderExecutionIdentity:
+        return EncoderExecutionIdentity(
+            mode="fixture",
+            device="cpu",
+            cache_identity="deterministic-friday-fixture",
+            batch_size=batch_size,
+        )
+
+
+class QwenItemTower:
+    """Article-shaped boundary around one already-loaded real Qwen encoder."""
+
+    def __init__(self, encoder: Qwen100Encoder) -> None:
+        if not isinstance(encoder, Qwen100Encoder):
+            raise TypeError("real serving requires a Qwen100Encoder instance")
+        self.encoder = encoder
+        self.embedding_space = None
+        self.dimension = encoder.contract.embeddingDimension
+
+    def encode_article(self, title: str, lead_text: str) -> NDArray[np.float32]:
+        text = format_article_input(title, lead_text)
+        result = self.encoder.encode([text])
+        if result.shape != (1, 100):
+            raise ValueError("real item encoder must return one 100d vector")
+        return np.asarray(result[0], dtype="<f4")
+
+    def execution_identity(self, *, batch_size: int) -> EncoderExecutionIdentity:
+        return EncoderExecutionIdentity(
+            mode="real_qwen",
+            device=self.encoder.device,
+            cache_identity=self.encoder.cache_identity,
+            batch_size=batch_size,
+        )
+
+
+__all__ = ["EncoderExecutionIdentity", "ItemTower", "QwenItemTower"]

@@ -93,6 +93,22 @@ def test_post_recommends_only_current_run_created_babels_with_timings() -> None:
         if stage != "serverTotal"
     )
     assert "Server-Timing" in http.headers
+    assert http.headers["X-Babel-Encoder-Mode"] == "fixture"
+    assert http.headers["X-Babel-Encoder-Device"] == "cpu"
+    assert http.headers["X-Babel-Encoder-Batch-Size"] == "1"
+    assert len(http.headers["X-Babel-Model-Manifest-Sha256"]) == 64
+
+
+def test_fixture_smoke_also_keeps_one_long_lived_item_tower() -> None:
+    state, _registry, _created_ids, _created_sources = serving_state()
+    tower = state.snapshot().item_tower
+    request = json.loads((FIXTURE / "observable/request.json").read_text())
+    client = TestClient(create_app(state))
+
+    assert client.post("/api/v1/recommendations", json=request).status_code == 200
+    request["requestId"] = "00000000-0000-5000-8000-000000000402"
+    assert client.post("/api/v1/recommendations", json=request).status_code == 200
+    assert state.snapshot().item_tower is tower
 
 
 def test_post_serializes_the_wire_payload_once(monkeypatch) -> None:

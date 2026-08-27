@@ -7,6 +7,7 @@ import hashlib
 from uuid import UUID
 
 import pytest
+import babel_online.contracts as contracts
 from pydantic import ValidationError
 
 from babel_online.contracts import (
@@ -26,6 +27,54 @@ from babel_online.contracts import (
     canonical_pgvector_snapshot_sha256,
     canonical_vector_sha256,
 )
+
+
+def test_real_model_manifest_v2_closes_the_trained_qwen_identity() -> None:
+    manifest_type = getattr(contracts, "ModelManifestV2", None)
+    assert manifest_type is not None, "Task 6 must define the real-model manifest"
+    document = {
+        "schemaVersion": 2,
+        "modelId": "2c4c48d5-3dcf-5ab9-8191-cd4edc2cbf67",
+        "label": "2016 interview Qwen original",
+        "parentModelId": None,
+        "producingRunId": None,
+        "encoderRepo": "dhelmy990/babel-qwen-navigation-2016-interview",
+        "encoderRevision": "57d949cd634b920cc1a46f27c9b21df094b5240e",
+        "artifactPath": "artifacts/" + "3f6b43e574eb2bcac55c4ddf95f624e3f42153f97437cfeba703c9b3b110a1f8",
+        "artifactId": "3f6b43e574eb2bcac55c4ddf95f624e3f42153f97437cfeba703c9b3b110a1f8",
+        "artifactManifestSha256": "5e04eeb0d04f6a15fc1eda2ad7a6034fad82f7a3da648179dbc2e0cf71b68a2f",
+        "checkpointTreeSha256": "ddf8721cc38abc9f61b8738d6092e4f6c9542c3c533fc6a81677b307533edcff",
+        "baseModelId": "Qwen/Qwen3-Embedding-0.6B",
+        "baseModelRevision": "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3",
+        "tokenizerRevision": "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3",
+        "datasetRepo": "dhelmy990/babel-wikipedia-experiment",
+        "datasetConfig": "distillation_2016_interview",
+        "datasetRevision": "b440e98b04ab77afed7caf0455eca3189235fc3b",
+        "datasetManifestSha256": "33c65554da38af5888e5aae75350ae8ee7889d6047c9f8339d97781e4326de09",
+        "trainingSourceRevision": "92f3ac697d78eb827d75b033df92dcbed887def7",
+        "adapterSha256": "4792009bfdaa9df25e3cd79f634ddfa081dc3c620828bda478be5db2fd7b8921",
+        "projectionSha256": "e156701da777fbb37e999c7d897f09cdd1993cd5c9d740aaafcfdeb6395d3ddb",
+        "validationSha256": "e4b76f00f65f4de0165e4eb47c652531295b4718d4d7bcc5008c5945a86f9e13",
+        "trainingExamples": 50_000,
+        "embeddingSpace": {
+            "schemaVersion": 1,
+            "embeddingSpaceId": "f3665769-b470-5228-8df4-08004e252aa4",
+            "dimension": 100,
+            "distance": "cosine",
+            "distilledEncoderArtifact": "hf://dhelmy990/babel-qwen-navigation-2016-interview@57d949cd634b920cc1a46f27c9b21df094b5240e/artifacts/3f6b43e574eb2bcac55c4ddf95f624e3f42153f97437cfeba703c9b3b110a1f8",
+            "datasetRevision": "b440e98b04ab77afed7caf0455eca3189235fc3b",
+            "compatibilityVersion": "babel-qwen-100d-v1",
+        },
+        "acceptance": "real_50k_qwen",
+        "immutable": True,
+    }
+
+    manifest = manifest_type.model_validate(document)
+
+    assert manifest.parentModelId is None
+    assert manifest.adapterSha256 == document["adapterSha256"]
+    with pytest.raises(ValidationError):
+        manifest_type.model_validate({**document, "artifactId": "0" * 64})
 from babel_online.config import default_run_config
 
 

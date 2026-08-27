@@ -308,6 +308,62 @@ class ModelManifestV1(FrozenContract):
         return self
 
 
+class ModelManifestV2(FrozenContract):
+    """Immutable identity of the accepted 50k distilled Qwen serving model.
+
+    V1 remains readable for the checked-in smoke fixture.  V2 deliberately
+    closes every identity needed to distinguish the real encoder from that
+    fixture and to reproduce its 100-dimensional vector space.
+    """
+
+    schemaVersion: Literal[2]
+    modelId: UUID
+    label: str = Field(min_length=1)
+    parentModelId: UUID | None
+    producingRunId: UUID | None
+    encoderRepo: Literal["dhelmy990/babel-qwen-navigation-2016-interview"]
+    encoderRevision: Literal["57d949cd634b920cc1a46f27c9b21df094b5240e"]
+    artifactPath: str = Field(pattern=r"^artifacts/[a-f0-9]{64}$")
+    artifactId: Literal["3f6b43e574eb2bcac55c4ddf95f624e3f42153f97437cfeba703c9b3b110a1f8"]
+    artifactManifestSha256: Literal["5e04eeb0d04f6a15fc1eda2ad7a6034fad82f7a3da648179dbc2e0cf71b68a2f"]
+    checkpointTreeSha256: Literal["ddf8721cc38abc9f61b8738d6092e4f6c9542c3c533fc6a81677b307533edcff"]
+    baseModelId: Literal["Qwen/Qwen3-Embedding-0.6B"]
+    baseModelRevision: Literal["97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"]
+    tokenizerRevision: Literal["97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"]
+    datasetRepo: Literal["dhelmy990/babel-wikipedia-experiment"]
+    datasetConfig: Literal["distillation_2016_interview"]
+    datasetRevision: Literal["b440e98b04ab77afed7caf0455eca3189235fc3b"]
+    datasetManifestSha256: Literal["33c65554da38af5888e5aae75350ae8ee7889d6047c9f8339d97781e4326de09"]
+    trainingSourceRevision: Literal["92f3ac697d78eb827d75b033df92dcbed887def7"]
+    adapterSha256: Literal["4792009bfdaa9df25e3cd79f634ddfa081dc3c620828bda478be5db2fd7b8921"]
+    projectionSha256: Literal["e156701da777fbb37e999c7d897f09cdd1993cd5c9d740aaafcfdeb6395d3ddb"]
+    validationSha256: Literal["e4b76f00f65f4de0165e4eb47c652531295b4718d4d7bcc5008c5945a86f9e13"]
+    trainingExamples: Literal[50_000]
+    embeddingSpace: EmbeddingSpaceV1
+    acceptance: Literal["real_50k_qwen"]
+    immutable: Literal[True]
+
+    @model_validator(mode="after")
+    def real_lineage_and_artifact_are_closed(self) -> "ModelManifestV2":
+        if (self.parentModelId is None) != (self.producingRunId is None):
+            raise ValueError("parentModelId and producingRunId must both be null or set")
+        if self.artifactPath != f"artifacts/{self.artifactId}":
+            raise ValueError("artifactPath must identify artifactId")
+        expected_artifact = (
+            f"hf://{self.encoderRepo}@{self.encoderRevision}/{self.artifactPath}"
+        )
+        if self.embeddingSpace.distilledEncoderArtifact != expected_artifact:
+            raise ValueError("embedding space does not identify the accepted Qwen artifact")
+        if self.embeddingSpace.datasetRevision != self.datasetRevision:
+            raise ValueError("embedding space and model dataset revisions differ")
+        if self.embeddingSpace.compatibilityVersion != "babel-qwen-100d-v1":
+            raise ValueError("real Qwen embedding compatibility version is invalid")
+        return self
+
+
+ModelManifest = ModelManifestV1 | ModelManifestV2
+
+
 class HnswSnapshotV1(FrozenContract):
     schemaVersion: Literal[1]
     runId: UUID
@@ -444,6 +500,8 @@ __all__ = [
     "FeedbackActivityV1",
     "HnswSnapshotV1",
     "ModelManifestV1",
+    "ModelManifestV2",
+    "ModelManifest",
     "LifecycleActivityV1",
     "RecommendationActivityV1",
     "RecommendationCandidateV1",

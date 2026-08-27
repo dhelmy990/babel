@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from threading import RLock
 from typing import Any, Protocol, cast
 
 import numpy as np
@@ -138,6 +139,7 @@ class Qwen100Encoder:
         backbone: object,
         projection: object,
         device: str = "cpu",
+        cache_identity: str | None = None,
     ) -> None:
         import torch
 
@@ -158,6 +160,10 @@ class Qwen100Encoder:
         self.backbone = backbone.to(device).eval()
         self.projection = projection.to(device).eval()
         self.device = device
+        self.cache_identity = cache_identity or (
+            f"hf://{contract.baseModelId}@{contract.baseModelRevision}"
+        )
+        self._inference_lock = RLock()
 
     @classmethod
     def from_artifact(
@@ -171,6 +177,8 @@ class Qwen100Encoder:
         model_loader: Callable[..., object] | None = None,
         adapter_loader: Callable[[object, Path, Mapping[str, object]], object] | None = None,
         projection_loader: Callable[[Path, int, int], object] | None = None,
+        local_files_only: bool = False,
+        model_cache_dir: str | Path | None = None,
     ) -> "Qwen100Encoder":
         if require_real_acceptance:
             acceptance = getattr(artifact, "assert_real_acceptance", None)
@@ -178,16 +186,26 @@ class Qwen100Encoder:
                 raise ValueError("artifact cannot prove real acceptance")
             acceptance()
         contract = artifact.serving_contract
+        load_kwargs: dict[str, object] = {
+            "revision": contract.tokenizerRevision,
+            "token": token,
+        }
+        if local_files_only:
+            load_kwargs["local_files_only"] = True
+        if model_cache_dir is not None:
+            load_kwargs["cache_dir"] = str(model_cache_dir)
         tokenizer = (tokenizer_loader or _default_tokenizer_loader)(
-            contract.baseModelId,
-            revision=contract.tokenizerRevision,
-            token=token,
+            contract.baseModelId, **load_kwargs
         )
         model_kwargs: dict[str, object] = {
             "revision": contract.baseModelRevision,
             "token": token,
             "attn_implementation": "sdpa",
         }
+        if local_files_only:
+            model_kwargs["local_files_only"] = True
+        if model_cache_dir is not None:
+            model_kwargs["cache_dir"] = str(model_cache_dir)
         backbone = (model_loader or _default_model_loader)(contract.baseModelId, **model_kwargs)
         configuration = getattr(backbone, "config", None)
         if configuration is not None:
@@ -208,6 +226,10 @@ class Qwen100Encoder:
             backbone=backbone,
             projection=projection,
             device=device,
+            cache_identity=(
+                f"hf://{contract.baseModelId}@{contract.baseModelRevision}"
+                f"|artifact:{contract.artifactRevision}:{contract.artifactId}"
+            ),
         )
 
     def encode(self, texts: Sequence[str]) -> NDArray[np.float32]:
@@ -218,33 +240,37 @@ class Qwen100Encoder:
             raise ValueError("texts must be a nonempty sequence")
         if any(not isinstance(text, str) or not text.strip() for text in texts):
             raise ValueError("every encoded text must be nonblank")
-        encoded = self.tokenizer(
-            list(texts),
-            padding=True,
-            truncation=True,
-            max_length=self.contract.maxLength,
-            return_tensors="pt",
-        )
-        if not isinstance(encoded, Mapping) or "input_ids" not in encoded or "attention_mask" not in encoded:
-            raise ValueError("tokenizer must return input_ids and attention_mask")
-        input_ids = encoded["input_ids"].to(self.device)
-        attention_mask = encoded["attention_mask"].to(self.device)
-        with torch.inference_mode():
-            outputs = self.backbone(input_ids=input_ids, attention_mask=attention_mask)
-            hidden = getattr(outputs, "last_hidden_state", None)
-            if hidden is None:
-                try:
-                    hidden = outputs[0]
-                except (KeyError, IndexError, TypeError) as error:
-                    raise TypeError("backbone output must contain last_hidden_state") from error
-            pooled = last_token_pool(hidden, attention_mask)
-            projected = self.projection(pooled.float())
-            norms = projected.norm(dim=-1)
-            if tuple(projected.shape) != (len(texts), 100):
-                raise ValueError("projection output must have shape [batch, 100]")
-            if not bool(torch.isfinite(projected).all()) or not bool(torch.all(norms > 0)):
-                raise FloatingPointError("projection produced a non-finite or zero-norm vector")
-            normalized = functional.normalize(projected, dim=-1).float()
+        # A single long-lived model may be reached by several FastAPI worker
+        # threads.  Serialize access to its tokenizer/modules instead of
+        # rebuilding 0.6B parameters per request.
+        with self._inference_lock:
+            encoded = self.tokenizer(
+                list(texts),
+                padding=True,
+                truncation=True,
+                max_length=self.contract.maxLength,
+                return_tensors="pt",
+            )
+            if not isinstance(encoded, Mapping) or "input_ids" not in encoded or "attention_mask" not in encoded:
+                raise ValueError("tokenizer must return input_ids and attention_mask")
+            input_ids = encoded["input_ids"].to(self.device)
+            attention_mask = encoded["attention_mask"].to(self.device)
+            with torch.inference_mode():
+                outputs = self.backbone(input_ids=input_ids, attention_mask=attention_mask)
+                hidden = getattr(outputs, "last_hidden_state", None)
+                if hidden is None:
+                    try:
+                        hidden = outputs[0]
+                    except (KeyError, IndexError, TypeError) as error:
+                        raise TypeError("backbone output must contain last_hidden_state") from error
+                pooled = last_token_pool(hidden, attention_mask)
+                projected = self.projection(pooled.float())
+                norms = projected.norm(dim=-1)
+                if tuple(projected.shape) != (len(texts), 100):
+                    raise ValueError("projection output must have shape [batch, 100]")
+                if not bool(torch.isfinite(projected).all()) or not bool(torch.all(norms > 0)):
+                    raise FloatingPointError("projection produced a non-finite or zero-norm vector")
+                normalized = functional.normalize(projected, dim=-1).float()
         result = normalized.detach().cpu().numpy().astype(np.float32, copy=False)
         if result.shape != (len(texts), 100) or not np.isfinite(result).all():
             raise FloatingPointError("encoder output violated the finite 100d contract")

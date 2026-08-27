@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from ..contracts import ModelManifestV1
+from ..contracts import ModelManifest, ModelManifestV2
 
 
 class DuplicateModel(ValueError):
@@ -21,16 +21,16 @@ class UnknownModel(KeyError):
 
 class ModelRegistry:
     def __init__(self) -> None:
-        self._models: dict[UUID, ModelManifestV1] = {}
+        self._models: dict[UUID, ModelManifest] = {}
         self._original_id: UUID | None = None
 
     @property
-    def original(self) -> ModelManifestV1:
+    def original(self) -> ModelManifest:
         if self._original_id is None:
             raise UnknownModel("original model is not registered")
         return self._models[self._original_id]
 
-    def register_original(self, manifest: ModelManifestV1) -> None:
+    def register_original(self, manifest: ModelManifest) -> None:
         if manifest.parentModelId is not None or manifest.producingRunId is not None:
             raise IncompatibleChildModel("original model cannot declare parent lineage")
         if self._original_id is not None or manifest.modelId in self._models:
@@ -38,12 +38,19 @@ class ModelRegistry:
         self._models[manifest.modelId] = manifest
         self._original_id = manifest.modelId
 
-    def register_child(self, manifest: ModelManifestV1) -> None:
+    def register_real_original(self, manifest: ModelManifestV2) -> None:
+        if not isinstance(manifest, ModelManifestV2):
+            raise IncompatibleChildModel("scale original must be the accepted real Qwen manifest")
+        self.register_original(manifest)
+
+    def register_child(self, manifest: ModelManifest) -> None:
         if manifest.modelId in self._models:
             raise DuplicateModel(f"model already registered: {manifest.modelId}")
         if manifest.parentModelId is None or manifest.parentModelId not in self._models:
             raise IncompatibleChildModel("child parent must already be registered")
         parent = self._models[manifest.parentModelId]
+        if type(manifest) is not type(parent):
+            raise IncompatibleChildModel("child manifest generation must match its parent")
         if manifest.embeddingSpace != parent.embeddingSpace:
             raise IncompatibleChildModel("child embedding space is incompatible")
         if (
@@ -54,15 +61,24 @@ class ModelRegistry:
             raise IncompatibleChildModel("child source identity is incompatible")
         self._models[manifest.modelId] = manifest
 
-    def get(self, model_id: UUID) -> ModelManifestV1:
+    def get(self, model_id: UUID) -> ModelManifest:
         try:
             return self._models[model_id]
         except KeyError as error:
             raise UnknownModel(str(model_id)) from error
 
-    def select(self, model_id: UUID) -> ModelManifestV1:
+    def select(self, model_id: UUID) -> ModelManifest:
         """Explicitly select original or child without mutating either."""
         return self.get(model_id)
+
+    def select_for_scale(self, model_id: UUID) -> ModelManifestV2:
+        """Reject V1 fixture manifests at the formal-scale boundary."""
+        manifest = self.get(model_id)
+        if not isinstance(manifest, ModelManifestV2):
+            raise IncompatibleChildModel(
+                "scale serving requires an accepted real Qwen ModelManifestV2"
+            )
+        return manifest
 
 
 __all__ = [

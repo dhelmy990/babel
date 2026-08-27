@@ -63,3 +63,13 @@ def test_registry_keeps_original_immutable_and_selects_child_explicitly() -> Non
     assert registry.select(original.modelId).modelId == original.modelId
     assert registry.select(child.modelId).modelId == child.modelId
     assert registry.original.modelId == original.modelId
+
+
+def test_scale_selection_rejects_the_friday_fixture_manifest() -> None:
+    original = original_manifest()
+    registry = ModelRegistry()
+    registry.register_original(original)
+
+    assert hasattr(registry, "select_for_scale")
+    with pytest.raises(ValueError, match="real.*Qwen|scale"):
+        registry.select_for_scale(original.modelId)
