@@ -582,6 +582,7 @@ class PerformanceJobManager:
         workload_freezer: WorkloadFreezer,
         condition_runner: ConditionRunner,
         population_loader: Callable[[Path], FrozenPopulationManifestV1] | None = None,
+        allow_population_build: bool | None = None,
     ) -> None:
         self.database = database
         self.output_root = Path(output_root)
@@ -593,6 +594,14 @@ class PerformanceJobManager:
 
             population_loader = load_frozen_population
         self.population_loader = population_loader
+        if allow_population_build is None:
+            configured = os.environ.get("BABEL_ONLINE_ALLOW_POPULATION_BUILD", "true")
+            if configured not in {"true", "false"}:
+                raise ValueError(
+                    "BABEL_ONLINE_ALLOW_POPULATION_BUILD must be true or false"
+                )
+            allow_population_build = configured == "true"
+        self.allow_population_build = allow_population_build
         self._lock = threading.RLock()
         self._experiment_id: UUID | None = None
         self._stop = threading.Event()
@@ -644,10 +653,63 @@ class PerformanceJobManager:
         trial = self.database.load_performance_experiment(experiment_id)
         trial.validate_formal_defaults()
         if trial.population_ready:
+            if not self.allow_population_build:
+                try:
+                    if (
+                        trial.population_run_id is None
+                        or trial.population_bundle_path is None
+                        or trial.population_manifest_sha256 is None
+                    ):
+                        raise RuntimeError(
+                            "validated imported-ready population binding is absent"
+                        )
+                    directory = Path(trial.population_bundle_path)
+                    manifest_path = directory / "manifest.json"
+                    try:
+                        manifest_bytes = manifest_path.read_bytes()
+                    except OSError as error:
+                        raise RuntimeError(
+                            "imported-ready population manifest is unavailable"
+                        ) from error
+                    if (
+                        hashlib.sha256(manifest_bytes).hexdigest()
+                        != trial.population_manifest_sha256
+                    ):
+                        raise RuntimeError(
+                            "imported-ready population manifest checksum differs"
+                        )
+                    manifest = self.population_loader(directory)
+                    _validate_population_cohort(trial, manifest)
+                    if manifest.sourcePopulationRunId != trial.population_run_id:
+                        raise RuntimeError(
+                            "imported-ready population run binding differs"
+                        )
+                except BaseException as error:
+                    self.database.transition_performance(
+                        experiment_id, "failed", failure=str(error)[:1000]
+                    )
+                    with self._lock:
+                        self._experiment_id = experiment_id
+                        self._phase = "failed"
+                        self._failure = str(error)
+                    raise
             with self._lock:
                 self._experiment_id = experiment_id
                 self._phase = "waiting_for_approval"
             return
+        if not self.allow_population_build:
+            error = RuntimeError(
+                "validated imported-ready population binding is required when "
+                "population build is disabled"
+            )
+            self.database.transition_performance(
+                experiment_id, "failed", failure=str(error)
+            )
+            with self._lock:
+                self._experiment_id = experiment_id
+                self._phase = "failed"
+                self._failure = str(error)
+            raise error
         if trial.status != "population_pending":
             raise RuntimeError("trial is not ready to build its population")
         with self._lock:

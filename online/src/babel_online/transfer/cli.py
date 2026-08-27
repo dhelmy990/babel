@@ -12,7 +12,7 @@ import tempfile
 from pathlib import Path
 from uuid import UUID
 
-from .database import export_population
+from .database import export_population, import_population
 from .parquet_bundle import verify_bundle
 
 
@@ -40,16 +40,16 @@ def _parser() -> argparse.ArgumentParser:
     import_parser = commands.add_parser(
         "import", description="Import a verified portable population bundle."
     )
-    import_parser.add_argument(
-        "bundle_root",
-        nargs="?",
-        default=".",
-        help="directory containing the five-file population bundle",
-    )
-    import_parser.add_argument(
-        "--trusted-digest",
-        help="trusted SHA-256 digest of the bundle SHA256SUMS bytes",
-    )
+    import_parser.add_argument("--database-url-env", required=True)
+    import_parser.add_argument("--bundle", required=True, type=Path)
+    import_parser.add_argument("--trusted-digest", required=True)
+    import_parser.add_argument("--operator-receipt", required=True, type=Path)
+    import_parser.add_argument("--fresh-trial-id", required=True, type=UUID)
+    import_parser.add_argument("--fresh-run-id", required=True, type=UUID)
+    import_parser.add_argument("--model-artifact-manifest", required=True, type=Path)
+    import_parser.add_argument("--model-checkpoint-root", required=True, type=Path)
+    import_parser.add_argument("--frozen-output-root", required=True, type=Path)
+    import_parser.add_argument("--import-receipt", required=True, type=Path)
     return parser
 
 
@@ -94,7 +94,36 @@ def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     arguments = parser.parse_args(sys.argv[1:] if argv is None else argv)
     if arguments.command == "import":
-        raise SystemExit("population import not implemented until import adapter")
+        environment_name = arguments.database_url_env
+        if _ENVIRONMENT_NAME.fullmatch(environment_name) is None:
+            parser.error("--database-url-env is not a valid environment variable name")
+        database_url = os.environ.get(environment_name)
+        if not database_url:
+            parser.error("the named database URL environment variable is unset or empty")
+        try:
+            receipt = import_population(
+                database_url,
+                arguments.bundle,
+                arguments.trusted_digest,
+                arguments.operator_receipt,
+                arguments.fresh_trial_id,
+                arguments.fresh_run_id,
+                arguments.model_artifact_manifest,
+                arguments.model_checkpoint_root,
+                arguments.frozen_output_root,
+                arguments.import_receipt,
+            )
+        except Exception:
+            print("population import failed", file=sys.stderr)
+            return 1
+        print(
+            json.dumps(
+                receipt.model_dump(mode="json"),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        return 0
     if arguments.command == "verify":
         try:
             verified = verify_bundle(arguments.bundle, arguments.trusted_digest)

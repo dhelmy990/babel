@@ -219,6 +219,91 @@ def test_start_builds_exact_population_then_waits_for_durable_approval(tmp_path:
     assert manager.status["phase"] == "waiting_for_approval"
 
 
+def test_population_build_disabled_fails_pending_trial_without_calling_builder(
+    tmp_path: Path,
+):
+    database = FakeDatabase()
+    calls = []
+    manager = PerformanceJobManager(
+        database=database,
+        output_root=tmp_path,
+        population_builder=lambda *_args: calls.append("population-build"),
+        workload_freezer=lambda *_args: None,
+        condition_runner=lambda *_args: None,
+        allow_population_build=False,
+    )
+
+    with pytest.raises(RuntimeError, match="validated imported-ready population"):
+        manager.start(EXPERIMENT_ID)
+
+    assert calls == []
+    assert database.trial.status == "failed"
+    assert manager.status["phase"] == "failed"
+
+
+def test_population_build_disabled_accepts_only_matching_imported_ready_binding(
+    tmp_path: Path,
+):
+    database = FakeDatabase()
+    population = _population_manifest()
+    population_dir = tmp_path / "population"
+    population_dir.mkdir()
+    manifest_bytes = population.model_dump_json().encode() + b"\n"
+    (population_dir / "manifest.json").write_bytes(manifest_bytes)
+    database.trial = _trial(
+        status="population_ready",
+        population_ready=True,
+        population_run_id=POPULATION_RUN_ID,
+        population_bundle_path=str(population_dir),
+        population_manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+    )
+    manager = PerformanceJobManager(
+        database=database,
+        output_root=tmp_path,
+        population_builder=lambda *_args: pytest.fail("population build is disabled"),
+        workload_freezer=lambda *_args: None,
+        condition_runner=lambda *_args: None,
+        population_loader=lambda _path: population,
+        allow_population_build=False,
+    )
+
+    manager.start(EXPERIMENT_ID)
+
+    assert database.trial.status == "population_ready"
+    assert manager.status["phase"] == "waiting_for_approval"
+
+
+def test_population_build_disabled_rejects_drifted_imported_ready_binding(
+    tmp_path: Path,
+):
+    database = FakeDatabase()
+    population = _population_manifest()
+    population_dir = tmp_path / "population"
+    population_dir.mkdir()
+    (population_dir / "manifest.json").write_text(population.model_dump_json() + "\n")
+    database.trial = _trial(
+        status="population_ready",
+        population_ready=True,
+        population_run_id=POPULATION_RUN_ID,
+        population_bundle_path=str(population_dir),
+        population_manifest_sha256="f" * 64,
+    )
+    manager = PerformanceJobManager(
+        database=database,
+        output_root=tmp_path,
+        population_builder=lambda *_args: pytest.fail("population build is disabled"),
+        workload_freezer=lambda *_args: None,
+        condition_runner=lambda *_args: None,
+        population_loader=lambda _path: population,
+        allow_population_build=False,
+    )
+
+    with pytest.raises(RuntimeError, match="manifest checksum"):
+        manager.start(EXPERIMENT_ID)
+
+    assert database.trial.status == "failed"
+
+
 def test_population_stop_at_committed_boundary_is_interrupted_not_failed(tmp_path: Path):
     database = FakeDatabase()
     entered = threading.Event()

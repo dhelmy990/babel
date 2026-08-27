@@ -736,7 +736,7 @@ def test_import_launcher_help_is_runnable(production_bundle: BundleFiles) -> Non
     assert "population bundle" in completed.stdout
 
 
-def test_import_launcher_fails_clearly_until_adapter_exists(
+def test_import_launcher_fails_closed_without_exact_operational_arguments(
     production_bundle: BundleFiles,
 ) -> None:
     completed = subprocess.run(
@@ -747,7 +747,19 @@ def test_import_launcher_fails_clearly_until_adapter_exists(
     )
 
     assert completed.returncode != 0
-    assert "not implemented until import adapter" in completed.stderr
+    for required in (
+        "--database-url-env",
+        "--bundle",
+        "--trusted-digest",
+        "--operator-receipt",
+        "--fresh-trial-id",
+        "--fresh-run-id",
+        "--model-artifact-manifest",
+        "--model-checkpoint-root",
+        "--frozen-output-root",
+        "--import-receipt",
+    ):
+        assert required in completed.stderr
 
 
 def test_writer_passes_every_frozen_parquet_setting(
