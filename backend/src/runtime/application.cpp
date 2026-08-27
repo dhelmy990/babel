@@ -532,6 +532,15 @@ Result<void> Application::serve() {
                                                std::move(callback));
       },
       {drogon::Post});
+  server.registerHandler(
+      "/admin/api/v1/performance/{1}/artifact",
+      [&experiment_controller](const drogon::HttpRequestPtr& request,
+                               ExperimentController::Callback&& callback,
+                               std::string experiment_id) {
+        experiment_controller.attachPerformanceArtifact(
+            request, std::move(experiment_id), std::move(callback));
+      },
+      {drogon::Post});
 
   try {
     server.setThreadNum(2)

@@ -170,7 +170,11 @@ class Repository final : public ExperimentRepository {
     return performance;
   }
   Result<PerformanceExperimentDto> attachPerformanceArtifact(
-      std::string_view, const PerformanceArtifactReceipt&) override {
+      std::string_view, const PerformanceArtifactReceipt& receipt) override {
+    attached_receipt = receipt;
+    performance.artifact_sha256 = receipt.artifact_sha256;
+    performance.remote_hf_commit_sha = receipt.remote_hf_commit_sha;
+    performance.remote_hf_bundle_path = receipt.remote_hf_bundle_path;
     return performance;
   }
   Result<void> appendPerformanceProgress(
@@ -212,6 +216,7 @@ class Repository final : public ExperimentRepository {
   };
   std::size_t performance_limit{0};
   std::optional<std::string> performance_before;
+  std::optional<PerformanceArtifactReceipt> attached_receipt;
 };
 
 class Worker final : public ExperimentWorker {
@@ -414,4 +419,47 @@ TEST_CASE("performance mutations require nonce and approval waits for population
                                 std::move(callback));
   });
   CHECK(blocked->getStatusCode() == drogon::k409Conflict);
+}
+
+TEST_CASE("completed performance trial attaches one verified remote artifact receipt") {
+  Repository repository;
+  repository.performance.results = std::vector<PerformanceResultDto>(9);
+  Worker worker;
+  ExperimentService service(repository, worker,
+                            ExperimentSourcePin{"repo", "config", std::string(40, 'e')});
+  AdminSecurity security("nonce");
+  ExperimentController controller(security, service);
+  const auto receipt = NJson{
+      {"artifactSha256", std::string(64, 'a')},
+      {"remoteHfCommitSha", std::string(40, 'b')},
+      {"remoteHfBundlePath", "runs/33333333-3333-5333-8333-333333333333"},
+  };
+
+  const auto forbidden = invoke([&](auto callback) {
+    controller.attachPerformanceArtifact(
+        request(drogon::Post, receipt.dump()), repository.performance.experiment_id,
+        std::move(callback));
+  });
+  CHECK(forbidden->getStatusCode() == drogon::k403Forbidden);
+  CHECK_FALSE(repository.attached_receipt.has_value());
+
+  auto authorized = request(drogon::Post, receipt.dump());
+  authorized->addHeader("x-babel-admin-nonce", "nonce");
+  const auto premature = invoke([&](auto callback) {
+    controller.attachPerformanceArtifact(
+        authorized, repository.performance.experiment_id, std::move(callback));
+  });
+  CHECK(premature->getStatusCode() == drogon::k409Conflict);
+  CHECK_FALSE(repository.attached_receipt.has_value());
+
+  repository.performance.status = PerformanceExperimentStatus::completed;
+  const auto attached = invoke([&](auto callback) {
+    controller.attachPerformanceArtifact(
+        authorized, repository.performance.experiment_id, std::move(callback));
+  });
+  REQUIRE(attached->getStatusCode() == drogon::k200OK);
+  REQUIRE(repository.attached_receipt.has_value());
+  CHECK(repository.attached_receipt->remote_hf_bundle_path ==
+        "runs/33333333-3333-5333-8333-333333333333");
+  CHECK(body(attached).at("trial").at("remoteHfCommitSha") == std::string(40, 'b'));
 }

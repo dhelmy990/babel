@@ -348,6 +348,13 @@ Result<PerformanceExperimentDto> ExperimentService::attachPerformanceArtifact(
     std::string_view experiment_id, const PerformanceArtifactReceipt& receipt) {
   auto trial = getPerformanceExperiment(experiment_id);
   if (!trial) return tl::make_unexpected(trial.error());
+  if (trial->status != PerformanceExperimentStatus::completed ||
+      trial->results.size() != 9) {
+    return tl::make_unexpected(ApplicationError{
+        ErrorCode::conflict,
+        "remote artifact requires one completed nine-condition trial",
+    });
+  }
   if (!validDigest(std::optional<std::string>{receipt.artifact_sha256}) ||
       !validRevision(receipt.remote_hf_commit_sha) ||
       receipt.remote_hf_bundle_path.empty()) {

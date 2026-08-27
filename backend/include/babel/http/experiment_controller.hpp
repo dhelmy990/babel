@@ -31,6 +31,8 @@ class ExperimentController final {
                                std::string experiment_id, Callback) const;
   void approveNextScale(const drogon::HttpRequestPtr&, std::string experiment_id,
                         Callback) const;
+  void attachPerformanceArtifact(const drogon::HttpRequestPtr&,
+                                 std::string experiment_id, Callback) const;
 
  private:
   AdminSecurity& security_;

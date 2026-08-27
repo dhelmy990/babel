@@ -456,6 +456,27 @@ Result<PerformanceLaunchRequest> performanceLaunchRequest(
   }
 }
 
+Result<PerformanceArtifactReceipt> performanceArtifactReceipt(
+    const drogon::HttpRequestPtr& request) {
+  auto payload = Json::parse(request->body(), nullptr, false);
+  if (!payload.is_object()) return invalidArgument("artifact receipt must be JSON");
+  const std::set<std::string> required{
+      "artifactSha256", "remoteHfCommitSha", "remoteHfBundlePath"};
+  if (payload.size() != required.size()) {
+    return invalidArgument("artifact receipt fields differ");
+  }
+  for (const auto& field : required) {
+    if (!payload.contains(field) || !payload.at(field).is_string()) {
+      return invalidArgument("artifact receipt fields differ");
+    }
+  }
+  return PerformanceArtifactReceipt{
+      .artifact_sha256 = payload.at("artifactSha256").get<std::string>(),
+      .remote_hf_commit_sha = payload.at("remoteHfCommitSha").get<std::string>(),
+      .remote_hf_bundle_path = payload.at("remoteHfBundlePath").get<std::string>(),
+  };
+}
+
 }  // namespace
 
 ExperimentController::ExperimentController(AdminSecurity& security,
@@ -677,6 +698,29 @@ void ExperimentController::approveNextScale(const drogon::HttpRequestPtr& reques
   }
   callback(jsonResponse(drogon::k202Accepted,
                         Json{{"trial", performanceJson(*approved)}}));
+}
+
+void ExperimentController::attachPerformanceArtifact(
+    const drogon::HttpRequestPtr& request, std::string experiment_id,
+    Callback callback) const {
+  if (!security_.authorizeMutation(request)) {
+    callback(jsonResponse(drogon::k403Forbidden,
+                          Json{{"error", Json{{"code", "forbidden"},
+                                               {"message", "Performance request rejected"}}}}));
+    return;
+  }
+  auto parsed = performanceArtifactReceipt(request);
+  if (!parsed) {
+    callback(failure(parsed.error(), "Invalid remote artifact receipt"));
+    return;
+  }
+  auto attached = service_.attachPerformanceArtifact(experiment_id, *parsed);
+  if (!attached) {
+    callback(failure(attached.error(), "Performance artifact could not be attached"));
+    return;
+  }
+  callback(jsonResponse(drogon::k200OK,
+                        Json{{"trial", performanceJson(*attached)}}));
 }
 
 }  // namespace babel
