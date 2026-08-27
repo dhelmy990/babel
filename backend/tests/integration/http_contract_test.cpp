@@ -383,6 +383,8 @@ TEST_CASE("runtime configuration is fixed to loopback and rejects unsafe databas
   CHECK_FALSE(defaults->huggingface_token.has_value());
   CHECK(defaults->online_worker_endpoint == "http://127.0.0.1:8790");
   CHECK_FALSE(defaults->online_worker_token.has_value());
+  CHECK(defaults->performance_worker_endpoint == "http://127.0.0.1:8792");
+  CHECK_FALSE(defaults->performance_worker_token.has_value());
 
   const auto nul = RuntimeConfig::fromEnvironment([](std::string_view name) {
     return name == "BABEL_DATABASE_URL"
@@ -405,6 +407,10 @@ TEST_CASE("runtime configuration is fixed to loopback and rejects unsafe databas
       return std::optional<std::string>{"http://127.0.0.1:9876"};
     if (name == "BABEL_ONLINE_WORKER_TOKEN")
       return std::optional<std::string>{std::string(64, 'e')};
+    if (name == "BABEL_PERFORMANCE_WORKER_ENDPOINT")
+      return std::optional<std::string>{"http://127.0.0.1:9878"};
+    if (name == "BABEL_PERFORMANCE_WORKER_TOKEN")
+      return std::optional<std::string>{std::string(64, 'f')};
     if (name == "BABEL_DATA_ROOT") return std::optional<std::string>{"/srv/babel-data"};
     return std::optional<std::string>{};
   });
@@ -418,6 +424,9 @@ TEST_CASE("runtime configuration is fixed to loopback and rejects unsafe databas
   CHECK(configured->huggingface_cache_root == "/srv/babel-data/cache/backend-seed");
   CHECK(configured->online_worker_endpoint == "http://127.0.0.1:9876");
   CHECK(configured->online_worker_token == std::optional{std::string(64, 'e')});
+  CHECK(configured->performance_worker_endpoint == "http://127.0.0.1:9878");
+  CHECK(configured->performance_worker_token ==
+        std::optional{std::string(64, 'f')});
 }
 
 TEST_CASE("runtime command parser exposes migrate serve and typed Personal migration only") {

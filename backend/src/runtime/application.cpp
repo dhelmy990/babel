@@ -32,6 +32,7 @@
 #include "babel/runtime/seed_job_runner.hpp"
 #include "babel/runtime/experiment_job_runner.hpp"
 #include "babel/runtime/experiment_worker_http_client.hpp"
+#include "babel/runtime/performance_worker_http_client.hpp"
 
 namespace babel {
 class BackendInstanceLease::State final {
@@ -128,6 +129,20 @@ class ThreadSafeIdGenerator final : public IdGenerator {
 ApplicationError commandError(std::string message) {
   return ApplicationError{.code = ErrorCode::invalid_argument, .message = std::move(message)};
 }
+
+class UnavailablePerformanceWorker final : public PerformanceExperimentWorker {
+ public:
+  Result<void> start(std::string_view) override { return unavailable(); }
+  Result<void> requestGracefulStop(std::string_view) override { return unavailable(); }
+  Result<void> approveNextScale(std::string_view) override { return unavailable(); }
+
+ private:
+  static Result<void> unavailable() {
+    return tl::make_unexpected(ApplicationError{
+        ErrorCode::database_unavailable,
+        "performance worker token is not configured"});
+  }
+};
 
 }  // namespace
 
@@ -228,8 +243,8 @@ Result<void> Application::verifySchemaReady() {
       });
     }
     if (transaction.exec(
-            "SELECT count(*) = 8 FROM schema_migrations "
-            "WHERE version IN ('1', '2', '3', '4', '5', '6', '7', '8')")
+            "SELECT count(*) = 9 FROM schema_migrations "
+            "WHERE version IN ('1', '2', '3', '4', '5', '6', '7', '8', '9')")
             .one_field()
             .as<bool>() == false) {
       return tl::make_unexpected(ApplicationError{
@@ -315,8 +330,16 @@ Result<void> Application::serve() {
     experiment_worker = std::make_unique<ExperimentJobRunner>(
         ExperimentJobRunner::Start{}, ExperimentJobRunner::GracefulStop{});
   }
+  std::unique_ptr<PerformanceExperimentWorker> performance_worker;
+  if (config_.performance_worker_token) {
+    performance_worker = std::make_unique<PerformanceWorkerHttpClient>(
+        config_.performance_worker_endpoint, *config_.performance_worker_token);
+  } else {
+    performance_worker = std::make_unique<UnavailablePerformanceWorker>();
+  }
   ExperimentService experiment_service(experiment_runs, *experiment_worker,
-                                       config_.experiment_source);
+                                       config_.experiment_source,
+                                       performance_worker.get());
   ExperimentController experiment_controller(admin_security, experiment_service);
 
   auto interrupted = seed_runner.markInterruptedRuns();

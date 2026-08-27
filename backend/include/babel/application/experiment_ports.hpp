@@ -33,6 +33,8 @@ class ExperimentRepository {
       std::string_view experiment_id) = 0;
   virtual Result<PerformanceExperimentDto> approvePerformanceNextScale(
       std::string_view experiment_id) = 0;
+  virtual Result<void> markPerformanceLaunchFailed(
+      std::string_view experiment_id, std::string_view message) = 0;
   virtual Result<PerformanceExperimentDto> markPerformancePopulationReady(
       std::string_view experiment_id, const PerformancePopulationEvidence&) = 0;
   virtual Result<PerformanceExperimentDto> attachPerformanceArtifact(
@@ -48,6 +50,14 @@ class ExperimentWorker {
   virtual ~ExperimentWorker() = default;
   virtual Result<void> start(ExperimentRunId) = 0;
   virtual Result<void> requestGracefulStop(ExperimentRunId) = 0;
+};
+
+class PerformanceExperimentWorker {
+ public:
+  virtual ~PerformanceExperimentWorker() = default;
+  virtual Result<void> start(std::string_view experiment_id) = 0;
+  virtual Result<void> requestGracefulStop(std::string_view experiment_id) = 0;
+  virtual Result<void> approveNextScale(std::string_view experiment_id) = 0;
 };
 
 }  // namespace babel

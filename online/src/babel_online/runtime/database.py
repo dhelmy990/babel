@@ -43,6 +43,10 @@ class LaunchIntegrityError(ValueError):
     pass
 
 
+class PerformanceBindingConflict(ValueError):
+    pass
+
+
 def _canonical_json(value: object) -> bytes:
     return json.dumps(
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
@@ -109,6 +113,123 @@ class RuntimeDatabase:
         version = document.get("schemaVersion")
         config_type = RunConfigV2 if version == 2 else RunConfigV1
         return PersistedRun(config_type.model_validate(document), str(row[2]), digest)
+
+    def create_scaled_run(self, config: RunConfigV2) -> PersistedRun:
+        """Persist one canonical V2 launch without passing through the V1 dashboard path."""
+        if not isinstance(config, RunConfigV2):
+            raise TypeError("scaled run creation requires RunConfigV2")
+        document = config.model_dump(mode="json")
+        launch = _canonical_json(document).decode("utf-8")
+        digest = hashlib.sha256(launch.encode("utf-8")).hexdigest()
+        scenario = "june_only" if len(config.environmentSequence) == 1 else "june_to_july"
+        legacy_month_budget = config.perMonthEventBudget[config.environmentSequence[0]]
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO experiment_runs(
+                  id, status, retrieval_backend, creator_count, scenario,
+                  environment_sequence, event_budget_per_month, run_seed,
+                  dataset_repository, dataset_config, dataset_revision,
+                  recommendation_k, top_l, kafka_topic, kafka_group,
+                  checkpoint_every_events, sync_every_steps, artifact_root, state_root,
+                  starting_model_id, active_model_id, contract_version,
+                  source_articles_per_month, target_created_babels, concurrent_users,
+                  recommendation_start_probability, continuation_probability,
+                  maximum_traversal_depth, maximum_requests_per_traversal,
+                  interleave_creation_and_recommendations, launch_config, launch_sha256
+                ) VALUES (
+                  %s, 'starting', %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s,
+                  %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 2,
+                  %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s
+                )
+                """,
+                (
+                    config.runId,
+                    config.retrievalBackend,
+                    config.creatorCount,
+                    scenario,
+                    json.dumps(config.environmentSequence, separators=(",", ":")),
+                    legacy_month_budget,
+                    config.runSeed,
+                    config.datasetRepo,
+                    config.datasetConfig,
+                    config.datasetRevision,
+                    config.recommendationK,
+                    config.topL,
+                    config.kafkaTopic,
+                    config.kafkaGroup,
+                    config.checkpointEveryEvents,
+                    config.syncEverySteps,
+                    config.artifactRoot,
+                    config.stateRoot,
+                    config.startingModelId,
+                    config.startingModelId,
+                    config.sourceArticlesPerMonth,
+                    config.targetCreatedBabels,
+                    config.concurrentUsers,
+                    config.recommendationStartProbability,
+                    config.continuationProbability,
+                    config.maximumTraversalDepth,
+                    config.maximumRequestsPerTraversal,
+                    config.interleaveCreationAndRecommendations,
+                    launch,
+                    digest,
+                ),
+            )
+        return PersistedRun(config=config, status="starting", launch_sha256=digest)
+
+    def bind_performance_population(
+        self,
+        experiment_id: str,
+        run_id: UUID,
+        manifest_sha256: str,
+        bundle_path: str,
+    ) -> None:
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE performance_experiments
+                SET run_id=%s, population_manifest_sha256=%s,
+                    population_bundle_path=%s
+                WHERE id=%s AND (
+                  (run_id IS NULL AND population_manifest_sha256 IS NULL AND
+                   population_bundle_path IS NULL) OR
+                  (run_id=%s AND population_manifest_sha256=%s AND
+                   population_bundle_path=%s)
+                )
+                RETURNING id
+                """,
+                (
+                    run_id,
+                    manifest_sha256,
+                    bundle_path,
+                    experiment_id,
+                    run_id,
+                    manifest_sha256,
+                    bundle_path,
+                ),
+            )
+            if cursor.fetchone() is None:
+                raise PerformanceBindingConflict(
+                    "performance population already has a different execution binding"
+                )
+
+    def bind_performance_condition(
+        self, experiment_id: str, condition_id: str, run_id: UUID
+    ) -> None:
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE performance_conditions SET run_id=%s
+                WHERE experiment_id=%s AND id=%s AND (run_id IS NULL OR run_id=%s)
+                RETURNING id
+                """,
+                (run_id, experiment_id, condition_id, run_id),
+            )
+            if cursor.fetchone() is None:
+                raise PerformanceBindingConflict(
+                    "performance condition already has a different run binding"
+                )
 
     def bootstrap_model(self, artifact: LoadedArtifact) -> None:
         model = artifact.manifest

@@ -159,6 +159,12 @@ class Repository final : public ExperimentRepository {
     performance.operator_approved = true;
     return performance;
   }
+  Result<void> markPerformanceLaunchFailed(
+      std::string_view, std::string_view message) override {
+    performance.status = PerformanceExperimentStatus::failed;
+    performance.failure = std::string(message);
+    return {};
+  }
   Result<PerformanceExperimentDto> markPerformancePopulationReady(
       std::string_view, const PerformancePopulationEvidence&) override {
     return performance;
@@ -373,6 +379,8 @@ TEST_CASE("saved performance list and progress detail are read only") {
   CHECK(trial.at("results").at(0).at("Ifull") == 1.8);
   CHECK(trial.at("results").at(0).at("IActivationIncrement") == 1.2);
   CHECK(trial.at("results").at(0).at("evidenceSha256") == std::string(64, 'a'));
+  CHECK(trial.contains("failure"));
+  CHECK(trial.at("failure").is_null());
 }
 
 TEST_CASE("performance mutations require nonce and approval waits for population evidence") {

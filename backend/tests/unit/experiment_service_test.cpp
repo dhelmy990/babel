@@ -102,6 +102,7 @@ class FakeRepository final : public ExperimentRepository {
 
   Result<PerformanceExperimentDto> createPerformanceExperiment(
       const PerformanceLaunchRequest& request) override {
+    events.push_back("persist-create");
     performance_created = request;
     return performance;
   }
@@ -114,11 +115,13 @@ class FakeRepository final : public ExperimentRepository {
   }
   Result<PerformanceExperimentDto> requestPerformanceGracefulStop(
       std::string_view) override {
+    events.push_back("persist-stop");
     performance.status = PerformanceExperimentStatus::stop_requested;
     return performance;
   }
   Result<PerformanceExperimentDto> approvePerformanceNextScale(
       std::string_view) override {
+    events.push_back("persist-approval");
     ++approve_calls;
     if (!performance.population_ready) {
       return tl::make_unexpected(ApplicationError{ErrorCode::conflict,
@@ -127,6 +130,13 @@ class FakeRepository final : public ExperimentRepository {
     performance.operator_approved = true;
     performance.status = PerformanceExperimentStatus::approved;
     return performance;
+  }
+  Result<void> markPerformanceLaunchFailed(std::string_view,
+                                           std::string_view message) override {
+    events.push_back("persist-failed");
+    performance.status = PerformanceExperimentStatus::failed;
+    performance.failure = std::string(message);
+    return {};
   }
   Result<PerformanceExperimentDto> markPerformancePopulationReady(
       std::string_view, const PerformancePopulationEvidence& evidence) override {
@@ -185,6 +195,7 @@ class FakeRepository final : public ExperimentRepository {
   };
   std::optional<PerformanceLaunchRequest> performance_created;
   int approve_calls{0};
+  std::vector<std::string> events;
 };
 
 class FakeWorker final : public ExperimentWorker {
@@ -209,6 +220,41 @@ class FakeWorker final : public ExperimentWorker {
   std::optional<ExperimentRunId> stopped_run;
   int start_calls{0};
   int stop_calls{0};
+};
+
+class FakePerformanceWorker final : public PerformanceExperimentWorker {
+ public:
+  explicit FakePerformanceWorker(std::vector<std::string>* events = nullptr)
+      : events(events) {}
+
+  Result<void> start(std::string_view experiment_id) override {
+    ++start_calls;
+    started = experiment_id;
+    if (events) events->push_back("command-start");
+    if (start_error) return tl::make_unexpected(*start_error);
+    return {};
+  }
+  Result<void> requestGracefulStop(std::string_view experiment_id) override {
+    ++stop_calls;
+    stopped = experiment_id;
+    if (events) events->push_back("command-stop");
+    return {};
+  }
+  Result<void> approveNextScale(std::string_view experiment_id) override {
+    ++approval_calls;
+    approved = experiment_id;
+    if (events) events->push_back("command-approval");
+    return {};
+  }
+
+  std::vector<std::string>* events;
+  std::optional<ApplicationError> start_error;
+  std::string started;
+  std::string stopped;
+  std::string approved;
+  int start_calls{0};
+  int stop_calls{0};
+  int approval_calls{0};
 };
 
 ExperimentSourcePin sourcePin() {
@@ -302,7 +348,8 @@ TEST_CASE("graceful stop persists intent and never exposes a kill operation") {
 TEST_CASE("performance trial defaults freeze split real model and scale controls") {
   FakeRepository repository;
   FakeWorker worker;
-  ExperimentService service(repository, worker, sourcePin());
+  FakePerformanceWorker performance_worker(&repository.events);
+  ExperimentService service(repository, worker, sourcePin(), &performance_worker);
   PerformanceLaunchRequest request{.starting_model_id = repository.model.model_id};
 
   const auto created = service.createPerformanceExperiment(request);
@@ -327,6 +374,59 @@ TEST_CASE("performance trial defaults freeze split real model and scale controls
   CHECK(repository.performance_created->sync_every_steps == 10);
   CHECK(repository.performance_created->interleave_creation_and_recommendations);
   CHECK_FALSE(repository.performance_created->auto_advance);
+  CHECK(performance_worker.start_calls == 1);
+  CHECK(performance_worker.started == created->experiment_id);
+  CHECK(repository.events == std::vector<std::string>{"persist-create", "command-start"});
+}
+
+TEST_CASE("performance launch failure is durable and returns the dispatch error") {
+  FakeRepository repository;
+  FakeWorker worker;
+  FakePerformanceWorker performance_worker(&repository.events);
+  performance_worker.start_error = ApplicationError{
+      ErrorCode::database_unavailable, "performance worker unavailable"};
+  ExperimentService service(repository, worker, sourcePin(), &performance_worker);
+
+  const auto created = service.createPerformanceExperiment(
+      PerformanceLaunchRequest{.starting_model_id = repository.model.model_id});
+
+  REQUIRE_FALSE(created.has_value());
+  CHECK(created.error().message == "performance worker unavailable");
+  CHECK(repository.performance.failure == "performance worker unavailable");
+  CHECK(repository.events == std::vector<std::string>{
+                                 "persist-create", "command-start", "persist-failed"});
+}
+
+TEST_CASE("performance stop and approval signal only after durable mutation") {
+  FakeRepository repository;
+  repository.performance.population_ready = true;
+  repository.performance.population_vector_count = 10000;
+  repository.performance.population_vector_sha256 = std::string(64, 'a');
+  repository.performance.population_model_repository =
+      repository.performance.launch.model_repository;
+  repository.performance.population_model_revision =
+      repository.performance.launch.model_revision;
+  repository.performance.population_model_sha256 = std::string(64, 'b');
+  repository.performance.population_dataset_repository =
+      repository.performance.launch.dataset_repository;
+  repository.performance.population_dataset_revision =
+      repository.performance.launch.dataset_revision;
+  repository.performance.population_dataset_sha256 = std::string(64, 'c');
+  FakeWorker worker;
+  FakePerformanceWorker performance_worker(&repository.events);
+  ExperimentService service(repository, worker, sourcePin(), &performance_worker);
+
+  REQUIRE(service.requestPerformanceGracefulStop(
+              repository.performance.experiment_id).has_value());
+  repository.performance.status = PerformanceExperimentStatus::population_ready;
+  REQUIRE(service.approvePerformanceNextScale(
+              repository.performance.experiment_id).has_value());
+
+  CHECK(repository.events == std::vector<std::string>{
+                                 "persist-stop", "command-stop",
+                                 "persist-approval", "command-approval"});
+  CHECK(performance_worker.stop_calls == 1);
+  CHECK(performance_worker.approval_calls == 1);
 }
 
 TEST_CASE("formal performance approval is blocked until exact population evidence exists") {

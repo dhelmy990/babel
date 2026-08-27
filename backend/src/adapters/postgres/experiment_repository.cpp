@@ -133,7 +133,7 @@ constexpr auto kPerformanceColumns = R"(
   population_model_sha256, population_dataset_repository, population_dataset_revision,
   population_dataset_sha256,
   operator_approved, artifact_sha256, remote_hf_commit_sha, remote_hf_bundle_path,
-  run_id,
+  run_id, population_manifest_sha256, population_bundle_path, failure,
   to_char(timezone('UTC', created_at), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at_text
 )";
 
@@ -197,6 +197,10 @@ PerformanceExperimentDto performanceFromRow(const pqxx::row& row) {
                     ? std::nullopt
                     : std::optional{ExperimentRunId::parse(
                                           row["run_id"].as<std::string>()).value()},
+      .population_manifest_sha256 =
+          optionalField<std::string>(row, "population_manifest_sha256"),
+      .population_bundle_path = optionalField<std::string>(row, "population_bundle_path"),
+      .failure = optionalField<std::string>(row, "failure"),
       .placement_manifest_json = optionalField<std::string>(row, "placement_manifest"),
       .placement_sha256 = optionalField<std::string>(row, "placement_sha256"),
       .hardware_identity_json = row["hardware_identity"].as<std::string>(),
@@ -882,6 +886,28 @@ PostgresExperimentRepository::markPerformancePopulationReady(
     }
     transaction.commit();
     return performanceFromRow(rows.one_row());
+  } catch (const std::exception& exception) {
+    return tl::make_unexpected(mapPostgresError(exception));
+  }
+}
+
+Result<void> PostgresExperimentRepository::markPerformanceLaunchFailed(
+    std::string_view experiment_id, std::string_view message) {
+  try {
+    auto connection = database_.connect();
+    pqxx::work transaction(*connection);
+    const auto rows = transaction.exec(R"(
+      UPDATE performance_experiments
+      SET status = 'failed', failure = $2
+      WHERE id = $1
+      RETURNING id
+    )", pqxx::params{experiment_id, message});
+    if (rows.empty()) {
+      return tl::make_unexpected(
+          ApplicationError{ErrorCode::not_found, "performance experiment not found"});
+    }
+    transaction.commit();
+    return {};
   } catch (const std::exception& exception) {
     return tl::make_unexpected(mapPostgresError(exception));
   }

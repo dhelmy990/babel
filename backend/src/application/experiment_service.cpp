@@ -182,8 +182,12 @@ bool isTerminal(ExperimentStatus status) noexcept {
 
 ExperimentService::ExperimentService(ExperimentRepository& repository,
                                      ExperimentWorker& worker,
-                                     ExperimentSourcePin source)
-    : repository_(repository), worker_(worker), source_(std::move(source)) {}
+                                     ExperimentSourcePin source,
+                                     PerformanceExperimentWorker* performance_worker)
+    : repository_(repository),
+      worker_(worker),
+      performance_worker_(performance_worker),
+      source_(std::move(source)) {}
 
 Result<std::vector<RecommenderModelDto>> ExperimentService::listModels() {
   return repository_.listModels();
@@ -250,7 +254,16 @@ Result<PerformanceExperimentDto> ExperimentService::createPerformanceExperiment(
     return invalidArgument(
         "selected model repository and revision must match the immutable registry entry");
   }
-  return repository_.createPerformanceExperiment(request);
+  auto created = repository_.createPerformanceExperiment(request);
+  if (!created) return tl::make_unexpected(created.error());
+  if (performance_worker_ == nullptr) return created;
+  auto launched = performance_worker_->start(created->experiment_id);
+  if (!launched) {
+    (void)repository_.markPerformanceLaunchFailed(created->experiment_id,
+                                                  launched.error().message);
+    return tl::make_unexpected(launched.error());
+  }
+  return created;
 }
 
 Result<std::vector<PerformanceExperimentDto>>
@@ -278,7 +291,12 @@ Result<PerformanceExperimentDto> ExperimentService::requestPerformanceGracefulSt
   if (experiment_id.empty() || experiment_id.size() > 128) {
     return invalidArgument("performance experiment ID is invalid");
   }
-  return repository_.requestPerformanceGracefulStop(experiment_id);
+  auto stopped = repository_.requestPerformanceGracefulStop(experiment_id);
+  if (!stopped) return tl::make_unexpected(stopped.error());
+  if (performance_worker_ == nullptr) return stopped;
+  auto requested = performance_worker_->requestGracefulStop(experiment_id);
+  if (!requested) return tl::make_unexpected(requested.error());
+  return stopped;
 }
 
 Result<PerformanceExperimentDto> ExperimentService::approvePerformanceNextScale(
@@ -299,7 +317,12 @@ Result<PerformanceExperimentDto> ExperimentService::approvePerformanceNextScale(
         "exact real model, dataset, vector count, and checksum evidence is required",
     });
   }
-  return repository_.approvePerformanceNextScale(experiment_id);
+  auto approved = repository_.approvePerformanceNextScale(experiment_id);
+  if (!approved) return tl::make_unexpected(approved.error());
+  if (performance_worker_ == nullptr) return approved;
+  auto requested = performance_worker_->approveNextScale(experiment_id);
+  if (!requested) return tl::make_unexpected(requested.error());
+  return approved;
 }
 
 Result<PerformanceExperimentDto> ExperimentService::markPerformancePopulationReady(

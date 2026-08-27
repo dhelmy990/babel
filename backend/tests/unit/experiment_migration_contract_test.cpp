@@ -100,7 +100,7 @@ TEST_CASE("performance migration saves immutable trials evidence progress and ap
   CHECK(migration.find("iactivation_increment double precision") != std::string::npos);
 }
 
-TEST_CASE("runtime readiness requires every migration through performance version eight") {
+TEST_CASE("runtime readiness requires every migration through performance execution version nine") {
   const auto application_path =
       std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
       "src/runtime/application.cpp";
@@ -108,8 +108,30 @@ TEST_CASE("runtime readiness requires every migration through performance versio
   REQUIRE(application_file.good());
 
   const std::string source{std::istreambuf_iterator<char>{application_file}, {}};
-  CHECK(source.find("SELECT count(*) = 8 FROM schema_migrations") !=
+  CHECK(source.find("SELECT count(*) = 9 FROM schema_migrations") !=
         std::string::npos);
-  CHECK(source.find("version IN ('1', '2', '3', '4', '5', '6', '7', '8')") !=
+  CHECK(source.find("version IN ('1', '2', '3', '4', '5', '6', '7', '8', '9')") !=
+        std::string::npos);
+}
+
+TEST_CASE("performance execution migration binds population and condition runs immutably") {
+  const auto migration_path =
+      std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
+      "migrations/009_performance_execution.sql";
+  std::ifstream migration_file(migration_path);
+  REQUIRE(migration_file.good());
+
+  const std::string migration{std::istreambuf_iterator<char>{migration_file}, {}};
+  CHECK(migration.find("population_manifest_sha256") != std::string::npos);
+  CHECK(migration.find("population_bundle_path") != std::string::npos);
+  CHECK(migration.find("failure") != std::string::npos);
+  CHECK(migration.find("ADD COLUMN run_id uuid") != std::string::npos);
+  CHECK(migration.find("REFERENCES experiment_runs(id) ON DELETE RESTRICT") !=
+        std::string::npos);
+  CHECK(migration.find("CREATE UNIQUE INDEX performance_conditions_run_id_unique") !=
+        std::string::npos);
+  CHECK(migration.find("prevent_performance_execution_binding_mutation") !=
+        std::string::npos);
+  CHECK(migration.find("prevent_performance_condition_run_mutation") !=
         std::string::npos);
 }

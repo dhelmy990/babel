@@ -184,6 +184,9 @@ Json performanceJson(const PerformanceExperimentDto& value) {
             {"datasetRevision", nullable(value.population_dataset_revision)},
             {"datasetSha256", nullable(value.population_dataset_sha256)}}},
       {"runId", value.run_id ? Json(value.run_id->value) : Json(nullptr)},
+      {"populationManifestSha256", nullable(value.population_manifest_sha256)},
+      {"populationBundlePath", nullable(value.population_bundle_path)},
+      {"failure", nullable(value.failure)},
       {"placement", value.placement_manifest_json
                             ? parsedObject(*value.placement_manifest_json)
                             : Json(nullptr)},

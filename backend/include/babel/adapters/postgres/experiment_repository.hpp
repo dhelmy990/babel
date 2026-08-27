@@ -30,6 +30,8 @@ class PostgresExperimentRepository final : public ExperimentRepository {
       std::string_view experiment_id) override;
   Result<PerformanceExperimentDto> approvePerformanceNextScale(
       std::string_view experiment_id) override;
+  Result<void> markPerformanceLaunchFailed(
+      std::string_view experiment_id, std::string_view message) override;
   Result<PerformanceExperimentDto> markPerformancePopulationReady(
       std::string_view experiment_id, const PerformancePopulationEvidence&) override;
   Result<PerformanceExperimentDto> attachPerformanceArtifact(

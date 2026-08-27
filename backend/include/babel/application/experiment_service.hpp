@@ -10,7 +10,8 @@ namespace babel {
 
 class ExperimentService final {
  public:
-  ExperimentService(ExperimentRepository&, ExperimentWorker&, ExperimentSourcePin);
+  ExperimentService(ExperimentRepository&, ExperimentWorker&, ExperimentSourcePin,
+                    PerformanceExperimentWorker* performance_worker = nullptr);
 
   Result<std::vector<RecommenderModelDto>> listModels();
   Result<ExperimentRunStatusDto> latestRun();
@@ -41,6 +42,7 @@ class ExperimentService final {
  private:
   ExperimentRepository& repository_;
   ExperimentWorker& worker_;
+  PerformanceExperimentWorker* performance_worker_;
   ExperimentSourcePin source_;
 };
 

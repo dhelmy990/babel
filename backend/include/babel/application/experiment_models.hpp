@@ -186,6 +186,9 @@ struct PerformanceExperimentDto {
   std::optional<std::string> population_dataset_sha256{};
   bool operator_approved{false};
   std::optional<ExperimentRunId> run_id{};
+  std::optional<std::string> population_manifest_sha256{};
+  std::optional<std::string> population_bundle_path{};
+  std::optional<std::string> failure{};
   std::optional<std::string> placement_manifest_json{};
   std::optional<std::string> placement_sha256{};
   std::string hardware_identity_json{"{}"};

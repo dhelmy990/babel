@@ -366,3 +366,46 @@ TEST_CASE_METHOD(ExperimentPostgresFixture,
   REQUIRE(listed->size() == 1);
   CHECK(listed->front().experiment_id == created->experiment_id);
 }
+
+TEST_CASE_METHOD(ExperimentPostgresFixture,
+                 "performance execution identities and launch failure are durable") {
+  const auto trial = repository_.createPerformanceExperiment(
+      babel::PerformanceLaunchRequest{.starting_model_id = model_id_}).value();
+  const auto population_run = repository_.createRun(launch()).value();
+
+  pqxx::connection connection(schemaUrl());
+  pqxx::work transaction(connection);
+  const auto condition_id = transaction.exec(
+      "SELECT id FROM performance_conditions WHERE experiment_id=$1 "
+      "ORDER BY condition_index LIMIT 1",
+      pqxx::params{trial.experiment_id}).one_field().as<std::string>();
+  transaction.exec(
+      "UPDATE performance_experiments SET run_id=$2, "
+      "population_manifest_sha256=$3, population_bundle_path=$4 WHERE id=$1",
+      pqxx::params{trial.experiment_id, population_run.run_id.value,
+                   std::string(64, 'a'), "runs/population"});
+  transaction.exec(
+      "UPDATE performance_conditions SET run_id=$3 WHERE experiment_id=$1 AND id=$2",
+      pqxx::params{trial.experiment_id, condition_id, population_run.run_id.value});
+  transaction.commit();
+
+  const auto conflict = [&] {
+    pqxx::connection changed_connection(schemaUrl());
+    pqxx::work changed(changed_connection);
+    changed.exec(
+        "UPDATE performance_experiments SET population_bundle_path='runs/other' "
+        "WHERE id=$1", pqxx::params{trial.experiment_id});
+    changed.commit();
+  };
+  CHECK_THROWS(conflict());
+
+  REQUIRE(repository_.markPerformanceLaunchFailed(
+      trial.experiment_id, "performance worker unavailable").has_value());
+  const auto failed = repository_.getPerformanceExperiment(trial.experiment_id);
+  REQUIRE(failed.has_value());
+  CHECK(failed->status == babel::PerformanceExperimentStatus::failed);
+  CHECK(failed->failure == "performance worker unavailable");
+  CHECK(failed->run_id == population_run.run_id);
+  CHECK(failed->population_manifest_sha256 == std::string(64, 'a'));
+  CHECK(failed->population_bundle_path == "runs/population");
+}

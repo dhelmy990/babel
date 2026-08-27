@@ -38,6 +38,8 @@ struct RuntimeConfig {
   };
   std::string online_worker_endpoint{"http://127.0.0.1:8790"};
   std::optional<std::string> online_worker_token;
+  std::string performance_worker_endpoint{"http://127.0.0.1:8792"};
+  std::optional<std::string> performance_worker_token;
 
   static Result<RuntimeConfig> fromEnvironment();
   static Result<RuntimeConfig> fromEnvironment(const Environment&);

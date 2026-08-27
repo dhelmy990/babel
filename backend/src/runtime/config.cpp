@@ -64,6 +64,19 @@ Result<RuntimeConfig> RuntimeConfig::fromEnvironment(const Environment& environm
     return invalidArgument(
         "BABEL_ONLINE_WORKER_TOKEN must contain exactly 64 lowercase hex digits");
   }
+  if (const auto endpoint = environment("BABEL_PERFORMANCE_WORKER_ENDPOINT")) {
+    if (!validLoopbackEndpoint(*endpoint)) {
+      return invalidArgument(
+          "BABEL_PERFORMANCE_WORKER_ENDPOINT must be numeric IPv4 loopback HTTP");
+    }
+    config.performance_worker_endpoint = *endpoint;
+  }
+  config.performance_worker_token = environment("BABEL_PERFORMANCE_WORKER_TOKEN");
+  if (config.performance_worker_token &&
+      !validInstanceToken(*config.performance_worker_token)) {
+    return invalidArgument(
+        "BABEL_PERFORMANCE_WORKER_TOKEN must contain exactly 64 lowercase hex digits");
+  }
   config.huggingface_token = environment("HF_TOKEN");
   if (config.huggingface_token && invalidEnvironmentValue(*config.huggingface_token)) {
     return invalidArgument("HF_TOKEN must be a non-empty single-line value");

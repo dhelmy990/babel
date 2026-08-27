@@ -11,6 +11,7 @@ from babel_online.contracts import (
     ActivityLogV1,
     ModelManifestV1,
     RunConfigV1,
+    RunConfigV2,
 )
 from babel_online.model.source_vector_cache import VectorCacheKey
 from babel_online.model.registry import ModelRegistry
@@ -139,6 +140,102 @@ class RecordingConnection:
 
     def cursor(self):
         return self._cursor
+
+
+def scaled_run_config() -> RunConfigV2:
+    return RunConfigV2(
+        schemaVersion=2,
+        runId=UUID("aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa"),
+        datasetRepo="owner/dataset",
+        datasetConfig="scaled",
+        datasetRevision="b" * 40,
+        startingModelId=UUID("cccccccc-cccc-5ccc-8ccc-cccccccccccc"),
+        retrievalBackend="pgvector",
+        creatorCount=50,
+        embeddingDimension=100,
+        environmentSequence=["2026-06", "2026-07"],
+        perMonthEventBudget={"2026-06": 2500, "2026-07": 2500},
+        runSeed=19,
+        recommendationK=20,
+        topL=200,
+        kafkaTopic="scaled.feedback",
+        kafkaGroup="scaled-trainer",
+        checkpointEveryEvents=80,
+        syncEverySteps=12,
+        artifactRoot="artifacts/scaled",
+        stateRoot="state/scaled",
+        sourceArticlesPerMonth=5000,
+        targetCreatedBabels=5000,
+        concurrentUsers=40,
+        recommendationStartProbability=0.3,
+        continuationProbability=0.2,
+        maximumTraversalDepth=2,
+        maximumRequestsPerTraversal=8,
+        interleaveCreationAndRecommendations=False,
+    )
+
+
+def test_create_scaled_run_persists_canonical_v2_launch_and_all_scaled_columns() -> None:
+    config = scaled_run_config()
+    cursor = RecordingCursor()
+    database = __import__(
+        "babel_online.runtime.database", fromlist=["RuntimeDatabase"]
+    ).RuntimeDatabase("unused", connect=lambda: RecordingConnection(cursor))
+
+    created = database.create_scaled_run(config)
+
+    query, parameters = cursor.queries[0]
+    document = config.model_dump(mode="json")
+    assert "INSERT INTO experiment_runs" in query
+    assert "contract_version" in query
+    assert "source_articles_per_month" in query
+    assert "target_created_babels" in query
+    assert "concurrent_users" in query
+    assert "recommendation_start_probability" in query
+    assert "continuation_probability" in query
+    assert "maximum_traversal_depth" in query
+    assert "maximum_requests_per_traversal" in query
+    assert "interleave_creation_and_recommendations" in query
+    assert json.loads(parameters[-2]) == document
+    assert parameters[-1] == canonical_json_sha256(document)
+    assert created.config == config
+    assert created.status == "starting"
+
+
+def test_performance_execution_bindings_are_identically_idempotent() -> None:
+    run_id = UUID("aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa")
+    cursor = RecordingCursor(rows=[("bound",), ("bound",)])
+    database = __import__(
+        "babel_online.runtime.database", fromlist=["RuntimeDatabase"]
+    ).RuntimeDatabase("unused", connect=lambda: RecordingConnection(cursor))
+
+    database.bind_performance_population("trial", run_id, "d" * 64, "runs/trial")
+    database.bind_performance_condition("trial", "condition", run_id)
+
+    assert "population_manifest_sha256" in cursor.queries[0][0]
+    assert "population_bundle_path" in cursor.queries[0][0]
+    assert cursor.queries[0][1] == (
+        run_id, "d" * 64, "runs/trial", "trial", run_id, "d" * 64, "runs/trial"
+    )
+    assert "run_id" in cursor.queries[1][0]
+    assert cursor.queries[1][1] == (run_id, "trial", "condition", run_id)
+
+
+def test_performance_execution_bindings_reject_conflicting_identity() -> None:
+    database_module = __import__(
+        "babel_online.runtime.database", fromlist=["RuntimeDatabase"]
+    )
+    cursor = RecordingCursor(rows=[])
+    database = database_module.RuntimeDatabase(
+        "unused", connect=lambda: RecordingConnection(cursor)
+    )
+
+    with pytest.raises(database_module.PerformanceBindingConflict):
+        database.bind_performance_population(
+            "trial", UUID(int=1), "d" * 64, "runs/trial"
+        )
+    with pytest.raises(database_module.PerformanceBindingConflict):
+        database.bind_performance_condition("trial", "condition", UUID(int=2))
 
 
 def test_existing_source_load_uses_exact_snapshot_key_not_moving_active_pointer() -> None:
