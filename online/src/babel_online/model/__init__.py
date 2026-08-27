@@ -1,6 +1,5 @@
 """Immutable model identities and fixture/real serving towers."""
 
-from .context_tower import CreatorContextTower
 from .artifact import (
     ArtifactIntegrityError,
     LoadedArtifact,
@@ -15,22 +14,33 @@ from .candidate_index import (
     MaterializedServingState,
     RetrievedCandidate,
 )
-from .item_tower import EncoderExecutionIdentity, ItemTower, QwenItemTower
-from .registry import DuplicateModel, IncompatibleChildModel, ModelRegistry
+from .context_tower import CreatorContextTower
 from .distilled_artifact import (
     ArtifactAcceptanceError,
-    ArtifactIntegrityError as DistilledArtifactIntegrityError,
     DistilledArtifactV1,
 )
-from .qwen_encoder import Qwen100Encoder, format_article_input
+from .distilled_artifact import (
+    ArtifactIntegrityError as DistilledArtifactIntegrityError,
+)
+from .frozen_population import (
+    FrozenPopulationIntegrityError,
+    FrozenPopulationManifestV1,
+    build_frozen_population,
+    clone_frozen_population,
+    load_frozen_population,
+)
+from .item_tower import EncoderExecutionIdentity, ItemTower, QwenItemTower
 from .population import (
     PopulationActivationEvidence,
+    PopulationBatchProgress,
     PopulationIdentity,
     PopulationIntegrityError,
     PopulationReceipt,
     PopulationSource,
     populate_created_babel_vectors,
 )
+from .qwen_encoder import Qwen100Encoder, format_article_input
+from .registry import DuplicateModel, IncompatibleChildModel, ModelRegistry
 from .source_vector_cache import (
     ResolvedSourceVector,
     SourceVectorResolver,
@@ -59,6 +69,8 @@ __all__ = [
     "DistilledArtifactV1",
     "DistilledArtifactIntegrityError",
     "IncompatibleChildModel",
+    "FrozenPopulationIntegrityError",
+    "FrozenPopulationManifestV1",
     "ItemTower",
     "QwenItemTower",
     "InMemoryCreatedBabelIndex",
@@ -70,6 +82,7 @@ __all__ = [
     "ModelRegistry",
     "PopulationIdentity",
     "PopulationActivationEvidence",
+    "PopulationBatchProgress",
     "PopulationIntegrityError",
     "PopulationReceipt",
     "PopulationSource",
@@ -80,8 +93,11 @@ __all__ = [
     "SourceVectorResolver",
     "VectorCacheKey",
     "load_artifact",
+    "load_frozen_population",
     "model_manifest_sha256",
     "populate_created_babel_vectors",
+    "build_frozen_population",
+    "clone_frozen_population",
     "format_article_input",
     "export_real_qwen_child",
     "semantic_vector_sha256",

@@ -2,21 +2,27 @@ from __future__ import annotations
 
 import hashlib
 import json
+import struct
 from pathlib import Path
 from uuid import UUID
 
 import pytest
-
 from babel_online.contracts import (
     ActivityLogV1,
+    CandidateActionV1,
+    FeedbackEventV2,
     ModelManifestV1,
     RunConfigV1,
     RunConfigV2,
 )
-from babel_online.model.source_vector_cache import VectorCacheKey
-from babel_online.model.registry import ModelRegistry
-from babel_online.model.state_distributor import KnownVectorProbeV1, export_real_qwen_child
 from babel_online.model.candidate_index import MaterializedServingState
+from babel_online.model.population import PopulationIdentity, PopulationIntegrityError
+from babel_online.model.registry import ModelRegistry
+from babel_online.model.source_vector_cache import VectorCacheKey
+from babel_online.model.state_distributor import (
+    KnownVectorProbeV1,
+    export_real_qwen_child,
+)
 from babel_online.runtime.database import (
     ArtifactConfigurationError,
     canonical_json_sha256,
@@ -24,9 +30,6 @@ from babel_online.runtime.database import (
 )
 from babel_online.simulation.scheduler import ScheduledWork, deterministic_schedule
 from babel_online.simulation.walk import WalkRollEvidence
-
-from babel_online.contracts import CandidateActionV1, FeedbackEventV2
-
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -119,6 +122,9 @@ class RecordingCursor:
 
     def execute(self, query, parameters=()):
         self.queries.append((" ".join(str(query).split()), parameters))
+
+    def executemany(self, query, parameters):
+        self.queries.append((" ".join(str(query).split()), list(parameters)))
 
     def fetchone(self):
         return self.rows.pop(0) if self.rows else None
@@ -343,6 +349,67 @@ def test_database_loads_the_exact_persisted_work_schedule() -> None:
     assert loaded == (expected,)
     assert "ORDER BY schedule_index" in cursor.queries[0][0]
     assert cursor.queries[0][1] == (run_id,)
+
+
+def population_identity() -> PopulationIdentity:
+    return PopulationIdentity(
+        run_id=UUID(int=1),
+        dataset_revision="b" * 40,
+        model_id=UUID(int=2),
+        model_version=0,
+        model_manifest_sha256="c" * 64,
+        artifact_manifest_sha256="d" * 64,
+        artifact_repo="dhelmy990/babel-qwen-navigation-2016-interview",
+        artifact_revision="1" * 40,
+        artifact_id="2" * 64,
+        training_dataset_revision="3" * 40,
+        embedding_space_id=UUID(int=3),
+        embedding_space_version="babel-qwen-100d-v1",
+    )
+
+
+def test_database_decodes_exact_pgvector_wire_payload_to_f32le() -> None:
+    values = __import__("numpy").linspace(-1, 1, 100, dtype="<f4")
+    wire = struct.pack(">hh", 100, 0) + values.astype(">f4").tobytes()
+    database_type = __import__(
+        "babel_online.runtime.database", fromlist=["RuntimeDatabase"]
+    ).RuntimeDatabase
+
+    actual_wire, f32le = database_type._decode_vector_send(wire)
+
+    assert actual_wire == wire
+    assert f32le == values.tobytes()
+    with pytest.raises(PopulationIntegrityError, match="wire"):
+        database_type._decode_vector_send(wire[:-4])
+
+
+def test_clone_population_is_insert_select_and_rejects_any_relational_difference() -> None:
+    source = population_identity()
+    state_row = (
+        source.model_id,
+        source.model_version,
+        source.embedding_space_id,
+        "a" * 64,
+        "a" * 64,
+    )
+    cursor = RecordingCursor(rows=[(0, 0, 0), state_row])
+    database = __import__(
+        "babel_online.runtime.database", fromlist=["RuntimeDatabase"]
+    ).RuntimeDatabase("unused", connect=lambda: RecordingConnection(cursor))
+
+    state = database.clone_population_transaction(source, UUID(int=9))
+
+    assert state.run_id == UUID(int=9)
+    inserts = [query for query, _ in cursor.queries[:4]]
+    assert all("INSERT INTO" in query and "SELECT" in query for query in inserts)
+    assert "vector_send(embedding)" in cursor.queries[4][0]
+
+    conflict = RecordingCursor(rows=[(0, 1, 0)])
+    database = __import__(
+        "babel_online.runtime.database", fromlist=["RuntimeDatabase"]
+    ).RuntimeDatabase("unused", connect=lambda: RecordingConnection(conflict))
+    with pytest.raises(PopulationIntegrityError, match="bytes or schedule"):
+        database.clone_population_transaction(source, UUID(int=10))
 
 
 def test_database_persists_and_loads_exact_traversal_roll_evidence() -> None:

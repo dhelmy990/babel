@@ -8,9 +8,9 @@ from uuid import UUID
 
 import numpy as np
 import pytest
-
 from babel_online.model.population import (
     PopulationActivationEvidence,
+    PopulationBatchProgress,
     PopulationIdentity,
     PopulationIntegrityError,
     PopulationSource,
@@ -18,7 +18,6 @@ from babel_online.model.population import (
 )
 from babel_online.model.qwen_encoder import Qwen100Encoder
 from babel_online.observable import CreatedBabel, VectorRecord
-
 
 RUN = UUID("00000000-0000-5000-8000-000000000001")
 MODEL = UUID("00000000-0000-5000-8000-000000000002")
@@ -301,6 +300,43 @@ def test_database_batch_is_committed_before_atomic_journal_advances(tmp_path) ->
     assert journal["committed_count"] == 1
     assert len(journal["committed_prefix_sha256"]) == 64
     assert journal["complete"] is True
+
+
+def test_progress_is_reported_after_committed_journal_and_stop_is_resumable(tmp_path) -> None:
+    database = FakePopulationDatabase([source(number) for number in range(1, 6)])
+    observed: list[PopulationBatchProgress] = []
+
+    def progress(value: PopulationBatchProgress) -> None:
+        journal = json.loads(
+            (tmp_path / str(RUN) / "population/journal.json").read_text()
+        )
+        assert journal["committed_count"] == value.committed_count
+        assert len(database.vectors) == value.committed_count
+        observed.append(value)
+
+    first = populate_created_babel_vectors(
+        database=database,
+        encoder=FakeQwen(),
+        identity=identity(),
+        state_root=tmp_path,
+        batch_size=2,
+        progress_sink=progress,
+        stop_requested=lambda: len(observed) == 1,
+    )
+
+    assert first.complete is False
+    assert first.indexed_count == 2
+    assert [(row.committed_count, row.batch_count) for row in observed] == [(2, 2)]
+
+    resumed = populate_created_babel_vectors(
+        database=database,
+        encoder=FakeQwen(),
+        identity=identity(),
+        state_root=tmp_path,
+        batch_size=2,
+    )
+    assert resumed.complete is True
+    assert resumed.indexed_count == 5
 
 
 def test_transient_failed_attempt_can_resume_cleanly_and_activate(tmp_path) -> None:

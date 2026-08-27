@@ -56,11 +56,10 @@ from ..simulation.decisions import (
     decide_candidate,
     deterministic_draw,
 )
+from ..simulation.population_plan import plan_population, schedule_planned_roots
 from ..simulation.scheduler import (
     BoundedCreatorScheduler,
     ScheduledSession,
-    ScheduledWork,
-    deterministic_schedule,
 )
 from ..simulation.walk import (
     IncludedWalkTarget,
@@ -277,6 +276,29 @@ class FridayDemoRuntime:
         return result
 
     def _plan(self) -> list[tuple[str, UUID, dict[str, Any], UUID]]:
+        formal_population = isinstance(self.config, RunConfigV2) and (
+            self.config.creatorCount == 50
+            and self.config.environmentSequence == ["2026-06", "2026-07"]
+            and self.config.perMonthEventBudget
+            == {"2026-06": 5_000, "2026-07": 5_000}
+            and self.config.targetCreatedBabels == 10_000
+            and self.config.sourceArticlesPerMonth == 5_000
+        )
+        if formal_population:
+            population = plan_population(self.config, self.bundle)
+            self._population_plan = population
+            self._creator_slots = {
+                creator: index for index, creator in enumerate(population.creator_ids)
+            }
+            return [
+                (
+                    row.period,
+                    row.babel.creatorId,
+                    dict(row.source_row),
+                    row.babel.babelId,
+                )
+                for row in population.babels
+            ]
         catalogs = self._catalogs()
         used: dict[UUID, set[str]] = {}
         plan: list[tuple[str, UUID, dict[str, Any], UUID]] = []
@@ -311,21 +333,7 @@ class FridayDemoRuntime:
     def _persist_scaled_schedule(
         self, plan: list[tuple[str, UUID, dict[str, Any], UUID]]
     ) -> tuple[ScheduledSession, ...]:
-        creator_events: dict[UUID, int] = {}
-        work = []
-        for period, creator_id, article, babel_id in plan:
-            event_number = creator_events.get(creator_id, 0)
-            creator_events[creator_id] = event_number + 1
-            work.append(
-                ScheduledWork(
-                    creator_id=creator_id,
-                    creator_event_number=event_number,
-                    period=period,
-                    source_article_key=article["article_key"],
-                    root_babel_id=babel_id,
-                )
-            )
-        schedule = deterministic_schedule(self.config.runId, work)
+        schedule = schedule_planned_roots(self.config.runId, plan)
         persisted = self.database.load_work_schedule(self.config.runId)
         if persisted:
             if persisted != schedule:

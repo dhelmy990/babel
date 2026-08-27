@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import struct
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -21,16 +22,17 @@ from ..contracts import (
     RunConfigV2,
 )
 from ..model.artifact import LoadedArtifact, load_artifact
+from ..model.candidate_index import MaterializedServingState
 from ..model.population import (
     PopulationActivationEvidence,
     PopulationIdentity,
     PopulationIntegrityError,
     PopulationSource,
 )
-from ..model.candidate_index import MaterializedServingState
 from ..model.source_vector_cache import VectorCacheKey
 from ..model.state_distributor import RealQwenChildStateV1
 from ..observable import CreatedBabel, VectorRecord, reject_hidden_fields
+from ..simulation.population_plan import PopulationPlan
 from ..simulation.scheduler import ScheduledSession
 from ..simulation.walk import WalkRollEvidence
 
@@ -84,6 +86,18 @@ class PersistedRun:
     config: RunConfigV1 | RunConfigV2
     status: str
     launch_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenPopulationRow:
+    """One DB-authoritative population row with exact pgvector wire bytes."""
+
+    babel: CreatedBabel
+    catalog_content_hash: str
+    event_number: int
+    scheduled: ScheduledSession
+    vector_send_bytes: bytes
+    vector_f32le_bytes: bytes
 
 
 class RuntimeDatabase:
@@ -142,6 +156,7 @@ class RuntimeDatabase:
                   %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 2,
                   %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s
                 )
+                ON CONFLICT (id) DO NOTHING
                 """,
                 (
                     config.runId,
@@ -176,7 +191,153 @@ class RuntimeDatabase:
                     digest,
                 ),
             )
+            if cursor.rowcount == 0:
+                cursor.execute(
+                    "SELECT launch_config,launch_sha256,status "
+                    "FROM experiment_runs WHERE id=%s",
+                    (config.runId,),
+                )
+                row = cursor.fetchone()
+                existing_document = (
+                    row[0] if row is not None and isinstance(row[0], Mapping)
+                    else json.loads(row[0]) if row is not None else None
+                )
+                if (
+                    row is None
+                    or existing_document != document
+                    or str(row[1]) != digest
+                ):
+                    raise LaunchIntegrityError(
+                        "existing scaled run differs from requested launch"
+                    )
+                return PersistedRun(
+                    config=config,
+                    status=str(row[2]),
+                    launch_sha256=digest,
+                )
         return PersistedRun(config=config, status="starting", launch_sha256=digest)
+
+    def stage_population_plan(
+        self, plan: PopulationPlan, *, batch_size: int = 500
+    ) -> None:
+        """Bulk insert a finalized plan, accepting only an identical retry."""
+        if not isinstance(plan, PopulationPlan):
+            raise TypeError("population staging requires PopulationPlan")
+        if batch_size <= 0:
+            raise ValueError("population staging batch size must be positive")
+        babel_parameters = [
+            (
+                row.babel.runId,
+                row.babel.babelId,
+                row.babel.creatorId,
+                row.babel.sourceArticleKey,
+                row.babel.title,
+                row.babel.text,
+                row.catalog_content_hash,
+                row.event_number,
+                row.babel.createdAtNs // 1_000,
+            )
+            for row in plan.babels
+        ]
+        schedule_parameters = [
+            (
+                row.run_id,
+                row.schedule_index,
+                row.creator_id,
+                row.creator_event_number,
+                row.period,
+                row.source_article_key,
+                row.root_babel_id,
+                row.traversal_session_id,
+                row.work_id,
+                row.workload_sha256,
+            )
+            for row in plan.schedule
+        ]
+        with self._connect() as connection, connection.cursor() as cursor:
+            for offset in range(0, len(babel_parameters), batch_size):
+                cursor.executemany(
+                    """
+                    INSERT INTO experiment_babels(
+                      run_id,babel_id,creator_id,source_article_key,title,article_text,
+                      catalog_content_hash,event_number,created_at,finalized_at
+                    ) VALUES (
+                      %s,%s,%s,%s,%s,%s,%s,%s,
+                      TIMESTAMPTZ 'epoch' + %s * INTERVAL '1 microsecond',
+                      TIMESTAMPTZ 'epoch' + %s * INTERVAL '1 microsecond'
+                    ) ON CONFLICT (run_id,babel_id) DO NOTHING
+                    """,
+                    [values + (values[-1],) for values in babel_parameters[offset:offset + batch_size]],
+                )
+            for offset in range(0, len(schedule_parameters), batch_size):
+                cursor.executemany(
+                    """
+                    INSERT INTO experiment_work_schedule(
+                      run_id,schedule_index,creator_id,creator_event_number,period,
+                      source_article_key,root_babel_id,traversal_session_id,work_id,
+                      workload_sha256
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (run_id,schedule_index) DO NOTHING
+                    """,
+                    schedule_parameters[offset:offset + batch_size],
+                )
+            cursor.execute(
+                """
+                SELECT babel_id,creator_id,source_article_key,title,article_text,
+                       catalog_content_hash,event_number,
+                       (extract(epoch from created_at) * 1000000000)::bigint,
+                       finalized_at IS NOT NULL
+                FROM experiment_babels WHERE run_id=%s ORDER BY event_number
+                """,
+                (plan.run_id,),
+            )
+            actual_babels = cursor.fetchall()
+            expected_babels = [
+                (
+                    row.babel.babelId,
+                    row.babel.creatorId,
+                    row.babel.sourceArticleKey,
+                    row.babel.title,
+                    row.babel.text,
+                    row.catalog_content_hash,
+                    row.event_number,
+                    row.babel.createdAtNs,
+                    True,
+                )
+                for row in plan.babels
+            ]
+            if actual_babels != expected_babels:
+                raise PopulationIntegrityError(
+                    "existing finalized population Babel content differs from plan"
+                )
+            cursor.execute(
+                """
+                SELECT schedule_index,creator_id,creator_event_number,period,
+                       source_article_key,root_babel_id,traversal_session_id,work_id,
+                       workload_sha256
+                FROM experiment_work_schedule WHERE run_id=%s ORDER BY schedule_index
+                """,
+                (plan.run_id,),
+            )
+            actual_schedule = cursor.fetchall()
+            expected_schedule = [
+                (
+                    row.schedule_index,
+                    row.creator_id,
+                    row.creator_event_number,
+                    row.period,
+                    row.source_article_key,
+                    row.root_babel_id,
+                    row.traversal_session_id,
+                    row.work_id,
+                    row.workload_sha256,
+                )
+                for row in plan.schedule
+            ]
+            if actual_schedule != expected_schedule:
+                raise PopulationIntegrityError(
+                    "existing frozen work schedule differs from plan"
+                )
 
     def bind_performance_population(
         self,
@@ -949,6 +1110,270 @@ class RuntimeDatabase:
             )
             for row in rows
         ]
+
+    @staticmethod
+    def _decode_vector_send(value: object) -> tuple[bytes, bytes]:
+        """Validate pgvector's binary send format and return exact f32le payload."""
+        wire = bytes(value)
+        if len(wire) != 404:
+            raise PopulationIntegrityError("pgvector wire row is not 100d")
+        dimension, unused = struct.unpack(">hh", wire[:4])
+        if dimension != 100 or unused != 0:
+            raise PopulationIntegrityError("pgvector wire header is invalid")
+        big_endian_values = wire[4:]
+        little_endian_values = b"".join(
+            big_endian_values[offset:offset + 4][::-1]
+            for offset in range(0, len(big_endian_values), 4)
+        )
+        return wire, little_endian_values
+
+    def frozen_population_rows(
+        self,
+        expected: PopulationIdentity,
+        *,
+        after_babel_id: UUID | None,
+        limit: int,
+    ) -> list[FrozenPopulationRow]:
+        """Read exact active vector bytes and bound schedule rows in Babel-ID order."""
+        if limit <= 0:
+            raise ValueError("frozen population read limit must be positive")
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT xb.babel_id,xb.creator_id,xb.source_article_key,xb.title,
+                       xb.article_text,xb.catalog_content_hash,xb.event_number,
+                       (extract(epoch from xb.created_at) * 1000000000)::bigint,
+                       ws.schedule_index,ws.creator_event_number,ws.period,
+                       ws.traversal_session_id,ws.work_id,ws.workload_sha256,
+                       public.vector_send(eb.embedding)
+                FROM experiment_babels AS xb
+                JOIN experiment_work_schedule AS ws
+                  ON ws.run_id=xb.run_id AND ws.root_babel_id=xb.babel_id
+                JOIN babel_embeddings AS eb
+                  ON eb.run_id=xb.run_id AND eb.babel_id=xb.babel_id
+                WHERE xb.run_id=%s AND xb.finalized_at IS NOT NULL
+                  AND eb.serving_model_id=%s
+                  AND eb.materialized_model_version=%s
+                  AND eb.embedding_space_id=%s
+                  AND (%s::uuid IS NULL OR xb.babel_id > %s::uuid)
+                ORDER BY xb.babel_id LIMIT %s
+                """,
+                (
+                    expected.run_id,
+                    expected.model_id,
+                    expected.model_version,
+                    expected.embedding_space_id,
+                    after_babel_id,
+                    after_babel_id,
+                    limit,
+                ),
+            )
+            rows = cursor.fetchall()
+        result: list[FrozenPopulationRow] = []
+        for row in rows:
+            wire, f32le = self._decode_vector_send(row[14])
+            babel = CreatedBabel(
+                babelId=row[0],
+                runId=expected.run_id,
+                creatorId=row[1],
+                sourceArticleKey=str(row[2]),
+                title=str(row[3]),
+                text=str(row[4]),
+                createdAtNs=max(0, int(row[7])),
+            )
+            scheduled = ScheduledSession(
+                run_id=expected.run_id,
+                schedule_index=int(row[8]),
+                creator_id=row[1],
+                creator_event_number=int(row[9]),
+                period=str(row[10]),
+                source_article_key=str(row[2]),
+                root_babel_id=row[0],
+                traversal_session_id=row[11],
+                work_id=row[12],
+                workload_sha256=str(row[13]),
+            )
+            result.append(
+                FrozenPopulationRow(
+                    babel=babel,
+                    catalog_content_hash=str(row[5]),
+                    event_number=int(row[6]),
+                    scheduled=scheduled,
+                    vector_send_bytes=wire,
+                    vector_f32le_bytes=f32le,
+                )
+            )
+        return result
+
+    def clone_population_transaction(
+        self, source: PopulationIdentity, destination_run_id: UUID
+    ) -> MaterializedServingState:
+        """Clone active population tables through INSERT...SELECT without Python vectors."""
+        if destination_run_id == source.run_id:
+            raise ValueError("population clone destination must differ from source")
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO experiment_babels(
+                  run_id,babel_id,creator_id,source_article_key,title,created_at,
+                  article_text,catalog_content_hash,event_number,request_id,finalized_at
+                )
+                SELECT %s,babel_id,creator_id,source_article_key,title,created_at,
+                       article_text,catalog_content_hash,event_number,request_id,finalized_at
+                FROM experiment_babels WHERE run_id=%s AND finalized_at IS NOT NULL
+                ON CONFLICT (run_id,babel_id) DO NOTHING
+                """,
+                (destination_run_id, source.run_id),
+            )
+            cursor.execute(
+                """
+                INSERT INTO babel_embeddings(
+                  run_id,babel_id,creator_id,embedding_space_id,serving_model_id,
+                  materialized_model_version,catalog_content_hash,embedding,created_at
+                )
+                SELECT %s,eb.babel_id,eb.creator_id,eb.embedding_space_id,
+                       eb.serving_model_id,eb.materialized_model_version,
+                       eb.catalog_content_hash,eb.embedding,eb.created_at
+                FROM babel_embeddings AS eb
+                WHERE eb.run_id=%s AND eb.serving_model_id=%s
+                  AND eb.materialized_model_version=%s AND eb.embedding_space_id=%s
+                ON CONFLICT (run_id,babel_id,materialized_model_version) DO NOTHING
+                """,
+                (
+                    destination_run_id,
+                    source.run_id,
+                    source.model_id,
+                    source.model_version,
+                    source.embedding_space_id,
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO run_embedding_states(
+                  run_id,active_model_id,active_model_version,embedding_space_id,
+                  pgvector_snapshot_sha256,backend_snapshot_sha256,synchronized_at
+                )
+                SELECT %s,active_model_id,active_model_version,embedding_space_id,
+                       pgvector_snapshot_sha256,backend_snapshot_sha256,synchronized_at
+                FROM run_embedding_states WHERE run_id=%s
+                ON CONFLICT (run_id) DO NOTHING
+                """,
+                (destination_run_id, source.run_id),
+            )
+            cursor.execute(
+                """
+                INSERT INTO experiment_work_schedule(
+                  run_id,schedule_index,creator_id,creator_event_number,period,
+                  source_article_key,root_babel_id,traversal_session_id,work_id,
+                  workload_sha256,created_at
+                )
+                SELECT %s,schedule_index,creator_id,creator_event_number,period,
+                       source_article_key,root_babel_id,traversal_session_id,work_id,
+                       workload_sha256,created_at
+                FROM experiment_work_schedule WHERE run_id=%s
+                ON CONFLICT (run_id,schedule_index) DO NOTHING
+                """,
+                (destination_run_id, source.run_id),
+            )
+            cursor.execute(
+                """
+                WITH babel_diff AS (
+                  (SELECT babel_id,creator_id,source_article_key,title,created_at,
+                          article_text,catalog_content_hash,event_number,request_id,finalized_at
+                   FROM experiment_babels WHERE run_id=%s
+                   EXCEPT
+                   SELECT babel_id,creator_id,source_article_key,title,created_at,
+                          article_text,catalog_content_hash,event_number,request_id,finalized_at
+                   FROM experiment_babels WHERE run_id=%s)
+                  UNION ALL
+                  (SELECT babel_id,creator_id,source_article_key,title,created_at,
+                          article_text,catalog_content_hash,event_number,request_id,finalized_at
+                   FROM experiment_babels WHERE run_id=%s
+                   EXCEPT
+                   SELECT babel_id,creator_id,source_article_key,title,created_at,
+                          article_text,catalog_content_hash,event_number,request_id,finalized_at
+                   FROM experiment_babels WHERE run_id=%s)
+                ), vector_diff AS (
+                  (SELECT babel_id,creator_id,embedding_space_id,serving_model_id,
+                          materialized_model_version,catalog_content_hash,
+                          public.vector_send(embedding),created_at
+                   FROM babel_embeddings WHERE run_id=%s
+                   EXCEPT
+                   SELECT babel_id,creator_id,embedding_space_id,serving_model_id,
+                          materialized_model_version,catalog_content_hash,
+                          public.vector_send(embedding),created_at
+                   FROM babel_embeddings WHERE run_id=%s)
+                  UNION ALL
+                  (SELECT babel_id,creator_id,embedding_space_id,serving_model_id,
+                          materialized_model_version,catalog_content_hash,
+                          public.vector_send(embedding),created_at
+                   FROM babel_embeddings WHERE run_id=%s
+                   EXCEPT
+                   SELECT babel_id,creator_id,embedding_space_id,serving_model_id,
+                          materialized_model_version,catalog_content_hash,
+                          public.vector_send(embedding),created_at
+                   FROM babel_embeddings WHERE run_id=%s)
+                ), schedule_diff AS (
+                  (SELECT schedule_index,creator_id,creator_event_number,period,
+                          source_article_key,root_babel_id,traversal_session_id,work_id,
+                          workload_sha256,created_at
+                   FROM experiment_work_schedule WHERE run_id=%s
+                   EXCEPT
+                   SELECT schedule_index,creator_id,creator_event_number,period,
+                          source_article_key,root_babel_id,traversal_session_id,work_id,
+                          workload_sha256,created_at
+                   FROM experiment_work_schedule WHERE run_id=%s)
+                  UNION ALL
+                  (SELECT schedule_index,creator_id,creator_event_number,period,
+                          source_article_key,root_babel_id,traversal_session_id,work_id,
+                          workload_sha256,created_at
+                   FROM experiment_work_schedule WHERE run_id=%s
+                   EXCEPT
+                   SELECT schedule_index,creator_id,creator_event_number,period,
+                          source_article_key,root_babel_id,traversal_session_id,work_id,
+                          workload_sha256,created_at
+                   FROM experiment_work_schedule WHERE run_id=%s)
+                )
+                SELECT (SELECT count(*) FROM babel_diff),
+                       (SELECT count(*) FROM vector_diff),
+                       (SELECT count(*) FROM schedule_diff)
+                """,
+                (
+                    source.run_id, destination_run_id,
+                    destination_run_id, source.run_id,
+                    source.run_id, destination_run_id,
+                    destination_run_id, source.run_id,
+                    source.run_id, destination_run_id,
+                    destination_run_id, source.run_id,
+                ),
+            )
+            differences = cursor.fetchone()
+            if differences is None or tuple(int(value) for value in differences) != (0, 0, 0):
+                raise PopulationIntegrityError("cloned population bytes or schedule differ")
+            cursor.execute(
+                """
+                SELECT active_model_id,active_model_version,embedding_space_id,
+                       pgvector_snapshot_sha256,backend_snapshot_sha256
+                FROM run_embedding_states WHERE run_id=%s
+                """,
+                (destination_run_id,),
+            )
+            state = cursor.fetchone()
+            expected_state = (
+                source.model_id,
+                source.model_version,
+                source.embedding_space_id,
+            )
+            if state is None or tuple(state[:3]) != expected_state:
+                raise PopulationIntegrityError("cloned active embedding state differs")
+        return MaterializedServingState(
+            run_id=destination_run_id,
+            model_id=state[0],
+            model_version=int(state[1]),
+            embedding_space_id=state[2],
+            pgvector_snapshot_sha256=str(state[3]),
+            backend_snapshot_sha256=str(state[4]),
+        )
 
     @staticmethod
     def _vector_literal(values: Sequence[float]) -> str:

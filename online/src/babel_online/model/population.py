@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Protocol
@@ -138,6 +138,16 @@ class PopulationReceipt:
     index_bytes: int
     explain_plan: object | None
     hnsw_used: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PopulationBatchProgress:
+    """Durable progress emitted only after a vector batch and journal commit."""
+
+    run_id: UUID
+    batch_count: int
+    committed_count: int
+    last_committed_babel_id: UUID
 
 
 class PopulationDatabase(Protocol):
@@ -331,6 +341,8 @@ def populate_created_babel_vectors(
     batch_size: int = 32,
     formal_minimum: int = 10_000,
     stop_after_batches: int | None = None,
+    progress_sink: Callable[[PopulationBatchProgress], None] | None = None,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> PopulationReceipt:
     """Populate exact real-Qwen vectors, journaling only after each DB commit."""
     if not isinstance(encoder, Qwen100Encoder):
@@ -426,8 +438,30 @@ def populate_created_babel_vectors(
 
     after = committed_id
     batches = 0
+
+    def incomplete_receipt() -> PopulationReceipt:
+        duration = time.monotonic() - started
+        committed = int(journal["committed_count"])
+        return PopulationReceipt(
+            complete=False,
+            created_count=created_count,
+            indexed_count=committed,
+            failure_count=int(journal["failure_count"]),
+            formal_ready=False,
+            snapshot_sha256=None,
+            created_content_manifest_sha256=manifest_sha,
+            duration_seconds=duration,
+            rows_per_second=committed / max(duration, 1e-9),
+            table_bytes=0,
+            index_bytes=0,
+            explain_plan=None,
+            hnsw_used=False,
+        )
+
     try:
         while True:
+            if stop_requested is not None and stop_requested():
+                return incomplete_receipt()
             sources = list(
                 database.population_sources(
                     identity.run_id, after_babel_id=after, limit=batch_size
@@ -450,23 +484,17 @@ def populate_created_babel_vectors(
             # The database transaction is complete before this atomic rename.
             _atomic_json(journal_path, journal)
             batches += 1
-            if stop_after_batches is not None and batches >= stop_after_batches:
-                duration = time.monotonic() - started
-                return PopulationReceipt(
-                    complete=False,
-                    created_count=created_count,
-                    indexed_count=int(journal["committed_count"]),
-                    failure_count=int(journal["failure_count"]),
-                    formal_ready=False,
-                    snapshot_sha256=None,
-                    created_content_manifest_sha256=manifest_sha,
-                    duration_seconds=duration,
-                    rows_per_second=int(journal["committed_count"]) / max(duration, 1e-9),
-                    table_bytes=0,
-                    index_bytes=0,
-                    explain_plan=None,
-                    hnsw_used=False,
+            if progress_sink is not None:
+                progress_sink(
+                    PopulationBatchProgress(
+                        run_id=identity.run_id,
+                        batch_count=len(records),
+                        committed_count=int(journal["committed_count"]),
+                        last_committed_babel_id=after,
+                    )
                 )
+            if stop_after_batches is not None and batches >= stop_after_batches:
+                return incomplete_receipt()
     except Exception:
         record_current_failure()
         raise
@@ -534,6 +562,7 @@ def populate_created_babel_vectors(
 
 __all__ = [
     "PopulationActivationEvidence",
+    "PopulationBatchProgress",
     "PopulationDatabase",
     "PopulationIdentity",
     "PopulationIntegrityError",
