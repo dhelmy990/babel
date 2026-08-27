@@ -1686,21 +1686,33 @@ class RuntimeDatabase:
                           materialized_model_version,catalog_content_hash,
                           public.vector_send(embedding),created_at
                    FROM babel_embeddings WHERE run_id=%s
+                     AND serving_model_id=%s
+                     AND materialized_model_version=%s
+                     AND embedding_space_id=%s
                    EXCEPT
                    SELECT babel_id,creator_id,embedding_space_id,serving_model_id,
                           materialized_model_version,catalog_content_hash,
                           public.vector_send(embedding),created_at
-                   FROM babel_embeddings WHERE run_id=%s)
+                   FROM babel_embeddings WHERE run_id=%s
+                     AND serving_model_id=%s
+                     AND materialized_model_version=%s
+                     AND embedding_space_id=%s)
                   UNION ALL
                   (SELECT babel_id,creator_id,embedding_space_id,serving_model_id,
                           materialized_model_version,catalog_content_hash,
                           public.vector_send(embedding),created_at
                    FROM babel_embeddings WHERE run_id=%s
+                     AND serving_model_id=%s
+                     AND materialized_model_version=%s
+                     AND embedding_space_id=%s
                    EXCEPT
                    SELECT babel_id,creator_id,embedding_space_id,serving_model_id,
                           materialized_model_version,catalog_content_hash,
                           public.vector_send(embedding),created_at
-                   FROM babel_embeddings WHERE run_id=%s)
+                   FROM babel_embeddings WHERE run_id=%s
+                     AND serving_model_id=%s
+                     AND materialized_model_version=%s
+                     AND embedding_space_id=%s)
                 ), schedule_diff AS (
                   (SELECT schedule_index,creator_id,creator_event_number,period,
                           source_article_key,root_babel_id,traversal_session_id,work_id,
@@ -1729,8 +1741,14 @@ class RuntimeDatabase:
                 (
                     source.run_id, destination_run_id,
                     destination_run_id, source.run_id,
-                    source.run_id, destination_run_id,
-                    destination_run_id, source.run_id,
+                    source.run_id, source.model_id, source.model_version,
+                    source.embedding_space_id,
+                    destination_run_id, source.model_id, source.model_version,
+                    source.embedding_space_id,
+                    destination_run_id, source.model_id, source.model_version,
+                    source.embedding_space_id,
+                    source.run_id, source.model_id, source.model_version,
+                    source.embedding_space_id,
                     source.run_id, destination_run_id,
                     destination_run_id, source.run_id,
                 ),

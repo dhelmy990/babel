@@ -24,6 +24,7 @@ from babel_online.runtime.services import (
     require_scaled_trainer_config,
     resolve_trainer_activation,
     run_periodic_training,
+    load_selected_working_model,
 )
 import pytest
 
@@ -359,3 +360,77 @@ def test_role_restart_accepts_active_child_of_configured_starting_model(
         registry, active_model_id=real_model_manifest.modelId,
         starting_model_id=child.modelId,
     )
+
+
+def test_same_process_and_split_training_load_identical_selected_child_state(
+    tmp_path,
+) -> None:
+    run_id = uuid4()
+    babel_ids = (uuid4(), uuid4())
+    records = []
+    for index, babel_id in enumerate(babel_ids):
+        vector = np.zeros(100, dtype=np.float32)
+        vector[index] = 1.0
+        records.append(
+            VectorRecord(
+                babel=CreatedBabel(
+                    babelId=babel_id,
+                    runId=run_id,
+                    creatorId=uuid4(),
+                    sourceArticleKey=f"enwiki:{index + 1}",
+                    title=f"Babel {index}",
+                    text="Lead",
+                    createdAtNs=index + 1,
+                ),
+                catalogContentHash=str(index + 1) * 64,
+                embeddingSpaceId=uuid4(),
+                servingModelId=uuid4(),
+                materializedModelVersion=3,
+                vector=tuple(float(value) for value in vector),
+            )
+        )
+    state = {
+        "learningRate": 0.017,
+        "transferState": {"queryVector": ([0.0, 1.0] + [0.0] * 98)},
+        "residuals": {
+            str(babel_ids[0]): ([0.25] + [0.0] * 99),
+            str(babel_ids[1]): ([0.0, -0.125] + [0.0] * 98),
+        },
+    }
+    descriptor_path = tmp_path / "model" / "state-descriptor.json"
+    descriptor_path.parent.mkdir()
+    (descriptor_path.parent / "online-state.json").write_text(json.dumps(state))
+    selected = (SimpleNamespace(onlineStatePath="online-state.json"), descriptor_path)
+
+    same_process = load_selected_working_model(records, selected)
+    split_process = load_selected_working_model(records, selected)
+
+    assert same_process.state_dict() == state
+    assert split_process.state_dict() == state
+    assert same_process.frozen_bytes() == split_process.frozen_bytes()
+
+
+def test_original_training_starts_without_child_state() -> None:
+    run_id = uuid4()
+    vector = np.eye(100, dtype=np.float32)[0]
+    record = VectorRecord(
+        babel=CreatedBabel(
+            babelId=uuid4(),
+            runId=run_id,
+            creatorId=uuid4(),
+            sourceArticleKey="enwiki:1",
+            title="Original",
+            text="Lead",
+            createdAtNs=1,
+        ),
+        catalogContentHash="a" * 64,
+        embeddingSpaceId=uuid4(),
+        servingModelId=uuid4(),
+        materializedModelVersion=0,
+        vector=tuple(float(value) for value in vector),
+    )
+
+    model = load_selected_working_model([record], (None, None))
+
+    assert model.learning_rate == 0.05
+    assert np.allclose(model.residual(record.babel.babelId), np.zeros(100))

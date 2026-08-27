@@ -440,10 +440,100 @@ def clone_frozen_population(
     return state
 
 
+def freeze_cloned_population(
+    *,
+    database: FrozenPopulationDatabase,
+    config: RunConfigV2,
+    bundle: DatasetBundle,
+    model: ModelManifestV2,
+    model_version: int,
+    source_identity: PopulationIdentity,
+    expected_snapshot_sha256: str,
+    output_root: str | Path,
+    experiment_id: str,
+    batch_size: int = 500,
+) -> FrozenPopulationManifestV1:
+    """Clone a selected real child population and bind a fresh trial manifest."""
+    destination_identity = PopulationIdentity.from_real_model(
+        run_id=config.runId,
+        dataset_revision=config.datasetRevision,
+        model=model,
+        model_version=model_version,
+    )
+    if (
+        source_identity.run_id == config.runId
+        or replace(source_identity, run_id=config.runId) != destination_identity
+        or config.startingModelId != model.modelId
+    ):
+        raise FrozenPopulationIntegrityError(
+            "selected child clone identity differs from destination"
+        )
+    database.create_scaled_run(config)
+    state = database.clone_population_transaction(source_identity, config.runId)
+    rows = _read_rows(database, destination_identity, batch_size)
+    babels, vectors, schedule, snapshot = _documents(rows, destination_identity)
+    if (
+        snapshot != expected_snapshot_sha256
+        or state.model_id != model.modelId
+        or state.model_version != model_version
+        or state.embedding_space_id != model.embeddingSpace.embeddingSpaceId
+        or state.pgvector_snapshot_sha256 != expected_snapshot_sha256
+        or state.backend_snapshot_sha256 != expected_snapshot_sha256
+    ):
+        raise FrozenPopulationIntegrityError(
+            "selected child clone snapshot differs from immutable source"
+        )
+    periods = {"2026-06": 0, "2026-07": 0}
+    for row in rows:
+        periods[row.scheduled.period] += 1
+    manifest = FrozenPopulationManifestV1(
+        schemaVersion=1,
+        experimentId=experiment_id,
+        sourcePopulationRunId=config.runId,
+        babelCount=10_000,
+        scheduleCount=10_000,
+        juneCount=periods["2026-06"],
+        julyCount=periods["2026-07"],
+        creatorCount=len({row.babel.creatorId for row in rows}),
+        modelId=model.modelId,
+        modelVersion=model_version,
+        modelManifestSha256=model_manifest_sha256(model),
+        artifactManifestSha256=destination_identity.artifact_manifest_sha256,
+        artifactRepo=destination_identity.artifact_repo,
+        artifactRevision=destination_identity.artifact_revision,
+        artifactId=destination_identity.artifact_id,
+        trainingDatasetRevision=destination_identity.training_dataset_revision,
+        datasetRepo=config.datasetRepo,
+        datasetConfig=config.datasetConfig,
+        datasetRevision=config.datasetRevision,
+        datasetManifestSha256=bundle.manifest_sha256,
+        embeddingSpaceId=destination_identity.embedding_space_id,
+        embeddingSpaceVersion=destination_identity.embedding_space_version,
+        embeddingDimension=100,
+        babelsSha256=_sha(babels),
+        vectorsSha256=_sha(vectors),
+        pgvectorSnapshotSha256=snapshot,
+        scheduleSha256=_sha(schedule),
+        babelsBytes=len(babels),
+        vectorBytes=len(vectors),
+        scheduleBytes=len(schedule),
+    )
+    directory = Path(output_root) / experiment_id / "population"
+    directory.mkdir(parents=True, exist_ok=True)
+    _atomic_bytes(directory / manifest.babelsFile, babels)
+    _atomic_bytes(directory / manifest.vectorsFile, vectors)
+    _atomic_bytes(directory / manifest.scheduleFile, schedule)
+    _atomic_bytes(
+        directory / "manifest.json", _json_line(manifest.model_dump(mode="json"))
+    )
+    return load_frozen_population(directory)
+
+
 __all__ = [
     "FrozenPopulationIntegrityError",
     "FrozenPopulationManifestV1",
     "build_frozen_population",
     "clone_frozen_population",
+    "freeze_cloned_population",
     "load_frozen_population",
 ]

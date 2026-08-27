@@ -12,7 +12,13 @@ from uuid import UUID, uuid5
 import pytest
 from fastapi.testclient import TestClient
 
+from babel_online.contracts import RunConfigV2
 from babel_online.model.frozen_population import FrozenPopulationManifestV1
+from babel_online.model.candidate_index import MaterializedServingState
+from babel_online.model.state_distributor import (
+    KnownVectorProbeV1,
+    RealQwenChildStateV1,
+)
 from babel_online.runtime.performance_worker import (
     LiveConditionEvidence,
     PerformanceCondition,
@@ -423,6 +429,207 @@ def test_real_population_builder_closes_trial_into_canonical_qwen_run(
     assert observed[0]["identity"].model_id == real_model_manifest.modelId
     assert manifest == _population_manifest()
     assert directory == tmp_path / str(EXPERIMENT_ID) / "population"
+
+
+def _real_child(real_model_manifest, *, parent=None, producing_run_id=None, version=4):
+    parent = real_model_manifest if parent is None else parent
+    producing_run_id = (
+        uuid5(EXPERIMENT_ID, "child-source")
+        if producing_run_id is None
+        else producing_run_id
+    )
+    document = parent.model_dump(mode="json")
+    document.update(
+        modelId=uuid5(producing_run_id, f"child:{version}"),
+        parentModelId=parent.modelId,
+        producingRunId=producing_run_id,
+        label=f"child v{version}",
+    )
+    child = type(real_model_manifest).model_validate(document)
+    return RealQwenChildStateV1(
+        schemaVersion=1,
+        childManifest=child,
+        onlineStatePath="online-state.json",
+        files={"online-state.json": "d" * 64},
+        processedFeedbackEvents=10,
+        modelVersion=version,
+        vectorSnapshotSha256="e" * 64,
+        knownVectorProbe=KnownVectorProbeV1(
+            schemaVersion=1,
+            inputVector=[1.0] + [0.0] * 99,
+            expectedSemanticSha256="f" * 64,
+        ),
+        createdAtNs=1,
+        immutable=True,
+    )
+
+
+def test_real_population_builder_clones_selected_child_snapshot_without_qwen(
+    tmp_path: Path, real_model_manifest, accepted_qwen_factory
+):
+    descriptor = _real_child(real_model_manifest)
+    descriptor_root = tmp_path / "child"
+    descriptor_root.mkdir()
+    state_path = descriptor_root / "online-state.json"
+    state_path.write_text("{}\n")
+    descriptor = descriptor.model_copy(
+        update={
+            "files": {
+                "online-state.json": hashlib.sha256(state_path.read_bytes()).hexdigest()
+            }
+        }
+    )
+    descriptor_path = descriptor_root / "state-descriptor.json"
+    descriptor_path.write_text(descriptor.model_dump_json() + "\n")
+    child = descriptor.childManifest
+    active = MaterializedServingState(
+        run_id=child.producingRunId,
+        model_id=child.modelId,
+        model_version=descriptor.modelVersion,
+        embedding_space_id=child.embeddingSpace.embeddingSpaceId,
+        pgvector_snapshot_sha256=descriptor.vectorSnapshotSha256,
+        backend_snapshot_sha256=descriptor.vectorSnapshotSha256,
+    )
+
+    class Database:
+        def load_real_child_artifact(self, model_id):
+            assert model_id == child.modelId
+            return descriptor, descriptor_path
+
+        def load_active_embedding_state(self, run_id):
+            assert run_id == child.producingRunId
+            return active
+
+        def load_run(self, run_id):
+            assert run_id == child.producingRunId
+            return type(
+                "Persisted",
+                (),
+                {
+                    "config": RunConfigV2(
+                        schemaVersion=2,
+                        runId=run_id,
+                        datasetRepo="dhelmy990/babel-wikipedia-experiment",
+                        datasetConfig="crosswalk_2026_06_07",
+                        datasetRevision="3" * 40,
+                        startingModelId=child.parentModelId,
+                        creatorCount=50,
+                        environmentSequence=["2026-06", "2026-07"],
+                        perMonthEventBudget={
+                            "2026-06": 5_000,
+                            "2026-07": 5_000,
+                        },
+                        runSeed=1,
+                        sourceArticlesPerMonth=5_000,
+                        targetCreatedBabels=10_000,
+                        concurrentUsers=50,
+                    )
+                },
+            )()
+
+    cloned = []
+
+    def clone(**values):
+        cloned.append(values)
+        return _population_manifest().model_copy(
+            update={
+                "sourcePopulationRunId": values["config"].runId,
+                "modelId": child.modelId,
+                "modelVersion": descriptor.modelVersion,
+                "modelManifestSha256": (
+                    values["source_identity"].model_manifest_sha256
+                ),
+                "pgvectorSnapshotSha256": descriptor.vectorSnapshotSha256,
+            }
+        )
+
+    encoder = accepted_qwen_factory()
+    before = encoder.calls
+    builder = RealPopulationBuilder(
+        database=Database(),
+        bundle=type(
+            "Bundle",
+            (),
+            {
+                "dataset_repository": "dhelmy990/babel-wikipedia-experiment",
+                "dataset_config": "crosswalk_2026_06_07",
+                "dataset_revision": "3" * 40,
+            },
+        )(),
+        model=real_model_manifest,
+        encoder=encoder,
+        output_root=tmp_path,
+        build=lambda **_values: pytest.fail("child start must not invoke Qwen build"),
+        clone=clone,
+    )
+
+    manifest, directory = builder(
+        _trial(
+            starting_model_id=child.modelId,
+            model_repository=child.encoderRepo,
+            model_revision=child.encoderRevision,
+        ),
+        POPULATION_RUN_ID,
+        lambda **_values: None,
+        lambda: False,
+    )
+
+    assert encoder.calls == before
+    assert manifest.modelId == child.modelId
+    assert manifest.modelVersion == descriptor.modelVersion
+    assert cloned[0]["source_identity"].run_id == child.producingRunId
+    assert cloned[0]["source_identity"].model_id == child.modelId
+    assert cloned[0]["expected_snapshot_sha256"] == descriptor.vectorSnapshotSha256
+    assert cloned[0]["config"].startingModelId == child.modelId
+    assert directory == tmp_path / str(EXPERIMENT_ID) / "population"
+
+
+def test_real_population_builder_rejects_foreign_or_inactive_child(
+    tmp_path: Path, real_model_manifest, accepted_qwen_factory
+):
+    foreign_parent = real_model_manifest.model_copy(
+        update={"modelId": uuid5(EXPERIMENT_ID, "foreign-original")}
+    )
+    descriptor = _real_child(foreign_parent)
+    descriptor_path = tmp_path / "state-descriptor.json"
+    descriptor_path.write_text(descriptor.model_dump_json() + "\n")
+
+    class Database:
+        def load_real_child_artifact(self, model_id):
+            return descriptor, descriptor_path
+
+        def load_active_embedding_state(self, _run_id):
+            pytest.fail("foreign lineage must fail before population access")
+
+    builder = RealPopulationBuilder(
+        database=Database(),
+        bundle=type(
+            "Bundle",
+            (),
+            {
+                "dataset_repository": "dhelmy990/babel-wikipedia-experiment",
+                "dataset_config": "crosswalk_2026_06_07",
+                "dataset_revision": "3" * 40,
+            },
+        )(),
+        model=real_model_manifest,
+        encoder=accepted_qwen_factory(),
+        output_root=tmp_path,
+        build=lambda **_values: pytest.fail("foreign child must not build"),
+        clone=lambda **_values: pytest.fail("foreign child must not clone"),
+    )
+
+    with pytest.raises(ValueError, match="lineage"):
+        builder(
+            _trial(
+                starting_model_id=descriptor.childManifest.modelId,
+                model_repository=descriptor.childManifest.encoderRepo,
+                model_revision=descriptor.childManifest.encoderRevision,
+            ),
+            POPULATION_RUN_ID,
+            lambda **_values: None,
+            lambda: False,
+        )
 
 
 def test_condition_runner_invokes_concrete_live_command_and_loads_evidence(

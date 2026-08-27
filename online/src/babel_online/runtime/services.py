@@ -286,6 +286,36 @@ def _load_records(database: Any, identity: Any) -> list[VectorRecord]:
     return records
 
 
+def load_selected_working_model(
+    records: list[VectorRecord],
+    selected_artifact: tuple[RealQwenChildStateV1 | None, Path | None],
+) -> Any:
+    """Construct the trainer state shared by monolith and split topologies."""
+    from ..training.working import NumpyWorkingModel
+
+    frozen = {
+        record.babel.babelId: np.asarray(record.vector, dtype="<f4")
+        for record in records
+    }
+    model = NumpyWorkingModel(
+        frozen,
+        query_vector=np.mean(np.stack(list(frozen.values())), axis=0),
+        learning_rate=0.05,
+    )
+    descriptor, descriptor_path = selected_artifact
+    if (descriptor is None) != (descriptor_path is None):
+        raise ValueError("selected child descriptor binding is incomplete")
+    if descriptor is not None and descriptor_path is not None:
+        state_path = (descriptor_path.parent / descriptor.onlineStatePath).resolve()
+        try:
+            state_path.relative_to(descriptor_path.parent.resolve())
+        except ValueError as error:
+            raise ValueError("selected child state escapes its artifact") from error
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        model.load_state_dict(state)
+    return model
+
+
 def resolve_role_state_root(
     config: Any, environment: Mapping[str, str] = os.environ
 ) -> Path:
@@ -497,7 +527,6 @@ def trainer_main(argv: list[str] | None = None) -> int:
     from ..feedback.kafka import KafkaFeedbackConsumer
     from ..training.checkpoint import CheckpointIdentity, load_latest_checkpoint
     from ..training.consumer import OnlineTrainer
-    from ..training.working import NumpyWorkingModel
 
     parser = argparse.ArgumentParser(prog="babel-online-trainer")
     parser.add_argument("--run-id", required=True, type=UUID)
@@ -518,18 +547,7 @@ def trainer_main(argv: list[str] | None = None) -> int:
         _encoder,
     ) = _load_role_context(arguments.run_id, load_encoder=False)
     config = require_scaled_trainer_config(config)
-    frozen = {
-        record.babel.babelId: np.asarray(record.vector, dtype="<f4")
-        for record in records
-    }
-    query = np.mean(np.stack(list(frozen.values())), axis=0)
-    model = NumpyWorkingModel(frozen, query_vector=query, learning_rate=0.05)
-    selected_descriptor, selected_descriptor_path = selected_artifact
-    if selected_descriptor is not None:
-        state_path = Path(selected_descriptor.onlineStatePath)
-        # Resolve the descriptor's online state relative to its immutable file.
-        state = json.loads((selected_descriptor_path.parent / state_path).read_text())
-        model.load_state_dict(state)
+    model = load_selected_working_model(records, selected_artifact)
     raw_consumer = KafkaFeedbackConsumer(
         os.environ.get("BABEL_KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:29092"),
         group_id=f"{config.kafkaGroup}.{arguments.run_id}",
@@ -838,6 +856,7 @@ def serving_main(argv: list[str] | None = None) -> int:
 __all__ = [
     "PublishedUpdate",
     "active_model_descends_from",
+    "load_selected_working_model",
     "ServingRole",
     "TrainerRole",
     "publish_final_update",

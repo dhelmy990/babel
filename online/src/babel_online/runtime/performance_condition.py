@@ -262,11 +262,11 @@ class _SameProcessHost:
         from ..serving import ServingState, create_app
         from ..training.checkpoint import CheckpointIdentity
         from ..training.consumer import OnlineTrainer
-        from ..training.working import NumpyWorkingModel
         from .services import (
             TrainerRole,
             _load_records,
             _load_role_context,
+            load_selected_working_model,
             run_periodic_training,
             scope_split_consumer,
         )
@@ -276,7 +276,7 @@ class _SameProcessHost:
             _loaded_database,
             self.config,
             loaded,
-            _selected_artifact,
+            selected_artifact,
             self.registry,
             self.active,
             self.records,
@@ -314,18 +314,7 @@ class _SameProcessHost:
         self.trainer = None
         self.role = None
         if condition.training_enabled:
-            frozen = {
-                record.babel.babelId: __import__("numpy").asarray(
-                    record.vector, dtype="<f4"
-                )
-                for record in self.records
-            }
-            numpy = __import__("numpy")
-            model = NumpyWorkingModel(
-                frozen,
-                query_vector=numpy.mean(numpy.stack(list(frozen.values())), axis=0),
-                learning_rate=0.05,
-            )
+            model = load_selected_working_model(self.records, selected_artifact)
             raw_consumer = KafkaFeedbackConsumer(
                 kafka_bootstrap_servers,
                 group_id=f"{self.config.kafkaGroup}.{run_id}",

@@ -8,11 +8,12 @@ from uuid import UUID, uuid4
 
 import numpy as np
 import pytest
-from babel_online.contracts import RunConfigV2
+from babel_online.contracts import RunConfigV2, canonical_pgvector_snapshot_sha256
 from babel_online.model.frozen_population import (
     FrozenPopulationIntegrityError,
     build_frozen_population,
     clone_frozen_population,
+    freeze_cloned_population,
     load_frozen_population,
 )
 from babel_online.model.population import (
@@ -271,6 +272,98 @@ def test_load_rejects_tampered_bundle(
     (directory / "vectors.f32le").write_bytes(b"bad")
     with pytest.raises(FrozenPopulationIntegrityError, match="vector"):
         load_frozen_population(directory)
+
+
+def test_selected_child_snapshot_is_rebound_to_new_trial_with_exact_babel_ids(
+    tmp_path, real_model_manifest, accepted_qwen_factory
+) -> None:
+    database = MemoryDatabase()
+    encoder = accepted_qwen_factory()
+    source_config = config(tmp_path, real_model_manifest.modelId, run_id=uuid4())
+    original_identity = PopulationIdentity.from_real_model(
+        run_id=source_config.runId,
+        dataset_revision=source_config.datasetRevision,
+        model=real_model_manifest,
+        model_version=0,
+    )
+    build_frozen_population(
+        database=database,
+        config=source_config,
+        bundle=bundle(),
+        model=real_model_manifest,
+        encoder=encoder,
+        identity=original_identity,
+        output_root=tmp_path / "original",
+        experiment_id="original",
+        batch_size=1_000,
+    )
+    child_document = real_model_manifest.model_dump(mode="json")
+    child_document.update(
+        modelId=uuid4(),
+        parentModelId=real_model_manifest.modelId,
+        producingRunId=source_config.runId,
+        label="selected child",
+    )
+    child = type(real_model_manifest).model_validate(child_document)
+    child_version = 3
+    child_records = {}
+    snapshot_rows = []
+    for babel_id, record in database.vectors[source_config.runId].items():
+        selected = record.model_copy(
+            update={
+                "servingModelId": child.modelId,
+                "materializedModelVersion": child_version,
+            }
+        )
+        child_records[babel_id] = selected
+        snapshot_rows.append(
+            {
+                "babelId": selected.babel.babelId,
+                "creatorId": selected.babel.creatorId,
+                "sourceArticleKey": selected.babel.sourceArticleKey,
+                "catalogContentHash": selected.catalogContentHash,
+                "embeddingSpaceId": selected.embeddingSpaceId,
+                "servingModelId": selected.servingModelId,
+                "materializedModelVersion": selected.materializedModelVersion,
+                "vectorSha256": hashlib.sha256(
+                    np.asarray(selected.vector, dtype="<f4").tobytes()
+                ).hexdigest(),
+            }
+        )
+    database.vectors[source_config.runId] = child_records
+    snapshot = canonical_pgvector_snapshot_sha256(snapshot_rows)
+    source_identity = PopulationIdentity.from_real_model(
+        run_id=source_config.runId,
+        dataset_revision=source_config.datasetRevision,
+        model=child,
+        model_version=child_version,
+    )
+    database.states[source_config.runId] = (source_identity, snapshot)
+    destination = config(tmp_path, child.modelId, run_id=uuid4())
+    before = encoder.calls
+
+    manifest = freeze_cloned_population(
+        database=database,
+        config=destination,
+        bundle=bundle(),
+        model=child,
+        model_version=child_version,
+        source_identity=source_identity,
+        expected_snapshot_sha256=snapshot,
+        output_root=tmp_path / "child",
+        experiment_id="new-trial",
+    )
+
+    assert encoder.calls == before
+    assert manifest.sourcePopulationRunId == destination.runId
+    assert manifest.modelId == child.modelId
+    assert manifest.modelVersion == child_version
+    assert manifest.pgvectorSnapshotSha256 == snapshot
+    assert set(database.vectors[destination.runId]) == set(child_records)
+    assert {
+        row.babel.sourceArticleKey
+        for row in database.vectors[destination.runId].values()
+    } == {row.babel.sourceArticleKey for row in child_records.values()}
 
 
 def test_build_reports_committed_progress_and_gracefully_returns_incomplete_receipt(

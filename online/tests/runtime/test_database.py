@@ -553,6 +553,10 @@ def test_clone_population_is_insert_select_and_rejects_any_relational_difference
     inserts = [query for query, _ in cursor.queries[:4]]
     assert all("INSERT INTO" in query and "SELECT" in query for query in inserts)
     assert "vector_send(embedding)" in cursor.queries[4][0]
+    assert cursor.queries[4][0].count("serving_model_id=%s") == 4
+    assert cursor.queries[4][0].count("materialized_model_version=%s") == 4
+    assert cursor.queries[4][0].count("embedding_space_id=%s") == 4
+    assert cursor.queries[4][0].count("%s") == len(cursor.queries[4][1])
 
     conflict = RecordingCursor(rows=[(0, 1, 0)])
     database = __import__(

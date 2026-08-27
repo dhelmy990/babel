@@ -223,6 +223,7 @@ class RealPopulationBuilder:
         encoder: Any,
         output_root: str | Path,
         build: Callable[..., Any] | None = None,
+        clone: Callable[..., FrozenPopulationManifestV1] | None = None,
     ) -> None:
         if not isinstance(model, ModelManifestV2):
             raise TypeError("formal population requires a real Qwen V2 model")
@@ -230,12 +231,67 @@ class RealPopulationBuilder:
             from ..model.frozen_population import build_frozen_population
 
             build = build_frozen_population
+        if clone is None:
+            from ..model.frozen_population import freeze_cloned_population
+
+            clone = freeze_cloned_population
         self.database = database
         self.bundle = bundle
         self.model = model
         self.encoder = encoder
         self.output_root = Path(output_root)
         self.build = build
+        self.clone = clone
+
+    @staticmethod
+    def _same_immutable_artifact(
+        left: ModelManifestV2, right: ModelManifestV2
+    ) -> bool:
+        ignored = {"modelId", "label", "parentModelId", "producingRunId"}
+        left_document = left.model_dump(mode="json")
+        right_document = right.model_dump(mode="json")
+        return all(
+            left_document[name] == right_document[name]
+            for name in left_document.keys() - ignored
+        )
+
+    def _selected_child(self, model_id: UUID):
+        descriptor, descriptor_path = self.database.load_real_child_artifact(model_id)
+        selected = descriptor.childManifest
+        if selected.modelId != model_id:
+            raise ValueError("selected child descriptor resolves to another model")
+        seen: set[UUID] = set()
+        current = selected
+        while current.modelId != self.model.modelId:
+            if current.modelId in seen or not self._same_immutable_artifact(
+                self.model, current
+            ):
+                raise ValueError("selected child is outside the accepted model lineage")
+            seen.add(current.modelId)
+            parent_id = current.parentModelId
+            if parent_id is None:
+                raise ValueError("selected child is outside the accepted model lineage")
+            if parent_id == self.model.modelId:
+                break
+            parent_descriptor, _parent_path = self.database.load_real_child_artifact(
+                parent_id
+            )
+            current = parent_descriptor.childManifest
+            if current.modelId != parent_id:
+                raise ValueError("selected child lineage descriptor differs")
+        root = descriptor_path.parent.resolve()
+        for relative, expected in descriptor.files.items():
+            path = (root / relative).resolve()
+            try:
+                path.relative_to(root)
+            except ValueError as error:
+                raise ValueError("selected child state escapes its artifact") from error
+            if (
+                not path.is_file()
+                or hashlib.sha256(path.read_bytes()).hexdigest() != expected
+            ):
+                raise ValueError("selected child state checksum differs")
+        return descriptor
 
     def __call__(
         self,
@@ -246,8 +302,7 @@ class RealPopulationBuilder:
     ) -> tuple[FrozenPopulationManifestV1, Path]:
         trial.validate_formal_defaults()
         if (
-            trial.starting_model_id != self.model.modelId
-            or trial.model_repository != self.model.encoderRepo
+            trial.model_repository != self.model.encoderRepo
             or trial.model_revision != self.model.encoderRevision
         ):
             raise ValueError("saved trial model differs from the accepted Qwen artifact")
@@ -297,12 +352,6 @@ class RealPopulationBuilder:
             maximumRequestsPerTraversal=10,
             interleaveCreationAndRecommendations=True,
         )
-        identity = PopulationIdentity.from_real_model(
-            run_id=run_id,
-            dataset_revision=config.datasetRevision,
-            model=self.model,
-            model_version=0,
-        )
         started = time.monotonic()
 
         def report(batch: Any) -> None:
@@ -313,18 +362,73 @@ class RealPopulationBuilder:
                 recent_rate=float(batch.committed_count) / elapsed,
             )
 
-        result = self.build(
-            database=self.database,
-            config=config,
-            bundle=self.bundle,
-            model=self.model,
-            encoder=self.encoder,
-            identity=identity,
-            output_root=self.output_root,
-            experiment_id=str(trial.id),
-            progress_sink=report,
-            stop_requested=stop_requested,
-        )
+        if trial.starting_model_id == self.model.modelId:
+            identity = PopulationIdentity.from_real_model(
+                run_id=run_id,
+                dataset_revision=config.datasetRevision,
+                model=self.model,
+                model_version=0,
+            )
+            result = self.build(
+                database=self.database,
+                config=config,
+                bundle=self.bundle,
+                model=self.model,
+                encoder=self.encoder,
+                identity=identity,
+                output_root=self.output_root,
+                experiment_id=str(trial.id),
+                progress_sink=report,
+                stop_requested=stop_requested,
+            )
+        else:
+            descriptor = self._selected_child(trial.starting_model_id)
+            child = descriptor.childManifest
+            source_run_id = child.producingRunId
+            if source_run_id is None:
+                raise ValueError("selected child does not identify its producing run")
+            source_config = self.database.load_run(source_run_id).config
+            if (
+                source_config.datasetRepo != config.datasetRepo
+                or source_config.datasetConfig != config.datasetConfig
+                or source_config.datasetRevision != config.datasetRevision
+                or source_config.creatorCount != config.creatorCount
+                or source_config.perMonthEventBudget != config.perMonthEventBudget
+                or source_config.targetCreatedBabels != config.targetCreatedBabels
+            ):
+                raise ValueError(
+                    "selected child producing run is incompatible with this trial"
+                )
+            active = self.database.load_active_embedding_state(source_run_id)
+            if (
+                active.run_id != source_run_id
+                or active.model_id != child.modelId
+                or active.model_version != descriptor.modelVersion
+                or active.embedding_space_id != child.embeddingSpace.embeddingSpaceId
+                or active.pgvector_snapshot_sha256 != descriptor.vectorSnapshotSha256
+                or active.backend_snapshot_sha256 != descriptor.vectorSnapshotSha256
+            ):
+                raise ValueError(
+                    "selected child is not the producing run's active snapshot"
+                )
+            source_identity = PopulationIdentity.from_real_model(
+                run_id=source_run_id,
+                dataset_revision=config.datasetRevision,
+                model=child,
+                model_version=descriptor.modelVersion,
+            )
+            result = self.clone(
+                database=self.database,
+                config=config,
+                bundle=self.bundle,
+                model=child,
+                model_version=descriptor.modelVersion,
+                source_identity=source_identity,
+                expected_snapshot_sha256=descriptor.vectorSnapshotSha256,
+                output_root=self.output_root,
+                experiment_id=str(trial.id),
+            )
+            progress(created_babels=10_000, indexed_babels=10_000, recent_rate=0.0)
         if isinstance(result, PopulationReceipt):
             if not result.complete and stop_requested():
                 raise InterruptedError("population build stopped at a committed boundary")
