@@ -4,7 +4,9 @@ services:
     network_mode: host
     env_file: /etc/babel/runtime.env
     environment:
-      BABEL_ONLINE_WORKER_ENDPOINT: http://127.0.0.1:8790
+      # Fail closed: the population/performance worker is deliberately absent.
+      BABEL_ONLINE_WORKER_ENDPOINT: http://127.0.0.1:9
+      BABEL_PERFORMANCE_WORKER_ENDPOINT: http://127.0.0.1:9
     command: ["serve"]
     restart: unless-stopped
     labels:

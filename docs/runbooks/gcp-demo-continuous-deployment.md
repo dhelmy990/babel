@@ -15,6 +15,12 @@ environment variables:
 - `GCP_VM_NAME`: private Compute Engine GPU VM name.
 - `GCP_VM_ZONE`: exact VM zone.
 - `BABEL_GCP_RUN_ID`: canonical UUID of the migrated/imported GCP run.
+- `BABEL_GCP_TRIAL_ID`: fresh UUIDv4 allocated by the verified importer. The
+  run ID must be exactly `uuid5(trial_id, "population")`.
+- `BABEL_POPULATION_VECTOR_SHA256`: ordered-vector SHA-256 from the ready
+  import receipt.
+- `BABEL_POPULATION_SNAPSHOT_SHA256`: canonical snapshot SHA-256 from that
+  same ready import receipt.
 
 No GitHub secret is required for GCP authentication. Do not create or upload a
 service-account JSON key.
@@ -27,17 +33,28 @@ service account named `babel-github-deployer`, and a new provider named
 attribute condition to both:
 
 ```text
-assertion.repository == 'dhelmy990/babel'
+assertion.repository_id == '1244081200' &&
+assertion.repository_owner_id == '120252306' &&
+assertion.repository == 'dhelmy990/babel' &&
 assertion.ref == 'refs/heads/demo'
 ```
 
-Grant the deployer only Artifact Registry write, Compute instance read, IAP
-tunnel access, and OS Login permissions required to reach the named VM. Grant
-the VM's own service account Artifact Registry read. Do not grant either
-principal project Owner or Editor.
+Configure mappings for `google.subject=assertion.sub`,
+`attribute.repository=assertion.repository`, `attribute.ref=assertion.ref`,
+`attribute.repository_id=assertion.repository_id`, and
+`attribute.repository_owner_id=assertion.repository_owner_id`.
+Bind `roles/iam.workloadIdentityUser` only to the resulting repository/ref
+principal set. The protected `gcp-demo` environment must allow only `demo`;
+the workflow repeats this guard for manual dispatches.
+
+Grant the deployer `roles/artifactregistry.writer` on only the `babel-demo`
+repository, `roles/compute.viewer`, `roles/iap.tunnelResourceAccessor`, and
+`roles/compute.osAdminLogin` (the rollout invokes root-owned files through
+`sudo`). Grant the VM's own service account `roles/artifactregistry.reader` on
+only `babel-demo`. Do not grant either principal project Owner or Editor.
 
 The VM requires Docker Engine, Compose v2, the NVIDIA container toolkit,
-Python 3, curl, `sha256sum`, an Artifact Registry credential helper configured
+Python 3, curl, `sha256sum`, `flock` (util-linux), an Artifact Registry credential helper configured
 for root, and `/var/lib/babel-online` on persistent storage. Provision
 `/etc/babel/runtime.env` mode `0600`, owned by root, with at least:
 
@@ -50,14 +67,27 @@ HF_TOKEN=private-hugging-face-read-token
 ```
 
 PostgreSQL/pgvector, Kafka, the imported 10,000-vector population, and its HNSW
-index are provisioned separately. CD never populates or re-encodes them.
+index are provisioned separately. CD never populates or re-encodes them. Before
+stopping the prior release, it recomputes the ordered-vector and snapshot
+hashes and checks fresh IDs, model/dataset provenance, 10,000 finite 100d
+vectors, catalog identity, and a valid/ready HNSW index. A mismatch is terminal.
 
 ## Operation and rollback
 
-Push the audited deployment commit to `demo`. A failed test, build, push,
-checksum, migration, CUDA probe, or pre-promotion validation leaves the current
-application running. A failed post-restart health check restarts the previous
-release. Successful receipts are stored at:
+Push the audited deployment commit to `demo`. A VM-side `flock` serializes
+rollouts even when GitHub cancels an older job; TERM, INT, and SSH HUP trigger
+rollback after promotion starts, while monotonic GitHub run IDs prevent an
+older attempt from winning. A failed test, build, push, checksum, migration,
+CUDA probe, or pre-promotion gate leaves the current application running.
+
+After restart, CD requires fresh run-bound trainer readiness, exact running
+image digests and source labels, exact model identity/version, and one bounded
+CUDA Qwen recommendation. Rollback is an application-image rollback, not a
+database down-migration. Demo CI rejects every migration-file change relative
+to `326b840`; future schema work requires an explicitly reviewed
+expand-contract sequence that keeps the previous images compatible. A failed
+restore/attestation remains failed and never repoints `current`. Successful
+receipts are stored at:
 
 ```text
 /opt/babel/current/deployment-receipt.json
@@ -71,3 +101,9 @@ dashboard without opening a public firewall rule:
 gcloud compute ssh VM_NAME --zone VM_ZONE --tunnel-through-iap \
   -- -N -L 8787:127.0.0.1:8787
 ```
+
+The backend dashboard is read-only in this topology. Both its online-worker
+and performance-worker endpoints are forced to closed loopback port 9, so
+population, approval, and matrix-control actions fail closed even if the VM
+contains old worker credentials. Add the performance worker only after the
+reviewed no-reencoding guard is replayed; recommendation serving remains available.

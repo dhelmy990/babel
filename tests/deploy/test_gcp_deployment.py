@@ -3,10 +3,15 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import subprocess
+import sys
+import time
 from pathlib import Path
+from uuid import UUID, uuid4, uuid5
 
 import pytest
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -22,7 +27,18 @@ def _load_release_module():
     return module
 
 
+def _load_predeploy_module():
+    path = DEPLOY / "predeploy.py"
+    spec = importlib.util.spec_from_file_location("babel_gcp_predeploy_contract", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def _valid_release() -> dict[str, str]:
+    trial_id = UUID("4b8ba3f2-4464-4da8-adf0-7a8cb8aa1a70")
     registry = "us-central1-docker.pkg.dev/demo-project/babel-demo"
     return {
         "BABEL_SOURCE_COMMIT": "a" * 40,
@@ -31,7 +47,12 @@ def _valid_release() -> dict[str, str]:
         "BABEL_TRAINER_IMAGE": f"{registry}/babel-trainer@sha256:{'3' * 64}",
         "BABEL_MODEL_REVISION": "57d949cd634b920cc1a46f27c9b21df094b5240e",
         "BABEL_DATASET_REVISION": "0d1ab2c7f0e2295682288fcf10077d2d776bf559",
-        "BABEL_GCP_RUN_ID": "4b8ba3f2-4464-4da8-adf0-7a8cb8aa1a70",
+        "BABEL_GCP_TRIAL_ID": str(trial_id),
+        "BABEL_GCP_RUN_ID": str(uuid5(trial_id, "population")),
+        "BABEL_POPULATION_VECTOR_SHA256": "4" * 64,
+        "BABEL_POPULATION_SNAPSHOT_SHA256": "5" * 64,
+        "BABEL_DEPLOYMENT_RUN_ID": "123456789",
+        "BABEL_DEPLOYMENT_RUN_ATTEMPT": "2",
     }
 
 
@@ -45,6 +66,7 @@ def test_release_contract_accepts_only_digest_images_and_pinned_provenance() -> 
         ("BABEL_MODEL_REVISION", "f" * 40),
         ("BABEL_DATASET_REVISION", "e" * 40),
         ("BABEL_GCP_RUN_ID", "not-a-uuid"),
+        ("BABEL_POPULATION_VECTOR_SHA256", "not-a-sha"),
     ):
         candidate = _valid_release()
         candidate[key] = invalid
@@ -82,7 +104,14 @@ def test_receipt_is_canonical_and_records_exact_image_digests() -> None:
         "trainerImageDigest": "sha256:" + "3" * 64,
         "modelRevision": "57d949cd634b920cc1a46f27c9b21df094b5240e",
         "datasetRevision": "0d1ab2c7f0e2295682288fcf10077d2d776bf559",
-        "runId": "4b8ba3f2-4464-4da8-adf0-7a8cb8aa1a70",
+        "trialId": "4b8ba3f2-4464-4da8-adf0-7a8cb8aa1a70",
+        "runId": str(
+            uuid5(UUID("4b8ba3f2-4464-4da8-adf0-7a8cb8aa1a70"), "population")
+        ),
+        "populationVectorSha256": "4" * 64,
+        "populationSnapshotSha256": "5" * 64,
+        "deploymentRunId": 123456789,
+        "deploymentRunAttempt": 2,
         "deployedAt": "2026-08-27T14:00:00Z",
     }
     encoded = release.canonical_json(receipt)
@@ -104,6 +133,88 @@ def test_workflow_is_wif_only_digest_deployment_from_demo_branch() -> None:
     assert "git pull" not in workflow
     assert "deploy/gcp/rollout.sh" in workflow
     assert "performance-worker" not in workflow
+    assert "github.ref == 'refs/heads/demo'" in workflow
+    assert "GITHUB_RUN_ID" in workflow
+    assert "BABEL_GCP_TRIAL_ID" in workflow
+    assert "tests/deploy/test_gcp_predeploy.py" in workflow
+    assert "tests/deploy/test_rollout_supervisor.py" in workflow
+    parsed = yaml.load(workflow, Loader=yaml.BaseLoader)
+    for job in parsed["jobs"].values():
+        for step in job.get("steps", []):
+            assert "${{ vars." not in step.get("run", "")
+
+
+def test_release_rejects_nonfresh_or_unbound_gcp_ids() -> None:
+    release = _load_release_module()
+    candidate = _valid_release()
+    candidate["BABEL_GCP_TRIAL_ID"] = "ce8e54ff-e317-4a89-b7db-90327e02dc43"
+    with pytest.raises(ValueError, match="fresh"):
+        release.validate_release(candidate)
+
+    candidate = _valid_release()
+    candidate["BABEL_GCP_RUN_ID"] = str(uuid4())
+    with pytest.raises(ValueError, match="uuid5"):
+        release.validate_release(candidate)
+
+
+def test_deployment_ownership_accepts_only_a_newer_github_attempt() -> None:
+    release = _load_release_module()
+    assert release.require_newer_deployment(11, 1, previous_run_id=10, previous_attempt=9)
+    assert release.require_newer_deployment(11, 2, previous_run_id=11, previous_attempt=1)
+    with pytest.raises(ValueError, match="older or duplicate"):
+        release.require_newer_deployment(10, 9, previous_run_id=11, previous_attempt=1)
+    with pytest.raises(ValueError, match="older or duplicate"):
+        release.require_newer_deployment(11, 1, previous_run_id=11, previous_attempt=1)
+
+def test_trainer_readiness_is_bound_to_run_and_current_rollout() -> None:
+    release = _load_release_module()
+    run_id = _valid_release()["BABEL_GCP_RUN_ID"]
+    threshold = time.time_ns()
+    ready = {
+        "schemaVersion": 1,
+        "runId": run_id,
+        "consumerGroup": f"babel-performance-population-demo.{run_id}",
+        "readyAtNs": threshold,
+    }
+    assert release.validate_trainer_readiness(
+        ready, expected_run_id=run_id, not_before_ns=threshold
+    ) == ready
+    with pytest.raises(ValueError, match="run"):
+        release.validate_trainer_readiness(
+            ready | {"runId": str(uuid4())},
+            expected_run_id=run_id,
+            not_before_ns=threshold,
+        )
+    with pytest.raises(ValueError, match="stale"):
+        release.validate_trainer_readiness(
+            ready | {"readyAtNs": threshold - 1},
+            expected_run_id=run_id,
+            not_before_ns=threshold,
+        )
+
+
+def test_serving_health_and_smoke_are_exactly_attested() -> None:
+    release = _load_release_module()
+    run_id = _valid_release()["BABEL_GCP_RUN_ID"]
+    model_id = "2c4c48d5-3dcf-5ab9-8191-cd4edc2cbf67"
+    health = {"status": "ok", "modelId": model_id, "modelVersion": 0}
+    assert release.validate_serving_health(health) == health
+    with pytest.raises(ValueError, match="model"):
+        release.validate_serving_health(health | {"modelVersion": 1})
+
+    smoke = {
+        "schemaVersion": 2,
+        "runId": run_id,
+        "modelId": model_id,
+        "modelVersion": 0,
+        "sourceVectorOrigin": "qwen_encode",
+        "candidates": [{"babelId": str(uuid4())}],
+    }
+    assert release.validate_serving_smoke(smoke, expected_run_id=run_id) == smoke
+    with pytest.raises(ValueError, match="CUDA Qwen"):
+        release.validate_serving_smoke(
+            smoke | {"sourceVectorOrigin": "pgvector_load"}, expected_run_id=run_id
+        )
 
 
 def test_multistage_image_and_compose_preserve_compute_boundary() -> None:
@@ -126,6 +237,8 @@ def test_multistage_image_and_compose_preserve_compute_boundary() -> None:
     trainer = compose.split("  trainer:", 1)[1]
     assert "gpus: all" not in trainer
     assert "performance-worker" not in compose
+    assert "BABEL_ONLINE_WORKER_ENDPOINT: http://127.0.0.1:9" in compose
+    assert "BABEL_PERFORMANCE_WORKER_ENDPOINT: http://127.0.0.1:9" in compose
 
 
 def test_rollout_validates_before_migration_and_rolls_back_on_failed_health() -> None:
@@ -133,13 +246,64 @@ def test_rollout_validates_before_migration_and_rolls_back_on_failed_health() ->
     validate_at = script.index("release.py validate")
     pull_at = script.index("compose pull")
     migrate_at = script.index("backend migrate")
-    stop_at = script.index("stop_current_release")
-    health_at = script.index("verify_health")
-    assert validate_at < pull_at < migrate_at < stop_at < health_at
+    gate_at = script.index("/opt/babel-predeploy.py")
+    stop_at = script.index('compose_for "$PREVIOUS_RELEASE" stop')
+    health_at = script.index('verify_release "$NEW_RELEASE"')
+    assert validate_at < pull_at < migrate_at < gate_at < stop_at < health_at
     assert "rollback_current_release" in script
-    assert "trap rollback_on_error ERR" in script
+    assert "flock --wait" in script
+    assert "trap 'exit 143' TERM" in script
+    assert "trap 'exit 130' INT" in script
+    assert "trap 'exit 129' HUP" in script
+    assert "trap '' TERM INT HUP" in script
+    assert "trainer-ready.json" in script and "rm -f" in script
+    assert "predeploy.py" in script
+    assert "--population-vector-sha256" in script
+    assert "--population-snapshot-sha256" in script
+    assert "--ordered-vector-sha256" not in script
+    assert "--snapshot-sha256" not in script
+    assert "validate-trainer-readiness" in script
+    assert "validate-serving-smoke" in script
+    assert "docker image inspect" in script
+    assert 'dev.babel.model-revision' in script
+    assert 'dev.babel.dataset-revision' in script
+    assert "rollback_current_release || true" not in script
     assert "docker compose down -v" not in script
     assert "rm -rf" not in script
+
+
+def test_rollout_predeploy_argv_is_accepted_end_to_end(monkeypatch, capsys) -> None:
+    script = (DEPLOY / "rollout.sh").read_text()
+    command = script.split(
+        '--entrypoint python "$BABEL_TRAINER_IMAGE" /opt/babel-predeploy.py', 1
+    )[1].split(
+        '>"$NEW_RELEASE/predeploy-evidence.json"', 1
+    )[0]
+    flags = re.findall(r"(--[a-z0-9-]+)\s+", command)
+    assert flags == [
+        "--trial-id",
+        "--run-id",
+        "--population-vector-sha256",
+        "--population-snapshot-sha256",
+    ]
+
+    predeploy = _load_predeploy_module()
+    monkeypatch.setenv("BABEL_DATABASE_URL", "postgresql://not-logged")
+    monkeypatch.setattr(predeploy, "read_database_snapshot", lambda *_a, **_k: ({}, []))
+    monkeypatch.setattr(
+        predeploy,
+        "validate_snapshot",
+        lambda *_a, **_k: {"schemaVersion": 1, "verified": True},
+    )
+    values = {
+        "--trial-id": _valid_release()["BABEL_GCP_TRIAL_ID"],
+        "--run-id": _valid_release()["BABEL_GCP_RUN_ID"],
+        "--population-vector-sha256": "4" * 64,
+        "--population-snapshot-sha256": "5" * 64,
+    }
+    argv = [part for flag in flags for part in (flag, values[flag])]
+    assert predeploy.main(argv) == 0
+    assert json.loads(capsys.readouterr().out) == {"schemaVersion": 1, "verified": True}
 
 
 def test_shell_scripts_parse() -> None:
