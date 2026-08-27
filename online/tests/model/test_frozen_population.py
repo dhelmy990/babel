@@ -17,7 +17,9 @@ from babel_online.model.frozen_population import (
 )
 from babel_online.model.population import (
     PopulationActivationEvidence,
+    PopulationBatchProgress,
     PopulationIdentity,
+    PopulationReceipt,
     PopulationSource,
 )
 from babel_online.runtime.database import FrozenPopulationRow, PersistedRun
@@ -269,3 +271,39 @@ def test_load_rejects_tampered_bundle(
     (directory / "vectors.f32le").write_bytes(b"bad")
     with pytest.raises(FrozenPopulationIntegrityError, match="vector"):
         load_frozen_population(directory)
+
+
+def test_build_reports_committed_progress_and_gracefully_returns_incomplete_receipt(
+    tmp_path, real_model_manifest, accepted_qwen_factory
+) -> None:
+    database = MemoryDatabase()
+    source_config = config(tmp_path, real_model_manifest.modelId, run_id=uuid4())
+    progress: list[PopulationBatchProgress] = []
+
+    result = build_frozen_population(
+        database=database,
+        config=source_config,
+        bundle=bundle(),
+        model=real_model_manifest,
+        encoder=accepted_qwen_factory(),
+        identity=PopulationIdentity.from_real_model(
+            run_id=source_config.runId,
+            dataset_revision=source_config.datasetRevision,
+            model=real_model_manifest,
+            model_version=0,
+        ),
+        output_root=tmp_path,
+        experiment_id="stopped",
+        batch_size=128,
+        progress_sink=progress.append,
+        stop_requested=lambda: bool(progress),
+    )
+
+    assert isinstance(result, PopulationReceipt)
+    assert result.complete is False
+    assert result.indexed_count == 128
+    assert [(item.batch_count, item.committed_count) for item in progress] == [
+        (128, 128)
+    ]
+    assert len(database.vectors[source_config.runId]) == 128
+    assert not (tmp_path / "stopped/population/manifest.json").exists()

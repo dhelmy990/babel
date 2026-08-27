@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Literal, Protocol
@@ -24,8 +24,10 @@ from ..simulation.population_plan import plan_population
 from .artifact import model_manifest_sha256
 from .candidate_index import MaterializedServingState
 from .population import (
+    PopulationBatchProgress,
     PopulationIdentity,
     PopulationIntegrityError,
+    PopulationReceipt,
     populate_created_babel_vectors,
 )
 from .qwen_encoder import Qwen100Encoder
@@ -231,7 +233,9 @@ def build_frozen_population(
     output_root: str | Path,
     experiment_id: str,
     batch_size: int = 32,
-) -> FrozenPopulationManifestV1:
+    progress_sink: Callable[[PopulationBatchProgress], None] | None = None,
+    stop_requested: Callable[[], bool] | None = None,
+) -> FrozenPopulationManifestV1 | PopulationReceipt:
     """Materialize once with accepted Qwen and export the trusted frozen bundle."""
     if identity != PopulationIdentity.from_real_model(
         run_id=config.runId,
@@ -251,12 +255,12 @@ def build_frozen_population(
         identity=identity,
         state_root=config.stateRoot,
         batch_size=batch_size,
+        progress_sink=progress_sink,
+        stop_requested=stop_requested,
     )
-    if (
-        not receipt.complete
-        or not receipt.formal_ready
-        or receipt.indexed_count != 10_000
-    ):
+    if not receipt.complete:
+        return receipt
+    if not receipt.formal_ready or receipt.indexed_count != 10_000:
         raise FrozenPopulationIntegrityError(
             "formal frozen population did not complete exactly 10,000 vectors"
         )
