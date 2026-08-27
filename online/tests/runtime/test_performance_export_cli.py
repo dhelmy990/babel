@@ -77,10 +77,12 @@ def test_performance_export_cli_uses_kafka_closes_and_prints_canonical_receipt(
     assert receipt == {
         "canonicalEdges": 7,
         "edgesParquet": str((tmp_path / "edges.parquet").resolve()),
+        "evidenceScope": "formal",
         "experimentId": str(EXPERIMENT_ID),
         "feedbackParquet": str((tmp_path / "feedback.parquet").resolve()),
         "feedbackExportManifest": str(manifest.resolve()),
         "feedbackRecords": 9,
+        "formalPerformanceClaim": True,
     }
     assert "secret" not in json.dumps(receipt)
 
