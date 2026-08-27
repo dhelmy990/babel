@@ -1,0 +1,187 @@
+name: Deploy GCP demo
+
+on:
+  push:
+    branches: [demo]
+  workflow_dispatch:
+
+concurrency:
+  group: babel-gcp-demo
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MODEL_REVISION: 57d949cd634b920cc1a46f27c9b21df094b5240e
+  DATASET_REVISION: 0d1ab2c7f0e2295682288fcf10077d2d776bf559
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the pushed commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.3"
+          enable-cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install test dependencies
+        run: |
+          npm ci
+          uv sync --directory online --frozen --extra pgvector --extra kafka --extra qwen --extra dev
+
+      - name: Run JavaScript and deployment tests
+        run: |
+          npm test
+          online/.venv/bin/python -m pytest -q tests/deploy/test_gcp_deployment.py
+
+      - name: Run online runtime tests
+        env:
+          PYTHONPATH: online/src:benchmark/src:.
+        run: |
+          online/.venv/bin/python -m pytest -q \
+            online/tests/training/test_torch_online.py \
+            online/tests/training/test_checkpoint.py \
+            online/tests/feedback/test_kafka.py \
+            online/tests/runtime/test_standalone_roles.py \
+            online/tests/runtime/test_topology.py \
+            online/tests/runtime/test_topology_acceptance.py
+
+      - name: Build and run the native test image
+        run: docker build --target backend-test --build-arg SOURCE_COMMIT="$GITHUB_SHA" .
+
+  publish-and-deploy:
+    needs: test
+    runs-on: ubuntu-24.04
+    environment: gcp-demo
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out the tested commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Authenticate with Babel Workload Identity Federation
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Set up Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+
+      - name: Authenticate Docker to Artifact Registry
+        run: gcloud auth configure-docker "${{ vars.GCP_ARTIFACT_REGION }}-docker.pkg.dev" --quiet
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Build and push backend
+        id: backend
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          target: backend
+          push: true
+          build-args: SOURCE_COMMIT=${{ github.sha }}
+          tags: ${{ vars.GCP_ARTIFACT_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ vars.GCP_ARTIFACT_REPOSITORY }}/babel-backend:${{ github.sha }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+      - name: Build and push CUDA serving
+        id: serving
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          target: serving
+          push: true
+          build-args: SOURCE_COMMIT=${{ github.sha }}
+          tags: ${{ vars.GCP_ARTIFACT_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ vars.GCP_ARTIFACT_REPOSITORY }}/babel-serving:${{ github.sha }}
+          cache-from: type=gha,scope=online
+          cache-to: type=gha,mode=max,scope=online
+
+      - name: Build and push CPU trainer
+        id: trainer
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          target: trainer
+          push: true
+          build-args: SOURCE_COMMIT=${{ github.sha }}
+          tags: ${{ vars.GCP_ARTIFACT_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ vars.GCP_ARTIFACT_REPOSITORY }}/babel-trainer:${{ github.sha }}
+          cache-from: type=gha,scope=online
+          cache-to: type=gha,mode=max,scope=online
+
+      - name: Create immutable release package
+        env:
+          BACKEND_DIGEST: ${{ steps.backend.outputs.digest }}
+          SERVING_DIGEST: ${{ steps.serving.outputs.digest }}
+          TRAINER_DIGEST: ${{ steps.trainer.outputs.digest }}
+          GCP_RUN_ID: ${{ vars.BABEL_GCP_RUN_ID }}
+          REGISTRY: ${{ vars.GCP_ARTIFACT_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ vars.GCP_ARTIFACT_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          release="babel-release-${GITHUB_SHA}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -m 0700 "$release"
+          backend_image="${REGISTRY}/babel-backend@${BACKEND_DIGEST}"
+          serving_image="${REGISTRY}/babel-serving@${SERVING_DIGEST}"
+          trainer_image="${REGISTRY}/babel-trainer@${TRAINER_DIGEST}"
+          [[ "$backend_image" == *@sha256:* ]]
+          [[ "$serving_image" == *@sha256:* ]]
+          [[ "$trainer_image" == *@sha256:* ]]
+          {
+            printf 'BABEL_SOURCE_COMMIT=%s\n' "$GITHUB_SHA"
+            printf 'BABEL_BACKEND_IMAGE=%s\n' "$backend_image"
+            printf 'BABEL_SERVING_IMAGE=%s\n' "$serving_image"
+            printf 'BABEL_TRAINER_IMAGE=%s\n' "$trainer_image"
+            printf 'BABEL_MODEL_REVISION=%s\n' "$MODEL_REVISION"
+            printf 'BABEL_DATASET_REVISION=%s\n' "$DATASET_REVISION"
+            printf 'BABEL_GCP_RUN_ID=%s\n' "$GCP_RUN_ID"
+          } >"$release/release.env"
+          install -m 0600 deploy/gcp/compose.yaml "$release/compose.yaml"
+          install -m 0700 deploy/gcp/rollout.sh "$release/rollout.sh"
+          install -m 0700 deploy/gcp/release.py "$release/release.py"
+          python3 "$release/release.py" validate "$release/release.env"
+          (
+            cd "$release"
+            sha256sum compose.yaml release.env release.py rollout.sh >SHA256SUMS
+          )
+          printf 'RELEASE=%s\n' "$release" >>"$GITHUB_ENV"
+
+      - name: Stage release on the private VM
+        run: |
+          gcloud compute scp --quiet --recurse --tunnel-through-iap \
+            "$RELEASE" \
+            "${{ vars.GCP_VM_NAME }}:/tmp/" \
+            --project "${{ vars.GCP_PROJECT_ID }}" \
+            --zone "${{ vars.GCP_VM_ZONE }}"
+
+      - name: Promote exact image digests and verify health
+        run: |
+          gcloud compute ssh --quiet --tunnel-through-iap \
+            "${{ vars.GCP_VM_NAME }}" \
+            --project "${{ vars.GCP_PROJECT_ID }}" \
+            --zone "${{ vars.GCP_VM_ZONE }}" \
+            --command "sudo bash /tmp/${RELEASE}/rollout.sh /tmp/${RELEASE}"

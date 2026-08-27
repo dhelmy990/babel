@@ -60,9 +60,13 @@ set_target_properties(babel_backend_cli PROPERTIES OUTPUT_NAME babel_backend)
 target_link_libraries(babel_backend_cli PRIVATE babel_backend)
 babel_enable_warnings(babel_backend_cli)
 
+set(BABEL_MIGRATION_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/migrations" CACHE PATH
+    "Runtime directory containing numbered PostgreSQL migrations")
+set(BABEL_ADMIN_ASSET_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/admin" CACHE PATH
+    "Runtime directory containing the loopback dashboard assets")
 target_compile_definitions(babel_backend PRIVATE
-  BABEL_MIGRATION_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/migrations"
-  BABEL_ADMIN_ASSET_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/admin")
+  BABEL_MIGRATION_DIRECTORY="${BABEL_MIGRATION_DIRECTORY}"
+  BABEL_ADMIN_ASSET_DIRECTORY="${BABEL_ADMIN_ASSET_DIRECTORY}")
 
 if(BUILD_TESTING)
   add_custom_target(babel_tests ALL)
