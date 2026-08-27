@@ -9,13 +9,15 @@ db-up:
 online-split:
     #!/usr/bin/env bash
     : "${BABEL_ONLINE_WORKER_TOKEN:?set the 64-hex dashboard worker token}"
-    BABEL_RUNTIME_TOPOLOGY=same_host_split \
+    BABEL_ONLINE_TRAINER_COMMAND="${BABEL_ONLINE_TRAINER_COMMAND:-babel-online-trainer --run-id {run_id} --activation-enabled true}" \
+      BABEL_RUNTIME_TOPOLOGY=same_host_split \
       online/.venv/bin/python -m babel_online.runtime.cli supervise
 
 online-isolated:
     #!/usr/bin/env bash
     : "${BABEL_ONLINE_WORKER_TOKEN:?set the 64-hex dashboard worker token}"
-    BABEL_RUNTIME_TOPOLOGY=same_host_isolated \
+    BABEL_ONLINE_TRAINER_COMMAND="${BABEL_ONLINE_TRAINER_COMMAND:-babel-online-trainer --run-id {run_id} --activation-enabled true}" \
+      BABEL_RUNTIME_TOPOLOGY=same_host_isolated \
       online/.venv/bin/python -m babel_online.runtime.cli supervise
 
 online-monolith:

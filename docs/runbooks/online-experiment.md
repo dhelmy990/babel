@@ -142,7 +142,7 @@ The fault runner maps to Task 9 as follows:
 | Fault | Runnable seam |
 |---|---|
 | Trainer kill | authenticated `POST /v1/topology/trainer/stop` through `HttpTask9TopologyControl` |
-| Trainer restart | supplied service callback starts `babel-online-trainer --run-id <run>` with the same pins/state root |
+| Trainer restart | supplied service callback starts `babel-online-trainer --run-id <run> --activation-enabled true` with the same pins/state root |
 | Kafka pause/resume | `CallbackKafkaControl` wraps the consumer/admin client's pause and resume actions |
 | Invalid model state | supplied injector writes one invalid activation request and returns whether serving rejected it |
 | Serving restart | separate stop and start callbacks around an availability/version probe |
