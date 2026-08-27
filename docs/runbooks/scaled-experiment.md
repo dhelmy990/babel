@@ -21,17 +21,18 @@ the complete context, residual, Adam, scheduler, offset, step, and version
 state. Activation swaps both materialized pgvector rows and the matching
 context tensors, while the original Qwen model remains immutable/selectable.
 
-> **Active-run warning:** trial
-> `ce8e54ff-e317-4a89-b7db-90327e02dc43` is already building its population.
-> Do not run the preparation/launch commands against it, regenerate its worker
-> token, or restart its backend/worker. Use the launch section only for a fresh
-> process or later trial.
+> **Completed-run boundary:** preserve optimized representative trial
+> `72e35d2e-f04e-405d-af9a-25f873e44d5b`, its source trial, and its failed
+> predecessor unchanged. Use the launch section only for a fresh trial; the
+> formal matrix cannot resume in place.
 
 ## Frozen inputs
 
 | Input | Immutable identity |
 |---|---|
-| Current 50-creator trial | `ce8e54ff-e317-4a89-b7db-90327e02dc43` |
+| Frozen source trial | `ce8e54ff-e317-4a89-b7db-90327e02dc43` |
+| Latest completed representative trial | `72e35d2e-f04e-405d-af9a-25f873e44d5b` |
+| First remotely verified representative | `dhelmy990/babel-wikipedia-experiment@dc0d158ff75851a5f944aa674f9fb88221440ede` |
 | Starting model ID | `2c4c48d5-3dcf-5ab9-8191-cd4edc2cbf67` |
 | Trained adapter/projection | `dhelmy990/babel-qwen-navigation-2016-interview@57d949cd634b920cc1a46f27c9b21df094b5240e` |
 | Artifact directory | `artifacts/3f6b43e574eb2bcac55c4ddf95f624e3f42153f97437cfeba703c9b3b110a1f8` |
@@ -87,6 +88,12 @@ export BABEL_ONLINE_QWEN_CACHE='/home/dhelmy990/.cache/huggingface/hub'
 export BABEL_PERFORMANCE_WORKER_TOKEN="$(openssl rand -hex 32)"
 export PATH="$PWD/online/.venv/bin:$PATH"
 ```
+
+Keep the `PATH` export when restarting either process and verify
+`command -v babel-online` resolves to `online/.venv/bin/babel-online` before
+launch. Attempt `7d0dbbf8-18e6-4a9b-afa1-0441ee4a300b` omitted that path on a
+worker restart, failed with `babel-online` not found before condition 1, and is
+startup diagnostic evidence only.
 
 Use CPU for the comparable same-host experiment unless CUDA is deliberately the
 resource under test. If using CUDA, verify the runtime first and record the
@@ -333,6 +340,61 @@ complete inventory at the returned commit to verify every checksum. The printed
 receipt contains no token. This representative receipt must not be passed to
 `trial-bundle-attach` and cannot claim formal performance evidence.
 
+The first successful representative bundle above contains 17 files and was
+remotely verified at dataset commit
+`dc0d158ff75851a5f944aa674f9fb88221440ede`, path
+`representative-runs/0367346d-98f9-4419-b2db-9194c4c868f7/08fcd65c2e723760e95e93dea0c48fb827de3b0702a5befece7ae9b0dc1786b1/`.
+It remains `formalPerformanceClaim=false`.
+
+### Publish the optimized representative
+
+Optimized trial `72e35d2e-f04e-405d-af9a-25f873e44d5b` completed the same
+frozen 2×3 workload with 450/450 successful requests, complete training-offset
+coverage, and zero final lag. Its export contains 450 feedback rows and 2,682
+accepted edges. Before publication, confirm the declared SHA-256 values are:
+
+```text
+feedback: adfea5b3b939aabe4a6478fc9c560ec71e6081b8eff5ef468ea59c97a31400fc
+edges:    3004a3d1ab53a80be0e349d3d38d1ac5b08f883fee44750212e3ec6d8b13d069
+```
+
+Build and publish it through the same representative-only contract, using new
+empty output/receipt paths:
+
+```bash
+TRIAL_ID='72e35d2e-f04e-405d-af9a-25f873e44d5b'
+RUN_ROOT="/home/dhelmy990/Data/babel-data/runs/$TRIAL_ID"
+PERF_ROOT='/home/dhelmy990/Data/babel-data/state/performance'
+REPRESENTATIVE_ROOT="$RUN_ROOT/representative-accepted"
+BUILD_RECEIPT="$RUN_ROOT/representative-build-receipt.json"
+
+babel-friday-benchmark representative-run-build \
+  --trial-id "$TRIAL_ID" \
+  --export-root "$RUN_ROOT/representative-export/feedback-export" \
+  --evidence-root "$PERF_ROOT/$TRIAL_ID/conditions" \
+  --report 'docs/experiments/scaled-performance-report.md' \
+  --output-root "$REPRESENTATIVE_ROOT" \
+  > "$BUILD_RECEIPT"
+
+BUNDLE_ROOT="$(jq -r '.bundleRoot' "$BUILD_RECEIPT")"
+
+babel-friday-benchmark representative-run-publish \
+  --trial-id "$TRIAL_ID" \
+  --bundle-root "$BUNDLE_ROOT" \
+  --repo-id 'dhelmy990/babel-wikipedia-experiment' \
+  --revision main \
+  > "$RUN_ROOT/representative-publication-receipt.json"
+```
+
+Publication status at this checkpoint:
+**pending local closed-bundle publication**. Replace that placeholder in the
+report, plan, and handoff only
+after the publisher returns an immutable dataset commit and the remote reload
+verifies the exact content-addressed path. Do not attach this receipt to the
+formal saved-trial route.
+
+### Build the formal accepted bundle
+
 Do not begin this phase until the trial's complete formal matrix is durably
 `completed` (nine conditions at cohort 50; six at cohorts 100/500), training
 conditions report zero final Kafka lag, and the selected child is present in
@@ -417,11 +479,10 @@ dashboard and confirm the artifact commit/path, condition-6 child, original
 parent, and the available topology ratio sets (three at cohort 50; two at
 cohorts 100/500).
 
-The backend serving the already-running trial was started before the final
-artifact-attachment route landed. Wait for the trial to become durably
-`completed`, then stop it, rebuild/restart the backend from this branch, and
-capture the restarted process's new admin nonce before attachment. Never do
-that rebuild/restart while population or matrix work is active.
+For a future formal trial, wait until it is durably `completed`, then stop it,
+rebuild/restart the backend from this branch if required, and capture the
+restarted process's new admin nonce before attachment. Never rebuild or restart
+while population or matrix work is active.
 
 ## Smoke labels and scaling
 

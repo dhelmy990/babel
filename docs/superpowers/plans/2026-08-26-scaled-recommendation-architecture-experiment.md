@@ -99,22 +99,41 @@ failed its Kafka drain because the superseded demo updater processed one event
 per step while publishing 68 large snapshots. Conditions 4–9 never ran. See
 `docs/experiments/scaled-performance-report.md` for exact evidence.
 
-Corrective execution order:
+The corrective representative execution is complete. Trial
+`0367346d-98f9-4419-b2db-9194c4c868f7` completed its fixed-order 2×3 matrix
+with 450/450 successful requests, complete training offset coverage, and zero
+final Kafka lag. Publisher commits `97525f4` and `c69b433` were reviewed; its
+17-file non-formal bundle was remotely verified at private dataset commit
+`dc0d158ff75851a5f944aa674f9fb88221440ede`, path
+`representative-runs/0367346d-98f9-4419-b2db-9194c4c868f7/08fcd65c2e723760e95e93dea0c48fb827de3b0702a5befece7ae9b0dc1786b1/`.
 
-1. Use the reviewed PyTorch online head from commit `83d0e3c` and live progress
-   telemetry from `326b840`.
-2. From the authenticated dashboard, create a fresh explicitly non-formal 2×3
-   rerun comparing `same_process` with `same_host_split` across the three load
-   modes. Reuse the checksum-identical frozen population and a bounded prefix of
-   the frozen workload under a new identity; do not re-encode 10,000 articles.
-3. Require zero request errors, zero final Kafka lag, durable original/child
-   lineage, all three interference ratios, and saved progress/results.
-4. Publish or attach only through a bundle contract matching the run's honest
-   `representative` label. Never pass a 2×3 rerun to the formal cohort-50 3×3
-   publisher.
-5. After the representative comparison is secured, decide whether remaining
-   time justifies a complete 3×3 run, retrieval comparison, fault campaign, or
-   higher creator cohort. These must not block the default split evidence.
+Staged activation commits `b0963cd` and `0d8f6f9` passed experiment review and
+79 focused tests. They prepare once, issue one database `executemany`, and
+atomically activate a prebuilt snapshot. Attempt
+`7d0dbbf8-18e6-4a9b-afa1-0441ee4a300b` failed before any condition because a
+worker restart omitted `online/.venv/bin` from `PATH`; it is startup diagnostic
+evidence only. After restoring the documented path, optimized trial
+`72e35d2e-f04e-405d-af9a-25f873e44d5b` completed the same frozen six-condition
+workload with 450/450 successful requests, complete offset coverage, and zero
+final lag.
+
+That optimized trial does not establish a stable topology ranking: its
+same-process rows are cold-cache/order distorted, and split full p95 improved
+only about 0.66%, from 84,844.64 to 84,288.69 ms. It does establish attribution.
+The split version-10 receipt records about 29.85 seconds of preparation and a
+41-millisecond atomic switch, with about 30.02 seconds of publication-to-
+activation staleness. Activated child
+`79db828b-c2ed-53fa-9f7c-555d6cf5610e` remains the serving version; final
+trainer version 17 child `c22c42b7-2cf5-5600-8c25-4d73df5f036c` is registered
+and selectable but was not activated after the required successful version-10
+activation. The optimized closed representative bundle is
+**pending local closed-bundle publication**.
+
+Next action: publish and remotely verify that exact non-formal bundle, then
+record its immutable commit/path. The next architecture experiment should move,
+throttle, or batch preparation across the trainer/distributor resource boundary
+and repeat in reverse or counterbalanced order. Do not spend the next iteration
+optimizing the already-small atomic switch.
 
 ## Orchestrator Fleet Map
 

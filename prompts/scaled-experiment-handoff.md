@@ -14,17 +14,18 @@ Serving activation must load the same context tensors together with the
 materialized child vectors; a run that still constructs `NumpyWorkingModel` is
 plumbing evidence only.
 
-> **Active-run warning:** trial
-> `ce8e54ff-e317-4a89-b7db-90327e02dc43` is already building its population.
-> Do not rerun the launch commands, regenerate its worker token, or restart its
-> backend/worker. The commands below are the reproducible launch procedure for a
-> fresh process or later trial.
+> **Completed-run boundary:** preserve trial
+> `72e35d2e-f04e-405d-af9a-25f873e44d5b` and its source trial unchanged. The
+> commands below are the reproducible launch procedure for a fresh trial, not a
+> resume command for completed or failed evidence.
 
 ## Immutable identities
 
 | Item | Pinned identity |
 |---|---|
-| Active 50-creator trial | `ce8e54ff-e317-4a89-b7db-90327e02dc43` |
+| Frozen source trial | `ce8e54ff-e317-4a89-b7db-90327e02dc43` |
+| Latest completed representative trial | `72e35d2e-f04e-405d-af9a-25f873e44d5b` |
+| First remotely verified representative | `dhelmy990/babel-wikipedia-experiment@dc0d158ff75851a5f944aa674f9fb88221440ede` |
 | Starting model ID | `2c4c48d5-3dcf-5ab9-8191-cd4edc2cbf67` |
 | Trained model | `dhelmy990/babel-qwen-navigation-2016-interview@57d949cd634b920cc1a46f27c9b21df094b5240e` |
 | Artifact ID | `3f6b43e574eb2bcac55c4ddf95f624e3f42153f97437cfeba703c9b3b110a1f8` |
@@ -66,6 +67,12 @@ export BABEL_PERFORMANCE_WORKER_TOKEN="$(openssl rand -hex 32)"
 export PATH="$PWD/online/.venv/bin:$PATH"
 ```
 
+The final `PATH` export is a startup requirement, not a convenience. Optimized
+attempt `7d0dbbf8-18e6-4a9b-afa1-0441ee4a300b` failed before condition 1 after
+a worker restart omitted `online/.venv/bin` and could not find `babel-online`.
+Verify `babel-online` resolves from that environment before starting both
+processes; the failed attempt is diagnostic evidence only.
+
 Use `BABEL_ONLINE_QWEN_DEVICE=cuda` only after verifying the local CUDA
 runtime. The backend and worker must inherit the same 64-hex performance token.
 Do not regenerate it in the second terminal.
@@ -84,6 +91,35 @@ just start
 
 Open `http://127.0.0.1:8787/admin`. The worker listens only on
 `127.0.0.1:8792`.
+
+## Latest representative evidence
+
+Staged activation commits `b0963cd` and `0d8f6f9` passed review and 79 focused
+tests. They prepare once, issue one database `executemany`, and atomically swap
+a prebuilt snapshot. Trial `72e35d2e-f04e-405d-af9a-25f873e44d5b` reused the
+frozen 10,000-vector real-Qwen population and six-condition workload at 50
+creators/concurrent users, 75 requests per condition, and 2.5 target RPS. All
+450 requests succeeded; every training condition had complete Kafka offset
+coverage and final lag zero.
+
+The split serving, training-only, and full p95 values were 4,920.49, 4,940.91,
+and 84,288.69 ms. Version-10 activation attributed about 29.85 seconds to
+preparation and about 41 milliseconds to the atomic switch. The activated
+serving child is `79db828b-c2ed-53fa-9f7c-555d6cf5610e`; final trainer version
+17 child `c22c42b7-2cf5-5600-8c25-4d73df5f036c` remains registered/selectable
+but unactivated. The same-process rows are cold-cache/order distorted, and
+split full p95 was only about 0.66% below the prior successful trial, so this is
+an attribution result rather than a material end-to-end speedup or stable
+topology claim.
+
+The optimized export contains 450 feedback rows and 2,682 accepted edges with
+SHA-256 values
+`adfea5b3b939aabe4a6478fc9c560ec71e6081b8eff5ef468ea59c97a31400fc` and
+`3004a3d1ab53a80be0e349d3d38d1ac5b08f883fee44750212e3ec6d8b13d069`,
+respectively. Publication is **pending local closed-bundle publication**. Use
+the representative build/publish procedure in
+`docs/runbooks/scaled-experiment.md`; do not use the formal publisher or attach
+route.
 
 ## Operate the trial
 
@@ -174,7 +210,7 @@ condition/run pairs, population/model pins, feedback/edge checksums, and the
 selected child. Publication still uses `runs/<TRIAL_ID>`, and attachment still
 accepts only that exact saved trial.
 
-For the already-running trial, wait until it is durably `completed` before
+For any future formal trial, wait until it is durably `completed` before
 stopping any process. Then rebuild/restart the backend from the current branch
 so its artifact-attachment route includes the latest code, capture the new
 per-process admin nonce, and run the attach command. This terminal-state restart

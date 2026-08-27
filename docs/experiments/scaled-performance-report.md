@@ -180,10 +180,72 @@ rows beneath
 `runs/0367346d-98f9-4419-b2db-9194c4c868f7/representative-export/` and is
 permanently labelled `formalPerformanceClaim=false`.
 
+Publisher commits `97525f4` and `c69b433` were reviewed. The closed 17-file
+bundle was remotely reloaded and checksum-verified at private dataset commit
+`dc0d158ff75851a5f944aa674f9fb88221440ede`, beneath
+`representative-runs/0367346d-98f9-4419-b2db-9194c4c868f7/08fcd65c2e723760e95e93dea0c48fb827de3b0702a5befece7ae9b0dc1786b1/`.
+This is the first remotely verified representative evidence and remains
+explicitly `formalPerformanceClaim=false`.
+
 An earlier 150-request representative attempt
 (`418a3a44-dcb8-42ee-be72-0706e4b30c35`) completed conditions 1–5 but failed
 closed when one final split-activation request crossed the 120-second timeout.
 It remains diagnostic load-limit evidence and is not an accepted result.
+
+### Optimized representative rerun
+
+Commits `b0963cd` and `0d8f6f9` changed activation to prepare the model once,
+write the prepared rows with one database `executemany`, and atomically switch
+the prebuilt snapshot. Experiment reviews returned PASS/APPROVED and all 79
+focused tests passed.
+
+The first attempted optimized rerun,
+`7d0dbbf8-18e6-4a9b-afa1-0441ee4a300b`, failed before condition 1 because the
+restarted worker did not inherit `online/.venv/bin` in `PATH` and therefore
+could not find `babel-online`. It is startup diagnostic evidence only. The
+launch procedure was corrected to restore the virtual-environment path before
+starting either process.
+
+Trial `72e35d2e-f04e-405d-af9a-25f873e44d5b` then completed with the same
+frozen source trial, population, and workload as the accepted representative
+comparison: 10,000 real-Qwen vectors, 50 creators and concurrent users, 75
+requests per condition (12 warm-up and 63 measured), 2.5 target RPS, six
+fixed-order conditions, and pgvector. All 450 requests succeeded with no
+errors. Every training condition ended at Kafka lag zero with complete offset
+coverage. This representative result is `formalPerformanceClaim=false`.
+
+| Topology | Serving p95 | Training p95 | Full p95 | `Itraining` | `Ifull` | `IActivationIncrement` |
+|---|---:|---:|---:|---:|---:|---:|
+| `same_process` | 83,786.707889 ms | 13,552.654297 ms | 85,161.014859 ms | 0.1617518415 | 1.0164024462 | 6.2837148349 |
+| `same_host_split` | 4,920.490575 ms | 4,940.905643 ms | 84,288.686762 ms | 1.0041489904 | 17.1301388504 | 17.0593597312 |
+
+The same-process rows are strongly cold-cache/order distorted and cannot
+support a stable topology conclusion. The same-host split training-only row is
+near its serving baseline, but split full p95 moved from 84,844.64 ms in the
+prior successful trial to 84,288.69 ms here, only about 0.66% lower. This is not
+a material end-to-end speedup claim.
+
+The architectural result is attribution. The split activation receipt for
+version 10 records `stageDurationNs=29851507054` (about 29.85 seconds) and
+`switchDurationNs=41016510` (about 41 milliseconds), with about 30.02 seconds
+from publication to activation. Atomic switching is small; preparing and
+materializing the snapshot remains the contention. The activated serving child
+is `79db828b-c2ed-53fa-9f7c-555d6cf5610e` at version 10. The final trainer
+version is 17: child `c22c42b7-2cf5-5600-8c25-4d73df5f036c` is registered and
+selectable, but its final activation request remained pending after the
+required successful version-10 activation. Final Kafka lag is zero.
+
+The export again contains 450 feedback rows and 2,682 accepted edges. Its
+feedback SHA-256 is
+`adfea5b3b939aabe4a6478fc9c560ec71e6081b8eff5ef468ea59c97a31400fc`; its
+edge SHA-256 is
+`3004a3d1ab53a80be0e349d3d38d1ac5b08f883fee44750212e3ec6d8b13d069`.
+Remote evidence: **pending local closed-bundle publication**. Until that pin is
+recorded, the earlier trial remains the remotely verified representative.
+
+The next experiment should move, throttle, or batch preparation at the
+trainer/distributor resource boundary, then repeat the comparison in reverse
+or counterbalanced order. Atomic switch work is no longer the primary target.
 
 ## Retrieval
 
@@ -246,7 +308,8 @@ are reported above and must not be presented as a completed topology result.
 | Tiny 3×3 smoke | Live passed; 9 requests; non-formal | `state/live-smoke-actual-v5/receipt.json` |
 | Frozen 10,000-Babel population | Passed | `state/performance/ce8e54ff-e317-4a89-b7db-90327e02dc43/population/manifest.json` |
 | First cohort-50 control attempt | Failed closed at condition 3; non-formal | `state/performance/ce8e54ff-e317-4a89-b7db-90327e02dc43/conditions/` |
-| Representative cohort-50 2×3 | Passed; 450/450 requests; non-formal | `runs/0367346d-98f9-4419-b2db-9194c4c868f7/representative-export/` |
+| First representative cohort-50 2×3 | Passed; 450/450 requests; remotely verified; non-formal | `dhelmy990/babel-wikipedia-experiment@dc0d158ff75851a5f944aa674f9fb88221440ede` |
+| Optimized representative cohort-50 2×3 | Passed; 450/450 requests; publication pending; non-formal | pending local closed-bundle publication |
 | pgvector/HNSW comparison | Pending | — |
 | Cohort 100/500 scale | Pending | — |
 | Live fault campaign | Pending | — |
