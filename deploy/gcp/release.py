@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID, uuid5
 
@@ -35,6 +36,10 @@ REQUIRED_KEYS = frozenset(
 )
 SHA40 = re.compile(r"^[a-f0-9]{40}$")
 SHA256 = re.compile(r"^[a-f0-9]{64}$")
+DOCKER_TIMESTAMP = re.compile(
+    r"^(?P<seconds>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})"
+    r"\.(?P<fraction>[0-9]{1,9})Z$"
+)
 IMAGE = re.compile(
     r"^[a-z0-9-]+-docker\.pkg\.dev/"
     r"[a-z][a-z0-9-]{4,28}[a-z0-9]/"
@@ -124,6 +129,48 @@ def validate_trainer_readiness(
     return document
 
 
+def docker_started_at_ns(value: str) -> int:
+    match = DOCKER_TIMESTAMP.fullmatch(value)
+    if match is None:
+        raise ValueError("trainer container StartedAt is not canonical UTC")
+    seconds = datetime.strptime(
+        match.group("seconds"), "%Y-%m-%dT%H:%M:%S"
+    ).replace(tzinfo=timezone.utc)
+    return int(seconds.timestamp()) * 1_000_000_000 + int(
+        match.group("fraction").ljust(9, "0")
+    )
+
+
+def validate_trainer_instance(
+    readiness: dict[str, object],
+    *,
+    expected_run_id: str,
+    rollout_not_before_ns: int,
+    before: dict[str, object],
+    after: dict[str, object],
+) -> dict[str, object]:
+    required = {"containerId", "startedAt", "pid", "restartCount"}
+    if set(before) != required or set(after) != required:
+        raise ValueError("trainer container instance evidence has an unexpected schema")
+    if before != after:
+        raise ValueError("trainer container process instance changed during verification")
+    container_id = before["containerId"]
+    if not isinstance(container_id, str) or SHA256.fullmatch(container_id) is None:
+        raise ValueError("trainer container ID is invalid")
+    if type(before["pid"]) is not int or before["pid"] <= 0:
+        raise ValueError("trainer container PID is invalid")
+    if type(before["restartCount"]) is not int or before["restartCount"] < 0:
+        raise ValueError("trainer container restart count is invalid")
+    started_at = before["startedAt"]
+    if not isinstance(started_at, str):
+        raise ValueError("trainer container StartedAt is invalid")
+    return validate_trainer_readiness(
+        readiness,
+        expected_run_id=expected_run_id,
+        not_before_ns=max(rollout_not_before_ns, docker_started_at_ns(started_at)),
+    )
+
+
 def validate_serving_health(document: dict[str, object]) -> dict[str, object]:
     expected = {
         "status": "ok",
@@ -163,6 +210,27 @@ def require_newer_deployment(
     if (candidate_run_id, candidate_attempt) <= (previous_run_id, previous_attempt):
         raise ValueError("refusing an older or duplicate deployment attempt")
     return True
+
+
+def validate_deployment_predecessor(
+    candidate: dict[str, str], *, previous: dict[str, str] | None
+) -> dict[str, str]:
+    """Allow a clean first deployment or a newer release of this exact schema.
+
+    Legacy release metadata is deliberately not upgraded implicitly: a rollback
+    target is useful only when it can be fully attested by the current contract.
+    """
+    valid_candidate = validate_release(candidate)
+    if previous is None:
+        return valid_candidate
+    valid_previous = validate_release(previous)
+    require_newer_deployment(
+        int(valid_candidate["BABEL_DEPLOYMENT_RUN_ID"]),
+        int(valid_candidate["BABEL_DEPLOYMENT_RUN_ATTEMPT"]),
+        previous_run_id=int(valid_previous["BABEL_DEPLOYMENT_RUN_ID"]),
+        previous_attempt=int(valid_previous["BABEL_DEPLOYMENT_RUN_ATTEMPT"]),
+    )
+    return valid_candidate
 
 
 def load_json_object(path: Path) -> dict[str, object]:
@@ -205,6 +273,12 @@ def main(argv: list[str] | None = None) -> int:
     readiness.add_argument("document", type=Path)
     readiness.add_argument("--run-id", required=True)
     readiness.add_argument("--not-before-ns", required=True, type=int)
+    instance = commands.add_parser("validate-trainer-instance")
+    instance.add_argument("document", type=Path)
+    instance.add_argument("before", type=Path)
+    instance.add_argument("after", type=Path)
+    instance.add_argument("--run-id", required=True)
+    instance.add_argument("--not-before-ns", required=True, type=int)
     health = commands.add_parser("validate-serving-health")
     health.add_argument("document", type=Path)
     smoke = commands.add_parser("validate-serving-smoke")
@@ -229,6 +303,14 @@ def main(argv: list[str] | None = None) -> int:
                 expected_run_id=arguments.run_id,
                 not_before_ns=arguments.not_before_ns,
             )
+        elif arguments.command == "validate-trainer-instance":
+            validate_trainer_instance(
+                load_json_object(arguments.document),
+                expected_run_id=arguments.run_id,
+                rollout_not_before_ns=arguments.not_before_ns,
+                before=load_json_object(arguments.before),
+                after=load_json_object(arguments.after),
+            )
         elif arguments.command == "validate-serving-health":
             validate_serving_health(load_json_object(arguments.document))
         elif arguments.command == "validate-serving-smoke":
@@ -236,13 +318,9 @@ def main(argv: list[str] | None = None) -> int:
                 load_json_object(arguments.document), expected_run_id=arguments.run_id
             )
         elif arguments.command == "assert-newer":
-            candidate = validate_release(parse_env(arguments.candidate))
-            previous = validate_release(parse_env(arguments.previous))
-            require_newer_deployment(
-                int(candidate["BABEL_DEPLOYMENT_RUN_ID"]),
-                int(candidate["BABEL_DEPLOYMENT_RUN_ATTEMPT"]),
-                previous_run_id=int(previous["BABEL_DEPLOYMENT_RUN_ID"]),
-                previous_attempt=int(previous["BABEL_DEPLOYMENT_RUN_ATTEMPT"]),
+            validate_deployment_predecessor(
+                parse_env(arguments.candidate),
+                previous=parse_env(arguments.previous),
             )
     except (json.JSONDecodeError, OSError, ValueError) as error:
         print(str(error), file=sys.stderr)

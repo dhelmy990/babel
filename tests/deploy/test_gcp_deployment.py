@@ -139,6 +139,17 @@ def test_workflow_is_wif_only_digest_deployment_from_demo_branch() -> None:
     assert "tests/deploy/test_gcp_predeploy.py" in workflow
     assert "tests/deploy/test_rollout_supervisor.py" in workflow
     parsed = yaml.load(workflow, Loader=yaml.BaseLoader)
+    postgres = parsed["jobs"]["test"]["services"]["postgres"]
+    assert postgres["image"] == "pgvector/pgvector:0.8.6-pg18-bookworm"
+    assert postgres["ports"] == ["54329:5432"]
+    assert "job.services.postgres.id" in workflow
+    assert "CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public" in workflow
+    native_build = next(
+        step["run"]
+        for step in parsed["jobs"]["test"]["steps"]
+        if step.get("name") == "Build and run the native test image"
+    )
+    assert "docker build --network host --target backend-test" in native_build
     for job in parsed["jobs"].values():
         for step in job.get("steps", []):
             assert "${{ vars." not in step.get("run", "")
@@ -166,6 +177,28 @@ def test_deployment_ownership_accepts_only_a_newer_github_attempt() -> None:
     with pytest.raises(ValueError, match="older or duplicate"):
         release.require_newer_deployment(11, 1, previous_run_id=11, previous_attempt=1)
 
+
+def test_deployment_predecessor_allows_clean_first_deploy_and_rejects_legacy_release() -> None:
+    release = _load_release_module()
+    candidate = _valid_release()
+    assert release.validate_deployment_predecessor(candidate, previous=None) == candidate
+
+    legacy = {
+        key: value
+        for key, value in candidate.items()
+        if key
+        not in {
+            "BABEL_GCP_TRIAL_ID",
+            "BABEL_POPULATION_VECTOR_SHA256",
+            "BABEL_POPULATION_SNAPSHOT_SHA256",
+            "BABEL_DEPLOYMENT_RUN_ID",
+            "BABEL_DEPLOYMENT_RUN_ATTEMPT",
+        }
+    }
+    with pytest.raises(ValueError, match="exact keys"):
+        release.validate_deployment_predecessor(candidate, previous=legacy)
+
+
 def test_trainer_readiness_is_bound_to_run_and_current_rollout() -> None:
     release = _load_release_module()
     run_id = _valid_release()["BABEL_GCP_RUN_ID"]
@@ -190,6 +223,48 @@ def test_trainer_readiness_is_bound_to_run_and_current_rollout() -> None:
             ready | {"readyAtNs": threshold - 1},
             expected_run_id=run_id,
             not_before_ns=threshold,
+        )
+
+
+def test_trainer_readiness_rejects_sigkill_restart_stale_file() -> None:
+    release = _load_release_module()
+    run_id = _valid_release()["BABEL_GCP_RUN_ID"]
+    ready = {
+        "schemaVersion": 1,
+        "runId": run_id,
+        "consumerGroup": f"babel-performance-population-demo.{run_id}",
+        "readyAtNs": 1_000_000_100,
+    }
+    before = {
+        "containerId": "a" * 64,
+        "startedAt": "1970-01-01T00:00:01.000000200Z",
+        "pid": 222,
+        "restartCount": 1,
+    }
+    with pytest.raises(ValueError, match="stale"):
+        release.validate_trainer_instance(
+            ready,
+            expected_run_id=run_id,
+            rollout_not_before_ns=1_000_000_000,
+            before=before,
+            after=before,
+        )
+
+    fresh = ready | {"readyAtNs": 1_000_000_300}
+    assert release.validate_trainer_instance(
+        fresh,
+        expected_run_id=run_id,
+        rollout_not_before_ns=1_000_000_000,
+        before=before,
+        after=before,
+    ) == fresh
+    with pytest.raises(ValueError, match="changed"):
+        release.validate_trainer_instance(
+            fresh,
+            expected_run_id=run_id,
+            rollout_not_before_ns=1_000_000_000,
+            before=before,
+            after=before | {"pid": 333, "restartCount": 2},
         )
 
 
@@ -227,6 +302,9 @@ def test_multistage_image_and_compose_preserve_compute_boundary() -> None:
     assert "--depth 1" not in dockerfile
     assert "bison build-essential" in dockerfile
     assert "flex git ninja-build pkg-config python3" in dockerfile
+    assert "ARG BABEL_TEST_DATABASE_URL=postgresql://babel:babel-local-dev@127.0.0.1:54329/babel" in dockerfile
+    assert 'BABEL_TEST_DATABASE_URL="$BABEL_TEST_DATABASE_URL" ctest' in dockerfile
+    assert "USER 65534:65534" in dockerfile
 
     compose = (DEPLOY / "compose.yaml").read_text()
     assert "${BABEL_BACKEND_IMAGE:?" in compose
@@ -243,6 +321,8 @@ def test_multistage_image_and_compose_preserve_compute_boundary() -> None:
 
 def test_rollout_validates_before_migration_and_rolls_back_on_failed_health() -> None:
     script = (DEPLOY / "rollout.sh").read_text()
+    supervisor = (DEPLOY / "rollout_supervisor.sh").read_text()
+    all_shell = script + supervisor
     validate_at = script.index("release.py validate")
     pull_at = script.index("compose pull")
     migrate_at = script.index("backend migrate")
@@ -251,18 +331,20 @@ def test_rollout_validates_before_migration_and_rolls_back_on_failed_health() ->
     health_at = script.index('verify_release "$NEW_RELEASE"')
     assert validate_at < pull_at < migrate_at < gate_at < stop_at < health_at
     assert "rollback_current_release" in script
-    assert "flock --wait" in script
-    assert "trap 'exit 143' TERM" in script
-    assert "trap 'exit 130' INT" in script
-    assert "trap 'exit 129' HUP" in script
-    assert "trap '' TERM INT HUP" in script
+    assert 'elif [[ -e "$CURRENT_LINK" ]]' in script
+    assert "flock --wait" in all_shell
+    assert "trap 'exit 143' TERM" in all_shell
+    assert "trap 'exit 130' INT" in all_shell
+    assert "trap 'exit 129' HUP" in all_shell
+    assert "trap '' TERM INT HUP" in all_shell
     assert "trainer-ready.json" in script and "rm -f" in script
     assert "predeploy.py" in script
     assert "--population-vector-sha256" in script
     assert "--population-snapshot-sha256" in script
     assert "--ordered-vector-sha256" not in script
     assert "--snapshot-sha256" not in script
-    assert "validate-trainer-readiness" in script
+    assert "validate-trainer-instance" in script
+    assert "StartedAt" in script and "RestartCount" in script
     assert "validate-serving-smoke" in script
     assert "docker image inspect" in script
     assert 'dev.babel.model-revision' in script
@@ -307,7 +389,7 @@ def test_rollout_predeploy_argv_is_accepted_end_to_end(monkeypatch, capsys) -> N
 
 
 def test_shell_scripts_parse() -> None:
-    for path in (DEPLOY / "rollout.sh",):
+    for path in (DEPLOY / "rollout.sh", DEPLOY / "rollout_supervisor.sh"):
         result = subprocess.run(
             ["bash", "-n", os.fspath(path)], capture_output=True, text=True
         )

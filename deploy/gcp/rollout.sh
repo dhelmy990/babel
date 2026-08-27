@@ -1,35 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-acquire_rollout_lock() {
-  local lock_path=$1
-  local timeout_seconds=$2
-  exec 9>"$lock_path"
-  flock --wait "$timeout_seconds" 9
-}
-
-finish_or_rollback() {
-  local status=$?
-  trap - EXIT
-  trap '' TERM INT HUP
-  if [[ "${PROMOTION_STARTED:-false}" == true ]]; then
-    if ! rollback_current_release; then
-      status=70
-    fi
-  fi
-  exit "$status"
-}
-
-install_rollout_traps() {
-  trap finish_or_rollback EXIT
-  trap 'exit 143' TERM
-  trap 'exit 130' INT
-  trap 'exit 129' HUP
-}
-
-if [[ "${BABEL_ROLLOUT_LIBRARY_ONLY:-false}" == true ]]; then
-  return 0
-fi
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/rollout_supervisor.sh"
 
 if [[ $# -ne 1 ]]; then
   echo "usage: rollout.sh RELEASE_PACKAGE_DIRECTORY" >&2
@@ -56,7 +29,7 @@ if [[ ! -f "$RUNTIME_ENV" ]]; then
   exit 1
 fi
 
-if ! acquire_rollout_lock /var/lock/babel-gcp-demo-rollout.lock 900; then
+if ! babel_acquire_rollout_lock /var/lock/babel-gcp-demo-rollout.lock 900; then
   echo "timed out waiting for the exclusive Babel rollout lock" >&2
   exit 75
 fi
@@ -73,6 +46,7 @@ install -d -m 0700 "$NEW_RELEASE"
 install -m 0600 release.env "$NEW_RELEASE/release.env"
 install -m 0600 SHA256SUMS "$NEW_RELEASE/SHA256SUMS"
 install -m 0700 rollout.sh "$NEW_RELEASE/rollout.sh"
+install -m 0700 rollout_supervisor.sh "$NEW_RELEASE/rollout_supervisor.sh"
 install -m 0700 release.py "$NEW_RELEASE/release.py"
 install -m 0700 predeploy.py "$NEW_RELEASE/predeploy.py"
 install -m 0600 compose.yaml "$NEW_RELEASE/compose.yaml"
@@ -100,85 +74,103 @@ if [[ -L "$CURRENT_LINK" ]]; then
   PREVIOUS_RELEASE="$(readlink -f "$CURRENT_LINK")"
   python3 "$NEW_RELEASE/release.py" assert-newer \
     "$NEW_RELEASE/release.env" "$PREVIOUS_RELEASE/release.env"
+elif [[ -e "$CURRENT_LINK" ]]; then
+  echo "$CURRENT_LINK exists but is not an attested release symlink" >&2
+  exit 1
 fi
 
 attest_containers() {
   local release_dir=$1
-  local source_commit model_revision dataset_revision service key expected_ref container_id actual_ref actual_id expected_id revision compose_revision compose_model_revision compose_dataset_revision
-  source_commit="$(release_value "$release_dir" BABEL_SOURCE_COMMIT)"
-  model_revision="$(release_value "$release_dir" BABEL_MODEL_REVISION)"
-  dataset_revision="$(release_value "$release_dir" BABEL_DATASET_REVISION)"
+  local source_commit model_revision dataset_revision service key expected_ref container_id actual_ref actual_id expected_id revision compose_revision compose_model_revision compose_dataset_revision running_count
+  if ! source_commit="$(release_value "$release_dir" BABEL_SOURCE_COMMIT)" \
+     || ! model_revision="$(release_value "$release_dir" BABEL_MODEL_REVISION)" \
+     || ! dataset_revision="$(release_value "$release_dir" BABEL_DATASET_REVISION)"; then
+    return 1
+  fi
   for service in backend serving trainer; do
     case "$service" in
       backend) key=BABEL_BACKEND_IMAGE ;;
       serving) key=BABEL_SERVING_IMAGE ;;
       trainer) key=BABEL_TRAINER_IMAGE ;;
     esac
-    expected_ref="$(release_value "$release_dir" "$key")"
-    [[ "$(compose_for "$release_dir" ps --status running --services | grep -cx "$service")" == 1 ]]
-    container_id="$(compose_for "$release_dir" ps --quiet "$service")"
-    actual_ref="$(docker inspect --format '{{.Config.Image}}' "$container_id")"
-    actual_id="$(docker inspect --format '{{.Image}}' "$container_id")"
-    expected_id="$(docker image inspect --format '{{.Id}}' "$expected_ref")"
-    revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$expected_ref")"
-    compose_revision="$(docker inspect --format '{{ index .Config.Labels "dev.babel.source-commit" }}' "$container_id")"
-    compose_model_revision="$(docker inspect --format '{{ index .Config.Labels "dev.babel.model-revision" }}' "$container_id")"
-    compose_dataset_revision="$(docker inspect --format '{{ index .Config.Labels "dev.babel.dataset-revision" }}' "$container_id")"
-    [[ "$actual_ref" == "$expected_ref" ]]
-    [[ "$actual_id" == "$expected_id" ]]
-    [[ "$revision" == "$source_commit" ]]
-    [[ "$compose_revision" == "$source_commit" ]]
-    [[ "$compose_model_revision" == "$model_revision" ]]
-    [[ "$compose_dataset_revision" == "$dataset_revision" ]]
+    if ! expected_ref="$(release_value "$release_dir" "$key")" \
+       || ! running_count="$(compose_for "$release_dir" ps --status running --services | grep -cx "$service")" \
+       || ! container_id="$(compose_for "$release_dir" ps --quiet "$service")" \
+       || ! actual_ref="$(docker inspect --format '{{.Config.Image}}' "$container_id")" \
+       || ! actual_id="$(docker inspect --format '{{.Image}}' "$container_id")" \
+       || ! expected_id="$(docker image inspect --format '{{.Id}}' "$expected_ref")" \
+       || ! revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$expected_ref")" \
+       || ! compose_revision="$(docker inspect --format '{{ index .Config.Labels "dev.babel.source-commit" }}' "$container_id")" \
+       || ! compose_model_revision="$(docker inspect --format '{{ index .Config.Labels "dev.babel.model-revision" }}' "$container_id")" \
+       || ! compose_dataset_revision="$(docker inspect --format '{{ index .Config.Labels "dev.babel.dataset-revision" }}' "$container_id")"; then
+      return 1
+    fi
+    if [[ "$running_count" != 1 \
+       || "$actual_ref" != "$expected_ref" \
+       || "$actual_id" != "$expected_id" \
+       || "$revision" != "$source_commit" \
+       || "$compose_revision" != "$source_commit" \
+       || "$compose_model_revision" != "$model_revision" \
+       || "$compose_dataset_revision" != "$dataset_revision" ]]; then
+      return 1
+    fi
   done
+  return 0
+}
+
+trainer_instance_evidence() {
+  local release_dir=$1
+  local container_id
+  if ! container_id="$(compose_for "$release_dir" ps --quiet trainer)" \
+     || [[ -z "$container_id" ]]; then
+    return 1
+  fi
+  docker inspect --format \
+    '{"containerId":"{{.Id}}","startedAt":"{{.State.StartedAt}}","pid":{{.State.Pid}},"restartCount":{{.RestartCount}}}' \
+    "$container_id"
 }
 
 verify_release() {
   local release_dir=$1
   local not_before_ns=$2
-  local run_id health_file
-  run_id="$(release_value "$release_dir" BABEL_GCP_RUN_ID)"
+  local run_id health_file before_file after_file
+  if ! run_id="$(release_value "$release_dir" BABEL_GCP_RUN_ID)"; then
+    return 1
+  fi
   health_file="$release_dir/serving-health.json"
+  before_file="$release_dir/trainer-instance-before.json"
+  after_file="$release_dir/trainer-instance-after.json"
   for _ in $(seq 1 180); do
-    if curl --fail --silent --show-error --max-time 2 \
+    if ! trainer_instance_evidence "$release_dir" >"$before_file" \
+       || ! curl --fail --silent --show-error --max-time 2 \
          http://127.0.0.1:8787/health | grep -q '"status":"ok"' \
-       && curl --fail --silent --show-error --max-time 2 \
+       || ! curl --fail --silent --show-error --max-time 2 \
          http://127.0.0.1:8791/health >"$health_file" \
-       && python3 "$NEW_RELEASE/release.py" validate-serving-health "$health_file" \
-       && python3 "$NEW_RELEASE/release.py" validate-trainer-readiness "$READY_PATH" \
-         --run-id "$run_id" --not-before-ns "$not_before_ns"; then
-      attest_containers "$release_dir"
-      return 0
+       || ! python3 "$NEW_RELEASE/release.py" validate-serving-health "$health_file"; then
+      sleep 2
+      continue
     fi
-    sleep 2
+    if ! attest_containers "$release_dir" \
+       || ! trainer_instance_evidence "$release_dir" >"$after_file" \
+       || ! python3 "$NEW_RELEASE/release.py" validate-trainer-instance \
+         "$READY_PATH" "$before_file" "$after_file" \
+         --run-id "$run_id" --not-before-ns "$not_before_ns"; then
+      sleep 2
+      continue
+    fi
+    return 0
   done
-  compose_for "$release_dir" ps >&2
-  compose_for "$release_dir" logs --tail 100 >&2
+  compose_for "$release_dir" ps >&2 || true
+  compose_for "$release_dir" logs --tail 100 >&2 || true
   return 1
 }
 
 rollback_current_release() {
-  local rollback_failed=false
-  local rollback_started_ns
-  compose stop || rollback_failed=true
-  if [[ -z "$PREVIOUS_RELEASE" || ! -d "$PREVIOUS_RELEASE" ]]; then
-    echo "new deployment failed and no previous release exists" >&2
-    return 1
-  fi
-  rm -f "$READY_PATH"
-  rollback_started_ns="$(date +%s%N)"
-  compose_for "$PREVIOUS_RELEASE" up --detach --remove-orphans || rollback_failed=true
-  if [[ "$rollback_failed" == false ]] \
-     && verify_release "$PREVIOUS_RELEASE" "$rollback_started_ns"; then
-    ln -sfn "$PREVIOUS_RELEASE" "${CURRENT_LINK}.rollback"
-    mv -Tf "${CURRENT_LINK}.rollback" "$CURRENT_LINK"
-    return 0
-  fi
-  echo "previous release could not be restored and attested" >&2
-  return 1
+  babel_restore_previous_release \
+    "$NEW_RELEASE" "$PREVIOUS_RELEASE" "$READY_PATH" "$CURRENT_LINK"
 }
 
-install_rollout_traps
+babel_install_rollout_traps
 
 compose pull
 source "$NEW_RELEASE/release.env"

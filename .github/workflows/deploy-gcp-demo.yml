@@ -20,6 +20,20 @@ jobs:
   test:
     if: github.ref == 'refs/heads/demo'
     runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.6-pg18-bookworm
+        env:
+          POSTGRES_DB: babel
+          POSTGRES_USER: babel
+          POSTGRES_PASSWORD: babel-local-dev
+        ports:
+          - 54329:5432
+        options: >-
+          --health-cmd "pg_isready -U babel -d babel"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - name: Check out the pushed commit
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -72,8 +86,18 @@ jobs:
       - name: Enforce demo expand-contract migration policy
         run: git diff --exit-code 326b8403ec166f44099cd8950d6ff05b7d2d75cb..HEAD -- backend/migrations
 
+      - name: Enable pgvector for native integration tests
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: >-
+          docker exec "$POSTGRES_CONTAINER" psql --set ON_ERROR_STOP=1
+          --username babel --dbname babel
+          --command 'CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public'
+
       - name: Build and run the native test image
-        run: docker build --target backend-test --build-arg SOURCE_COMMIT="$GITHUB_SHA" .
+        # The backend integration suite uses the job's pgvector service through
+        # its fixed local test port. This test image is never published.
+        run: docker build --network host --target backend-test --build-arg SOURCE_COMMIT="$GITHUB_SHA" .
 
   publish-and-deploy:
     if: github.ref == 'refs/heads/demo'
@@ -202,12 +226,13 @@ jobs:
           } >"$release/release.env"
           install -m 0600 deploy/gcp/compose.yaml "$release/compose.yaml"
           install -m 0700 deploy/gcp/rollout.sh "$release/rollout.sh"
+          install -m 0700 deploy/gcp/rollout_supervisor.sh "$release/rollout_supervisor.sh"
           install -m 0700 deploy/gcp/release.py "$release/release.py"
           install -m 0700 deploy/gcp/predeploy.py "$release/predeploy.py"
           python3 "$release/release.py" validate "$release/release.env"
           (
             cd "$release"
-            sha256sum compose.yaml predeploy.py release.env release.py rollout.sh >SHA256SUMS
+            sha256sum compose.yaml predeploy.py release.env release.py rollout.sh rollout_supervisor.sh >SHA256SUMS
           )
           printf 'RELEASE=%s\n' "$release" >>"$GITHUB_ENV"
 

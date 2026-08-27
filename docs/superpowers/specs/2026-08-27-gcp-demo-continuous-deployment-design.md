@@ -24,10 +24,14 @@ Rollout holds a VM lock, rejects superseded GitHub run IDs, validates checksums,
 exact keys, CUDA, fresh IDs, exact model/dataset provenance, 10,000 vectors,
 recomputed population hashes, and HNSW readiness before it interrupts the
 current application. It then performs a bounded restart, rejects stale trainer
-readiness, attests running image digests/source labels, and executes one CUDA
-Qwen recommendation before promotion. ERR/TERM/INT/HUP restores and attests the
-previous application revision; a failed restore remains visible. Fixed host
-ports make this bounded restart rather than zero-downtime blue/green.
+readiness against the current Docker container ID, start time, PID, and restart
+count, attests running image digests/source labels, and executes one CUDA Qwen
+recommendation before promotion. ERR/TERM/INT/HUP restores and attests the
+previous application revision; every restore operation is checked explicitly
+even in Bash conditional contexts, and a failed restore remains visible without
+repointing `current`. Fixed host ports make this bounded restart rather than
+zero-downtime blue/green. A clean first deployment is accepted only with no
+`current` link; preexisting legacy seven-key release metadata is fail-closed.
 
 Migrations are forward-only. Demo CI rejects migration changes relative to
 `326b840`, preserving compatibility with the prior application image without

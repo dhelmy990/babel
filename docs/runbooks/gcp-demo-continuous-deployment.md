@@ -82,12 +82,24 @@ CUDA probe, or pre-promotion gate leaves the current application running.
 
 After restart, CD requires fresh run-bound trainer readiness, exact running
 image digests and source labels, exact model identity/version, and one bounded
-CUDA Qwen recommendation. Rollback is an application-image rollback, not a
-database down-migration. Demo CI rejects every migration-file change relative
-to `326b840`; future schema work requires an explicitly reviewed
-expand-contract sequence that keeps the previous images compatible. A failed
-restore/attestation remains failed and never repoints `current`. Successful
-receipts are stored at:
+CUDA Qwen recommendation. Readiness must be newer than both the rollout and the
+current trainer container's Docker `StartedAt`; the container ID, PID, start
+time, and restart count must also remain unchanged throughout verification.
+This rejects a readiness file left behind by a SIGKILL/OOM restart.
+
+Rollback is an application-image rollback, not a database down-migration. Demo
+CI rejects every migration-file change relative to `326b840`; future schema
+work requires an explicitly reviewed expand-contract sequence that keeps the
+previous images compatible. Every restore operation is checked explicitly,
+including readiness removal, previous-image attestation, and both symlink
+operations. A failed restore remains failed and never repoints `current`.
+
+A first deployment is allowed only when `/opt/babel/current` does not exist.
+Once it exists, its `release.env` must satisfy the current 12-key attestation
+contract and be older than the candidate. The earlier seven-key prototype is
+intentionally rejected rather than treated as a rollback target; an operator
+must explicitly remove a confirmed never-deployed prototype link before the
+first real deployment. Successful receipts are stored at:
 
 ```text
 /opt/babel/current/deployment-receipt.json

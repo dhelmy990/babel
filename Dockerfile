@@ -21,12 +21,15 @@ RUN cmake -S . -B /build -G Ninja \
     && cmake --build /build --target babel_backend_cli --parallel 2
 
 FROM backend-build AS backend-test
+ARG BABEL_TEST_DATABASE_URL=postgresql://babel:babel-local-dev@127.0.0.1:54329/babel
 RUN cmake -S . -B /build-test -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
       -DBUILD_TESTING=ON \
       -DCMAKE_TOOLCHAIN_FILE=/opt/vcpkg/scripts/buildsystems/vcpkg.cmake \
     && cmake --build /build-test --parallel 2 \
-    && ctest --test-dir /build-test --output-on-failure
+    && chown -R 65534:65534 /build-test
+USER 65534:65534
+RUN BABEL_TEST_DATABASE_URL="$BABEL_TEST_DATABASE_URL" ctest --test-dir /build-test --output-on-failure
 
 FROM debian:bookworm-slim AS backend
 ARG SOURCE_COMMIT=unknown
