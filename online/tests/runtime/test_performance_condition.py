@@ -555,6 +555,7 @@ def test_live_condition_rebinds_workload_and_publishes_exact_feedback(
         )
 
     producer = SimpleNamespace(publish=publish, close=lambda: None)
+    progress = []
 
     async def runner(manifest, spec, replay, universe, **options):
         assert replay.rows[0].request.runId == condition_run
@@ -562,6 +563,18 @@ def test_live_condition_rebinds_workload_and_publishes_exact_feedback(
         assert manifest.timeoutSeconds == 120.0
         options["success_callback"](
             replay.rows[0], SimpleNamespace(), SimpleNamespace()
+        )
+        options["progress_callback"](
+            SimpleNamespace(
+                phase="draining",
+                total=1,
+                submitted=1,
+                completed=1,
+                errors=0,
+                in_flight=0,
+                elapsed_seconds=0.1,
+                recent_rate=10.0,
+            )
         )
         measurement = SimpleNamespace(
             isWarmup=False,
@@ -587,6 +600,7 @@ def test_live_condition_rebinds_workload_and_publishes_exact_feedback(
         transport_factory=lambda *_: SimpleNamespace(),
         producer_factory=lambda *_: producer,
         concurrent_runner=runner,
+        progress_sink=progress.append,
     )
 
     assert evidence["requestCount"] == 1
@@ -621,6 +635,7 @@ def test_live_condition_rebinds_workload_and_publishes_exact_feedback(
             "servingVersion": 0,
         },
     }
+    assert progress[-1].submitted == progress[-1].completed == 1
 
 
 def test_real_workload_freezer_runs_reference_host_and_coordinator(tmp_path: Path):

@@ -360,6 +360,7 @@ def _boolean(value: str) -> bool:
 
 
 def _performance_condition(argv: list[str]) -> None:
+    from .condition_progress import PersistedConditionProgress
     from .performance_condition import execute_live_condition
 
     parser = argparse.ArgumentParser(prog="babel-online performance-condition")
@@ -410,18 +411,25 @@ def _performance_condition(argv: list[str]) -> None:
     for selected in prior:
         signal.signal(selected, interrupt)
     try:
-        execute_live_condition(
+        with PersistedConditionProgress(
             database=database,
-            trial=trial,
-            condition=condition,
-            run_id=arguments.run_id,
-            frozen_workload_path=arguments.workload,
-            evidence_path=arguments.evidence,
-            serving_port=int(os.environ.get("BABEL_RECOMMENDATION_PORT", "8791")),
-            kafka_bootstrap_servers=os.environ.get(
-                "BABEL_KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:29092"
-            ),
-        )
+            experiment_id=arguments.experiment_id,
+            condition_index=condition.condition_index,
+            condition_count=len(trial.conditions),
+        ) as progress:
+            execute_live_condition(
+                database=database,
+                trial=trial,
+                condition=condition,
+                run_id=arguments.run_id,
+                frozen_workload_path=arguments.workload,
+                evidence_path=arguments.evidence,
+                serving_port=int(os.environ.get("BABEL_RECOMMENDATION_PORT", "8791")),
+                kafka_bootstrap_servers=os.environ.get(
+                    "BABEL_KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:29092"
+                ),
+                progress_sink=progress.publish,
+            )
     finally:
         for selected, handler in prior.items():
             signal.signal(selected, handler)

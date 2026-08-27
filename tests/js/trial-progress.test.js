@@ -13,9 +13,10 @@ test('progress mapper is pure and reports rate ETA and matrix position', () => {
   });
 
   assert.deepEqual(progress.progressView(snapshot), {
-    phase: 'measuring', condition: '3/9', seeded: '5000/5000',
+    phase: 'measuring', workPhase: 'measuring', condition: '3/9', seeded: '5000/5000',
     created: '2500/10000', indexed: '2400/10000', requested: 800,
-    completed: 750, elapsed: '2m 30s', rate: '25.00/s', eta: '5m 0s',
+    submitted: 750, completed: 750, errors: 0, inFlight: 0,
+    elapsed: '2m 30s', rate: '25.00/s', eta: '5m 0s',
     percent: 25, draining: false,
   });
   assert.equal(snapshot.createdBabels, 2500);
@@ -37,4 +38,24 @@ test('progress poller performs only persisted read requests', async () => {
   assert.equal(views[0].phase, 'population');
   assert.equal(Object.hasOwn(poller, 'startTrainer'), false);
   assert.equal(Object.hasOwn(poller, 'mutate'), false);
+});
+
+test('condition progress exposes submitted completed error and in-flight counts', () => {
+  const view = progress.progressView({
+    phase: 'scheduled', conditionIndex: 6, conditionCount: 9,
+    createdBabels: 10000, targetCreatedBabels: 10000,
+    requested: 750, completed: 300, elapsedSeconds: 60, recentRate: 5,
+    telemetry: {
+      submitted: 320, errors: 2, inFlight: 20, conditionPhase: 'scheduled',
+    },
+  });
+
+  assert.equal(view.condition, '6/9');
+  assert.equal(view.workPhase, 'scheduled');
+  assert.equal(view.submitted, 320);
+  assert.equal(view.completed, 300);
+  assert.equal(view.errors, 2);
+  assert.equal(view.inFlight, 20);
+  assert.equal(view.percent, 40);
+  assert.equal(view.eta, '1m 30s');
 });

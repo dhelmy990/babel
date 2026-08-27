@@ -23,19 +23,33 @@
     const target = Math.max(0, number(row.targetCreatedBabels));
     const created = Math.max(0, number(row.createdBabels));
     const rate = Math.max(0, number(row.recentRate));
-    const eta = rate > 0 ? Math.max(0, target - created) / rate : 0;
+    const telemetry = row.telemetry && typeof row.telemetry === 'object'
+      ? row.telemetry : {};
+    const workPhase = String(telemetry.conditionPhase || row.phase || 'pending');
+    const conditionActive = ['scheduled', 'draining'].includes(workPhase)
+      && number(row.requested) > 0;
+    const remaining = conditionActive
+      ? Math.max(0, number(row.requested) - number(row.completed))
+      : Math.max(0, target - created);
+    const eta = rate > 0 ? remaining / rate : 0;
     return {
       phase: String(row.phase || 'pending'),
+      workPhase,
       condition: `${number(row.conditionIndex)}/${number(row.conditionCount, 9)}`,
       seeded: `${number(row.seededArticles)}/${number(row.targetSeededArticles)}`,
       created: `${created}/${target}`,
       indexed: `${number(row.indexedBabels)}/${target}`,
       requested: number(row.requested),
+      submitted: number(telemetry.submitted, number(row.completed)),
       completed: number(row.completed),
+      errors: number(telemetry.errors),
+      inFlight: number(telemetry.inFlight),
       elapsed: duration(row.elapsedSeconds),
       rate: `${rate.toFixed(2)}/s`,
       eta: duration(eta),
-      percent: target > 0 ? Math.min(100, Math.round((created / target) * 100)) : 0,
+      percent: conditionActive
+        ? Math.min(100, Math.round((number(row.completed) / number(row.requested)) * 100))
+        : target > 0 ? Math.min(100, Math.round((created / target) * 100)) : 0,
       draining: row.draining === true,
     };
   }

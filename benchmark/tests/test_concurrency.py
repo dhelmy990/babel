@@ -118,6 +118,64 @@ def test_open_loop_schedule_is_deterministic_and_bounded_with_real_concurrency()
     assert all(row.outcome == "success" for row in rows)
 
 
+def test_concurrent_progress_observer_reports_exact_lifecycle_without_changing_rows() -> None:
+    manifest, replay, universe = inputs()
+    snapshots = []
+
+    rows = asyncio.run(
+        run_concurrent_condition(
+            manifest,
+            manifest.conditions[0],
+            replay,
+            universe,
+            transport=AsyncTransport(),
+            schedule_mode="open_loop",
+            max_in_flight=2,
+            progress_callback=snapshots.append,
+        )
+    )
+
+    assert len(rows) == len(replay.rows)
+    assert snapshots[0].phase == "scheduled"
+    assert snapshots[0].submitted == snapshots[0].completed == 0
+    assert snapshots[0].in_flight == snapshots[0].errors == 0
+    assert all(row.in_flight == row.submitted - row.completed for row in snapshots)
+    assert all(row.completed <= row.submitted <= len(replay.rows) for row in snapshots)
+    assert snapshots[-1].phase == "draining"
+    assert snapshots[-1].submitted == snapshots[-1].completed == len(replay.rows)
+    assert snapshots[-1].in_flight == snapshots[-1].errors == 0
+    assert snapshots[-1].elapsed_seconds > 0
+    assert snapshots[-1].recent_rate > 0
+
+
+def test_concurrent_progress_counts_request_errors_without_aborting_observation() -> None:
+    manifest, replay, universe = inputs()
+    snapshots = []
+
+    class ErrorTransport(AsyncTransport):
+        async def post_json(self, path, payload, timeout_seconds):
+            if payload["requestId"] == str(replay.rows[0].request.requestId):
+                return 503, {}
+            return await super().post_json(path, payload, timeout_seconds)
+
+    rows = asyncio.run(
+        run_concurrent_condition(
+            manifest,
+            manifest.conditions[0],
+            replay,
+            universe,
+            transport=ErrorTransport(),
+            schedule_mode="closed_loop",
+            max_in_flight=2,
+            progress_callback=snapshots.append,
+        )
+    )
+
+    assert sum(row.outcome != "success" for row in rows) == 1
+    assert snapshots[-1].errors == 1
+    assert snapshots[-1].completed == len(replay.rows)
+
+
 def test_closed_loop_schedule_preserves_stable_identity_and_timeout_rows() -> None:
     manifest, replay, universe = inputs()
 

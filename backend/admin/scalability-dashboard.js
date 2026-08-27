@@ -216,7 +216,7 @@
       elements['performance-phase'].textContent = `${view.phase} · condition ${view.condition} · seeded ${view.seeded} · created ${view.created} · indexed ${view.indexed}`;
       elements['performance-progress'].value = view.percent;
       elements['performance-progress'].textContent = `${view.percent}%`;
-      elements['performance-rate'].textContent = `${view.completed}/${view.requested} requests complete · ${view.rate} · elapsed ${view.elapsed} · ETA ${view.eta}${view.draining ? ' · draining' : ''}`;
+      elements['performance-rate'].textContent = `${view.submitted}/${view.requested} submitted · ${view.completed} completed · ${view.errors} errors · ${view.inFlight} in flight · ${view.rate} · elapsed ${view.elapsed} · ETA ${view.eta}${view.draining ? ' · draining' : ''}`;
     }
 
     function renderTrial(trial, persistedProgressView = null) {

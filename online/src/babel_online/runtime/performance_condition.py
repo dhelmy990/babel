@@ -1037,6 +1037,7 @@ def execute_live_condition(
     transport_factory: Callable[..., Any] | None = None,
     producer_factory: Callable[..., Any] | None = None,
     concurrent_runner: Callable[..., Any] | None = None,
+    progress_sink: Callable[[Any], None] | None = None,
 ) -> dict[str, Any]:
     """Execute one formal condition through real HTTP, Kafka and model roles.
 
@@ -1232,6 +1233,11 @@ def execute_live_condition(
                     resource_collector=resource_collector,
                     live_identity_validator=None if ledger is None else ledger.validate,
                     success_callback=feedback_publisher.callback,
+                    **(
+                        {"progress_callback": progress_sink}
+                        if progress_sink is not None
+                        else {}
+                    ),
                 )
             )
             if any(row.outcome != "success" for row in result.measurements):

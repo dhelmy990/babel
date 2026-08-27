@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import deque
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, ContextManager, Protocol
-from collections.abc import Iterator, Sequence
 
 from .contracts import (
     BenchmarkManifestV1,
@@ -216,6 +217,20 @@ class ConcurrentConditionResult(Sequence[RequestMeasurementV2]):
 
     def __iter__(self) -> Iterator[RequestMeasurementV2]:
         return iter(self.measurements)
+
+
+@dataclass(frozen=True, slots=True)
+class ConcurrentConditionProgress:
+    """Operational replay progress kept outside the benchmark evidence contract."""
+
+    phase: str
+    total: int
+    submitted: int
+    completed: int
+    errors: int
+    in_flight: int
+    elapsed_seconds: float
+    recent_rate: float
 
 
 def _parse_recommendation_response(
@@ -518,6 +533,7 @@ async def run_concurrent_condition(
         None,
     ]
     | None = None,
+    progress_callback: Callable[[ConcurrentConditionProgress], None] | None = None,
 ) -> ConcurrentConditionResult:
     """Replay one deterministic bounded concurrent schedule."""
     _validate_inputs(manifest, replay, universe)
@@ -542,20 +558,56 @@ async def run_concurrent_condition(
     base_ns = monotonic_ns()
     semaphore = asyncio.Semaphore(max_in_flight)
     active = 0
+    submitted = 0
+    completed_count = 0
+    errors = 0
+    completion_times_ns: deque[int] = deque()
     active_lock = asyncio.Lock()
     measurements: list[RequestMeasurementV2] = []
 
+    def publish_progress(now_ns: int) -> None:
+        if progress_callback is None:
+            return
+        elapsed_seconds = max(0.0, (now_ns - base_ns) / 1_000_000_000.0)
+        recent_floor = now_ns - 5_000_000_000
+        while completion_times_ns and completion_times_ns[0] < recent_floor:
+            completion_times_ns.popleft()
+        recent_count = len(completion_times_ns)
+        recent_window = min(5.0, elapsed_seconds)
+        recent_rate = recent_count / recent_window if recent_window > 0 else 0.0
+        snapshot = ConcurrentConditionProgress(
+            phase="draining" if submitted == len(replay.rows) else "scheduled",
+            total=len(replay.rows),
+            submitted=submitted,
+            completed=completed_count,
+            errors=errors,
+            in_flight=active,
+            elapsed_seconds=elapsed_seconds,
+            recent_rate=recent_rate,
+        )
+        try:
+            progress_callback(snapshot)
+        except Exception:
+            # Dashboard telemetry is deliberately non-authoritative: an observer
+            # failure must not alter the frozen workload or benchmark evidence.
+            pass
+
+    publish_progress(base_ns)
+
     async def execute(index: int) -> None:
-        nonlocal active
+        nonlocal active, submitted, completed_count, errors
         replay_row = replay.rows[index]
         intended = base_ns + replay_row.scheduleOffsetNs
         remaining = intended - monotonic_ns()
         if remaining > 0:
             await async_sleep(remaining / 1_000_000_000)
         async with semaphore:
+            request_failed = False
             async with active_lock:
                 active += 1
+                submitted += 1
                 in_flight = active
+                publish_progress(monotonic_ns())
             started = monotonic_ns()
             queue_delay = max(0, started - intended)
             common: dict[str, Any] = {
@@ -580,6 +632,7 @@ async def run_concurrent_condition(
                 )
                 completed = monotonic_ns()
                 if not 200 <= status < 300:
+                    request_failed = True
                     measurements.append(
                         RequestMeasurementV2(
                             **common,
@@ -652,6 +705,7 @@ async def run_concurrent_condition(
                         ) from error
                 measurements.append(measurement)
             except TimeoutError as error:
+                request_failed = True
                 completed = monotonic_ns()
                 measurements.append(
                     RequestMeasurementV2(
@@ -663,8 +717,10 @@ async def run_concurrent_condition(
                     )
                 )
             except _FatalConditionCallback:
+                request_failed = True
                 raise
             except Exception as error:
+                request_failed = True
                 completed = monotonic_ns()
                 measurements.append(
                     RequestMeasurementV2(
@@ -678,6 +734,10 @@ async def run_concurrent_condition(
             finally:
                 async with active_lock:
                     active -= 1
+                    completed_count += 1
+                    errors += int(request_failed)
+                    completion_times_ns.append(monotonic_ns())
+                    publish_progress(completion_times_ns[-1])
 
     resource_stop = asyncio.Event()
     resource_task = (
@@ -710,6 +770,7 @@ __all__ = [
     "AlreadyConfiguredConditionDriver",
     "ConditionDriver",
     "ConditionTelemetryRecorder",
+    "ConcurrentConditionProgress",
     "ConcurrentConditionResult",
     "HttpxTransport",
     "AsyncHttpxTransport",

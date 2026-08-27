@@ -228,6 +228,25 @@ test('dashboard polling renders persisted seeded, walk, and Hugging Face evidenc
   ]);
 });
 
+test('dashboard renders independently persisted live condition counters', async () => {
+  const context = await initializeController();
+  Object.assign(context.trial.progress, {
+    phase: 'scheduled', conditionIndex: 4, requested: 750, completed: 300,
+    elapsedSeconds: 60, recentRate: 5, draining: false,
+  });
+  Object.assign(context.trial.progress.telemetry, {
+    conditionPhase: 'scheduled', submitted: 320, errors: 2, inFlight: 20,
+  });
+
+  await context.intervalCallback();
+
+  assert.match(context.document.getElementById('performance-phase').textContent,
+    /scheduled · condition 4\/9/);
+  assert.match(context.document.getElementById('performance-rate').textContent,
+    /320\/750 submitted · 300 completed · 2 errors · 20 in flight/);
+  assert.equal(context.document.getElementById('performance-progress').value, 40);
+});
+
 test('dashboard renders every persisted condition result for the selected cohort', async () => {
   const context = await initializeController();
   context.trial.creatorCount = 100;

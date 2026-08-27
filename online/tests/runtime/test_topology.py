@@ -258,6 +258,7 @@ def test_condition_sigterm_interrupts_execution_and_restores_handlers(
     cleaned = []
 
     def execute(**_values):
+        assert callable(_values["progress_sink"])
         try:
             installed[signal.SIGTERM](signal.SIGTERM, None)
         finally:
