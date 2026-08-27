@@ -335,6 +335,22 @@ and the operator explicitly approves another saved trial. Keep an optional
 pgvector/HNSW comparison separate from topology conclusions. `cross_host` is a
 future evidence expansion, not a prerequisite for the same-host split result.
 
+For each higher cohort, choose **100 creators** or **500 creators** in the
+dashboard and click **Save and launch cohort population**. Each click creates a
+new durable trial; it does not mutate or advance the 50-creator trial. Wait for
+the exact 10,000 created/indexed vectors and pinned provenance gate, then click
+**Approve this cohort's measurements**. The worker freezes one workload and
+replays it across exactly six conditions:
+
+- `same_process`: serving only, training without activation, training with activation;
+- `same_host_split`: serving only, training without activation, training with activation.
+
+Higher cohorts set concurrent users equal to the creator cohort and remain
+manual: completion never starts the next cohort. Use the immutable original
+Qwen model for 100/500. Existing post-run children are bound to their producing
+50-creator population and are intentionally rejected until cross-cohort child
+population remapping exists.
+
 ## Shutdown and recovery boundary
 
 Use **Graceful stop** to stop new work and retain evidence and the last valid

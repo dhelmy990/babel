@@ -5,6 +5,7 @@
 #include <sstream>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <boost/uuid/random_generator.hpp>
 #include <boost/uuid/uuid_io.hpp>
@@ -701,8 +702,11 @@ PostgresExperimentRepository::createPerformanceExperiment(
             static_cast<std::int64_t>(request.duration_seconds), request.target_rps,
             request.latency_safety_threshold_ms});
 
-    const std::array<std::string_view, 3> topologies{
-        "same_process", "same_host_split", "same_host_isolated"};
+    const std::vector<std::string_view> topologies =
+        request.creator_count == 50
+            ? std::vector<std::string_view>{"same_process", "same_host_split",
+                                            "same_host_isolated"}
+            : std::vector<std::string_view>{"same_process", "same_host_split"};
     for (std::size_t topology_index = 0; topology_index < topologies.size(); ++topology_index) {
       for (std::size_t mode = 0; mode < 3; ++mode) {
         const auto condition_id =
@@ -730,14 +734,15 @@ PostgresExperimentRepository::createPerformanceExperiment(
                          synchronization_enabled, config, sha256(config)});
       }
     }
+    const auto condition_count = topologies.size() * 3;
     transaction.exec(R"(
       INSERT INTO performance_progress_snapshots(
         experiment_id, sequence, phase, condition_count
-      ) VALUES ($1, 0, 'population', 9)
-    )", pqxx::params{generated});
+      ) VALUES ($1, 0, 'population', $2)
+    )", pqxx::params{generated, condition_count});
     transaction.commit();
     auto result = performanceFromRow(rows.one_row());
-    result.progress = PerformanceProgressDto{};
+    result.progress = PerformanceProgressDto{.condition_count = condition_count};
     return result;
   } catch (const std::exception& exception) {
     return tl::make_unexpected(mapPostgresError(exception));

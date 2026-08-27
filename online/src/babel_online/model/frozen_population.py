@@ -45,7 +45,7 @@ class FrozenPopulationManifestV1(FrozenContract):
     scheduleCount: Literal[10_000]
     juneCount: Literal[5_000]
     julyCount: Literal[5_000]
-    creatorCount: Literal[50]
+    creatorCount: Literal[50, 100, 500]
     modelId: UUID
     modelVersion: int = Field(ge=0)
     modelManifestSha256: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -363,7 +363,7 @@ def _validate_files(directory: Path, manifest: FrozenPopulationManifestV1) -> No
         raise FrozenPopulationIntegrityError("frozen schedule periods differ")
     if sum(row.get("period") == "2026-06" for row in schedules) != 5_000:
         raise FrozenPopulationIntegrityError("frozen June count differs")
-    if len({row.get("creatorId") for row in babels}) != 50:
+    if len({row.get("creatorId") for row in babels}) != manifest.creatorCount:
         raise FrozenPopulationIntegrityError("frozen creator count differs")
     vector_data = (directory / manifest.vectorsFile).read_bytes()
     snapshot = canonical_pgvector_snapshot_sha256(
@@ -413,7 +413,7 @@ def clone_frozen_population(
         or destination.datasetConfig != manifest.datasetConfig
         or destination.datasetRevision != manifest.datasetRevision
         or destination.startingModelId != manifest.modelId
-        or destination.creatorCount != 50
+        or destination.creatorCount != manifest.creatorCount
         or destination.perMonthEventBudget != {"2026-06": 5_000, "2026-07": 5_000}
         or destination.targetCreatedBabels != 10_000
     ):

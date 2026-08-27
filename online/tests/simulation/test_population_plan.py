@@ -16,7 +16,11 @@ from babel_online.simulation.population_plan import plan_population
 MODEL = UUID("00000000-0000-5000-8000-000000000002")
 
 
-def formal_config(*, run_id: UUID = UUID("00000000-0000-5000-8000-000000000001")):
+def formal_config(
+    *,
+    run_id: UUID = UUID("00000000-0000-5000-8000-000000000001"),
+    creator_count: int = 50,
+):
     return RunConfigV2(
         schemaVersion=2,
         runId=run_id,
@@ -24,13 +28,13 @@ def formal_config(*, run_id: UUID = UUID("00000000-0000-5000-8000-000000000001")
         datasetConfig=SCALE_DATASET_CONFIG,
         datasetRevision=SCALE_DATASET_REVISION,
         startingModelId=MODEL,
-        creatorCount=50,
+        creatorCount=creator_count,
         environmentSequence=["2026-06", "2026-07"],
         perMonthEventBudget={"2026-06": 5_000, "2026-07": 5_000},
         runSeed=73,
         sourceArticlesPerMonth=5_000,
         targetCreatedBabels=10_000,
-        concurrentUsers=50,
+        concurrentUsers=creator_count,
     )
 
 
@@ -104,10 +108,25 @@ def test_population_source_draw_is_seed_stable_but_run_scoped_ids_are_not() -> N
     assert first.schedule != second.schedule
 
 
+@pytest.mark.parametrize("creator_count", [100, 500])
+def test_higher_cohort_population_keeps_real_ten_thousand_root_contract(
+    creator_count: int,
+) -> None:
+    plan = plan_population(formal_config(creator_count=creator_count), real_bundle())
+
+    assert len(plan.babels) == 10_000
+    assert len(plan.creator_ids) == creator_count
+    assert plan.period_counts == {"2026-06": 5_000, "2026-07": 5_000}
+    creator_sources = [
+        (row.babel.creatorId, row.babel.sourceArticleKey) for row in plan.babels
+    ]
+    assert len(set(creator_sources)) == 10_000
+
+
 @pytest.mark.parametrize(
     "change, message",
     [
-        ({"creatorCount": 49, "concurrentUsers": 49}, "50 creators"),
+        ({"creatorCount": 49, "concurrentUsers": 49}, "50, 100, or 500"),
         (
             {
                 "perMonthEventBudget": {"2026-06": 4_999, "2026-07": 5_000},

@@ -57,7 +57,7 @@ class PlannedBabel:
 
 @dataclass(frozen=True, slots=True)
 class PopulationPlan:
-    """The exact formal 50-creator, 5k June plus 5k July population."""
+    """One exact formal-cohort, 5k June plus 5k July population."""
 
     run_id: UUID
     dataset_revision: str
@@ -76,8 +76,8 @@ class PopulationPlan:
                 "formal population requires 5,000 June and 5,000 July Babels"
             )
         creators = {row.babel.creatorId for row in self.babels}
-        if len(creators) != 50:
-            raise ValueError("formal population requires exactly 50 creators")
+        if len(creators) not in {50, 100, 500}:
+            raise ValueError("formal population requires 50, 100, or 500 creators")
         creator_sources = [
             (row.babel.creatorId, row.babel.sourceArticleKey) for row in self.babels
         ]
@@ -136,8 +136,13 @@ def _validate_formal_inputs(config: RunConfigV2, bundle: DatasetBundle) -> None:
         or bundle.release_scope != "timeboxed_engineering_snapshot"
     ):
         raise ValueError("formal population requires the real scale dataset identity")
-    if config.creatorCount != 50 or config.concurrentUsers > 50:
-        raise ValueError("formal population requires exactly 50 creators")
+    if (
+        config.creatorCount not in {50, 100, 500}
+        or config.concurrentUsers != config.creatorCount
+    ):
+        raise ValueError(
+            "formal population requires 50, 100, or 500 concurrent creators"
+        )
     if (
         config.environmentSequence != ["2026-06", "2026-07"]
         or config.perMonthEventBudget != {"2026-06": 5_000, "2026-07": 5_000}

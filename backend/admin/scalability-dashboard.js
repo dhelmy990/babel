@@ -71,6 +71,28 @@
     return { ...trialDefaults(), ...values, autoAdvance: false };
   }
 
+  function cohortConditionCount(cohortSize) {
+    const size = Number(cohortSize);
+    if (![50, 100, 500].includes(size)) {
+      throw new Error('Formal cohort must be 50, 100, or 500 creators');
+    }
+    return size === 50 ? 9 : 6;
+  }
+
+  function cohortTrialRequest(cohortSize, values = {}) {
+    const size = Number(cohortSize);
+    cohortConditionCount(size);
+    return buildTrialRequest({
+      ...values,
+      topology: 'same_host_split',
+      creatorCount: size,
+      concurrentUsers: size,
+      seededArticles: 10000,
+      targetCreatedBabels: 10000,
+      autoAdvance: false,
+    });
+  }
+
   async function jsonRequest(fetchImpl, url, options = {}) {
     let response;
     try {
@@ -97,7 +119,7 @@
       throw new Error('The read-only trial progress component is unavailable');
     }
     const ids = [
-      'performance-status', 'performance-topology', 'performance-model',
+      'performance-status', 'performance-cohort', 'performance-topology', 'performance-model',
       'performance-backend', 'performance-dataset', 'performance-creators', 'performance-seeded-slider',
       'performance-seeded', 'performance-created-slider', 'performance-created',
       'performance-concurrent-slider', 'performance-concurrent',
@@ -120,6 +142,27 @@
     bindPairedControl(elements['performance-seeded-slider'], elements['performance-seeded']);
     bindPairedControl(elements['performance-created-slider'], elements['performance-created']);
     bindPairedControl(elements['performance-concurrent-slider'], elements['performance-concurrent']);
+    function synchronizeCohortControls() {
+      const requested = Number(elements['performance-cohort'].value || 50);
+      const size = [50, 100, 500].includes(requested) ? requested : 50;
+      elements['performance-creators'].value = String(size);
+      elements['performance-concurrent'].value = String(size);
+      elements['performance-concurrent-slider'].value = String(size);
+      elements['performance-seeded'].value = '10000';
+      elements['performance-seeded-slider'].value = '10000';
+      elements['performance-created'].value = '10000';
+      elements['performance-created-slider'].value = '10000';
+      elements['performance-topology'].value = 'same_host_split';
+      elements['performance-topology'].disabled = size > 50;
+      for (const id of [
+        'performance-creators', 'performance-concurrent',
+        'performance-concurrent-slider', 'performance-seeded',
+        'performance-seeded-slider', 'performance-created',
+        'performance-created-slider',
+      ]) elements[id].disabled = true;
+    }
+    elements['performance-cohort'].addEventListener('change', synchronizeCohortControls);
+    synchronizeCohortControls();
 
     function setStatus(message, error = false) {
       elements['performance-status'].textContent = message;
@@ -181,7 +224,7 @@
         setStatus('No scalability trial has been saved');
         return;
       }
-      setStatus(`${String(trial.status).replaceAll('_', ' ')} · ${trial.topology} · ${trial.targetCreatedBabels} Babel target`);
+      setStatus(`${String(trial.status).replaceAll('_', ' ')} · ${trial.creatorCount || 50} creators · ${trial.progress?.conditionCount || cohortConditionCount(trial.creatorCount || 50)} conditions · ${trial.targetCreatedBabels} Babel target`);
       const gate = populationGateView(trial);
       elements['performance-gate'].textContent = gate.message;
       elements['performance-approve'].disabled = pending || !trial.populationReady
@@ -243,7 +286,7 @@
         const body = documentRef.createElement('button');
         heading.textContent = trial.createdAt || trial.experimentId;
         body.type = 'button'; body.className = 'secondary';
-        body.textContent = `${trial.status} · ${trial.topology} · ${trial.targetCreatedBabels} Babels`;
+        body.textContent = `${trial.status} · ${trial.creatorCount || 50} creators · ${trial.progress?.conditionCount || cohortConditionCount(trial.creatorCount || 50)} conditions`;
         body.addEventListener('click', () => loadTrial(trial.experimentId));
         item.appendChild(heading); item.appendChild(body);
         elements['performance-trials'].appendChild(item);
@@ -278,7 +321,7 @@
 
     function launchBody() {
       const selected = models.get(elements['performance-model'].value) || {};
-      return buildTrialRequest({
+      return cohortTrialRequest(Number(elements['performance-cohort'].value || 50), {
         startingModelId: elements['performance-model'].value,
         topology: elements['performance-topology'].value,
         modelRepository: selected.encoderRepo || trialDefaults().modelRepository,
@@ -358,7 +401,8 @@
   else if (root.document) root.document.addEventListener('DOMContentLoaded', initializeScalabilityDashboard, { once: true });
 
   return Object.freeze({
-    bindPairedControl, buildTrialRequest, createScalabilityController,
+    bindPairedControl, buildTrialRequest, cohortConditionCount, cohortTrialRequest,
+    createScalabilityController,
     interferenceRatios, jsonRequest, populationGateView, trialDefaults,
   });
 }));

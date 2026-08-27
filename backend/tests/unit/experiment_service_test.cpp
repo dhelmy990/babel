@@ -389,6 +389,62 @@ TEST_CASE("performance trial defaults freeze split real model and scale controls
   CHECK(repository.events == std::vector<std::string>{"persist-create", "command-start"});
 }
 
+TEST_CASE("performance higher cohorts keep ten thousand rows and explicit split approval") {
+  FakeRepository repository;
+  FakeWorker worker;
+  FakePerformanceWorker performance_worker(&repository.events);
+  ExperimentService service(repository, worker, sourcePin(), &performance_worker);
+  auto request = repository.performance.launch;
+  request.creator_count = 100;
+  request.concurrent_users = 100;
+  request.seeded_articles = 10000;
+  request.target_created_babels = 10000;
+  request.topology = PerformanceTopology::same_host_split;
+
+  const auto created = service.createPerformanceExperiment(request);
+
+  REQUIRE(created.has_value());
+  REQUIRE(repository.performance_created.has_value());
+  CHECK(repository.performance_created->creator_count == 100);
+  CHECK(repository.performance_created->concurrent_users == 100);
+  CHECK_FALSE(repository.performance_created->auto_advance);
+  CHECK(performance_worker.start_calls == 1);
+
+  request.creator_count = 101;
+  request.concurrent_users = 101;
+  const auto unsupported = service.createPerformanceExperiment(request);
+  REQUIRE_FALSE(unsupported.has_value());
+  CHECK(unsupported.error().message.find("50, 100, or 500") != std::string::npos);
+
+  request.creator_count = 100;
+  request.concurrent_users = 100;
+  repository.model.parent_model_id = originalModel().model_id;
+  const auto child = service.createPerformanceExperiment(request);
+  REQUIRE_FALSE(child.has_value());
+  CHECK(child.error().message.find("immutable original") != std::string::npos);
+}
+
+TEST_CASE("completed higher cohort accepts its six saved results for attachment") {
+  FakeRepository repository;
+  FakeWorker worker;
+  ExperimentService service(repository, worker, sourcePin());
+  repository.performance.launch.creator_count = 100;
+  repository.performance.status = PerformanceExperimentStatus::completed;
+  repository.performance.results = std::vector<PerformanceResultDto>(6);
+
+  const auto attached = service.attachPerformanceArtifact(
+      repository.performance.experiment_id,
+      PerformanceArtifactReceipt{
+          .artifact_sha256 = std::string(64, 'a'),
+          .remote_hf_commit_sha = std::string(40, 'b'),
+          .remote_hf_bundle_path =
+              "runs/" + repository.performance.experiment_id,
+      });
+
+  REQUIRE(attached.has_value());
+  CHECK(attached->artifact_sha256 == std::string(64, 'a'));
+}
+
 TEST_CASE("performance launch failure is durable and returns the dispatch error") {
   FakeRepository repository;
   FakeWorker worker;

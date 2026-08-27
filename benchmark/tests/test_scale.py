@@ -112,6 +112,34 @@ def test_first_cohort_uses_nine_conditions_and_higher_cohorts_use_six() -> None:
         cohort_condition_matrix(100, selected_split="same_process")  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize("creator_count", [100, 500])
+def test_higher_cohort_population_receipt_keeps_the_ten_thousand_vector_gate(
+    creator_count: int,
+) -> None:
+    receipt = FrozenPopulationReceipt(
+        dataset_repository="dhelmy990/babel-wikipedia-experiment",
+        dataset_revision="0" * 40,
+        model_id=uuid4(),
+        model_revision="1" * 40,
+        june_created=5_000,
+        july_created=5_000,
+        distinct_babel_count=10_000,
+        indexed_count=10_000,
+        formal_threshold=10_000,
+        ordered_manifest_path="population/ordered-babels.jsonl",
+        ordered_manifest_sha256="a" * 64,
+        vector_bytes_sha256="b" * 64,
+        creator_source_unique=True,
+        creator_count=creator_count,
+        round_robin_verified=True,
+        cross_month_used_source_invariant_verified=True,
+        creator_round_robin_manifest_sha256="3" * 64,
+        cross_month_used_sources_manifest_sha256="4" * 64,
+    )
+
+    assert receipt.formal_measurement_ready
+
+
 def test_cohort_ladder_requires_explicit_operator_approval() -> None:
     gate = ManualCohortGate()
 

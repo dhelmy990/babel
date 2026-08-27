@@ -38,7 +38,7 @@ class FrozenPopulationReceipt(FrozenContract):
         if (
             self.june_created != 5_000
             or self.july_created != 5_000
-            or self.creator_count != 50
+            or self.creator_count not in {50, 100, 500}
             or self.formal_threshold != 10_000
             or not self.round_robin_verified
             or not self.cross_month_used_source_invariant_verified
@@ -46,7 +46,7 @@ class FrozenPopulationReceipt(FrozenContract):
             == self.cross_month_used_sources_manifest_sha256
         ):
             raise ValueError(
-                "formal population requires 5,000 rows per month, 50 creators, "
+                "formal population requires 5,000 rows per month, a supported cohort, "
                 "round-robin placement, and the cross-month used-source invariant"
             )
         if (

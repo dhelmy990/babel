@@ -87,6 +87,13 @@
         </header>
 
         <div class="experiment-grid performance-controls">
+          <label>Formal creator cohort
+            <select id="performance-cohort">
+              <option value="50">50 creators · full 3×3 baseline</option>
+              <option value="100">100 creators · monolith vs split</option>
+              <option value="500">500 creators · monolith vs split</option>
+            </select>
+          </label>
           <label>Topology
             <select id="performance-topology">
               <option value="same_host_split">Split services (default)</option>
@@ -158,10 +165,10 @@
             Interleave creation and recommendation events
           </label>
         </div>
-        <p class="contract-note">Walk contract: independent 0.40 start/continuation draws, depth 2, ten-request cap. The 3×3 matrix never auto-advances.</p>
+        <p class="contract-note">Walk contract: independent 0.40 start/continuation draws, depth 2, ten-request cap. The 50-creator baseline uses the exact 3×3 matrix; 100 and 500 compare same-process with the selected same-host split across all three load modes and currently require the immutable original model. Cohorts never auto-advance.</p>
         <div class="experiment-actions">
-          <button id="performance-create" type="button">Save trial configuration</button>
-          <button id="performance-approve" type="button" disabled>Approve formal measurements</button>
+          <button id="performance-create" type="button">Save and launch cohort population</button>
+          <button id="performance-approve" type="button" disabled>Approve this cohort's measurements</button>
           <button id="performance-stop" class="secondary" type="button" disabled>Graceful stop</button>
         </div>
 

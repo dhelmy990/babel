@@ -84,33 +84,38 @@ class PerformanceExperiment:
     population_manifest_sha256: str | None
     conditions: tuple[PerformanceCondition, ...]
 
+    @property
+    def condition_count(self) -> int:
+        return len(self.conditions)
+
     def validate_formal_defaults(self) -> None:
         if (
-            self.creator_count != 50
+            self.creator_count not in {50, 100, 500}
             or self.target_created_babels != 10_000
-            or self.concurrent_users != 50
+            or self.concurrent_users != self.creator_count
             or self.recommendation_start_probability != 0.4
             or self.continuation_probability != 0.4
             or self.maximum_traversal_depth != 2
             or self.maximum_requests_per_traversal != 10
             or not self.interleave_creation_and_recommendations
         ):
-            raise ValueError("saved trial does not match the formal first-cohort contract")
+            raise ValueError("saved trial does not match the formal cohort contract")
+        topologies = (
+            ("same_process", "same_host_split", "same_host_isolated")
+            if self.creator_count == 50
+            else ("same_process", "same_host_split")
+        )
         expected = {
             (topology, training, activation)
-            for topology in (
-                "same_process",
-                "same_host_split",
-                "same_host_isolated",
-            )
+            for topology in topologies
             for training, activation in ((False, False), (True, False), (True, True))
         }
         actual = {
             (row.topology, row.training_enabled, row.activation_enabled)
             for row in self.conditions
         }
-        if len(self.conditions) != 9 or actual != expected:
-            raise ValueError("saved trial does not contain the exact 3x3 condition matrix")
+        if len(self.conditions) != len(expected) or actual != expected:
+            raise ValueError("saved trial does not contain its exact condition matrix")
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,7 +331,7 @@ class RealPopulationBuilder:
             datasetRevision=trial.dataset_revision,
             startingModelId=trial.starting_model_id,
             retrievalBackend="pgvector",
-            creatorCount=50,
+            creatorCount=trial.creator_count,
             embeddingDimension=100,
             environmentSequence=["2026-06", "2026-07"],
             perMonthEventBudget={"2026-06": 5_000, "2026-07": 5_000},
@@ -345,7 +350,7 @@ class RealPopulationBuilder:
             stateRoot=str(root / "state"),
             sourceArticlesPerMonth=5_000,
             targetCreatedBabels=10_000,
-            concurrentUsers=50,
+            concurrentUsers=trial.concurrent_users,
             recommendationStartProbability=0.4,
             continuationProbability=0.4,
             maximumTraversalDepth=2,
@@ -556,6 +561,15 @@ def _manifest_sha(manifest: FrozenPopulationManifestV1) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def _validate_population_cohort(
+    trial: PerformanceExperiment, manifest: FrozenPopulationManifestV1
+) -> None:
+    if manifest.experimentId != str(trial.id):
+        raise ValueError("frozen population belongs to another trial")
+    if manifest.creatorCount != trial.creator_count:
+        raise ValueError("frozen population creator count differs from cohort")
+
+
 class PerformanceJobManager:
     """One event-driven population/matrix job controlled by the dashboard."""
 
@@ -649,7 +663,7 @@ class PerformanceJobManager:
                     experiment_id,
                     phase="population",
                     condition_index=None,
-                    condition_count=9,
+                    condition_count=trial.condition_count,
                     seeded_articles=int(values.get("created_babels", 0)),
                     created_babels=int(values.get("created_babels", 0)),
                     indexed_babels=int(values.get("indexed_babels", 0)),
@@ -671,6 +685,7 @@ class PerformanceJobManager:
                 return
             if manifest.sourcePopulationRunId != run_id:
                 raise ValueError("population builder returned a different source run")
+            _validate_population_cohort(trial, manifest)
             self.database.transition(run_id, "completed")
             manifest_sha = _manifest_sha(manifest)
             self.database.bind_performance_population(
@@ -681,7 +696,7 @@ class PerformanceJobManager:
                 experiment_id,
                 phase="population_ready",
                 condition_index=None,
-                condition_count=9,
+                condition_count=trial.condition_count,
                 seeded_articles=10_000,
                 created_babels=10_000,
                 indexed_babels=10_000,
@@ -717,12 +732,13 @@ class PerformanceJobManager:
             capture_started = time.monotonic()
             population_dir = Path(trial.population_bundle_path or "")
             manifest = self.population_loader(population_dir)
+            _validate_population_cohort(trial, manifest)
             self.database.transition_performance(experiment_id, "running")
             self.database.append_performance_progress(
                 experiment_id,
                 phase="reference_workload",
                 condition_index=None,
-                condition_count=9,
+                condition_count=trial.condition_count,
                 seeded_articles=10_000,
                 created_babels=10_000,
                 indexed_babels=10_000,
@@ -754,7 +770,7 @@ class PerformanceJobManager:
                 experiment_id,
                 phase="reference_workload_ready",
                 condition_index=None,
-                condition_count=9,
+                condition_count=trial.condition_count,
                 seeded_articles=10_000,
                 created_babels=10_000,
                 indexed_babels=10_000,
@@ -839,7 +855,7 @@ class PerformanceJobManager:
                     experiment_id,
                     phase="matrix",
                     condition_index=condition.condition_index,
-                    condition_count=9,
+                    condition_count=trial.condition_count,
                     seeded_articles=10_000,
                     created_babels=10_000,
                     indexed_babels=10_000,

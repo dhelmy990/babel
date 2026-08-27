@@ -2,8 +2,9 @@
 
 #include <cstdlib>
 #include <memory>
-#include <random>
 #include <array>
+#include <random>
+#include <set>
 #include <iomanip>
 #include <sstream>
 #include <string>
@@ -384,6 +385,34 @@ TEST_CASE_METHOD(ExperimentPostgresFixture,
   REQUIRE(listed.has_value());
   REQUIRE(listed->size() == 1);
   CHECK(listed->front().experiment_id == created->experiment_id);
+}
+
+TEST_CASE_METHOD(ExperimentPostgresFixture,
+                 "higher performance cohorts save the selected six-condition matrix") {
+  const babel::PerformanceLaunchRequest launch{
+      .starting_model_id = model_id_,
+      .topology = babel::PerformanceTopology::same_host_split,
+      .creator_count = 100,
+      .seeded_articles = 10000,
+      .target_created_babels = 10000,
+      .concurrent_users = 100,
+  };
+  const auto created = repository_.createPerformanceExperiment(launch);
+  REQUIRE(created.has_value());
+  REQUIRE(created->progress.has_value());
+  CHECK(created->progress->condition_count == 6);
+
+  pqxx::connection connection(schemaUrl());
+  pqxx::read_transaction transaction(connection);
+  const auto rows = transaction.exec(R"(
+    SELECT topology, training_enabled, synchronization_enabled
+    FROM performance_conditions WHERE experiment_id=$1
+    ORDER BY condition_index
+  )", pqxx::params{created->experiment_id});
+  REQUIRE(rows.size() == 6);
+  std::set<std::string> topologies;
+  for (const auto& row : rows) topologies.insert(row["topology"].as<std::string>());
+  CHECK(topologies == std::set<std::string>{"same_process", "same_host_split"});
 }
 
 TEST_CASE_METHOD(ExperimentPostgresFixture,

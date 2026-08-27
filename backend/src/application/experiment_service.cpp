@@ -31,15 +31,19 @@ bool validDigest(const std::optional<std::string>& value) {
 }
 
 Result<void> validatePerformanceLaunch(const PerformanceLaunchRequest& request) {
-  if (request.creator_count == 0 || request.creator_count > 10000) {
-    return invalidArgument("creatorCount must be between 1 and 10000");
+  if (request.creator_count != 50 && request.creator_count != 100 &&
+      request.creator_count != 500) {
+    return invalidArgument("creatorCount must be 50, 100, or 500");
   }
-  if (request.seeded_articles == 0 || request.seeded_articles > 1000000 ||
-      request.target_created_babels == 0 || request.target_created_babels > 1000000) {
-    return invalidArgument("population counts must be between 1 and 1000000");
+  if (request.seeded_articles != 10000 || request.target_created_babels != 10000) {
+    return invalidArgument("formal cohorts require exactly 10000 source and created Babels");
   }
-  if (request.concurrent_users == 0 || request.concurrent_users > request.creator_count) {
-    return invalidArgument("concurrentUsers must be between 1 and creatorCount");
+  if (request.concurrent_users != request.creator_count) {
+    return invalidArgument("formal cohort concurrency must equal creatorCount");
+  }
+  if (request.creator_count > 50 &&
+      request.topology != PerformanceTopology::same_host_split) {
+    return invalidArgument("higher cohorts compare same_process with same_host_split");
   }
   if (!std::isfinite(request.recommendation_start_probability) ||
       request.recommendation_start_probability < 0 ||
@@ -249,6 +253,10 @@ Result<PerformanceExperimentDto> ExperimentService::createPerformanceExperiment(
     return invalidArgument(model->incompatibility_reason.value_or(
         "starting model is not immutable and compatible"));
   }
+  if (request.creator_count > 50 && model->parent_model_id.has_value()) {
+    return invalidArgument(
+        "higher creator cohorts currently require the immutable original model");
+  }
   if (model->encoder_repo != request.model_repository ||
       model->encoder_revision != request.model_revision) {
     return invalidArgument(
@@ -348,11 +356,12 @@ Result<PerformanceExperimentDto> ExperimentService::attachPerformanceArtifact(
     std::string_view experiment_id, const PerformanceArtifactReceipt& receipt) {
   auto trial = getPerformanceExperiment(experiment_id);
   if (!trial) return tl::make_unexpected(trial.error());
+  const auto expected_results = trial->launch.creator_count == 50 ? 9U : 6U;
   if (trial->status != PerformanceExperimentStatus::completed ||
-      trial->results.size() != 9) {
+      trial->results.size() != expected_results) {
     return tl::make_unexpected(ApplicationError{
         ErrorCode::conflict,
-        "remote artifact requires one completed nine-condition trial",
+        "remote artifact requires one completed formal cohort trial",
     });
   }
   if (!validDigest(std::optional<std::string>{receipt.artifact_sha256}) ||

@@ -114,6 +114,41 @@ test('trial defaults preserve the real split Qwen experiment', () => {
   });
 });
 
+test('100 and 500 creator cohorts save the six-condition split comparison contract', () => {
+  for (const cohortSize of [100, 500]) {
+    const request = dashboard.cohortTrialRequest(cohortSize, {
+      topology: 'same_host_isolated', creatorCount: 7, concurrentUsers: 3,
+      seededArticles: 5, targetCreatedBabels: 9, autoAdvance: true,
+    });
+    assert.equal(request.creatorCount, cohortSize);
+    assert.equal(request.concurrentUsers, cohortSize);
+    assert.equal(request.seededArticles, 10000);
+    assert.equal(request.targetCreatedBabels, 10000);
+    assert.equal(request.topology, 'same_host_split');
+    assert.equal(request.autoAdvance, false);
+    assert.equal(dashboard.cohortConditionCount(cohortSize), 6);
+  }
+  assert.equal(dashboard.cohortConditionCount(50), 9);
+  assert.throws(() => dashboard.cohortTrialRequest(101), /50, 100, or 500/);
+});
+
+test('cohort selector synchronizes visible creator concurrency and split controls', async () => {
+  const context = await initializeController();
+  const cohort = context.document.getElementById('performance-cohort');
+  cohort.value = '500';
+
+  cohort.dispatch('change');
+
+  assert.equal(context.document.getElementById('performance-creators').value, '500');
+  assert.equal(context.document.getElementById('performance-concurrent').value, '500');
+  assert.equal(context.document.getElementById('performance-concurrent-slider').value, '500');
+  assert.equal(context.document.getElementById('performance-topology').value, 'same_host_split');
+  assert.equal(context.document.getElementById('performance-seeded').value, '10000');
+  assert.equal(context.document.getElementById('performance-created').value, '10000');
+  assert.equal(context.document.getElementById('performance-seeded').disabled, true);
+  assert.equal(context.document.getElementById('performance-created').disabled, true);
+});
+
 test('paired slider and numeric input synchronize while custom input may exceed slider max', () => {
   const listeners = {};
   const slider = { value: '50', min: '1', max: '500', addEventListener: (name, fn) => { listeners[`slider:${name}`] = fn; } };

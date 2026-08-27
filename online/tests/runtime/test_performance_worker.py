@@ -37,10 +37,17 @@ SHA = "1" * 64
 COMMIT = "2" * 40
 
 
-def _conditions() -> tuple[PerformanceCondition, ...]:
+def _conditions(
+    cohort_size: int = 50, *, selected_split: str = "same_host_split"
+) -> tuple[PerformanceCondition, ...]:
     values = []
     index = 0
-    for topology in ("same_process", "same_host_split", "same_host_isolated"):
+    topologies = (
+        ("same_process", "same_host_split", "same_host_isolated")
+        if cohort_size == 50
+        else ("same_process", selected_split)
+    )
+    for topology in topologies:
         for training, activation in ((False, False), (True, False), (True, True)):
             index += 1
             values.append(
@@ -58,6 +65,8 @@ def _conditions() -> tuple[PerformanceCondition, ...]:
 
 
 def _trial(**changes) -> PerformanceExperiment:
+    creator_count = int(changes.get("creator_count", 50))
+    selected_split = str(changes.pop("selected_split", "same_host_split"))
     value = PerformanceExperiment(
         id=EXPERIMENT_ID,
         status="population_pending",
@@ -67,9 +76,9 @@ def _trial(**changes) -> PerformanceExperiment:
         dataset_repository="dhelmy990/babel-wikipedia-experiment",
         dataset_config="crosswalk_2026_06_07",
         dataset_revision="3" * 40,
-        creator_count=50,
+        creator_count=creator_count,
         target_created_babels=10_000,
-        concurrent_users=50,
+        concurrent_users=creator_count,
         recommendation_start_probability=0.4,
         continuation_probability=0.4,
         maximum_traversal_depth=2,
@@ -85,12 +94,12 @@ def _trial(**changes) -> PerformanceExperiment:
         population_run_id=None,
         population_bundle_path=None,
         population_manifest_sha256=None,
-        conditions=_conditions(),
+        conditions=_conditions(creator_count, selected_split=selected_split),
     )
     return replace(value, **changes)
 
 
-def _population_manifest() -> FrozenPopulationManifestV1:
+def _population_manifest(*, creator_count: int = 50) -> FrozenPopulationManifestV1:
     return FrozenPopulationManifestV1(
         schemaVersion=1,
         experimentId=str(EXPERIMENT_ID),
@@ -99,7 +108,7 @@ def _population_manifest() -> FrozenPopulationManifestV1:
         scheduleCount=10_000,
         juneCount=5_000,
         julyCount=5_000,
-        creatorCount=50,
+        creatorCount=creator_count,
         modelId=MODEL_ID,
         modelVersion=0,
         modelManifestSha256=SHA,
@@ -335,6 +344,104 @@ def test_approval_clones_once_and_replays_one_frozen_workload_across_3x3(tmp_pat
     assert manager.status["phase"] == "completed"
 
 
+@pytest.mark.parametrize("creator_count", [100, 500])
+def test_higher_cohort_runs_six_conditions_with_one_frozen_workload(
+    tmp_path: Path, creator_count: int
+):
+    database = FakeDatabase()
+    population = _population_manifest(creator_count=creator_count)
+    population_dir = tmp_path / "population"
+    population_dir.mkdir()
+    (population_dir / "manifest.json").write_text(
+        population.model_dump_json() + "\n", encoding="utf-8"
+    )
+    database.trial = _trial(
+        creator_count=creator_count,
+        status="approved",
+        operator_approved=True,
+        population_ready=True,
+        population_run_id=POPULATION_RUN_ID,
+        population_bundle_path=str(population_dir),
+        population_manifest_sha256=hashlib.sha256(
+            (population_dir / "manifest.json").read_bytes()
+        ).hexdigest(),
+    )
+    frozen = tmp_path / "workload"
+    frozen.mkdir()
+    (frozen / "requests.template.jsonl").write_text("{}\n" * 3)
+    observed = []
+
+    def run(trial, condition, run_id, workload, stop):
+        observed.append((condition.topology, workload.identity))
+        return LiveConditionEvidence(
+            condition_id=condition.id,
+            run_id=run_id,
+            request_count=3,
+            p95_ms=15.0 if condition.activation_enabled else 12.0,
+            raw_evidence={"workloadIdentity": list(workload.identity)},
+        )
+
+    manager = PerformanceJobManager(
+        database=database,
+        output_root=tmp_path,
+        population_builder=lambda *_args: pytest.fail("population is already ready"),
+        workload_freezer=lambda *_args: type(
+            "Frozen", (), {"path": frozen, "identity": (SHA,) * 6}
+        )(),
+        condition_runner=run,
+        population_loader=lambda _path: population,
+    )
+
+    manager.approve_next_scale(EXPERIMENT_ID)
+    _wait(manager)
+
+    assert len(observed) == 6
+    assert {topology for topology, _identity in observed} == {
+        "same_process",
+        "same_host_split",
+    }
+    assert len({identity for _topology, identity in observed}) == 1
+    assert {row["condition_count"] for row in database.progress} == {6}
+    assert len(database.results) == 6
+
+
+def test_higher_cohort_rejects_a_frozen_population_from_another_cohort(
+    tmp_path: Path,
+):
+    database = FakeDatabase()
+    population = _population_manifest(creator_count=50)
+    population_dir = tmp_path / "population"
+    population_dir.mkdir()
+    (population_dir / "manifest.json").write_text(
+        population.model_dump_json() + "\n", encoding="utf-8"
+    )
+    database.trial = _trial(
+        creator_count=100,
+        status="approved",
+        operator_approved=True,
+        population_ready=True,
+        population_run_id=POPULATION_RUN_ID,
+        population_bundle_path=str(population_dir),
+        population_manifest_sha256=hashlib.sha256(
+            (population_dir / "manifest.json").read_bytes()
+        ).hexdigest(),
+    )
+    manager = PerformanceJobManager(
+        database=database,
+        output_root=tmp_path,
+        population_builder=lambda *_args: pytest.fail("population is already ready"),
+        workload_freezer=lambda *_args: pytest.fail("cohort drift must fail first"),
+        condition_runner=lambda *_args: pytest.fail("cohort drift must fail first"),
+        population_loader=lambda _path: population,
+    )
+
+    manager.approve_next_scale(EXPERIMENT_ID)
+    _wait(manager)
+
+    assert database.trial.status == "failed"
+    assert "creator count" in str(manager.status["failure"])
+
+
 def test_approval_refuses_non_durable_gate(tmp_path: Path):
     manager = PerformanceJobManager(
         database=FakeDatabase(),
@@ -429,6 +536,49 @@ def test_real_population_builder_closes_trial_into_canonical_qwen_run(
     assert observed[0]["identity"].model_id == real_model_manifest.modelId
     assert manifest == _population_manifest()
     assert directory == tmp_path / str(EXPERIMENT_ID) / "population"
+
+
+@pytest.mark.parametrize("creator_count", [100, 500])
+def test_real_population_builder_carries_the_saved_higher_cohort_into_the_run(
+    tmp_path: Path, real_model_manifest, accepted_qwen_factory, creator_count: int
+):
+    observed = []
+
+    def build(**values):
+        observed.append(values)
+        return _population_manifest(creator_count=creator_count)
+
+    builder = RealPopulationBuilder(
+        database=object(),
+        bundle=type(
+            "Bundle",
+            (),
+            {
+                "dataset_repository": "dhelmy990/babel-wikipedia-experiment",
+                "dataset_config": "crosswalk_2026_06_07",
+                "dataset_revision": "3" * 40,
+            },
+        )(),
+        model=real_model_manifest,
+        encoder=accepted_qwen_factory(),
+        output_root=tmp_path,
+        build=build,
+    )
+
+    builder(
+        _trial(
+            creator_count=creator_count,
+            starting_model_id=real_model_manifest.modelId,
+            model_repository=real_model_manifest.encoderRepo,
+            model_revision=real_model_manifest.encoderRevision,
+        ),
+        POPULATION_RUN_ID,
+        lambda **_values: None,
+        lambda: False,
+    )
+
+    assert observed[0]["config"].creatorCount == creator_count
+    assert observed[0]["config"].concurrentUsers == creator_count
 
 
 def _real_child(real_model_manifest, *, parent=None, producing_run_id=None, version=4):
