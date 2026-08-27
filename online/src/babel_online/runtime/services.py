@@ -108,6 +108,73 @@ def _activate_prepared_snapshot(
     )
 
 
+def _prepare_split_serving_update(
+    *,
+    state: Any,
+    database: Any,
+    run_id: UUID,
+    base_records: list[VectorRecord],
+    child_records: list[VectorRecord],
+    descriptor: RealQwenChildStateV1,
+    root: Path,
+    stage_started_at_ns: int | None = None,
+) -> PreparedServingUpdate:
+    """Validate child materialization and build the split snapshot exactly once."""
+    from ..model.candidate_index import MaterializedServingState
+    from ..model.pgvector_index import PgvectorCandidateIndex
+    from ..training.torch_working import TorchOnlineRecommender
+
+    started_at_ns = (
+        time.time_ns() if stage_started_at_ns is None else stage_started_at_ns
+    )
+    child = descriptor.childManifest
+    if _snapshot_sha(child_records) != descriptor.vectorSnapshotSha256:
+        raise ValueError("child pgvector snapshot checksum differs")
+    child_state = MaterializedServingState(
+        run_id=run_id,
+        model_id=child.modelId,
+        model_version=descriptor.modelVersion,
+        embedding_space_id=child.embeddingSpace.embeddingSpaceId,
+        pgvector_snapshot_sha256=descriptor.vectorSnapshotSha256,
+        backend_snapshot_sha256=descriptor.vectorSnapshotSha256,
+    )
+    online_state = json.loads((root / descriptor.onlineStatePath).read_text())
+    frozen = {
+        record.babel.babelId: np.asarray(record.vector, dtype="<f4")
+        for record in base_records
+    }
+    probe_model = TorchOnlineRecommender(frozen, learning_rate=0.05)
+    probe_model.load_state_dict(online_state)
+    materialized = probe_model.materialized_vectors()
+    if any(
+        not np.allclose(
+            materialized[record.babel.babelId],
+            np.asarray(record.vector, dtype="<f4"),
+            rtol=1e-6,
+            atol=1e-7,
+        )
+        for record in child_records
+    ):
+        raise ValueError("online state does not reproduce child vectors")
+    prepared_snapshot = state.prepare_sync(
+        selected_model_id=child.modelId,
+        materialized_state=child_state,
+        candidate_index=PgvectorCandidateIndex(database.query_candidates),
+        vector_records=child_records,
+        context_tower=probe_model,
+    )
+    return PreparedServingUpdate(
+        child=child,
+        materialized_state=child_state,
+        snapshot=prepared_snapshot,
+        descriptor_root=root,
+        descriptor=descriptor,
+        probe_model=probe_model,
+        stage_started_at_ns=started_at_ns,
+        prepared_at_ns=time.time_ns(),
+    )
+
+
 class TrainerRole:
     """Own online updates and publish state only through immutable files."""
 
@@ -685,13 +752,11 @@ def serving_main(argv: list[str] | None = None) -> int:
     """Run synchronous Qwen/pgvector recommendation serving independently."""
     import uvicorn
 
-    from ..model.candidate_index import MaterializedServingState
     from ..model.pgvector_index import PgvectorCandidateIndex
     from ..model.population import PopulationIdentity
     from ..model.source_vector_cache import SourceVectorResolver
     from ..serving.app import create_app
     from ..serving.state import ServingState
-    from ..training.torch_working import TorchOnlineRecommender
 
     parser = argparse.ArgumentParser(prog="babel-recommendation-server")
     parser.add_argument("--run-id", required=True, type=UUID)
@@ -749,50 +814,15 @@ def serving_main(argv: list[str] | None = None) -> int:
             model_version=descriptor.modelVersion,
         )
         child_records = _load_records(database, identity)
-        if _snapshot_sha(child_records) != descriptor.vectorSnapshotSha256:
-            raise ValueError("child pgvector snapshot checksum differs")
-        child_state = MaterializedServingState(
+        return _prepare_split_serving_update(
+            state=state,
+            database=database,
             run_id=arguments.run_id,
-            model_id=child.modelId,
-            model_version=descriptor.modelVersion,
-            embedding_space_id=child.embeddingSpace.embeddingSpaceId,
-            pgvector_snapshot_sha256=descriptor.vectorSnapshotSha256,
-            backend_snapshot_sha256=descriptor.vectorSnapshotSha256,
-        )
-        online_state = json.loads((root / descriptor.onlineStatePath).read_text())
-        frozen = {
-            record.babel.babelId: np.asarray(record.vector, dtype="<f4")
-            for record in records
-        }
-        probe_model = TorchOnlineRecommender(frozen, learning_rate=0.05)
-        probe_model.load_state_dict(online_state)
-        materialized = probe_model.materialized_vectors()
-        if any(
-            not np.allclose(
-                materialized[record.babel.babelId],
-                np.asarray(record.vector, dtype="<f4"),
-                rtol=1e-6,
-                atol=1e-7,
-            )
-            for record in child_records
-        ):
-            raise ValueError("online state does not reproduce child vectors")
-        prepared_snapshot = state.prepare_sync(
-            selected_model_id=child.modelId,
-            materialized_state=child_state,
-            candidate_index=PgvectorCandidateIndex(database.query_candidates),
-            vector_records=child_records,
-            context_tower=probe_model,
-        )
-        return PreparedServingUpdate(
-            child=child,
-            materialized_state=child_state,
-            snapshot=prepared_snapshot,
-            descriptor_root=root,
+            base_records=records,
+            child_records=child_records,
             descriptor=descriptor,
-            probe_model=probe_model,
+            root=root,
             stage_started_at_ns=stage_started_at_ns,
-            prepared_at_ns=time.time_ns(),
         )
 
     def probe(prepared: PreparedServingUpdate, known: KnownVectorProbeV1) -> bool:

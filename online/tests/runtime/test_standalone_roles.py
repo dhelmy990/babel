@@ -7,12 +7,17 @@ from uuid import uuid4
 import numpy as np
 
 from babel_online.contracts import RunConfigV1, RunConfigV2
+from babel_online.model.candidate_index import (
+    InMemoryCreatedBabelIndex,
+    MaterializedServingState,
+)
 from babel_online.model.registry import ModelRegistry
 from babel_online.feedback.bus import TopicPartition
 from babel_online.model.state_distributor import ModelStateDistributor
 from babel_online.observable import CreatedBabel, VectorRecord
 from babel_online.runtime.services import (
     _activate_prepared_snapshot,
+    _prepare_split_serving_update,
     ServingRole,
     TrainerRole,
     serving_main,
@@ -27,6 +32,7 @@ from babel_online.runtime.services import (
     run_periodic_training,
     load_selected_working_model,
 )
+from babel_online.serving.state import ServingState
 from babel_online.training.torch_working import TorchOnlineRecommender
 import pytest
 
@@ -48,6 +54,120 @@ def test_split_activation_passes_the_prebuilt_snapshot_without_rebuilding() -> N
     )
 
     assert activated == [prepared_snapshot]
+    assert commits == ["committed"]
+
+
+def test_split_prepare_builds_the_full_snapshot_once_and_activation_reuses_it(
+    tmp_path,
+    real_model_manifest,
+    accepted_qwen_factory,
+    monkeypatch,
+) -> None:
+    run_id = uuid4()
+    vectors = np.eye(100, dtype=np.float32)[:3]
+    records = [
+        VectorRecord(
+            babel=CreatedBabel(
+                babelId=uuid4(),
+                runId=run_id,
+                creatorId=uuid4(),
+                sourceArticleKey=f"enwiki:{index + 1}",
+                title=f"Representative {index}",
+                text=f"Representative immutable record {index}.",
+                createdAtNs=index + 1,
+            ),
+            catalogContentHash=f"{index + 1:x}" * 64,
+            embeddingSpaceId=real_model_manifest.embeddingSpace.embeddingSpaceId,
+            servingModelId=real_model_manifest.modelId,
+            materializedModelVersion=0,
+            vector=tuple(float(value) for value in vector),
+        )
+        for index, vector in enumerate(vectors)
+    ]
+    frozen = {
+        record.babel.babelId: np.asarray(record.vector, dtype="<f4")
+        for record in records
+    }
+    working = TorchOnlineRecommender(frozen, learning_rate=0.05)
+    registry = ModelRegistry()
+    registry.register_real_original(real_model_manifest)
+    inserted_batches = []
+    published = TrainerRole(
+        trainer=SimpleNamespace(
+            processed_events=3,
+            capture_sync_state=lambda: SimpleNamespace(
+                version=2,
+                materialized_vectors=working.materialized_vectors(),
+                model_state=working.state_dict(),
+            ),
+        ),
+        parent=real_model_manifest,
+        registry=registry,
+        database=SimpleNamespace(
+            register_real_child=lambda *_: None,
+            insert_vectors=inserted_batches.append,
+        ),
+        run_id=run_id,
+        state_root=tmp_path,
+        base_records=records,
+    ).publish_update()
+    child_records = inserted_batches[0]
+    initial_state = MaterializedServingState(
+        run_id=run_id,
+        model_id=real_model_manifest.modelId,
+        model_version=0,
+        embedding_space_id=real_model_manifest.embeddingSpace.embeddingSpaceId,
+        pgvector_snapshot_sha256="a" * 64,
+        backend_snapshot_sha256="a" * 64,
+    )
+    state = ServingState(
+        registry=registry,
+        selected_model_id=real_model_manifest.modelId,
+        materialized_state=initial_state,
+        candidate_index=InMemoryCreatedBabelIndex(records),
+        vector_records=records,
+        qwen_encoder=accepted_qwen_factory(),
+        scale_run=True,
+        context_tower=working,
+    )
+    build_calls = []
+    prepare_calls = []
+    original_build = state._build_snapshot
+    original_prepare = state.prepare_sync
+
+    def count_build(*args, **kwargs):
+        build_calls.append(args[3])
+        return original_build(*args, **kwargs)
+
+    def count_prepare(**kwargs):
+        prepare_calls.append(kwargs["vector_records"])
+        return original_prepare(**kwargs)
+
+    monkeypatch.setattr(state, "_build_snapshot", count_build)
+    monkeypatch.setattr(state, "prepare_sync", count_prepare)
+
+    prepared = _prepare_split_serving_update(
+        state=state,
+        database=SimpleNamespace(query_candidates=lambda *_: ()),
+        run_id=run_id,
+        base_records=records,
+        child_records=child_records,
+        descriptor=published.child.descriptor,
+        root=published.child.root,
+    )
+
+    assert prepare_calls == [child_records]
+    assert prepare_calls[0] is child_records
+    assert build_calls == [child_records]
+    assert len(prepared.snapshot.vectors_by_babel_id) == len(child_records) == 3
+    commits = []
+    _activate_prepared_snapshot(
+        state=state,
+        prepared_snapshot=prepared.snapshot,
+        activation_commit=lambda: commits.append("committed"),
+    )
+    assert state.snapshot() is prepared.snapshot
+    assert build_calls == [child_records]
     assert commits == ["committed"]
 
 
