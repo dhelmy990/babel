@@ -17,6 +17,8 @@ training
 benchmark/**
 !benchmark/pyproject.toml
 !benchmark/src/
+benchmark/src/**
 !benchmark/src/babel_benchmark/
-!benchmark/src/babel_benchmark/**
+benchmark/src/babel_benchmark/**
+!benchmark/src/babel_benchmark/*.py
 *.pdf

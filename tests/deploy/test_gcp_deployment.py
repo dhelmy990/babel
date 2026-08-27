@@ -6,6 +6,8 @@ import os
 import re
 import subprocess
 import sys
+import tarfile
+import tempfile
 import time
 from pathlib import Path
 from uuid import UUID, uuid4, uuid5
@@ -404,21 +406,67 @@ def test_multistage_image_and_compose_preserve_compute_boundary() -> None:
     assert "BABEL_PERFORMANCE_WORKER_ENDPOINT: http://127.0.0.1:8792" in compose
 
 
-def test_performance_worker_build_context_includes_only_benchmark_package() -> None:
-    dockerignore = (ROOT / ".dockerignore").read_text().splitlines()
-    benchmark_rules = [
-        rule
-        for rule in dockerignore
-        if rule.lstrip("!").startswith("benchmark")
-    ]
+def test_performance_worker_build_context_includes_only_required_sources() -> None:
+    tracked_sources = subprocess.run(
+        ["git", "ls-files", "benchmark/src/babel_benchmark"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert tracked_sources
+    assert all(Path(path).suffix == ".py" for path in tracked_sources)
 
-    assert benchmark_rules == [
-        "benchmark/**",
-        "!benchmark/pyproject.toml",
-        "!benchmark/src/",
-        "!benchmark/src/babel_benchmark/",
-        "!benchmark/src/babel_benchmark/**",
-    ]
+    with tempfile.TemporaryDirectory(
+        prefix="babel-dockerignore-probe-", dir=Path.home()
+    ) as directory:
+        probe = Path(directory)
+        (probe / ".dockerignore").write_text((ROOT / ".dockerignore").read_text())
+        (probe / "Dockerfile").write_text("FROM scratch\nCOPY benchmark /benchmark\n")
+        pyproject = probe / "benchmark" / "pyproject.toml"
+        pyproject.parent.mkdir(parents=True)
+        pyproject.write_bytes((ROOT / "benchmark" / "pyproject.toml").read_bytes())
+        for path in tracked_sources:
+            target = probe / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((ROOT / path).read_bytes())
+
+        forbidden = {
+            "benchmark/src/babel_benchmark/__pycache__/cached.pyc": b"cache",
+            "benchmark/src/babel_benchmark/generated.pyc": b"bytecode",
+            "benchmark/src/babel_benchmark/.secret": b"secret",
+            "benchmark/tests/test_hidden.py": b"test",
+            "benchmark/src/babel_friday_benchmark.egg-info/PKG-INFO": b"metadata",
+        }
+        for path, content in forbidden.items():
+            target = probe / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+
+        output = probe / "context.tar"
+        subprocess.run(
+            [
+                "docker",
+                "build",
+                "--no-cache",
+                "--progress=plain",
+                "--file",
+                "Dockerfile",
+                "--output",
+                f"type=tar,dest={output}",
+                ".",
+            ],
+            cwd=probe,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        with tarfile.open(output) as archive:
+            included = {name.removeprefix("./") for name in archive.getnames()}
+
+    assert "benchmark/pyproject.toml" in included
+    assert set(tracked_sources) <= included
+    assert forbidden.keys().isdisjoint(included), forbidden.keys() & included
 
 
 def test_rollout_validates_before_migration_and_rolls_back_on_failed_health() -> None:
