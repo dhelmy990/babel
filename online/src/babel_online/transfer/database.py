@@ -799,6 +799,9 @@ def _install_bundle_create_only(
 ) -> BundleFiles:
     """Portably install a bundle, accepting it only after complete re-verification.
 
+    The mode-0700 handoff root's owner UID is trusted. Cooperating exporters must
+    use this function so its parent-directory flock serializes publication; this
+    is not a security boundary against hostile code already running as that UID.
     A process crash can leave an incomplete digest directory. Such a directory is
     always a collision and requires deliberate operator cleanup before retry.
     """
@@ -817,6 +820,7 @@ def _install_bundle_create_only(
     try:
         source_fd = os.open(source, directory_flags)
         parent_fd = os.open(destination.parent, directory_flags)
+        fcntl.flock(parent_fd, fcntl.LOCK_EX)
         opened_source = os.fstat(source_fd)
         if (opened_source.st_dev, opened_source.st_ino) != (
             source_lstat.st_dev,

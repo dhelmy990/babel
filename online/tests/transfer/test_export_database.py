@@ -632,6 +632,54 @@ def test_portable_install_has_one_concurrent_winner_and_checksum_marker_last(
     assert set(path.name for path in destination.iterdir()) == set(PORTABLE_PAYLOADS)
 
 
+def test_portable_install_serializes_cooperating_exporters_through_final_verify(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = portable_source(tmp_path / "source")
+    destination = tmp_path / ("a" * 64)
+    winner_verifying = threading.Event()
+    release_winner = threading.Event()
+    contender_finished = threading.Event()
+    results: list[SimpleNamespace] = []
+    errors: list[BaseException] = []
+
+    def verify(root, digest):
+        winner_verifying.set()
+        assert release_winner.wait(timeout=5)
+        return SimpleNamespace(root=Path(root), digest=digest)
+
+    monkeypatch.setattr("babel_online.transfer.database.verify_bundle", verify)
+
+    def winner() -> None:
+        results.append(_install_bundle_create_only(source, destination, "a" * 64))
+
+    def contender() -> None:
+        try:
+            _install_bundle_create_only(source, destination, "a" * 64)
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            contender_finished.set()
+
+    winner_thread = threading.Thread(target=winner)
+    winner_thread.start()
+    assert winner_verifying.wait(timeout=5)
+    contender_thread = threading.Thread(target=contender)
+    contender_thread.start()
+
+    try:
+        assert not contender_finished.wait(timeout=0.25)
+    finally:
+        release_winner.set()
+    winner_thread.join(timeout=5)
+    contender_thread.join(timeout=5)
+
+    assert len(results) == 1
+    assert len(errors) == 1
+    assert isinstance(errors[0], PopulationTransferIntegrityError)
+    assert "collision" in str(errors[0])
+
+
 def test_portable_install_rejects_a_symlinked_staged_bundle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
