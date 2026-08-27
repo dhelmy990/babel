@@ -449,6 +449,16 @@ def _validate_evidence(
         (manifest.artifactRepo, MODEL_REPOSITORY, "frozen model repository"),
         (manifest.artifactRevision, MODEL_REVISION, "frozen model revision"),
         (manifest.artifactId, MODEL_ARTIFACT_ID, "frozen artifact"),
+        (
+            manifest.artifactManifestSha256,
+            evidence.registered_artifact_manifest_sha256,
+            "frozen artifact manifest",
+        ),
+        (
+            manifest.trainingDatasetRevision,
+            evidence.registered_training_dataset_revision,
+            "frozen training dataset revision",
+        ),
         (manifest.datasetRepo, DATASET_REPOSITORY, "frozen dataset repository"),
         (manifest.datasetConfig, DATASET_CONFIGURATION, "frozen dataset configuration"),
         (manifest.datasetRevision, DATASET_REVISION, "frozen dataset revision"),

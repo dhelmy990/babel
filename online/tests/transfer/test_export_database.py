@@ -26,7 +26,12 @@ from babel_online.transfer.contracts import (
     ORIGIN_TRIAL_ID,
     SERVING_MODEL_ID,
 )
-from babel_online.transfer.database import _write_authoritative_bundle, export_population
+from babel_online.transfer.database import (
+    _SourceEvidence,
+    _validate_evidence,
+    _write_authoritative_bundle,
+    export_population,
+)
 
 
 ARTIFACT_MANIFEST_SHA = "5e04eeb0d04f6a15fc1eda2ad7a6034fad82f7a3da648179dbc2e0cf71b68a2f"
@@ -600,3 +605,28 @@ def test_export_rejects_embedding_row_identity_drift(
 
     with pytest.raises(PopulationTransferIntegrityError, match=message):
         export_population("postgresql://secret", ORIGIN_TRIAL_ID, tmp_path / "bundles")
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        (
+            "trainingDatasetRevision",
+            "0" * 40,
+            "frozen training dataset revision",
+        ),
+        (
+            "artifactManifestSha256",
+            "0" * 64,
+            "frozen artifact manifest",
+        ),
+    ],
+)
+def test_export_binds_frozen_training_provenance_to_registered_model(
+    tmp_path: Path, field: str, value: str, message: str
+) -> None:
+    manifest, cursor = configured_source(tmp_path)
+    drifted = manifest.model_copy(update={field: value})
+
+    with pytest.raises(PopulationTransferIntegrityError, match=message):
+        _validate_evidence(_SourceEvidence.from_row(cursor.evidence), drifted)
