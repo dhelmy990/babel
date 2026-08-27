@@ -243,8 +243,8 @@ Result<void> Application::verifySchemaReady() {
       });
     }
     if (transaction.exec(
-            "SELECT count(*) = 9 FROM schema_migrations "
-            "WHERE version IN ('1', '2', '3', '4', '5', '6', '7', '8', '9')")
+            "SELECT count(*) = 10 FROM schema_migrations "
+            "WHERE version IN ('1', '2', '3', '4', '5', '6', '7', '8', '9', '10')")
             .one_field()
             .as<bool>() == false) {
       return tl::make_unexpected(ApplicationError{

@@ -51,13 +51,27 @@ export BABEL_ONLINE_MODEL_MODE='real_qwen'
 export BABEL_ONLINE_QWEN_DEVICE='cpu'
 export BABEL_RUNTIME_TOPOLOGY='same_host_split'
 export BABEL_ONLINE_WORKER_TOKEN="$(openssl rand -hex 32)"
+export BABEL_PERFORMANCE_WORKER_TOKEN="$(openssl rand -hex 32)"
 export PATH="$PWD/online/.venv/bin:$PATH"
 ```
 
-Start `babel-online supervise` and `just start` in separate terminals with the
-same environment and worker token. The supervisor exposes only a loopback
-control boundary. The dashboard at `http://127.0.0.1:8787/admin` remains the
-only supported operator launch surface.
+Start `babel-online performance-worker` and `just start` in separate terminals
+with the same environment and performance-worker token. The worker listens only
+on `127.0.0.1:8792`; it builds the real population first, waits for dashboard
+approval, captures one bounded reference workload, then runs the nine conditions
+sequentially. The dashboard at `http://127.0.0.1:8787/admin` remains the normal
+operator launch surface.
+
+If the dashboard request times out while the loopback worker is still healthy,
+retry the same idempotent action without creating a second trial:
+
+```bash
+babel-online performance-command \
+  --experiment-id '<saved-trial-uuid>' \
+  --action approve-next-scale
+```
+
+The other recovery actions are `start` and `graceful-stop`.
 
 ## Controls and evidence
 

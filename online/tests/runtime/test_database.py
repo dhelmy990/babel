@@ -244,6 +244,156 @@ def test_performance_execution_bindings_reject_conflicting_identity() -> None:
         database.bind_performance_condition("trial", "condition", UUID(int=2))
 
 
+def test_database_loads_saved_performance_trial_and_exact_3x3_conditions() -> None:
+    experiment_id = UUID(int=101)
+    model_id = UUID(int=102)
+    condition_rows = []
+    index = 0
+    for topology in ("same_process", "same_host_split", "same_host_isolated"):
+        for training, activation in ((False, False), (True, False), (True, True)):
+            index += 1
+            condition_rows.append(
+                (UUID(int=200 + index), index, topology, training, activation, None, "pending")
+            )
+    trial_row = (
+        experiment_id,
+        "population_pending",
+        model_id,
+        "dhelmy990/babel-qwen-navigation-2016-interview",
+        "1" * 40,
+        "dhelmy990/babel-wikipedia-experiment",
+        "2" * 40,
+        50,
+        10_000,
+        50,
+        0.4,
+        0.4,
+        2,
+        10,
+        True,
+        30,
+        120,
+        5.0,
+        8,
+        10,
+        False,
+        False,
+        None,
+        None,
+        None,
+    )
+    cursor = RecordingCursor(rows=[trial_row, *condition_rows])
+    database = __import__(
+        "babel_online.runtime.database", fromlist=["RuntimeDatabase"]
+    ).RuntimeDatabase("unused", connect=lambda: RecordingConnection(cursor))
+
+    trial = database.load_performance_experiment(experiment_id)
+
+    assert trial.id == experiment_id
+    assert trial.dataset_config == "crosswalk_2026_06_07"
+    assert trial.warmup_seconds == 30
+    assert len(trial.conditions) == 9
+    trial.validate_formal_defaults()
+    assert "FROM performance_experiments" in cursor.queries[0][0]
+    assert "ORDER BY condition_index" in cursor.queries[1][0]
+
+
+def test_database_persists_performance_progress_and_result_ratios() -> None:
+    database_module = __import__(
+        "babel_online.runtime.database", fromlist=["RuntimeDatabase"]
+    )
+    worker_module = __import__(
+        "babel_online.runtime.performance_worker", fromlist=["LiveConditionEvidence"]
+    )
+    cursor = RecordingCursor()
+    database = database_module.RuntimeDatabase(
+        "unused", connect=lambda: RecordingConnection(cursor)
+    )
+    experiment_id, condition_id, run_id = UUID(int=1), UUID(int=2), UUID(int=3)
+    database.append_performance_progress(
+        experiment_id,
+        phase="matrix",
+        condition_index=1,
+        condition_count=9,
+        seeded_articles=10_000,
+        created_babels=10_000,
+        indexed_babels=10_000,
+        requested=20,
+        completed=20,
+        elapsed_seconds=2.0,
+        recent_rate=10.0,
+        draining=False,
+        telemetry={"ok": True},
+    )
+    database.save_performance_condition_result(
+        experiment_id,
+        worker_module.LiveConditionEvidence(
+            condition_id=condition_id,
+            run_id=run_id,
+            request_count=20,
+            p95_ms=12.0,
+            raw_evidence={"kind": "live"},
+        ),
+        serving_p95_ms=10.0,
+        training_p95_ms=12.0,
+        full_p95_ms=15.0,
+    )
+
+    assert "performance_progress_snapshots" in cursor.queries[0][0]
+    result_query, result_parameters = cursor.queries[1]
+    assert "performance_results" in result_query
+    assert result_parameters[-3:] == (1.2, 1.5, 1.25)
+
+
+def test_database_exposes_persisted_trainer_serving_health() -> None:
+    cursor = RecordingCursor(rows=[(12, 7, 3, "checkpoint.json", True)])
+    database = __import__(
+        "babel_online.runtime.database", fromlist=["RuntimeDatabase"]
+    ).RuntimeDatabase("unused", connect=lambda: RecordingConnection(cursor))
+
+    health = database.performance_runtime_health(UUID(int=91))
+
+    assert health == {
+        "kafka_lag": 12,
+        "trainer_version": 7,
+        "serving_version": 3,
+        "checkpoint_version": 7,
+        "activation_version": 3,
+    }
+
+
+def test_database_verifies_live_identity_against_run_scoped_model_lineage() -> None:
+    cursor = RecordingCursor(rows=[(True,)])
+    database = __import__(
+        "babel_online.runtime.database", fromlist=["RuntimeDatabase"]
+    ).RuntimeDatabase("unused", connect=lambda: RecordingConnection(cursor))
+    values = {
+        "run_id": UUID(int=1),
+        "starting_model_id": UUID(int=2),
+        "model_id": UUID(int=3),
+        "model_version": 4,
+        "embedding_space_id": UUID(int=5),
+        "pgvector_sha256": "a" * 64,
+        "backend_sha256": "b" * 64,
+    }
+
+    assert database.verify_live_serving_identity(**values) is True
+    query, parameters = cursor.queries[0]
+    assert "WITH RECURSIVE lineage" in query
+    assert "producing_run_id" in query
+    assert "run_embedding_states" in query
+    assert parameters == (
+        values["starting_model_id"],
+        values["run_id"],
+        values["run_id"],
+        values["model_id"],
+        values["model_version"],
+        values["embedding_space_id"],
+        values["pgvector_sha256"],
+        values["backend_sha256"],
+    )
+
+
 def test_existing_source_load_uses_exact_snapshot_key_not_moving_active_pointer() -> None:
     vector = "[" + ",".join(["1"] + ["0"] * 99) + "]"
     cursor = RecordingCursor(rows=[(vector,)])

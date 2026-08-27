@@ -100,7 +100,7 @@ TEST_CASE("performance migration saves immutable trials evidence progress and ap
   CHECK(migration.find("iactivation_increment double precision") != std::string::npos);
 }
 
-TEST_CASE("runtime readiness requires every migration through performance execution version nine") {
+TEST_CASE("runtime readiness requires every migration through condition interruption version ten") {
   const auto application_path =
       std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
       "src/runtime/application.cpp";
@@ -108,9 +108,9 @@ TEST_CASE("runtime readiness requires every migration through performance execut
   REQUIRE(application_file.good());
 
   const std::string source{std::istreambuf_iterator<char>{application_file}, {}};
-  CHECK(source.find("SELECT count(*) = 9 FROM schema_migrations") !=
+  CHECK(source.find("SELECT count(*) = 10 FROM schema_migrations") !=
         std::string::npos);
-  CHECK(source.find("version IN ('1', '2', '3', '4', '5', '6', '7', '8', '9')") !=
+  CHECK(source.find("version IN ('1', '2', '3', '4', '5', '6', '7', '8', '9', '10')") !=
         std::string::npos);
 }
 
@@ -134,4 +134,17 @@ TEST_CASE("performance execution migration binds population and condition runs i
         std::string::npos);
   CHECK(migration.find("prevent_performance_condition_run_mutation") !=
         std::string::npos);
+}
+
+TEST_CASE("performance condition interruption migration preserves resumable status") {
+  const auto migration_path =
+      std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
+      "migrations/010_performance_condition_interrupted.sql";
+  std::ifstream migration_file(migration_path);
+  REQUIRE(migration_file.good());
+
+  const std::string migration{std::istreambuf_iterator<char>{migration_file}, {}};
+  CHECK(migration.find("DROP CONSTRAINT performance_conditions_status_check") !=
+        std::string::npos);
+  CHECK(migration.find("'interrupted'") != std::string::npos);
 }

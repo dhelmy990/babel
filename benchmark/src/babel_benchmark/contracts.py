@@ -159,6 +159,9 @@ class ConditionSpecV2(FrozenContract):
     expectedPgvectorSnapshotSha256: str = Field(pattern=_SHA256)
     expectedBackendSnapshotSha256: str = Field(pattern=_SHA256)
     activationTargets: tuple[ActivationTargetV1, ...] = ()
+    activationValidation: Literal[
+        "pinned_targets", "verified_live_ledger"
+    ] = "pinned_targets"
 
     @field_validator("scheduleOffsetsNs")
     @classmethod
@@ -179,6 +182,12 @@ class ConditionSpecV2(FrozenContract):
 
     @model_validator(mode="after")
     def activation_targets_form_a_pinned_lineage(self) -> "ConditionSpecV2":
+        if self.activationValidation == "verified_live_ledger":
+            if not self.identity.activationEnabled or self.activationTargets:
+                raise ValueError(
+                    "verified live activation requires activation and no predeclared targets"
+                )
+            return self
         if bool(self.activationTargets) != self.identity.activationEnabled:
             raise ValueError(
                 "activation targets must exist only for activation conditions"

@@ -49,6 +49,10 @@ class ConditionDriver(Protocol):
     ) -> ContextManager[None]: ...
 
 
+class _FatalConditionCallback(RuntimeError):
+    pass
+
+
 class HttpxTransport:
     def __init__(self, endpoint: str) -> None:
         import httpx
@@ -508,6 +512,12 @@ async def run_concurrent_condition(
     async_sleep: Callable[[float], Any] = asyncio.sleep,
     trainer_model_version: int | None = None,
     resource_collector: PeriodicResourceCollector | None = None,
+    live_identity_validator: Callable[[RecommendationResponseV2], None] | None = None,
+    success_callback: Callable[
+        [Any, RecommendationResponseV1 | RecommendationResponseV2, RequestMeasurementV2],
+        None,
+    ]
+    | None = None,
 ) -> ConcurrentConditionResult:
     """Replay one deterministic bounded concurrent schedule."""
     _validate_inputs(manifest, replay, universe)
@@ -520,6 +530,14 @@ async def run_concurrent_condition(
         if isinstance(condition, ConditionSpecV2)
         else infer_v1_condition_identity(condition)
     )
+    live_validation = (
+        isinstance(condition, ConditionSpecV2)
+        and condition.activationValidation == "verified_live_ledger"
+    )
+    if live_validation != (live_identity_validator is not None):
+        raise ValueError(
+            "verified live activation and its identity validator must be configured together"
+        )
     condition_id = identity.stable_key
     base_ns = monotonic_ns()
     semaphore = asyncio.Semaphore(max_in_flight)
@@ -579,7 +597,18 @@ async def run_concurrent_condition(
                     or response.runId != replay_row.request.runId
                 ):
                     raise ValueError("recommendation response identity mismatch")
-                _validate_serving_identity(condition, response)
+                if live_identity_validator is None:
+                    _validate_serving_identity(condition, response)
+                else:
+                    if not isinstance(response, RecommendationResponseV2):
+                        raise ValueError("live activation requires a V2 serving response")
+                    if response.embeddingSpaceId != condition.expectedEmbeddingSpaceId:
+                        raise ValueError(
+                            "recommendation embedding space differs from condition"
+                        )
+                    if response.retrievalBackend != condition.identity.retrievalBackend:
+                        raise ValueError("retrieval backend differs from condition")
+                    live_identity_validator(response)
                 universe.validate_candidates(
                     requester=replay_row.request.creatorId,
                     response_rows=response.candidates,
@@ -589,8 +618,7 @@ async def run_concurrent_condition(
                     staleness = max(0, trainer_model_version - response.modelVersion)
                 client_total = completed - started
                 cache_status, source_vector_origin = _cache_evidence(response)
-                measurements.append(
-                    RequestMeasurementV2(
+                measurement = RequestMeasurementV2(
                         **common,
                         completedAtMonotonicNs=completed,
                         clientTotalNs=client_total,
@@ -615,7 +643,14 @@ async def run_concurrent_condition(
                         queryVectorSha256=response.queryVectorSha256,
                         candidateCount=len(response.candidates),
                     )
-                )
+                if success_callback is not None:
+                    try:
+                        success_callback(replay_row, response, measurement)
+                    except BaseException as error:
+                        raise _FatalConditionCallback(
+                            "condition success callback failed"
+                        ) from error
+                measurements.append(measurement)
             except TimeoutError as error:
                 completed = monotonic_ns()
                 measurements.append(
@@ -627,6 +662,8 @@ async def run_concurrent_condition(
                         errorType=type(error).__name__,
                     )
                 )
+            except _FatalConditionCallback:
+                raise
             except Exception as error:
                 completed = monotonic_ns()
                 measurements.append(

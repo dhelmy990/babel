@@ -565,6 +565,18 @@ def trainer_main(argv: list[str] | None = None) -> int:
         state_root=role_state_root,
         base_records=records,
     )
+    ready_path_value = os.environ.get("BABEL_TRAINER_READY_PATH")
+    ready_path = Path(ready_path_value) if ready_path_value else None
+    if ready_path is not None:
+        _atomic_request(
+            ready_path,
+            {
+                "schemaVersion": 1,
+                "runId": str(arguments.run_id),
+                "consumerGroup": f"{config.kafkaGroup}.{arguments.run_id}",
+                "readyAtNs": time.time_ns(),
+            },
+        )
 
     def report_metrics() -> None:
         database.update_metrics(arguments.run_id, **trainer_runtime_metrics(trainer))
@@ -579,29 +591,33 @@ def trainer_main(argv: list[str] | None = None) -> int:
             checkpoint_sha256=loaded_checkpoint.manifest_sha256,
         )
 
-    last_published = run_periodic_training(
-        trainer,
-        stop_requested=stopping.is_set,
-        checkpoint_every_events=config.checkpointEveryEvents,
-        sync_every_steps=config.syncEverySteps,
-        activation_enabled=activation_enabled,
-        publish_update=role.publish_update,
-        initial_published_version=active.model_version,
-        report_metrics=report_metrics,
-        report_checkpoint=report_checkpoint,
-    )
-    end_offsets = consumer.high_watermarks()
-    trainer.drain_to(end_offsets)
-    final_checkpoint = trainer.checkpoint_and_commit()
-    report_metrics()
-    report_checkpoint(final_checkpoint)
-    publish_final_update(
-        trainer,
-        role,
-        last_published=last_published,
-        activation_enabled=activation_enabled,
-    )
-    consumer.close()
+    try:
+        last_published = run_periodic_training(
+            trainer,
+            stop_requested=stopping.is_set,
+            checkpoint_every_events=config.checkpointEveryEvents,
+            sync_every_steps=config.syncEverySteps,
+            activation_enabled=activation_enabled,
+            publish_update=role.publish_update,
+            initial_published_version=active.model_version,
+            report_metrics=report_metrics,
+            report_checkpoint=report_checkpoint,
+        )
+        end_offsets = consumer.high_watermarks()
+        trainer.drain_to(end_offsets)
+        final_checkpoint = trainer.checkpoint_and_commit()
+        report_metrics()
+        report_checkpoint(final_checkpoint)
+        publish_final_update(
+            trainer,
+            role,
+            last_published=last_published,
+            activation_enabled=activation_enabled,
+        )
+    finally:
+        consumer.close()
+        if ready_path is not None:
+            ready_path.unlink(missing_ok=True)
     return 0
 
 

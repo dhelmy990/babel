@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import json
+import signal
 import sys
 import threading
 import time
@@ -184,6 +185,114 @@ def test_python_cli_defaults_to_split_supervisor(monkeypatch) -> None:
     assert calls == ["split"]
     assert PublicTopology is Topology
     assert PublicPlacementManifestV1.__name__ == "PlacementManifestV1"
+
+
+def test_python_cli_dispatches_performance_worker_and_condition(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        runtime_cli, "_performance_worker", lambda: calls.append(("worker", ()))
+    )
+    monkeypatch.setattr(
+        runtime_cli,
+        "_performance_condition",
+        lambda argv: calls.append(("condition", tuple(argv))),
+    )
+    monkeypatch.setattr(
+        runtime_cli,
+        "_performance_command",
+        lambda argv: calls.append(("operator", tuple(argv))),
+    )
+
+    assert runtime_cli.main(["performance-worker"]) == 0
+    assert runtime_cli.main(["performance-condition", "--run-id", "value"]) == 0
+    assert runtime_cli.main(["performance-command", "--action", "start"]) == 0
+    assert calls == [
+        ("worker", ()),
+        ("condition", ("--run-id", "value")),
+        ("operator", ("--action", "start")),
+    ]
+
+
+def test_console_entrypoint_reads_sys_argv(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(runtime_cli, "_performance_worker", lambda: calls.append("worker"))
+    monkeypatch.setattr(sys, "argv", ["babel-online", "performance-worker"])
+
+    assert runtime_cli.main() == 0
+    assert calls == ["worker"]
+
+
+def test_condition_sigterm_interrupts_execution_and_restores_handlers(
+    monkeypatch, tmp_path
+) -> None:
+    from babel_online.runtime import performance_condition as condition_module
+    from babel_online.runtime.performance_worker import PerformanceCondition
+
+    experiment_id, condition_id, run_id = uuid4(), uuid4(), uuid4()
+    condition = PerformanceCondition(
+        id=condition_id,
+        condition_index=1,
+        topology="same_process",
+        training_enabled=False,
+        activation_enabled=False,
+        run_id=run_id,
+        status="running",
+    )
+    trial = SimpleNamespace(
+        conditions=(condition,), duration_seconds=120, target_rps=5.0
+    )
+    monkeypatch.setenv("BABEL_DATABASE_URL", "unused")
+    monkeypatch.setattr(
+        runtime_cli,
+        "RuntimeDatabase",
+        lambda _dsn: SimpleNamespace(
+            load_performance_experiment=lambda _experiment_id: trial
+        ),
+    )
+    installed = {}
+    old = object()
+    monkeypatch.setattr(signal, "getsignal", lambda _selected: old)
+    monkeypatch.setattr(
+        signal, "signal", lambda selected, handler: installed.__setitem__(selected, handler)
+    )
+    cleaned = []
+
+    def execute(**_values):
+        try:
+            installed[signal.SIGTERM](signal.SIGTERM, None)
+        finally:
+            cleaned.append("condition-cleanup")
+
+    monkeypatch.setattr(condition_module, "execute_live_condition", execute)
+    with pytest.raises(InterruptedError, match="graceful-stop"):
+        runtime_cli._performance_condition(
+            [
+                "--experiment-id",
+                str(experiment_id),
+                "--condition-id",
+                str(condition_id),
+                "--run-id",
+                str(run_id),
+                "--topology",
+                "same_process",
+                "--training-enabled",
+                "false",
+                "--activation-enabled",
+                "false",
+                "--workload",
+                str(tmp_path / "workload"),
+                "--duration-seconds",
+                "120",
+                "--target-rps",
+                "5",
+                "--evidence",
+                str(tmp_path / "evidence.json"),
+            ]
+        )
+
+    assert cleaned == ["condition-cleanup"]
+    assert installed[signal.SIGTERM] is old
+    assert installed[signal.SIGINT] is old
 
 
 def test_same_process_entrypoint_records_current_process_placement(tmp_path) -> None:

@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import importlib.metadata
 import os
+import signal
+import sys
 import time
 from pathlib import Path
 import urllib.request
@@ -286,7 +288,7 @@ def _supervise() -> None:
         ),
         trainer_command=os.environ.get(
             "BABEL_ONLINE_TRAINER_COMMAND",
-            "babel-online-trainer --run-id {run_id}",
+            "babel-online-trainer --run-id {run_id} --activation-enabled true",
         ),
         serving_version=_service_version("BABEL_ONLINE_SERVING_VERSION", "serving"),
         trainer_version=_service_version("BABEL_ONLINE_TRAINER_VERSION", "trainer"),
@@ -344,16 +346,202 @@ def _supervise() -> None:
             manager.request_stop(manager.active_run_id)
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="babel-online")
+def _boolean(value: str) -> bool:
+    normalized = value.strip().casefold()
+    if normalized not in {"true", "false"}:
+        raise argparse.ArgumentTypeError("value must be true or false")
+    return normalized == "true"
+
+
+def _performance_condition(argv: list[str]) -> None:
+    from .performance_condition import execute_live_condition
+
+    parser = argparse.ArgumentParser(prog="babel-online performance-condition")
+    parser.add_argument("--experiment-id", required=True, type=UUID)
+    parser.add_argument("--condition-id", required=True, type=UUID)
+    parser.add_argument("--run-id", required=True, type=UUID)
+    parser.add_argument("--topology", required=True)
+    parser.add_argument("--training-enabled", required=True, type=_boolean)
+    parser.add_argument("--activation-enabled", required=True, type=_boolean)
+    parser.add_argument("--workload", required=True, type=Path)
+    parser.add_argument("--duration-seconds", required=True, type=int)
+    parser.add_argument("--target-rps", required=True, type=float)
+    parser.add_argument("--evidence", required=True, type=Path)
+    arguments = parser.parse_args(argv)
+    database = RuntimeDatabase(_required("BABEL_DATABASE_URL"))
+    trial = database.load_performance_experiment(arguments.experiment_id)
+    try:
+        condition = next(
+            row for row in trial.conditions if row.id == arguments.condition_id
+        )
+    except StopIteration as error:
+        raise SystemExit("condition is outside the saved performance trial") from error
+    expected = (
+        condition.run_id,
+        condition.topology,
+        condition.training_enabled,
+        condition.activation_enabled,
+        trial.duration_seconds,
+        trial.target_rps,
+    )
+    actual = (
+        arguments.run_id,
+        arguments.topology,
+        arguments.training_enabled,
+        arguments.activation_enabled,
+        arguments.duration_seconds,
+        arguments.target_rps,
+    )
+    if expected != actual:
+        raise SystemExit("condition command differs from its durable dashboard binding")
+    def interrupt(_signum, _frame) -> None:
+        raise InterruptedError("performance condition received a graceful-stop signal")
+
+    prior = {
+        selected: signal.getsignal(selected)
+        for selected in (signal.SIGTERM, signal.SIGINT)
+    }
+    for selected in prior:
+        signal.signal(selected, interrupt)
+    try:
+        execute_live_condition(
+            database=database,
+            trial=trial,
+            condition=condition,
+            run_id=arguments.run_id,
+            frozen_workload_path=arguments.workload,
+            evidence_path=arguments.evidence,
+            serving_port=int(os.environ.get("BABEL_RECOMMENDATION_PORT", "8791")),
+            kafka_bootstrap_servers=os.environ.get(
+                "BABEL_KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:29092"
+            ),
+        )
+    finally:
+        for selected, handler in prior.items():
+            signal.signal(selected, handler)
+
+
+def _performance_worker() -> None:
+    import uvicorn
+
+    from .performance_condition import RealWorkloadFreezer
+    from .performance_worker import (
+        PerformanceConditionCommandRunner,
+        PerformanceJobManager,
+        RealPopulationBuilder,
+        create_performance_control_app,
+    )
+
+    database = RuntimeDatabase(_required("BABEL_DATABASE_URL"))
+    token = _required("HF_TOKEN")
+    real, encoder = _load_real_launch(
+        database,
+        token=token,
+        artifact_cache_dir=os.environ.get(
+            "BABEL_ONLINE_MODEL_ARTIFACT_CACHE",
+            "state/online/cache/model-artifact",
+        ),
+        model_cache_dir=os.environ.get(
+            "BABEL_ONLINE_QWEN_CACHE", "state/online/cache/qwen-base"
+        ),
+        device=os.environ.get("BABEL_ONLINE_QWEN_DEVICE", "cpu"),
+    )
+    dataset_repo = _required("BABEL_ONLINE_DATASET_REPOSITORY")
+    dataset_revision = _required("BABEL_ONLINE_DATASET_REVISION")
+    dataset_root = acquire_pinned_bundle(
+        repo_id=dataset_repo,
+        revision=dataset_revision,
+        token=token,
+        cache_dir=os.environ.get(
+            "BABEL_ONLINE_HF_CACHE", "state/online/cache/dataset"
+        ),
+    )
+    bundle = load_scale_dataset_bundle(
+        dataset_root,
+        dataset_repository=dataset_repo,
+        dataset_config=SCALE_DATASET_CONFIG,
+        dataset_revision=dataset_revision,
+    )
+    output_root = Path(
+        os.environ.get("BABEL_PERFORMANCE_STATE_ROOT", "state/performance")
+    )
+    kafka = os.environ.get("BABEL_KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:29092")
+    serving_port = int(os.environ.get("BABEL_RECOMMENDATION_PORT", "8791"))
+    manager = PerformanceJobManager(
+        database=database,
+        output_root=output_root,
+        population_builder=RealPopulationBuilder(
+            database=database,
+            bundle=bundle,
+            model=real.manifest,
+            encoder=encoder,
+            output_root=output_root,
+        ),
+        workload_freezer=RealWorkloadFreezer(
+            database=database,
+            bundle=bundle,
+            output_root=output_root,
+            kafka_bootstrap_servers=kafka,
+            serving_port=serving_port,
+        ),
+        condition_runner=PerformanceConditionCommandRunner(
+            output_root=output_root,
+            executable=os.environ.get("BABEL_ONLINE_EXECUTABLE", "babel-online"),
+        ),
+    )
+    app = create_performance_control_app(
+        manager, token=_required("BABEL_PERFORMANCE_WORKER_TOKEN")
+    )
+    uvicorn.run(app, host="127.0.0.1", port=8792, log_level="info")
+
+
+def _performance_command(argv: list[str]) -> None:
+    """Retry one dashboard worker control action from the operator shell."""
+    parser = argparse.ArgumentParser(prog="babel-online performance-command")
+    parser.add_argument("--experiment-id", required=True, type=UUID)
     parser.add_argument(
-        "command", nargs="?", default="supervise", choices=["serve", "supervise"]
+        "--action",
+        required=True,
+        choices=("start", "graceful-stop", "approve-next-scale"),
     )
     arguments = parser.parse_args(argv)
-    if arguments.command == "serve":
+    request = urllib.request.Request(
+        "http://127.0.0.1:8792/v1/performance/"
+        f"{arguments.experiment_id}/{arguments.action}",
+        data=b"",
+        method="POST",
+        headers={
+            "X-Babel-Worker-Token": _required("BABEL_PERFORMANCE_WORKER_TOKEN")
+        },
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        if int(response.status) != 202:
+            raise RuntimeError(
+                f"performance worker rejected operator action: {response.status}"
+            )
+
+
+def main(argv: list[str] | None = None) -> int:
+    values = list(sys.argv[1:] if argv is None else argv)
+    command = values.pop(0) if values else "supervise"
+    if command == "serve":
+        if values:
+            raise SystemExit("serve does not accept positional arguments")
         _serve()
-    elif arguments.command == "supervise":
+    elif command == "supervise":
+        if values:
+            raise SystemExit("supervise does not accept positional arguments")
         _supervise()
+    elif command == "performance-worker":
+        if values:
+            raise SystemExit("performance-worker does not accept positional arguments")
+        _performance_worker()
+    elif command == "performance-condition":
+        _performance_condition(values)
+    elif command == "performance-command":
+        _performance_command(values)
+    else:
+        raise SystemExit(f"unsupported babel-online command: {command}")
     return 0
 
 

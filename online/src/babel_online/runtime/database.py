@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import struct
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -392,6 +393,372 @@ class RuntimeDatabase:
                     "performance condition already has a different run binding"
                 )
 
+    def load_performance_experiment(self, experiment_id: UUID):
+        """Load the immutable dashboard trial plus its exact saved condition matrix."""
+        from .performance_worker import PerformanceCondition, PerformanceExperiment
+
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id,status,starting_model_id,model_repository,model_revision,
+                       dataset_repository,dataset_revision,creator_count,
+                       target_created_babels,concurrent_users,
+                       recommendation_start_probability,continuation_probability,
+                       maximum_traversal_depth,maximum_requests_per_traversal,
+                       interleave_creation_and_recommendations,warmup_seconds,duration_seconds,
+                       target_rps,training_micro_batch_size,sync_every_steps,
+                       operator_approved,population_ready,run_id,
+                       population_bundle_path,population_manifest_sha256
+                FROM performance_experiments WHERE id=%s
+                """,
+                (experiment_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise KeyError(f"performance experiment does not exist: {experiment_id}")
+            cursor.execute(
+                """
+                SELECT id,condition_index,topology,training_enabled,
+                       synchronization_enabled,run_id,status
+                FROM performance_conditions
+                WHERE experiment_id=%s ORDER BY condition_index
+                """,
+                (experiment_id,),
+            )
+            condition_rows = cursor.fetchall()
+        conditions = tuple(
+            PerformanceCondition(
+                id=UUID(str(value[0])),
+                condition_index=int(value[1]),
+                topology=str(value[2]),
+                training_enabled=bool(value[3]),
+                activation_enabled=bool(value[4]),
+                run_id=None if value[5] is None else UUID(str(value[5])),
+                status=str(value[6]),
+            )
+            for value in condition_rows
+        )
+        return PerformanceExperiment(
+            id=UUID(str(row[0])),
+            status=str(row[1]),
+            starting_model_id=UUID(str(row[2])),
+            model_repository=str(row[3]),
+            model_revision=str(row[4]),
+            dataset_repository=str(row[5]),
+            dataset_config="crosswalk_2026_06_07",
+            dataset_revision=str(row[6]),
+            creator_count=int(row[7]),
+            target_created_babels=int(row[8]),
+            concurrent_users=int(row[9]),
+            recommendation_start_probability=float(row[10]),
+            continuation_probability=float(row[11]),
+            maximum_traversal_depth=int(row[12]),
+            maximum_requests_per_traversal=int(row[13]),
+            interleave_creation_and_recommendations=bool(row[14]),
+            warmup_seconds=int(row[15]),
+            duration_seconds=int(row[16]),
+            target_rps=float(row[17]),
+            training_micro_batch_size=int(row[18]),
+            sync_every_steps=int(row[19]),
+            operator_approved=bool(row[20]),
+            population_ready=bool(row[21]),
+            population_run_id=None if row[22] is None else UUID(str(row[22])),
+            population_bundle_path=None if row[23] is None else str(row[23]),
+            population_manifest_sha256=None if row[24] is None else str(row[24]),
+            conditions=conditions,
+        )
+
+    def append_performance_progress(
+        self,
+        experiment_id: UUID,
+        *,
+        phase: str,
+        condition_index: int | None,
+        condition_count: int,
+        seeded_articles: int,
+        created_babels: int,
+        indexed_babels: int,
+        requested: int,
+        completed: int,
+        elapsed_seconds: float,
+        recent_rate: float,
+        draining: bool,
+        telemetry: Mapping[str, object],
+    ) -> None:
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO performance_progress_snapshots(
+                  experiment_id,sequence,phase,condition_index,condition_count,
+                  seeded_articles,created_babels,indexed_babels,requested,completed,
+                  elapsed_seconds,recent_rate,draining,telemetry
+                ) SELECT %s,COALESCE(MAX(sequence),-1)+1,%s,%s,%s,%s,%s,%s,%s,%s,
+                         %s,%s,%s,%s::jsonb
+                  FROM performance_progress_snapshots WHERE experiment_id=%s
+                """,
+                (
+                    experiment_id,
+                    phase,
+                    condition_index,
+                    condition_count,
+                    seeded_articles,
+                    created_babels,
+                    indexed_babels,
+                    requested,
+                    completed,
+                    elapsed_seconds,
+                    recent_rate,
+                    draining,
+                    json.dumps(telemetry, sort_keys=True, separators=(",", ":")),
+                    experiment_id,
+                ),
+            )
+
+    def create_condition_run(self, trial: Any, condition: Any, run_id: UUID) -> UUID:
+        """Persist one formal condition run with topology-independent semantics."""
+        seed = int.from_bytes(
+            hashlib.sha256(f"{trial.id}:workload".encode("utf-8")).digest()[:8],
+            "big",
+        ) & ((1 << 63) - 1)
+        root = Path(
+            os.environ.get("BABEL_PERFORMANCE_STATE_ROOT", "state/performance")
+        ) / str(trial.id) / "conditions" / str(condition.condition_index)
+        config = RunConfigV2(
+            schemaVersion=2,
+            runId=run_id,
+            datasetRepo=trial.dataset_repository,
+            datasetConfig=trial.dataset_config,
+            datasetRevision=trial.dataset_revision,
+            startingModelId=trial.starting_model_id,
+            retrievalBackend="pgvector",
+            creatorCount=trial.creator_count,
+            embeddingDimension=100,
+            environmentSequence=["2026-06", "2026-07"],
+            perMonthEventBudget={"2026-06": 5_000, "2026-07": 5_000},
+            runSeed=seed,
+            recommendationK=10,
+            topL=100,
+            kafkaTopic="babel.feedback.v1",
+            kafkaGroup=f"babel-performance-{trial.id}-{condition.condition_index}",
+            checkpointEveryEvents=max(1, trial.training_micro_batch_size * 10),
+            syncEverySteps=trial.sync_every_steps,
+            artifactRoot=str(root / "artifacts"),
+            stateRoot=str(root / "runtime"),
+            sourceArticlesPerMonth=5_000,
+            targetCreatedBabels=10_000,
+            concurrentUsers=trial.concurrent_users,
+            recommendationStartProbability=trial.recommendation_start_probability,
+            continuationProbability=trial.continuation_probability,
+            maximumTraversalDepth=2,
+            maximumRequestsPerTraversal=trial.maximum_requests_per_traversal,
+            interleaveCreationAndRecommendations=(
+                trial.interleave_creation_and_recommendations
+            ),
+        )
+        self.create_scaled_run(config)
+        return run_id
+
+    def clone_performance_population(
+        self, trial: Any, condition: Any, run_id: UUID
+    ) -> None:
+        """Validate the bound bundle and clone its exact DB snapshot without Qwen."""
+        from ..model.frozen_population import load_frozen_population
+
+        if trial.population_bundle_path is None or trial.population_run_id is None:
+            raise PerformanceBindingConflict("performance population is not bound")
+        manifest = load_frozen_population(trial.population_bundle_path)
+        if (
+            manifest.sourcePopulationRunId != trial.population_run_id
+            or manifest.experimentId != str(trial.id)
+        ):
+            raise PerformanceBindingConflict(
+                "frozen population differs from the saved trial binding"
+            )
+        state = self.clone_population_transaction(
+            manifest.population_identity(), run_id
+        )
+        if (
+            state.model_id != manifest.modelId
+            or state.model_version != manifest.modelVersion
+            or state.embedding_space_id != manifest.embeddingSpaceId
+            or state.pgvector_snapshot_sha256 != manifest.pgvectorSnapshotSha256
+            or state.backend_snapshot_sha256 != manifest.pgvectorSnapshotSha256
+        ):
+            raise PopulationIntegrityError(
+                "condition clone active snapshot differs from frozen population"
+            )
+
+    def transition_performance(
+        self, experiment_id: UUID, status: str, failure: str | None = None
+    ) -> None:
+        allowed = {
+            "population_pending", "population_ready", "approved", "running",
+            "stop_requested", "draining", "completed", "failed", "interrupted",
+        }
+        if status not in allowed:
+            raise ValueError("invalid performance experiment status")
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE performance_experiments SET status=%s,failure=COALESCE(%s,failure) "
+                "WHERE id=%s RETURNING id",
+                (status, failure, experiment_id),
+            )
+            if cursor.fetchone() is None:
+                raise KeyError(experiment_id)
+
+    def mark_performance_population_ready(
+        self, experiment_id: UUID, manifest: Any
+    ) -> None:
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE performance_experiments SET
+                  status='population_ready',population_ready=true,
+                  population_vector_count=%s,population_vector_sha256=%s,
+                  population_model_repository=%s,population_model_revision=%s,
+                  population_model_sha256=%s,population_dataset_repository=%s,
+                  population_dataset_revision=%s,population_dataset_sha256=%s
+                WHERE id=%s AND (
+                  status='population_pending' OR
+                  (population_ready=true AND population_vector_count=%s AND
+                   population_vector_sha256=%s)
+                ) RETURNING id
+                """,
+                (
+                    manifest.babelCount,
+                    manifest.vectorsSha256,
+                    manifest.artifactRepo,
+                    manifest.artifactRevision,
+                    manifest.modelManifestSha256,
+                    manifest.datasetRepo,
+                    manifest.datasetRevision,
+                    manifest.datasetManifestSha256,
+                    experiment_id,
+                    manifest.babelCount,
+                    manifest.vectorsSha256,
+                ),
+            )
+            if cursor.fetchone() is None:
+                raise PerformanceBindingConflict(
+                    "performance population readiness already differs"
+                )
+
+    def transition_performance_condition(
+        self, experiment_id: UUID, condition_id: UUID, status: str
+    ) -> None:
+        if status not in {
+            "pending",
+            "warmup",
+            "running",
+            "draining",
+            "completed",
+            "failed",
+            "interrupted",
+        }:
+            raise ValueError("invalid performance condition status")
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE performance_conditions SET status=%s "
+                "WHERE experiment_id=%s AND id=%s RETURNING id",
+                (status, experiment_id, condition_id),
+            )
+            if cursor.fetchone() is None:
+                raise KeyError(condition_id)
+
+    def save_performance_condition_result(
+        self,
+        experiment_id: UUID,
+        evidence: Any,
+        *,
+        serving_p95_ms: float,
+        training_p95_ms: float,
+        full_p95_ms: float,
+    ) -> None:
+        if min(serving_p95_ms, training_p95_ms, full_p95_ms) <= 0:
+            raise ValueError("interference p95 values must be positive")
+        ratios = (
+            training_p95_ms / serving_p95_ms,
+            full_p95_ms / serving_p95_ms,
+            full_p95_ms / training_p95_ms,
+        )
+        raw = {
+            **evidence.raw_evidence,
+            "conditionId": str(evidence.condition_id),
+            "runId": str(evidence.run_id),
+            "requestCount": evidence.request_count,
+            "conditionP95Ms": evidence.p95_ms,
+        }
+        encoded = json.dumps(raw, sort_keys=True, separators=(",", ":"))
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO performance_results(
+                  experiment_id,condition_id,raw_evidence,evidence_sha256,
+                  serving_p95_ms,training_p95_ms,full_p95_ms,
+                  itraining,ifull,iactivation_increment
+                ) VALUES (%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (experiment_id,condition_id) DO NOTHING
+                """,
+                (
+                    experiment_id,
+                    evidence.condition_id,
+                    encoded,
+                    hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+                    serving_p95_ms,
+                    training_p95_ms,
+                    full_p95_ms,
+                    *ratios,
+                ),
+            )
+
+    def verify_live_serving_identity(
+        self,
+        *,
+        run_id: UUID,
+        starting_model_id: UUID,
+        model_id: UUID,
+        model_version: int,
+        embedding_space_id: UUID,
+        pgvector_sha256: str,
+        backend_sha256: str,
+    ) -> bool:
+        """Verify one response against the run's active immutable descendant state."""
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                WITH RECURSIVE lineage AS (
+                  SELECT id,parent_model_id,producing_run_id
+                  FROM recommender_models WHERE id=%s
+                  UNION ALL
+                  SELECT child.id,child.parent_model_id,child.producing_run_id
+                  FROM recommender_models AS child
+                  JOIN lineage AS parent ON child.parent_model_id=parent.id
+                  WHERE child.producing_run_id=%s
+                )
+                SELECT EXISTS(
+                  SELECT 1 FROM run_embedding_states AS active
+                  JOIN lineage ON lineage.id=active.active_model_id
+                  WHERE active.run_id=%s AND active.active_model_id=%s
+                    AND active.active_model_version=%s
+                    AND active.embedding_space_id=%s
+                    AND active.pgvector_snapshot_sha256=%s
+                    AND active.backend_snapshot_sha256=%s
+                )
+                """,
+                (
+                    starting_model_id,
+                    run_id,
+                    run_id,
+                    model_id,
+                    model_version,
+                    embedding_space_id,
+                    pgvector_sha256,
+                    backend_sha256,
+                ),
+            )
+            row = cursor.fetchone()
+        return row is not None and bool(row[0])
+
     def bootstrap_model(self, artifact: LoadedArtifact) -> None:
         model = artifact.manifest
         embedding = model.embeddingSpace.model_dump(mode="json")
@@ -672,6 +1039,27 @@ class RuntimeDatabase:
                 f"UPDATE experiment_runs SET {assignments} WHERE id=%s",  # noqa: S608
                 (*values.values(), run_id),
             )
+
+    def performance_runtime_health(self, run_id: UUID) -> dict[str, int | None]:
+        """Return independently persisted trainer/serving health for sampling."""
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT kafka_lag,trainer_steps,active_model_version,"
+                "checkpoint_path,serving_synced FROM experiment_runs WHERE id=%s",
+                (run_id,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise KeyError(run_id)
+        trainer_version = int(row[1])
+        serving_version = int(row[2])
+        return {
+            "kafka_lag": int(row[0]),
+            "trainer_version": trainer_version,
+            "serving_version": serving_version,
+            "checkpoint_version": trainer_version if row[3] is not None else None,
+            "activation_version": serving_version if bool(row[4]) else None,
+        }
 
     def append_activity(self, activity: ActivityLogV1 | ActivityLogV2) -> int:
         reject_hidden_fields(activity.model_dump(mode="json"))

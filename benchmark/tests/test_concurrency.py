@@ -314,3 +314,122 @@ def test_activation_condition_accepts_pinned_child_identity_and_v2_cache_origin(
     assert {row.backendSnapshotSha256 for row in rows} == {"d" * 64}
     assert {row.sourceVectorOrigin for row in rows} == {"cache_hit"}
     assert {row.cacheStatus for row in rows} == {"hit"}
+
+
+def test_live_activation_uses_db_verified_ledger_without_predeclared_child(tmp_path: Path):
+    legacy, legacy_replay, universe = inputs()
+    request_path = tmp_path / "requests-live-v2.jsonl"
+    request_path.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "scheduleOffsetNs": row.scheduleOffsetNs,
+                    "request": {
+                        "schemaVersion": 2,
+                        "requestId": str(row.request.requestId),
+                        "runId": str(row.request.runId),
+                        "creatorId": str(row.request.creatorId),
+                        "sourceBabelId": str(row.request.newBabelId),
+                        "sourceArticleKey": row.request.newSourceArticleKey,
+                        "traversalSessionId": str(row.request.requestId),
+                        "parentRequestId": None,
+                        "traversalDepth": 0,
+                        "title": row.request.title,
+                        "text": row.request.text,
+                        "historyBabelIds": [],
+                        "candidateCount": row.request.candidateCount,
+                    },
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+            for row in legacy_replay.rows
+        )
+    )
+    replay = ReplayCorpus.from_jsonl(request_path)
+    source = legacy.model_dump(mode="json")
+    source.update(
+        schemaVersion=2,
+        requestPath="/api/v2/recommendations",
+        requestCorpusSha256=replay.sha256,
+        scheduleMode="open_loop",
+        maxInFlight=2,
+        conditions=[
+            {
+                "identity": {
+                    "topology": "same_process",
+                    "trainingEnabled": True,
+                    "activationEnabled": True,
+                    "retrievalBackend": "pgvector",
+                },
+                "requestCorpusSha256": replay.sha256,
+                "scheduleOffsetsNs": list(legacy.scheduleOffsetsNs),
+                "expectedModelId": str(legacy.conditions[0].expectedModelId),
+                "expectedModelVersion": 2,
+                "expectedEmbeddingSpaceId": str(
+                    legacy.conditions[0].expectedEmbeddingSpaceId
+                ),
+                "expectedDatasetSnapshotSha256": legacy.candidateUniverseSha256,
+                "expectedPgvectorSnapshotSha256": "a" * 64,
+                "expectedBackendSnapshotSha256": "a" * 64,
+                "activationValidation": "verified_live_ledger",
+            }
+        ],
+    )
+    manifest = BenchmarkManifestV2.model_validate(source)
+    verified = []
+
+    class LiveTransport(AsyncTransport):
+        async def post_json(self, path, payload, timeout_seconds):
+            status, body = await super().post_json(path, payload, timeout_seconds)
+            body.update(
+                schemaVersion=2,
+                modelId="00000000-0000-5000-8000-000000000099",
+                modelVersion=4,
+                pgvectorSnapshotSha256="c" * 64,
+                backendSnapshotSha256="c" * 64,
+                sourceVectorOrigin="cache_hit",
+            )
+            return status, body
+
+    rows = asyncio.run(
+        run_concurrent_condition(
+            manifest,
+            manifest.conditions[0],
+            replay,
+            universe,
+            transport=LiveTransport(),
+            schedule_mode="open_loop",
+            max_in_flight=2,
+            live_identity_validator=lambda response: verified.append(
+                (response.modelId, response.modelVersion)
+            ),
+        )
+    )
+
+    assert all(row.outcome == "success" for row in rows)
+    assert verified and set(verified) == {
+        (UUID("00000000-0000-5000-8000-000000000099"), 4)
+    }
+
+
+def test_success_callback_failure_is_fatal_not_a_duplicate_error_measurement():
+    manifest, replay, universe = inputs()
+
+    def fail(*_values):
+        raise RuntimeError("feedback publish failed")
+
+    with pytest.raises(RuntimeError, match="condition success callback failed"):
+        asyncio.run(
+            run_concurrent_condition(
+                manifest,
+                manifest.conditions[0],
+                replay,
+                universe,
+                transport=AsyncTransport(),
+                schedule_mode="closed_loop",
+                max_in_flight=1,
+                success_callback=fail,
+            )
+        )
