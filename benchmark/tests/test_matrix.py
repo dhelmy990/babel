@@ -402,3 +402,8 @@ def test_dashboard_http_adapter_uses_saved_trial_endpoints() -> None:
     assert [row[0] for row in calls] == ["POST", "POST"]
     assert calls[0][1].endswith("/admin/api/v1/performance")
     assert calls[1][1].endswith("/admin/api/v1/performance/trial-1/graceful-stop")
+    assert calls[0][2] == {
+        "Origin": "http://127.0.0.1:8787",
+        "X-Babel-Admin-Nonce": "nonce",
+    }
+    assert calls[1][2] == calls[0][2]

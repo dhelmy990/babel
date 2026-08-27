@@ -9,6 +9,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
+from urllib.parse import urlsplit
 
 
 Topology = Literal["same_process", "same_host_split", "same_host_isolated"]
@@ -450,7 +451,12 @@ class DashboardPerformanceHttpClient:
             transport = httpx.Client()
         self._transport = transport
         self._base_url = base_url.rstrip("/")
-        self._headers = {"X-Babel-Admin-Nonce": admin_nonce}
+        parsed = urlsplit(base_url)
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        self._headers = {
+            "Origin": origin,
+            "X-Babel-Admin-Nonce": admin_nonce,
+        }
 
     def create_trial(self, launch: dict[str, object]) -> str:
         response = self._transport.request(
