@@ -240,8 +240,12 @@ feedback SHA-256 is
 `adfea5b3b939aabe4a6478fc9c560ec71e6081b8eff5ef468ea59c97a31400fc`; its
 edge SHA-256 is
 `3004a3d1ab53a80be0e349d3d38d1ac5b08f883fee44750212e3ec6d8b13d069`.
-Remote evidence: **pending local closed-bundle publication**. Until that pin is
-recorded, the earlier trial remains the remotely verified representative.
+The closed 17-file bundle, with artifact SHA-256
+`53c3835487a07a1241d4b12664c05477decc4293e1f3bd496d30a74acb44585c`,
+was remotely reloaded and verified at private dataset commit
+`0076949251709c6eec71f231dc096eb0589f2f6b`, beneath
+`representative-runs/72e35d2e-f04e-405d-af9a-25f873e44d5b/53c3835487a07a1241d4b12664c05477decc4293e1f3bd496d30a74acb44585c/`.
+It remains explicitly `formalPerformanceClaim=false`.
 
 The next experiment should move, throttle, or batch preparation at the
 trainer/distributor resource boundary, then repeat the comparison in reverse
@@ -309,7 +313,7 @@ are reported above and must not be presented as a completed topology result.
 | Frozen 10,000-Babel population | Passed | `state/performance/ce8e54ff-e317-4a89-b7db-90327e02dc43/population/manifest.json` |
 | First cohort-50 control attempt | Failed closed at condition 3; non-formal | `state/performance/ce8e54ff-e317-4a89-b7db-90327e02dc43/conditions/` |
 | First representative cohort-50 2×3 | Passed; 450/450 requests; remotely verified; non-formal | `dhelmy990/babel-wikipedia-experiment@dc0d158ff75851a5f944aa674f9fb88221440ede` |
-| Optimized representative cohort-50 2×3 | Passed; 450/450 requests; publication pending; non-formal | pending local closed-bundle publication |
+| Optimized representative cohort-50 2×3 | Passed; 450/450 requests; remotely verified; non-formal | `dhelmy990/babel-wikipedia-experiment@0076949251709c6eec71f231dc096eb0589f2f6b` |
 | pgvector/HNSW comparison | Pending | — |
 | Cohort 100/500 scale | Pending | — |
 | Live fault campaign | Pending | — |

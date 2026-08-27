@@ -116,10 +116,12 @@ The optimized export contains 450 feedback rows and 2,682 accepted edges with
 SHA-256 values
 `adfea5b3b939aabe4a6478fc9c560ec71e6081b8eff5ef468ea59c97a31400fc` and
 `3004a3d1ab53a80be0e349d3d38d1ac5b08f883fee44750212e3ec6d8b13d069`,
-respectively. Publication is **pending local closed-bundle publication**. Use
-the representative build/publish procedure in
-`docs/runbooks/scaled-experiment.md`; do not use the formal publisher or attach
-route.
+respectively. Its 17-file closed bundle, artifact SHA-256
+`53c3835487a07a1241d4b12664c05477decc4293e1f3bd496d30a74acb44585c`,
+was remotely reloaded and verified at private dataset commit
+`0076949251709c6eec71f231dc096eb0589f2f6b`, path
+`representative-runs/72e35d2e-f04e-405d-af9a-25f873e44d5b/53c3835487a07a1241d4b12664c05477decc4293e1f3bd496d30a74acb44585c/`.
+It remains `formalPerformanceClaim=false`; do not use the formal attach route.
 
 ## Operate the trial
 

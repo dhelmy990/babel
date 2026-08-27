@@ -386,12 +386,15 @@ babel-friday-benchmark representative-run-publish \
   > "$RUN_ROOT/representative-publication-receipt.json"
 ```
 
-Publication status at this checkpoint:
-**pending local closed-bundle publication**. Replace that placeholder in the
-report, plan, and handoff only
-after the publisher returns an immutable dataset commit and the remote reload
-verifies the exact content-addressed path. Do not attach this receipt to the
-formal saved-trial route.
+The optimized publication completed with 17 remotely verified files and
+artifact SHA-256
+`53c3835487a07a1241d4b12664c05477decc4293e1f3bd496d30a74acb44585c`.
+The immutable private dataset pin is
+`dhelmy990/babel-wikipedia-experiment@0076949251709c6eec71f231dc096eb0589f2f6b`,
+path
+`representative-runs/72e35d2e-f04e-405d-af9a-25f873e44d5b/53c3835487a07a1241d4b12664c05477decc4293e1f3bd496d30a74acb44585c/`.
+The verified manifest remains `formalPerformanceClaim=false`. Do not attach
+this receipt to the formal saved-trial route.
 
 ### Build the formal accepted bundle
 

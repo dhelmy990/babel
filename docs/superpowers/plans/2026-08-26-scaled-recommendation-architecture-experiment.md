@@ -126,14 +126,19 @@ activation staleness. Activated child
 `79db828b-c2ed-53fa-9f7c-555d6cf5610e` remains the serving version; final
 trainer version 17 child `c22c42b7-2cf5-5600-8c25-4d73df5f036c` is registered
 and selectable but was not activated after the required successful version-10
-activation. The optimized closed representative bundle is
-**pending local closed-bundle publication**.
+activation.
 
-Next action: publish and remotely verify that exact non-formal bundle, then
-record its immutable commit/path. The next architecture experiment should move,
-throttle, or batch preparation across the trainer/distributor resource boundary
-and repeat in reverse or counterbalanced order. Do not spend the next iteration
-optimizing the already-small atomic switch.
+Publication gate: **complete**. The optimized 17-file bundle, artifact SHA-256
+`53c3835487a07a1241d4b12664c05477decc4293e1f3bd496d30a74acb44585c`,
+was remotely reloaded and verified at private dataset commit
+`0076949251709c6eec71f231dc096eb0589f2f6b`, path
+`representative-runs/72e35d2e-f04e-405d-af9a-25f873e44d5b/53c3835487a07a1241d4b12664c05477decc4293e1f3bd496d30a74acb44585c/`,
+with `formalPerformanceClaim=false`.
+
+Next action: move, throttle, or batch preparation across the
+trainer/distributor resource boundary and repeat in reverse or counterbalanced
+order. Do not spend the next iteration optimizing the already-small atomic
+switch.
 
 ## Orchestrator Fleet Map
 
