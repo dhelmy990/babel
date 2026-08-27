@@ -29,7 +29,7 @@ Design authority:
 ## Global Constraints
 
 - Dataset repository: `dhelmy990/babel-wikipedia-experiment` (private).
-- Model repository: `dhelmy990/babel-qwen-navigation-2016` (private).
+- Model repository: `dhelmy990/babel-qwen-navigation-2016-interview` (private).
 - Base model: `Qwen/Qwen3-Embedding-0.6B` at `97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3`.
 - Student output is exactly 100-dimensional and L2 normalized.
 - Initial acquisition may download an authoritative Wikipedia source solely to mirror it. All semantic processing then reads the backend-authenticated, commit-pinned HF mirror.
@@ -505,6 +505,7 @@ decisions, depth, determinism, and caps.
 - [ ] `same_process` hosts serving/trainer components in one process. `same_host_split` launches independent healthy executables sharing only immutable model-state files for weights.
 - [ ] Add same-host isolation with recorded/verified CPU affinity and memory limits. Report shared ordinary GPU as not isolated unless separate devices/MIG are verified.
 - [ ] Distributor validates parent/space/files/checksums, registers immutable child, requests activation, runs known-vector probe, atomically swaps, and retains previous/original on failure. Never use Kafka for weights.
+- [ ] Define the real-Qwen child manifest/state descriptor used by the distributor and PostgreSQL registry. V1 children remain fixture-only; a V2 original must produce a compatible immutable real-model child rather than being downgraded to V1.
 - [ ] Persist placement, requested/verified limits, process/container IDs, trainer/serving versions, publish/activation times, and staleness. Make split the Python default; Task 10 makes it the C++ dashboard default.
 - [ ] Test and commit:
 
@@ -543,7 +544,7 @@ independence and semantic parity.
 - Produces: immutable experiment/condition rows, APIs, paired sliders/numeric inputs, pure progress view.
 
 - [ ] Test split/0.40/depth-two defaults, slider↔numeric synchronization, server validation, and a pure ETA/progress mapper.
-- [ ] Migration 008 stores immutable topology, placement checksum, dataset/model/vector/request/feedback/hardware/resource identities, status, safety receipt, artifact SHA, and progress snapshots.
+- [ ] Migration 008 stores immutable topology, placement checksum, dataset/model/vector/request/feedback/hardware/resource identities, status, safety receipt, artifact SHA, returned Hugging Face commit plus bundle path, and progress snapshots. Attaching the verified remote commit/path is one atomic saved-trial update after remote reload succeeds.
 - [ ] Add controls for topology, model, dataset, backend, walk probability/depth/cap, sync/training, warmup/duration/RPS/safety. Add paired slider+numeric input for seeded articles, target created Babels, concurrent simulated users; valid custom numbers may exceed slider range.
 - [ ] `trial-progress.js` polls persisted status only and imports no trainer/Kafka/serving/benchmark code. Show phase, condition `n/9`, seeded/created/indexed/requested/completed, elapsed, recent rate, ETA, draining.
 - [ ] Show graph/walk/cache, placement/resources, Kafka/trainer, trainer-vs-serving staleness, activation spikes, and artifact links.
