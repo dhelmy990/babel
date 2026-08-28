@@ -37,11 +37,48 @@ def _condition(topology, training, activation):
     )
 
 
+@pytest.mark.parametrize(
+    ("topology", "training_enabled"),
+    (("same_host_split", True), ("same_host_isolated", False)),
+)
+def test_split_plan_overrides_inherited_role_state_root(
+    tmp_path, monkeypatch, topology, training_enabled
+):
+    topology_root = tmp_path / "topology"
+    role_state_root = tmp_path / "condition-runtime"
+    monkeypatch.setenv("BABEL_ONLINE_STATE_ROOT", str(tmp_path / "inherited-wrong"))
+
+    plan = build_live_condition_plan(
+        _condition(topology, training_enabled, False),
+        run_id=UUID(int=2),
+        state_root=topology_root,
+        role_state_root=role_state_root,
+        serving_port=8791,
+        python_executable="/venv/bin/python",
+        cpu_count=8,
+    )
+
+    assert plan.state_root == topology_root
+    assert plan.commands["serving"].environment["BABEL_ONLINE_STATE_ROOT"] == str(
+        role_state_root
+    )
+    assert plan.commands["trainer"].environment["BABEL_ONLINE_STATE_ROOT"] == str(
+        role_state_root
+    )
+    if training_enabled:
+        assert plan.commands["trainer"].environment[
+            "BABEL_TRAINER_READY_PATH"
+        ] == str(topology_root / "trainer-ready.json")
+    else:
+        assert "BABEL_TRAINER_READY_PATH" not in plan.commands["trainer"].environment
+
+
 def test_split_plan_uses_real_roles_and_explicit_activation_flag(tmp_path):
     plan = build_live_condition_plan(
         _condition("same_host_split", True, False),
         run_id=UUID(int=2),
         state_root=tmp_path,
+        role_state_root=tmp_path / "runtime",
         serving_port=8791,
         python_executable="/venv/bin/python",
         cpu_count=8,
@@ -65,6 +102,7 @@ def test_isolated_plan_assigns_disjoint_cpu_sets_and_serving_only_idle_role(tmp_
         _condition("same_host_isolated", False, False),
         run_id=UUID(int=2),
         state_root=tmp_path,
+        role_state_root=tmp_path / "runtime",
         serving_port=8791,
         python_executable="/venv/bin/python",
         cpu_count=8,
@@ -84,6 +122,7 @@ def test_isolated_plan_uses_actual_affinity_cpu_ids(tmp_path, monkeypatch):
         _condition("same_host_isolated", True, False),
         run_id=UUID(int=2),
         state_root=tmp_path,
+        role_state_root=tmp_path / "runtime",
         serving_port=8791,
         python_executable="/venv/bin/python",
         cpu_count=64,
@@ -216,6 +255,7 @@ def test_split_host_removes_stale_trainer_ready_marker(tmp_path, monkeypatch):
         _condition("same_host_split", True, False),
         run_id=run_id,
         state_root=tmp_path / "topology",
+        role_state_root=tmp_path / "runtime",
         serving_port=8791,
         python_executable="/venv/bin/python",
         cpu_count=4,
@@ -256,6 +296,7 @@ def test_split_host_rejects_ready_marker_when_trainer_exited(tmp_path):
         _condition("same_host_split", True, False),
         run_id=run_id,
         state_root=tmp_path / "topology",
+        role_state_root=tmp_path / "runtime",
         serving_port=8791,
         python_executable="/venv/bin/python",
         cpu_count=4,
@@ -691,6 +732,7 @@ def test_real_workload_freezer_runs_reference_host_and_coordinator(tmp_path: Pat
             return SimpleNamespace(
                 config=SimpleNamespace(
                     runId=run_id,
+                    stateRoot=str(tmp_path / "reference-runtime"),
                     environmentSequence=["2026-06", "2026-07"],
                     concurrentUsers=1,
                     recommendationStartProbability=0.4,
@@ -859,6 +901,7 @@ def test_real_workload_freezer_honors_dashboard_stop_after_boundary(tmp_path: Pa
             return SimpleNamespace(
                 config=SimpleNamespace(
                     runId=run_id,
+                    stateRoot=str(tmp_path / "reference-runtime"),
                     environmentSequence=["2026-06", "2026-07"],
                 )
             )

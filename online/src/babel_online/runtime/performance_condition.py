@@ -36,6 +36,7 @@ def build_live_condition_plan(
     *,
     run_id: UUID,
     state_root: str | Path,
+    role_state_root: str | Path,
     serving_port: int,
     python_executable: str,
     cpu_count: int,
@@ -43,6 +44,7 @@ def build_live_condition_plan(
     """Close a saved condition into real serving/trainer process commands."""
     topology = Topology.parse(condition.topology)
     root = Path(state_root)
+    role_root = Path(role_state_root)
     scripts = Path(python_executable).parent
     serving = ServiceCommand(
         role="serving",
@@ -54,6 +56,7 @@ def build_live_condition_plan(
             str(serving_port),
         ),
         version="babel-online:real-qwen-serving-v1",
+        environment={"BABEL_ONLINE_STATE_ROOT": str(role_root)},
     )
     if condition.training_enabled:
         trainer_argv = (
@@ -71,15 +74,16 @@ def build_live_condition_plan(
             "import time; time.sleep(86400)",
         )
         trainer_version = "babel-online:idle-serving-only-control-v1"
+    trainer_environment = {"BABEL_ONLINE_STATE_ROOT": str(role_root)}
+    if condition.training_enabled:
+        trainer_environment["BABEL_TRAINER_READY_PATH"] = str(
+            root / "trainer-ready.json"
+        )
     trainer = ServiceCommand(
         role="trainer",
         argv=trainer_argv,
         version=trainer_version,
-        environment=(
-            {"BABEL_TRAINER_READY_PATH": str(root / "trainer-ready.json")}
-            if condition.training_enabled
-            else {}
-        ),
+        environment=trainer_environment,
     )
     resources = {"serving": ResourceRequest(), "trainer": ResourceRequest()}
     if topology is Topology.SAME_HOST_ISOLATED:
@@ -974,6 +978,7 @@ class RealWorkloadFreezer:
             reference,
             run_id=reference_run_id,
             state_root=self.output_root / str(trial.id) / "reference-topology",
+            role_state_root=persisted.config.stateRoot,
             serving_port=self.serving_port,
             python_executable=self.python_executable or sys.executable,
             cpu_count=os.cpu_count() or 1,
@@ -1220,6 +1225,7 @@ def execute_live_condition(
             condition,
             run_id=run_id,
             state_root=condition_directory / "topology",
+            role_state_root=config.stateRoot,
             serving_port=serving_port,
             python_executable=python_executable or sys.executable,
             cpu_count=os.cpu_count() or 1,
