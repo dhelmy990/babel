@@ -364,15 +364,17 @@ current release, runtime environment, or Docker daemon:
 sudo -s
 ```
 
-Verify the privilege boundary and capture the original IAP SSH operator's UID.
-It must be a positive integer so the retrieved result remains readable by that
-operator rather than becoming root-owned:
+Verify the privilege boundary and capture the original IAP SSH operator's UID
+and GID. Both must be positive integers so the retrieved result remains
+readable by that operator rather than becoming root-owned:
 
 ```bash
 set -Eeuo pipefail
 test "$(id -u)" -eq 0
 OPERATOR_UID="${SUDO_UID:?sudo -s must preserve the original operator UID}"
+OPERATOR_GID="${SUDO_GID:?sudo -s must preserve the original operator GID}"
 [[ "$OPERATOR_UID" =~ ^[1-9][0-9]*$ ]]
+[[ "$OPERATOR_GID" =~ ^[1-9][0-9]*$ ]]
 ```
 
 Run all remaining VM command blocks inside this same root shell. Record the
@@ -385,6 +387,8 @@ ISOLATED_TRIAL_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 test "$ISOLATED_TRIAL_ID" != "$SOURCE_TRIAL_ID"
 PERF_ROOT='/var/lib/babel-online/performance'
 RUN_ROOT="/var/lib/babel-online/results/28-august-morning-run/isolated-smoke/$ISOLATED_TRIAL_ID"
+STAGE_ROOT="/tmp/babel-isolated-$ISOLATED_TRIAL_ID"
+test ! -e "$STAGE_ROOT"
 
 set -a
 source /opt/babel/current/release.env
@@ -455,17 +459,99 @@ admin_curl() {
 }
 
 capture_evidence() (
+  trap - ERR INT TERM HUP
   set +e
   worker_curl --silent --show-error --max-time 5 \
     --url http://127.0.0.1:8792/v1/performance/status \
     > "$RUN_ROOT/worker-status-final.json"
-  curl --silent --show-error --max-time 5 \
-    "http://127.0.0.1:8787/admin/api/v1/performance/$ISOLATED_TRIAL_ID" \
+  admin_curl --silent --show-error --max-time 5 \
+    --url "http://127.0.0.1:8787/admin/api/v1/performance/$ISOLATED_TRIAL_ID" \
     > "$RUN_ROOT/trial-final.json"
   "${compose[@]}" logs --no-color --timestamps backend performance-worker \
     > "$RUN_ROOT/compose.log" 2>&1
+  exit 0
 )
-trap 'capture_evidence' ERR
+
+inventory_results() (
+  trap - ERR INT TERM HUP
+  set -Eeuo pipefail
+  inventory_tmp="$(mktemp /tmp/babel-isolated-sums.XXXXXX)"
+  trap 'rm -f -- "$inventory_tmp"' EXIT
+  cd "$RUN_ROOT"
+  find . -type f ! -name SHA256SUMS -print0 \
+    | sort -z \
+    | xargs -0 -r sha256sum > "$inventory_tmp"
+  install -m 0644 "$inventory_tmp" "$RUN_ROOT/SHA256SUMS"
+  rm -f -- "$inventory_tmp"
+  trap - EXIT
+  sha256sum --check SHA256SUMS
+)
+
+stage_results() (
+  trap - ERR INT TERM HUP
+  set -Eeuo pipefail
+  test ! -e "$STAGE_ROOT"
+  stage_tmp="${STAGE_ROOT}.partial.$$"
+  test ! -e "$stage_tmp"
+  trap 'test -e "$STAGE_ROOT" || rm -rf -- "$stage_tmp"' EXIT
+  install -d -m 0700 "$stage_tmp"
+  cp --archive "$RUN_ROOT/." "$stage_tmp/"
+  chown -R "$OPERATOR_UID:$OPERATOR_GID" "$stage_tmp"
+  mv -- "$stage_tmp" "$STAGE_ROOT"
+  trap - EXIT
+  test -d "$STAGE_ROOT"
+)
+
+fail_and_stage() {
+  trap - ERR INT TERM HUP
+  set +e
+  local status="${1:-1}"
+  local reason="${2:-unexpected isolated smoke failure}"
+  if [[ ! "$status" =~ ^[1-9][0-9]*$ ]]; then
+    status=1
+  fi
+  capture_evidence
+  {
+    echo '# FAILED — 28 August isolated interview smoke'
+    echo
+    echo 'This is incomplete, non-formal representative evidence only.'
+    printf -- '- Trial: %s\n' "$ISOLATED_TRIAL_ID"
+    printf -- '- Source trial: %s (immutable)\n' "$SOURCE_TRIAL_ID"
+    printf -- '- Failure: %s\n' "$reason"
+    printf -- '- Captured UTC: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo '- Changed-configuration retry: forbidden'
+  } > "$RUN_ROOT/FAILED.md"
+  local failed_state="$RUN_ROOT/failed-condition-state"
+  if [[ -d "$PERF_ROOT/$ISOLATED_TRIAL_ID/conditions" \
+      && ! -e "$failed_state" ]]; then
+    install -d -m 0750 "$failed_state"
+    cp --archive "$PERF_ROOT/$ISOLATED_TRIAL_ID/conditions" "$failed_state/"
+  fi
+  if ! inventory_results; then
+    echo '- SHA-256 inventory required a best-effort retry.' \
+      >> "$RUN_ROOT/FAILED.md"
+    inventory_results || true
+  fi
+  if ! stage_results; then
+    echo 'failed evidence could not be staged; leave the VM running' >&2
+  fi
+  exit "$status"
+}
+
+trap 'fail_and_stage $? "unexpected command failure"' ERR
+trap 'fail_and_stage 130 "received INT"' INT
+trap 'fail_and_stage 143 "received TERM"' TERM
+trap 'fail_and_stage 129 "received HUP"' HUP
+```
+
+Every error or terminal signal uses that single fail-and-stage path. It disables
+its own traps, captures worker/dashboard/log evidence, writes the explicitly
+non-formal `FAILED.md`, copies available condition state, inventories the
+result, and stages it for IAP retrieval. After a staged failure, exit the
+remaining SSH shell, retrieve with the local block below, and then stop the VM:
+
+```bash
+gcloud compute instances stop babel-gpu-serving --project chloe-tutoring-bot --zone asia-southeast1-b
 ```
 
 Create the exact isolated-smoke request, prepare it through the source trial's
@@ -536,20 +622,15 @@ print(document.get("phase", ""))
       break
       ;;
     failed|interrupted)
-      capture_evidence
-      echo "isolated smoke hard-failed with phase $phase" >&2
-      exit 1
+      fail_and_stage 1 "worker entered terminal phase $phase"
       ;;
   esac
   sleep 1
 done
 if [[ "$completed" != true ]]; then
-  capture_evidence
-  echo 'isolated smoke hard-failed after the 15-minute timeout' >&2
-  exit 1
+  fail_and_stage 1 'worker did not complete before the 15-minute timeout'
 fi
 capture_evidence
-trap - ERR
 ```
 
 Export that exact trial from the performance-worker container. This does not
@@ -566,19 +647,394 @@ ID="$ISOLATED_TRIAL_ID"
   > "$RUN_ROOT/export-receipt.json"
 ```
 
-Create `$RUN_ROOT/REPORT.md` after completion, add any operator observations,
-then build the closed bundle:
+Generate fail-closed `$RUN_ROOT/summary.json` and `$RUN_ROOT/REPORT.md` from
+the exact evidence and protected release attestation before building the closed
+bundle:
 
 ```bash
-cat > "$RUN_ROOT/REPORT.md" <<EOF
-# 28 August isolated interview smoke
+python3 - \
+  "$ID" \
+  "$PERF_ROOT/$ID/conditions" \
+  "$RUN_ROOT" \
+  /opt/babel/current/release.env <<'PY'
+import json
+import math
+import re
+import sys
+from pathlib import Path
+from statistics import mean
 
-- Trial: $ID
-- Evidence: non-formal representative smoke only
-- Local conditions: 01/02/03
-- Formal position mapping: 7/8/9
-- Formal performance claim: false
-EOF
+trial_id, evidence_arg, run_arg, release_arg = sys.argv[1:]
+evidence_root = Path(evidence_arg)
+run_root = Path(run_arg)
+source_trial_id = "dd8c6ee6-1a4b-443d-ae2c-2a0c02792f28"
+
+request = json.loads((run_root / "create-request.json").read_text(encoding="utf-8"))
+if request != {
+    "rerunId": trial_id,
+    "matrix": "isolated-smoke",
+    "warmupSeconds": 5,
+    "durationSeconds": 25,
+    "targetRps": 5.0,
+}:
+    raise SystemExit("isolated smoke request schedule differs")
+receipt = json.loads((run_root / "create-receipt.json").read_text(encoding="utf-8"))
+trial = receipt.get("trial") if isinstance(receipt, dict) else None
+request_identity = trial.get("requestIdentity") if isinstance(trial, dict) else None
+if (
+    not isinstance(request_identity, dict)
+    or trial.get("experimentId") != trial_id
+    or trial.get("topology") != "same_host_isolated"
+    or trial.get("retrievalBackend") != "pgvector"
+    or trial.get("warmupSeconds") != 5
+    or trial.get("durationSeconds") != 25
+    or trial.get("targetRps") != 5.0
+    or trial.get("populationReady") is not True
+    or trial.get("vectorCount") != 10_000
+    or trial.get("requiredVectorCount") != 10_000
+    or request_identity.get("sourceTrialId") != source_trial_id
+    or request_identity.get("evidenceScope") != "representative_isolated_smoke"
+):
+    raise SystemExit("create receipt does not attest the isolated source population")
+
+release = {}
+for number, line in enumerate(
+    Path(release_arg).read_text(encoding="utf-8").splitlines(), start=1
+):
+    if not line or line.startswith("#"):
+        continue
+    if "=" not in line:
+        raise SystemExit(f"release attestation line {number} is not KEY=value")
+    key, value = line.split("=", 1)
+    if key in release or not key or not value or value != value.strip():
+        raise SystemExit("release attestation contains an invalid or repeated value")
+    release[key] = value
+
+image_keys = (
+    "BABEL_BACKEND_IMAGE",
+    "BABEL_SERVING_IMAGE",
+    "BABEL_TRAINER_IMAGE",
+    "BABEL_PERFORMANCE_WORKER_IMAGE",
+)
+required_release = {
+    "BABEL_SOURCE_COMMIT",
+    *image_keys,
+    "BABEL_MODEL_REVISION",
+    "BABEL_DATASET_REVISION",
+    "BABEL_POPULATION_VECTOR_SHA256",
+    "BABEL_POPULATION_SNAPSHOT_SHA256",
+}
+if not required_release.issubset(release):
+    raise SystemExit("release attestation is incomplete")
+sha40 = re.compile(r"^[a-f0-9]{40}$")
+sha256 = re.compile(r"^[a-f0-9]{64}$")
+image = re.compile(r"^[^\s@]+@sha256:[a-f0-9]{64}$")
+if sha40.fullmatch(release["BABEL_SOURCE_COMMIT"]) is None:
+    raise SystemExit("source commit is not a lowercase 40-hex revision")
+if any(image.fullmatch(release[key]) is None for key in image_keys):
+    raise SystemExit("one or more release images are not digest-qualified")
+if any(
+    sha40.fullmatch(release[key]) is None
+    for key in ("BABEL_MODEL_REVISION", "BABEL_DATASET_REVISION")
+):
+    raise SystemExit("model or dataset revision is not a lowercase 40-hex revision")
+if any(
+    sha256.fullmatch(release[key]) is None
+    for key in (
+        "BABEL_POPULATION_VECTOR_SHA256",
+        "BABEL_POPULATION_SNAPSHOT_SHA256",
+    )
+):
+    raise SystemExit("population attestation is not a lowercase SHA-256")
+
+expected_files = {
+    Path("01/live-evidence.json"),
+    Path("02/live-evidence.json"),
+    Path("03/live-evidence.json"),
+}
+actual_files = {
+    path.relative_to(evidence_root)
+    for path in evidence_root.rglob("*")
+    if path.is_file()
+}
+if actual_files != expected_files:
+    raise SystemExit("condition evidence must be exactly padded 01/02/03 files")
+
+def percentile(values, fraction):
+    ordered = sorted(values)
+    return ordered[max(0, math.ceil(fraction * len(ordered)) - 1)]
+
+def numeric_metrics(resources, field, *, integer=False):
+    values = []
+    for resource in resources:
+        value = resource.get(field)
+        if value is None:
+            continue
+        valid = type(value) is int if integer else type(value) in {int, float}
+        if not valid or value < 0 or not math.isfinite(float(value)):
+            raise SystemExit(f"resource metric {field} is invalid")
+        values.append(value)
+    return values
+
+rows = []
+expected_modes = ((False, False), (True, False), (True, True))
+for internal_index, (training, activation) in enumerate(expected_modes, start=1):
+    path = evidence_root / f"{internal_index:02d}" / "live-evidence.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    raw = document.get("rawEvidence")
+    identity = {
+        "topology": "same_host_isolated",
+        "trainingEnabled": training,
+        "activationEnabled": activation,
+        "retrievalBackend": "pgvector",
+    }
+    if not isinstance(raw, dict):
+        raise SystemExit(f"condition {internal_index} raw evidence is missing")
+    if raw.get("evidenceScope") != "representative_isolated_smoke":
+        raise SystemExit(f"condition {internal_index} scope differs")
+    if raw.get("conditionIdentity") != identity:
+        raise SystemExit(f"condition {internal_index} identity differs")
+    measurements = raw.get("measurements")
+    if not isinstance(measurements, list) or len(measurements) != 150:
+        raise SystemExit(f"condition {internal_index} measurements differ")
+    if any(
+        not isinstance(row, dict)
+        or row.get("outcome") != "success"
+        or type(row.get("isWarmup")) is not bool
+        for row in measurements
+    ):
+        raise SystemExit(f"condition {internal_index} contains request failures")
+    warmup = [row for row in measurements if row["isWarmup"] is True]
+    measured = [row for row in measurements if row["isWarmup"] is False]
+    if (
+        len(warmup) != 25
+        or len(measured) != 125
+        or document.get("requestCount") != 125
+        or raw.get("warmupCount") != 25
+        or raw.get("selectedRequestCount") != 150
+    ):
+        raise SystemExit(f"condition {internal_index} request schedule differs")
+    latencies_ns = []
+    starts = []
+    completions = []
+    for row in measured:
+        latency = row.get("clientTotalNs")
+        started = row.get("actualStartMonotonicNs")
+        completed = row.get("completedAtMonotonicNs")
+        if (
+            type(latency) is not int
+            or latency <= 0
+            or type(started) is not int
+            or type(completed) is not int
+            or completed <= started
+        ):
+            raise SystemExit(f"condition {internal_index} timing evidence is invalid")
+        latencies_ns.append(latency)
+        starts.append(started)
+        completions.append(completed)
+    elapsed_ns = max(completions) - min(starts)
+    if elapsed_ns <= 0:
+        raise SystemExit(f"condition {internal_index} elapsed time is invalid")
+    latencies_ms = [value / 1_000_000 for value in latencies_ns]
+    p95_ms = percentile(latencies_ms, 0.95)
+    recorded_p95 = document.get("p95Ms")
+    if type(recorded_p95) not in {int, float} or not math.isclose(
+        float(recorded_p95), p95_ms
+    ):
+        raise SystemExit(f"condition {internal_index} p95 differs")
+
+    resources = raw.get("resources")
+    if (
+        not isinstance(resources, list)
+        or not resources
+        or any(not isinstance(row, dict) for row in resources)
+    ):
+        raise SystemExit(f"condition {internal_index} resources are missing")
+    cpu = numeric_metrics(resources, "cpuPercent")
+    host_memory = numeric_metrics(resources, "hostMemoryUsedBytes", integer=True)
+    gpu = numeric_metrics(resources, "gpuUtilizationPercent")
+    gpu_memory = numeric_metrics(resources, "gpuMemoryUsedBytes", integer=True)
+    trainer_throughput = numeric_metrics(resources, "trainingStepRate")
+    activation_ns = numeric_metrics(resources, "activationDurationNs", integer=True)
+    if not cpu or not host_memory or not gpu or not gpu_memory:
+        raise SystemExit(f"condition {internal_index} resource arrays are incomplete")
+
+    feedback = raw.get("feedbackKafka")
+    final = feedback.get("finalTrainerState") if isinstance(feedback, dict) else None
+    if (
+        not isinstance(final, dict)
+        or final.get("available") is not True
+        or type(final.get("kafkaLag")) is not int
+        or final["kafkaLag"] < 0
+    ):
+        raise SystemExit(f"condition {internal_index} final trainer state is missing")
+    if training:
+        ranges = feedback.get("offsetRanges")
+        next_offsets = final.get("nextOffsets")
+        if (
+            final.get("kafkaLag") != 0
+            or final.get("offsetsCoverPublishedRanges") is not True
+            or not isinstance(ranges, list)
+            or not ranges
+            or not isinstance(next_offsets, list)
+            or not next_offsets
+            or sha256.fullmatch(str(final.get("checkpointManifestSha256", "")))
+            is None
+        ):
+            raise SystemExit(f"condition {internal_index} Kafka drain is incomplete")
+        offset_map = {}
+        for offset in next_offsets:
+            if (
+                not isinstance(offset, dict)
+                or not isinstance(offset.get("topic"), str)
+                or not offset["topic"]
+                or type(offset.get("partition")) is not int
+                or offset["partition"] < 0
+                or type(offset.get("nextOffset")) is not int
+                or offset["nextOffset"] < 0
+            ):
+                raise SystemExit(f"condition {internal_index} offsets are invalid")
+            key = (offset["topic"], offset["partition"])
+            if key in offset_map:
+                raise SystemExit(f"condition {internal_index} offsets repeat")
+            offset_map[key] = offset["nextOffset"]
+        for offset_range in ranges:
+            if (
+        not isinstance(offset_range, dict)
+        or not isinstance(offset_range.get("topic"), str)
+        or not offset_range["topic"]
+        or type(offset_range.get("partition")) is not int
+        or offset_range["partition"] < 0
+        or type(offset_range.get("startInclusive")) is not int
+        or offset_range["startInclusive"] < 0
+        or type(offset_range.get("endExclusive")) is not int
+        or offset_range["endExclusive"] <= offset_range["startInclusive"]
+        or offset_map.get(
+                    (offset_range.get("topic"), offset_range.get("partition")), -1
+                )
+                < offset_range["endExclusive"]
+            ):
+                raise SystemExit(f"condition {internal_index} offsets lack coverage")
+    if activation and (
+        not isinstance(raw.get("observedActivationTargets"), list)
+        or not raw["observedActivationTargets"]
+        or not activation_ns
+    ):
+        raise SystemExit("condition 3 activation evidence or timing is incomplete")
+
+    rows.append(
+        {
+            "formalConditionIndex": internal_index + 6,
+            "conditionIndex": internal_index,
+            "conditionId": document["conditionId"],
+            "runId": document["runId"],
+            "trainingEnabled": training,
+            "activationEnabled": activation,
+            "requestCount": len(measured),
+            "p50Ms": percentile(latencies_ms, 0.50),
+            "p95Ms": p95_ms,
+            "p99Ms": percentile(latencies_ms, 0.99),
+            "maxMs": max(latencies_ms),
+            "achievedRps": len(measured) / (elapsed_ns / 1_000_000_000),
+            "errors": 0,
+            "timeouts": 0,
+            "meanCpuPercent": mean(cpu),
+            "maxHostMemoryBytes": max(host_memory),
+            "meanGpuUtilizationPercent": mean(gpu),
+            "maxGpuMemoryBytes": max(gpu_memory),
+            "maxTrainerThroughputStepsPerSecond": max(
+                trainer_throughput, default=0.0
+            ),
+            "finalKafkaLag": final["kafkaLag"],
+            "maxActivationTimingMs": max(activation_ns, default=0) / 1_000_000,
+        }
+    )
+
+if rows[0]["p95Ms"] <= 0 or rows[1]["p95Ms"] <= 0:
+    raise SystemExit("interference ratio denominator is not positive")
+ratios = {
+    "Itraining": rows[1]["p95Ms"] / rows[0]["p95Ms"],
+    "Ifull": rows[2]["p95Ms"] / rows[0]["p95Ms"],
+    "IActivationIncrement": rows[2]["p95Ms"] / rows[1]["p95Ms"],
+}
+label = "representative isolated smoke — non-formal interview evidence"
+images = {
+    "backend": release["BABEL_BACKEND_IMAGE"],
+    "serving": release["BABEL_SERVING_IMAGE"],
+    "trainer": release["BABEL_TRAINER_IMAGE"],
+    "performanceWorker": release["BABEL_PERFORMANCE_WORKER_IMAGE"],
+}
+summary = {
+    "schemaVersion": 1,
+    "trialId": trial_id,
+    "label": label,
+    "evidenceScope": "representative_isolated_smoke",
+    "formalPerformanceClaim": False,
+    "sourceTrialId": source_trial_id,
+    "populationVectorCount": 10_000,
+    "schedule": {"warmupSeconds": 5, "durationSeconds": 25, "targetRps": 5.0},
+    "sourceCommit": release["BABEL_SOURCE_COMMIT"],
+    "images": images,
+    "modelRevision": release["BABEL_MODEL_REVISION"],
+    "datasetRevision": release["BABEL_DATASET_REVISION"],
+    "populationVectorSha256": release["BABEL_POPULATION_VECTOR_SHA256"],
+    "populationSnapshotSha256": release[
+        "BABEL_POPULATION_SNAPSHOT_SHA256"
+    ],
+    "conditions": rows,
+    "interference": ratios,
+}
+(run_root / "summary.json").write_text(
+    json.dumps(summary, indent=2, sort_keys=True, allow_nan=False) + "\n",
+    encoding="utf-8",
+)
+
+lines = [
+    "# 28 August Morning Run — Isolated Topology Smoke",
+    "",
+    f"{label}.",
+    "",
+    f"- Trial: `{trial_id}`",
+    f"- Source trial: `{source_trial_id}` (immutable)",
+    "- Population vector count: 10,000",
+    "- Schedule: 5 s warmup, 25 s measured, target 5.0 RPS",
+    f"- Source commit: `{release['BABEL_SOURCE_COMMIT']}`",
+    f"- Backend image: `{images['backend']}`",
+    f"- Serving image: `{images['serving']}`",
+    f"- Trainer image: `{images['trainer']}`",
+    f"- Performance-worker image: `{images['performanceWorker']}`",
+    f"- Model revision: `{release['BABEL_MODEL_REVISION']}`",
+    f"- Dataset revision: `{release['BABEL_DATASET_REVISION']}`",
+    f"- Population vector SHA-256: `{release['BABEL_POPULATION_VECTOR_SHA256']}`",
+    f"- Population snapshot SHA-256: `{release['BABEL_POPULATION_SNAPSHOT_SHA256']}`",
+    "",
+    "| Formal # | Local # | Training | Activation | p50 ms | p95 ms | p99 ms | max ms | achieved RPS | errors | timeouts | CPU mean % | host memory max GiB | GPU mean % | GPU memory max GiB | trainer throughput max steps/s | final Kafka lag | activation max ms |",
+    "|---:|---:|:---:|:---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+]
+for row in rows:
+    lines.append(
+        f"| {row['formalConditionIndex']} | {row['conditionIndex']} | "
+        f"{str(row['trainingEnabled']).lower()} | "
+        f"{str(row['activationEnabled']).lower()} | "
+        f"{row['p50Ms']:.3f} | {row['p95Ms']:.3f} | "
+        f"{row['p99Ms']:.3f} | {row['maxMs']:.3f} | "
+        f"{row['achievedRps']:.3f} | {row['errors']} | {row['timeouts']} | "
+        f"{row['meanCpuPercent']:.2f} | "
+        f"{row['maxHostMemoryBytes'] / 2**30:.3f} | "
+        f"{row['meanGpuUtilizationPercent']:.2f} | "
+        f"{row['maxGpuMemoryBytes'] / 2**30:.3f} | "
+        f"{row['maxTrainerThroughputStepsPerSecond']:.3f} | "
+        f"{row['finalKafkaLag']} | {row['maxActivationTimingMs']:.3f} |"
+    )
+lines += [
+    "",
+    f"- Itraining: {ratios['Itraining']:.4f}",
+    f"- Ifull: {ratios['Ifull']:.4f}",
+    f"- IActivationIncrement: {ratios['IActivationIncrement']:.4f}",
+    "",
+]
+(run_root / "REPORT.md").write_text("\n".join(lines), encoding="utf-8")
+PY
 
 "${compose[@]}" exec -T performance-worker \
   babel-friday-benchmark representative-run-build \
@@ -616,40 +1072,50 @@ That optional representative publication must never be attached or presented
 as formal evidence.
 
 Generate and check one SHA-256 inventory for every result file other than the
-inventory itself:
+inventory itself, then create the fresh traversable `/tmp` stage owned by the
+original SSH operator:
 
 ```bash
-(
-  cd "$RUN_ROOT"
-  find . -type f ! -name SHA256SUMS -print0 \
-    | sort -z \
-    | xargs -0 sha256sum > SHA256SUMS
-  sha256sum --check SHA256SUMS
-)
+inventory_results
+stage_results
+trap - ERR INT TERM HUP
 ```
 
-Exit the root shell and then the VM SSH shell before running any local copy
-command:
+After success, exit the root shell and then the VM SSH shell before running a
+local copy command:
 
 ```bash
 exit
 exit
 ```
 
-On the local workstation, set the same recorded ID and retrieve the result only
-through IAP. The local destination is exactly
+On failure, `fail_and_stage` exits the root shell nonzero after staging, so exit
+the remaining VM SSH shell once. In either case both the root and SSH shells
+must be closed before retrieval.
+
+On the local workstation, set the same recorded ID and retrieve only the fresh
+`/tmp` stage through IAP. Refuse both possible destination names before copying,
+so scp can never merge with stale evidence. The final local destination is
+exactly
 `results/28-august-morning-run/isolated-smoke/$ISOLATED_TRIAL_ID`:
 
 ```bash
 ISOLATED_TRIAL_ID='<recorded fresh UUID>'
-mkdir -p results/28-august-morning-run/isolated-smoke
+ID="$ISOLATED_TRIAL_ID"
+LOCAL_ROOT='results/28-august-morning-run/isolated-smoke'
+test ! -e "$LOCAL_ROOT/$ID"
+test ! -e "$LOCAL_ROOT/babel-isolated-$ID"
+mkdir -p "$LOCAL_ROOT"
 gcloud compute scp --recurse --tunnel-through-iap \
   --project chloe-tutoring-bot \
   --zone asia-southeast1-b \
-  "babel-gpu-serving:/var/lib/babel-online/results/28-august-morning-run/isolated-smoke/$ISOLATED_TRIAL_ID" \
-  results/28-august-morning-run/isolated-smoke/
+  "babel-gpu-serving:/tmp/babel-isolated-$ID" \
+  "$LOCAL_ROOT/"
+test -d "$LOCAL_ROOT/babel-isolated-$ID"
+test ! -e "$LOCAL_ROOT/$ID"
+mv -- "$LOCAL_ROOT/babel-isolated-$ID" "$LOCAL_ROOT/$ID"
 (
-  cd "results/28-august-morning-run/isolated-smoke/$ISOLATED_TRIAL_ID"
+  cd "$LOCAL_ROOT/$ID"
   sha256sum --check SHA256SUMS
 )
 ```
@@ -660,6 +1126,8 @@ exact stop command is:
 ```bash
 gcloud compute instances stop babel-gpu-serving --project chloe-tutoring-bot --zone asia-southeast1-b
 ```
+
+### Formal accepted-bundle export
 
 Do not begin this phase until the trial's complete formal matrix is durably
 `completed` (nine conditions at cohort 50; six at cohorts 100/500), training
