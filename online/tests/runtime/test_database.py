@@ -500,6 +500,41 @@ def test_database_creates_only_the_isolated_smoke_trio(tmp_path: Path) -> None:
     ]
 
 
+def test_database_rejects_unknown_representative_scope_before_conditions(
+    tmp_path: Path,
+) -> None:
+    from babel_online.runtime.performance_rerun import RepresentativeRerunBinding
+
+    rerun_id = UUID(int=102)
+    binding = RepresentativeRerunBinding(
+        rerun_id=rerun_id,
+        source_trial_id=UUID(int=101),
+        evidence_scope="representative_unknown_scope",
+        population_run_id=UUID(int=103),
+        population_path=(tmp_path / "source" / "population").resolve(),
+        population_manifest_sha256="a" * 64,
+        workload_path=(tmp_path / "source" / "workload").resolve(),
+        workload_identity=tuple(str(index) * 64 for index in range(6)),
+        warmup_seconds=5,
+        duration_seconds=25,
+        target_rps=5.0,
+        request_limit=150,
+    )
+    cursor = RecordingCursor(rows=[(rerun_id,)])
+    database = RuntimeDatabase(
+        "unused", connect=lambda: RecordingConnection(cursor)
+    )
+
+    with pytest.raises(ValueError) as raised:
+        database.create_representative_performance_rerun(binding)
+
+    assert str(raised.value) == "representative rerun evidence scope is unsupported"
+    assert all(
+        "INSERT INTO performance_conditions" not in query
+        for query, _parameters in cursor.queries
+    )
+
+
 def test_database_persists_performance_progress_and_result_ratios() -> None:
     database_module = __import__(
         "babel_online.runtime.database", fromlist=["RuntimeDatabase"]

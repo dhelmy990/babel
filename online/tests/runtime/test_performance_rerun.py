@@ -210,6 +210,24 @@ def test_isolated_smoke_reuse_preserves_scope_population_and_request_limit(
     assert binding.request_limit == 150
 
 
+def test_reuse_validation_rejects_unknown_representative_scope(tmp_path: Path):
+    population_dir = tmp_path / "population"
+    population_dir.mkdir()
+    workload_dir = tmp_path / "workload"
+    workload_dir.mkdir()
+
+    with pytest.raises(ValueError) as raised:
+        validate_representative_reuse(
+            source=_ready_source(population_dir),
+            manifest=_population_manifest(),
+            workload=FrozenWorkload(workload_dir, ("1" * 64,) * 6),
+            rerun_id=RERUN_ID,
+            evidence_scope="representative_unknown_scope",
+        )
+
+    assert str(raised.value) == "representative rerun evidence scope is unsupported"
+
+
 @pytest.mark.parametrize(
     ("source_change", "manifest_change", "message"),
     [
@@ -399,6 +417,42 @@ def test_isolated_smoke_runs_exact_same_host_isolated_trio(tmp_path: Path):
     trial.validate_runnable_contract()
     with pytest.raises(ValueError, match="formal"):
         trial.validate_formal_defaults()
+
+
+def test_runnable_contract_rejects_unknown_representative_scope(tmp_path: Path):
+    conditions = tuple(
+        PerformanceCondition(
+            id=uuid5(RERUN_ID, f"condition:{index}"),
+            condition_index=index,
+            topology="same_host_split",
+            training_enabled=training,
+            activation_enabled=activation,
+            run_id=None,
+            status="pending",
+        )
+        for index, (training, activation) in enumerate(
+            ((False, False), (True, False), (True, True)), start=1
+        )
+    )
+    trial = replace(
+        _trial(),
+        id=RERUN_ID,
+        evidence_scope="representative_unknown_scope",
+        source_trial_id=SOURCE_ID,
+        source_workload_path=str(tmp_path / "workload"),
+        source_workload_identity=("1" * 64,) * 6,
+        replay_request_limit=150,
+        population_ready=True,
+        population_run_id=POPULATION_RUN_ID,
+        population_bundle_path=str(tmp_path / "population"),
+        population_manifest_sha256="2" * 64,
+        conditions=conditions,
+    )
+
+    with pytest.raises(ValueError) as raised:
+        trial.validate_runnable_contract()
+
+    assert str(raised.value) == "saved trial has an unsupported evidence scope"
 
 
 def test_representative_population_may_only_name_declared_source_trial(tmp_path: Path):
