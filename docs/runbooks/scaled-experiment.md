@@ -520,7 +520,9 @@ for _, created_at, run_id, status, conclusion, run_started_at in sorted(
   EXACT_RUNS_BEFORE="$(exact_demo_runs)"
   RUN_IDS_BEFORE="$({
     while IFS=$'\t' read -r run_id _; do
-      [[ "$run_id" =~ ^[1-9][0-9]*$ ]] && printf '%s\n' "$run_id"
+      if [[ "$run_id" =~ ^[1-9][0-9]*$ ]]; then
+        printf '%s\n' "$run_id"
+      fi
     done <<< "$EXACT_RUNS_BEFORE"
   })"
 
