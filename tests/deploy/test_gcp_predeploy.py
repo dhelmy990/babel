@@ -488,12 +488,14 @@ def _ready_import_receipt(vector_sha: str, snapshot_sha: str) -> dict[str, objec
     }
 
 
-def test_reuse_validation_checks_receipt_and_metadata_without_vector_rows(
-    predeploy, valid_snapshot, tmp_path: Path
+@pytest.mark.parametrize("trial_status", ["population_ready", "failed"])
+def test_reuse_validation_accepts_only_preserved_terminal_trial_statuses(
+    predeploy, valid_snapshot, tmp_path: Path, trial_status: str
 ) -> None:
     metadata, _vectors, vector_sha, snapshot_sha = valid_snapshot
     metadata = metadata | {
         "sample_creator_id": UUID(int=10_001),
+        "trial_status": trial_status,
         "trial_population_manifest_sha256": "d" * 64,
     }
     receipt_path = tmp_path / "import-receipt.json"
@@ -516,6 +518,31 @@ def test_reuse_validation_checks_receipt_and_metadata_without_vector_rows(
     assert evidence["orderedVectorSha256"] == vector_sha
     assert evidence["pgvectorSnapshotSha256"] == snapshot_sha
     assert len(evidence["importReceiptSha256"]) == 64
+
+
+def test_reuse_validation_rejects_arbitrary_trial_status(
+    predeploy, valid_snapshot, tmp_path: Path
+) -> None:
+    metadata, _vectors, vector_sha, snapshot_sha = valid_snapshot
+    metadata = metadata | {
+        "sample_creator_id": UUID(int=10_001),
+        "trial_status": "running",
+        "trial_population_manifest_sha256": "d" * 64,
+    }
+    receipt_path = tmp_path / "import-receipt.json"
+    receipt_path.write_bytes(
+        predeploy.canonical_json(_ready_import_receipt(vector_sha, snapshot_sha))
+    )
+
+    with pytest.raises(predeploy.PredeployValidationError, match="trial_status"):
+        predeploy.validate_reuse_snapshot(
+            metadata,
+            import_receipt_path=receipt_path,
+            trial_id=TRIAL_ID,
+            run_id=RUN_ID,
+            expected_vector_sha256=vector_sha,
+            expected_snapshot_sha256=snapshot_sha,
+        )
 
 
 def test_reuse_cli_never_invokes_full_vector_scan(

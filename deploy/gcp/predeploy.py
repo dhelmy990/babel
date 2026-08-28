@@ -767,7 +767,12 @@ def validate_reuse_snapshot(
         raise PredeployValidationError(
             f"reuse metadata is incomplete: {sorted(missing)[0]}"
         )
+    trial_status = _value(metadata, "trial_status")
+    if trial_status not in ("population_ready", "failed"):
+        raise PredeployValidationError("trial_status differs from accepted value")
     for field, value in reuse_expected.items():
+        if field == "trial_status":
+            continue
         _expect(metadata, field, value)
     sample_creator_id = _uuid(
         _value(metadata, "sample_creator_id"), "sample_creator_id"
