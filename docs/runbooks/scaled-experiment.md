@@ -369,7 +369,7 @@ and GID. Both must be positive integers so the retrieved result remains
 readable by that operator rather than becoming root-owned:
 
 ```bash
-set -Eeuo pipefail
+set -euo pipefail
 test "$(id -u)" -eq 0
 OPERATOR_UID="${SUDO_UID:?sudo -s must preserve the original operator UID}"
 OPERATOR_GID="${SUDO_GID:?sudo -s must preserve the original operator GID}"
@@ -390,10 +390,6 @@ RUN_ROOT="/var/lib/babel-online/results/28-august-morning-run/isolated-smoke/$IS
 STAGE_ROOT="/tmp/babel-isolated-$ISOLATED_TRIAL_ID"
 test ! -e "$STAGE_ROOT"
 
-set -a
-source /opt/babel/current/release.env
-set +a
-
 compose=(
   docker compose
   --project-name babel-gcp-demo
@@ -404,57 +400,34 @@ compose=(
 
 install -d -m 0770 -o "$OPERATOR_UID" -g 10001 "$RUN_ROOT"
 printf 'ISOLATED_TRIAL_ID=%s\n' "$ISOLATED_TRIAL_ID"
-
-guard="$(
-  "${compose[@]}" run --rm --no-deps --entrypoint /bin/sh performance-worker \
-    -c 'printf %s "$BABEL_ONLINE_ALLOW_POPULATION_BUILD"'
-)"
-test "$guard" = false
 ```
 
-The isolated topology runner owns the per-condition serving and trainer roles,
-so stop the standalone roles before the matrix. Keep exactly one performance
-worker, then require both the backend and worker to answer on loopback:
+Define and arm the single failure path before reading protected credentials or
+making the first Docker topology change. The authenticated helpers return a
+plain failure while their token or nonce is unavailable, so early evidence
+capture remains best effort:
 
 ```bash
-"${compose[@]}" stop serving trainer
-"${compose[@]}" up --detach backend performance-worker
-
-for _ in $(seq 1 120); do
-  if curl --fail --silent --show-error --max-time 2 \
-      http://127.0.0.1:8787/health >/dev/null \
-    && curl --fail --silent --show-error --max-time 2 \
-      http://127.0.0.1:8792/health >/dev/null; then
-    break
-  fi
-  sleep 1
-done
-curl --fail --silent --show-error --max-time 2 \
-  http://127.0.0.1:8787/health >/dev/null
-curl --fail --silent --show-error --max-time 2 \
-  http://127.0.0.1:8792/health >/dev/null
-
-BABEL_PERFORMANCE_WORKER_TOKEN="$(
-  python3 /opt/babel/current/release.py runtime-token /etc/babel/runtime.env
-)"
+BABEL_PERFORMANCE_WORKER_TOKEN=''
+BABEL_ADMIN_NONCE=''
 
 worker_curl() {
-  printf 'header = "X-Babel-Worker-Token: %s"\n' \
-    "$BABEL_PERFORMANCE_WORKER_TOKEN" \
+  local token="${BABEL_PERFORMANCE_WORKER_TOKEN:-}"
+  if [[ -z "$token" ]]; then
+    return 1
+  fi
+  printf 'header = "X-Babel-Worker-Token: %s"\n' "$token" \
     | curl --config - "$@"
 }
 
-BABEL_ADMIN_NONCE="$(
-  curl --fail --silent --show-error --max-time 5 \
-    http://127.0.0.1:8787/admin \
-    | sed -n 's/.*name="babel-admin-nonce" content="\([^"]*\)".*/\1/p'
-)"
-test -n "$BABEL_ADMIN_NONCE"
-
 admin_curl() {
+  local nonce="${BABEL_ADMIN_NONCE:-}"
+  if [[ -z "$nonce" ]]; then
+    return 1
+  fi
   printf '%s\n%s\n' \
     'header = "Origin: http://127.0.0.1:8787"' \
-    "header = \"X-Babel-Admin-Nonce: $BABEL_ADMIN_NONCE\"" \
+    "header = \"X-Babel-Admin-Nonce: $nonce\"" \
     | curl --config - "$@"
 }
 
@@ -474,7 +447,7 @@ capture_evidence() (
 
 inventory_results() (
   trap - ERR INT TERM HUP
-  set -Eeuo pipefail
+  set -euo pipefail
   inventory_tmp="$(mktemp /tmp/babel-isolated-sums.XXXXXX)"
   trap 'rm -f -- "$inventory_tmp"' EXIT
   cd "$RUN_ROOT"
@@ -489,7 +462,7 @@ inventory_results() (
 
 stage_results() (
   trap - ERR INT TERM HUP
-  set -Eeuo pipefail
+  set -euo pipefail
   test ! -e "$STAGE_ROOT"
   stage_tmp="${STAGE_ROOT}.partial.$$"
   test ! -e "$stage_tmp"
@@ -532,7 +505,13 @@ fail_and_stage() {
       >> "$RUN_ROOT/FAILED.md"
     inventory_results || true
   fi
-  if ! stage_results; then
+  if stage_results; then
+    printf '%s\n' \
+      "Failure evidence staged at $STAGE_ROOT." \
+      'Exit the root and VM SSH shells, then resume at' \
+      '"Local retrieval after success or staged failure" and stop the VM.' \
+      >&2
+  else
     echo 'failed evidence could not be staged; leave the VM running' >&2
   fi
   exit "$status"
@@ -544,15 +523,62 @@ trap 'fail_and_stage 143 "received TERM"' TERM
 trap 'fail_and_stage 129 "received HUP"' HUP
 ```
 
+With failure handling active, load the protected release and enforce the hard
+population-build guard before changing the topology:
+
+```bash
+set -a
+source /opt/babel/current/release.env
+set +a
+
+guard="$(
+  "${compose[@]}" run --rm --no-deps --entrypoint /bin/sh performance-worker \
+    -c 'printf %s "$BABEL_ONLINE_ALLOW_POPULATION_BUILD"'
+)"
+test "$guard" = false
+```
+
+The isolated topology runner owns the per-condition serving and trainer roles,
+so stop the standalone roles before the matrix. Keep exactly one performance
+worker, then require both the backend and worker to answer on loopback:
+
+```bash
+"${compose[@]}" stop serving trainer
+"${compose[@]}" up --detach backend performance-worker
+
+for _ in $(seq 1 120); do
+  if curl --fail --silent --show-error --max-time 2 \
+      http://127.0.0.1:8787/health >/dev/null \
+    && curl --fail --silent --show-error --max-time 2 \
+      http://127.0.0.1:8792/health >/dev/null; then
+    break
+  fi
+  sleep 1
+done
+curl --fail --silent --show-error --max-time 2 \
+  http://127.0.0.1:8787/health >/dev/null
+curl --fail --silent --show-error --max-time 2 \
+  http://127.0.0.1:8792/health >/dev/null
+
+BABEL_PERFORMANCE_WORKER_TOKEN="$(
+  python3 /opt/babel/current/release.py runtime-token /etc/babel/runtime.env
+)"
+test -n "$BABEL_PERFORMANCE_WORKER_TOKEN"
+
+BABEL_ADMIN_NONCE="$(
+  curl --fail --silent --show-error --max-time 5 \
+    http://127.0.0.1:8787/admin \
+    | sed -n 's/.*name="babel-admin-nonce" content="\([^"]*\)".*/\1/p'
+)"
+test -n "$BABEL_ADMIN_NONCE"
+```
+
 Every error or terminal signal uses that single fail-and-stage path. It disables
 its own traps, captures worker/dashboard/log evidence, writes the explicitly
 non-formal `FAILED.md`, copies available condition state, inventories the
-result, and stages it for IAP retrieval. After a staged failure, exit the
-remaining SSH shell, retrieve with the local block below, and then stop the VM:
-
-```bash
-gcloud compute instances stop babel-gpu-serving --project chloe-tutoring-bot --zone asia-southeast1-b
-```
+result, and stages it for IAP retrieval. On failure it exits the root shell
+nonzero; skip all success-only VM commands that follow, exit the remaining SSH
+shell, and resume at **Local retrieval after success or staged failure** below.
 
 Create the exact isolated-smoke request, prepare it through the source trial's
 nonce-protected dashboard route, and save the create receipt:
@@ -684,7 +710,6 @@ request_identity = trial.get("requestIdentity") if isinstance(trial, dict) else 
 if (
     not isinstance(request_identity, dict)
     or trial.get("experimentId") != trial_id
-    or trial.get("topology") != "same_host_isolated"
     or trial.get("retrievalBackend") != "pgvector"
     or trial.get("warmupSeconds") != 5
     or trial.get("durationSeconds") != 25
@@ -1093,6 +1118,8 @@ On failure, `fail_and_stage` exits the root shell nonzero after staging, so exit
 the remaining VM SSH shell once. In either case both the root and SSH shells
 must be closed before retrieval.
 
+#### Local retrieval after success or staged failure
+
 On the local workstation, set the same recorded ID and retrieve only the fresh
 `/tmp` stage through IAP. Refuse both possible destination names before copying,
 so scp can never merge with stale evidence. The final local destination is
@@ -1100,23 +1127,26 @@ exactly
 `results/28-august-morning-run/isolated-smoke/$ISOLATED_TRIAL_ID`:
 
 ```bash
-ISOLATED_TRIAL_ID='<recorded fresh UUID>'
-ID="$ISOLATED_TRIAL_ID"
-LOCAL_ROOT='results/28-august-morning-run/isolated-smoke'
-test ! -e "$LOCAL_ROOT/$ID"
-test ! -e "$LOCAL_ROOT/babel-isolated-$ID"
-mkdir -p "$LOCAL_ROOT"
-gcloud compute scp --recurse --tunnel-through-iap \
-  --project chloe-tutoring-bot \
-  --zone asia-southeast1-b \
-  "babel-gpu-serving:/tmp/babel-isolated-$ID" \
-  "$LOCAL_ROOT/"
-test -d "$LOCAL_ROOT/babel-isolated-$ID"
-test ! -e "$LOCAL_ROOT/$ID"
-mv -- "$LOCAL_ROOT/babel-isolated-$ID" "$LOCAL_ROOT/$ID"
 (
-  cd "$LOCAL_ROOT/$ID"
-  sha256sum --check SHA256SUMS
+  set -euo pipefail
+  ISOLATED_TRIAL_ID='<recorded fresh UUID>'
+  ID="$ISOLATED_TRIAL_ID"
+  LOCAL_ROOT='results/28-august-morning-run/isolated-smoke'
+  test ! -e "$LOCAL_ROOT/$ID"
+  test ! -e "$LOCAL_ROOT/babel-isolated-$ID"
+  mkdir -p "$LOCAL_ROOT"
+  gcloud compute scp --recurse --tunnel-through-iap \
+    --project chloe-tutoring-bot \
+    --zone asia-southeast1-b \
+    "babel-gpu-serving:/tmp/babel-isolated-$ID" \
+    "$LOCAL_ROOT/"
+  test -d "$LOCAL_ROOT/babel-isolated-$ID"
+  test ! -e "$LOCAL_ROOT/$ID"
+  mv -- "$LOCAL_ROOT/babel-isolated-$ID" "$LOCAL_ROOT/$ID"
+  (
+    cd "$LOCAL_ROOT/$ID"
+    sha256sum --check SHA256SUMS
+  )
 )
 ```
 
