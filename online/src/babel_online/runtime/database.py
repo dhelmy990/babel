@@ -506,6 +506,28 @@ class RuntimeDatabase:
 
     def create_representative_performance_rerun(self, binding: Any) -> Any:
         """Atomically copy only immutable launch/population identity into a new trial."""
+        representative_profiles = {
+            "representative_same_process_vs_split": (
+                "same_host_split",
+                ("same_process", "same_host_split"),
+            ),
+            "representative_split_smoke": (
+                "same_host_split",
+                ("same_host_split",),
+            ),
+            "representative_isolated_smoke": (
+                "same_host_isolated",
+                ("same_host_isolated",),
+            ),
+        }
+        try:
+            experiment_topology, condition_topologies = representative_profiles[
+                binding.evidence_scope
+            ]
+        except KeyError:
+            raise ValueError(
+                "representative rerun evidence scope is unsupported"
+            ) from None
         request_identity = json.dumps(
             {
                 "evidenceScope": binding.evidence_scope,
@@ -545,7 +567,7 @@ class RuntimeDatabase:
                     operator_approved,run_id,population_manifest_sha256,
                     population_bundle_path
                   )
-                  SELECT %s,'population_ready','same_host_split',starting_model_id,
+                  SELECT %s,'population_ready',%s,starting_model_id,
                     model_repository,model_revision,dataset_repository,dataset_revision,
                     retrieval_backend,creator_count,seeded_articles,target_created_babels,
                     concurrent_users,recommendation_start_probability,
@@ -570,6 +592,7 @@ class RuntimeDatabase:
                     binding.population_run_id,
                     binding.population_manifest_sha256,
                     binding.rerun_id,
+                    experiment_topology,
                     binding.warmup_seconds,
                     binding.duration_seconds,
                     binding.target_rps,
@@ -580,24 +603,10 @@ class RuntimeDatabase:
                 raise PerformanceBindingConflict(
                     "representative rerun source changed or destination already exists"
                 )
-            representative_topologies = {
-                "representative_same_process_vs_split": (
-                    "same_process",
-                    "same_host_split",
-                ),
-                "representative_split_smoke": ("same_host_split",),
-                "representative_isolated_smoke": ("same_host_isolated",),
-            }
-            try:
-                topologies = representative_topologies[binding.evidence_scope]
-            except KeyError:
-                raise ValueError(
-                    "representative rerun evidence scope is unsupported"
-                ) from None
             conditions = []
             condition_values = (
                 (topology, training, activation)
-                for topology in topologies
+                for topology in condition_topologies
                 for training, activation in (
                     (False, False),
                     (True, False),

@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import struct
 from pathlib import Path
 from types import SimpleNamespace
-from uuid import UUID, uuid5
+from uuid import UUID, uuid4, uuid5
 
 import pytest
 from babel_online.contracts import (
@@ -153,6 +154,22 @@ class RecordingConnection:
 
     def cursor(self):
         return self._cursor
+
+
+class NonCommittingConnection:
+    """Expose a real connection without committing the test transaction."""
+
+    def __init__(self, connection):
+        self._connection = connection
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def cursor(self):
+        return self._connection.cursor()
 
 
 def vector_record(*, babel_id: UUID, source_key: str) -> VectorRecord:
@@ -438,6 +455,7 @@ def test_database_creates_labelled_unapproved_split_rerun_from_locked_source(
         "a" * 64,
         rerun_id,
     )
+    assert create_parameters[4] == "same_host_split"
     condition_query, condition_parameters = cursor.queries[1]
     assert "performance_conditions" in condition_query
     assert len(condition_parameters) == 6
@@ -486,6 +504,9 @@ def test_database_creates_only_the_isolated_smoke_trio(tmp_path: Path) -> None:
 
     database.create_representative_performance_rerun(binding)
 
+    create_query, create_parameters = cursor.queries[0]
+    assert "'same_host_split'" not in create_query
+    assert create_parameters[4] == "same_host_isolated"
     _condition_query, condition_rows = cursor.queries[1]
     assert len(condition_rows) == 3
     assert [row[0] for row in condition_rows] == [
@@ -498,6 +519,193 @@ def test_database_creates_only_the_isolated_smoke_trio(tmp_path: Path) -> None:
         (True, False),
         (True, True),
     ]
+
+
+def test_database_persists_split_smoke_compatibility_topology(tmp_path: Path) -> None:
+    from babel_online.runtime.performance_rerun import (
+        SPLIT_SMOKE_SCOPE,
+        RepresentativeRerunBinding,
+    )
+
+    binding = RepresentativeRerunBinding(
+        rerun_id=UUID(int=102),
+        source_trial_id=UUID(int=101),
+        evidence_scope=SPLIT_SMOKE_SCOPE,
+        population_run_id=UUID(int=103),
+        population_path=(tmp_path / "source" / "population").resolve(),
+        population_manifest_sha256="a" * 64,
+        workload_path=(tmp_path / "source" / "workload").resolve(),
+        workload_identity=tuple(str(index) * 64 for index in range(6)),
+        warmup_seconds=5,
+        duration_seconds=25,
+        target_rps=5.0,
+        request_limit=150,
+    )
+    cursor = RecordingCursor(rows=[(binding.rerun_id,)])
+    database = RuntimeDatabase(
+        "unused", connect=lambda: RecordingConnection(cursor)
+    )
+
+    database.create_representative_performance_rerun(binding)
+
+    create_query, create_parameters = cursor.queries[0]
+    assert "'same_host_split'" not in create_query
+    assert create_parameters[4] == "same_host_split"
+
+
+@pytest.mark.pgvector
+def test_database_persists_isolated_rerun_topology_and_identity_in_postgresql(
+    tmp_path: Path,
+) -> None:
+    import psycopg
+
+    from babel_online.runtime.performance_rerun import (
+        ISOLATED_SMOKE_SCOPE,
+        RepresentativeRerunBinding,
+    )
+
+    database_url = os.environ.get(
+        "BABEL_TEST_DATABASE_URL",
+        "postgresql://babel:babel-local-dev@127.0.0.1:54329/babel",
+    )
+    source_id = uuid4()
+    rerun_id = uuid4()
+    population_run_id = uuid4()
+    model_id = uuid4()
+    population_path = (tmp_path / "imported-population").resolve()
+    workload_path = (tmp_path / "frozen-workload").resolve()
+    workload_identity = tuple(str(index) * 64 for index in range(6))
+    binding = RepresentativeRerunBinding(
+        rerun_id=rerun_id,
+        source_trial_id=source_id,
+        evidence_scope=ISOLATED_SMOKE_SCOPE,
+        population_run_id=population_run_id,
+        population_path=population_path,
+        population_manifest_sha256="a" * 64,
+        workload_path=workload_path,
+        workload_identity=workload_identity,
+        warmup_seconds=5,
+        duration_seconds=25,
+        target_rps=5.0,
+        request_limit=150,
+    )
+    connection = psycopg.connect(database_url)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO recommender_models(
+                  id,label,encoder_repo,encoder_revision,dataset_repo,dataset_revision,
+                  environment_sequence,checkpoint_path,checkpoint_sha256,embedding_space
+                ) VALUES (%s,'rerun topology test','test/model',%s,'test/dataset',%s,
+                          '["2026-06","2026-07"]'::jsonb,'checkpoint',%s,'{}'::jsonb)
+                """,
+                (model_id, "1" * 40, "2" * 40, "3" * 64),
+            )
+            cursor.execute(
+                """
+                INSERT INTO experiment_runs(
+                  id,status,retrieval_backend,creator_count,scenario,
+                  environment_sequence,event_budget_per_month,run_seed,
+                  dataset_repository,dataset_config,dataset_revision,
+                  starting_model_id,active_model_id,launch_config,launch_sha256
+                ) VALUES (%s,'completed','pgvector',50,'june_to_july',
+                          '["2026-06","2026-07"]'::jsonb,5000,19,
+                          'test/dataset','crosswalk_2026_06_07',%s,%s,%s,
+                          '{}'::jsonb,%s)
+                """,
+                (population_run_id, "2" * 40, model_id, model_id, "4" * 64),
+            )
+            cursor.execute(
+                """
+                INSERT INTO performance_experiments(
+                  id,status,topology,starting_model_id,model_repository,
+                  model_revision,dataset_repository,dataset_revision,
+                  population_ready,population_vector_count,population_vector_sha256,
+                  population_model_repository,population_model_revision,
+                  population_model_sha256,population_dataset_repository,
+                  population_dataset_revision,population_dataset_sha256,
+                  run_id,population_manifest_sha256,population_bundle_path
+                ) VALUES (%s,'failed','same_host_split',%s,'test/model',%s,
+                          'test/dataset',%s,true,10000,%s,'test/model',%s,%s,
+                          'test/dataset',%s,%s,%s,%s,%s)
+                """,
+                (
+                    source_id,
+                    model_id,
+                    "1" * 40,
+                    "2" * 40,
+                    "5" * 64,
+                    "1" * 40,
+                    "6" * 64,
+                    "2" * 40,
+                    "7" * 64,
+                    population_run_id,
+                    "a" * 64,
+                    str(population_path),
+                ),
+            )
+        database = RuntimeDatabase(
+            database_url,
+            connect=lambda: NonCommittingConnection(connection),
+        )
+
+        saved = database.create_representative_performance_rerun(binding)
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT topology,request_identity,run_id,population_bundle_path,
+                       population_manifest_sha256,population_vector_count,
+                       population_vector_sha256,population_model_repository,
+                       population_model_revision,population_model_sha256,
+                       population_dataset_repository,population_dataset_revision,
+                       population_dataset_sha256
+                FROM performance_experiments WHERE id=%s
+                """,
+                (rerun_id,),
+            )
+            saved_trial = cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT topology,training_enabled,synchronization_enabled
+                FROM performance_conditions
+                WHERE experiment_id=%s ORDER BY condition_index
+                """,
+                (rerun_id,),
+            )
+            saved_conditions = cursor.fetchall()
+
+        assert saved == binding
+        assert saved_trial[0] == "same_host_isolated"
+        assert saved_conditions == [
+            ("same_host_isolated", False, False),
+            ("same_host_isolated", True, False),
+            ("same_host_isolated", True, True),
+        ]
+        assert saved_trial[1] == {
+            "evidenceScope": ISOLATED_SMOKE_SCOPE,
+            "requestLimit": 150,
+            "sourceTrialId": str(source_id),
+            "sourceWorkloadPath": str(workload_path),
+            "workloadIdentity": list(workload_identity),
+        }
+        assert saved_trial[2:] == (
+            population_run_id,
+            str(population_path),
+            "a" * 64,
+            10_000,
+            "5" * 64,
+            "test/model",
+            "1" * 40,
+            "6" * 64,
+            "test/dataset",
+            "2" * 40,
+            "7" * 64,
+        )
+    finally:
+        connection.rollback()
+        connection.close()
 
 
 def test_database_rejects_unknown_representative_scope_before_conditions(
@@ -520,19 +728,15 @@ def test_database_rejects_unknown_representative_scope_before_conditions(
         target_rps=5.0,
         request_limit=150,
     )
-    cursor = RecordingCursor(rows=[(rerun_id,)])
     database = RuntimeDatabase(
-        "unused", connect=lambda: RecordingConnection(cursor)
+        "unused",
+        connect=lambda: (_ for _ in ()).throw(AssertionError("unexpected connect")),
     )
 
     with pytest.raises(ValueError) as raised:
         database.create_representative_performance_rerun(binding)
 
     assert str(raised.value) == "representative rerun evidence scope is unsupported"
-    assert all(
-        "INSERT INTO performance_conditions" not in query
-        for query, _parameters in cursor.queries
-    )
 
 
 def test_database_persists_performance_progress_and_result_ratios() -> None:
