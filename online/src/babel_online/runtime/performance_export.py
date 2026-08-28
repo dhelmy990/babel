@@ -95,6 +95,18 @@ def _canonical_json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
 
 
+def _canonical_uuid(value: object, label: str) -> UUID:
+    if not isinstance(value, str):
+        raise ValueError(f"{label} must be a canonical UUID")
+    try:
+        parsed = UUID(value)
+    except ValueError as error:
+        raise ValueError(f"{label} must be a canonical UUID") from error
+    if str(parsed) != value:
+        raise ValueError(f"{label} must be a canonical UUID")
+    return parsed
+
+
 def _write_canonical(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp")
@@ -207,6 +219,32 @@ def _load_condition_evidence(condition: Any, evidence_root: Path):
         raise ValueError(
             "live feedback acknowledgement count and offsets require exact integers"
         )
+    if any(
+        not isinstance(row, dict)
+        or row.get("outcome") != "success"
+        or type(row.get("isWarmup")) is not bool
+        for row in measurements
+    ):
+        raise ValueError("live measurements must be successful with exact warmup flags")
+    if sum(row["isWarmup"] is False for row in measurements) != request_count:
+        raise ValueError("live measured request count differs from requestCount")
+    try:
+        measurement_request_ids = [
+            _canonical_uuid(row.get("requestId"), "measurement requestId")
+            for row in measurements
+        ]
+        record_request_ids = [
+            _canonical_uuid(row.get("requestId"), "feedback record requestId")
+            for row in records
+        ]
+    except ValueError as error:
+        raise ValueError("live feedback request identities are invalid") from error
+    if (
+        len(set(measurement_request_ids)) != len(measurement_request_ids)
+        or len(set(record_request_ids)) != len(record_request_ids)
+        or set(measurement_request_ids) != set(record_request_ids)
+    ):
+        raise ValueError("live feedback request identities differ from measurements")
     final = kafka.get("finalTrainerState")
     if condition.training_enabled:
         if not isinstance(final, dict) or final.get("available") is not True:

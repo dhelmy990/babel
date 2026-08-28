@@ -36,6 +36,17 @@ _ROOT_FILES = {
     "trial-results.json",
     "trial-summary.json",
 }
+_EDGE_UUID_FIELDS = {
+    "runId",
+    "sourceBabelId",
+    "targetBabelId",
+    "actingCreatorId",
+    "requestId",
+    "feedbackEventId",
+    "traversalSessionId",
+}
+_EDGE_INTEGER_FIELDS = {"feedbackOccurredAtNs", "traversalDepth"}
+_EDGE_FIELDS = _EDGE_UUID_FIELDS | _EDGE_INTEGER_FIELDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,6 +173,29 @@ def _canonical(value: object) -> bytes:
     ).encode("utf-8")
 
 
+def _canonical_uuid(value: object, label: str) -> UUID:
+    if not isinstance(value, str):
+        raise ValueError(f"{label} must be a canonical UUID")
+    try:
+        parsed = UUID(value)
+    except ValueError as error:
+        raise ValueError(f"{label} must be a canonical UUID") from error
+    if str(parsed) != value:
+        raise ValueError(f"{label} must be a canonical UUID")
+    return parsed
+
+
+def _normalize_arrow_value(value: Any) -> Any:
+    as_py = getattr(value, "as_py", None)
+    if callable(as_py):
+        return _normalize_arrow_value(as_py())
+    if isinstance(value, dict):
+        return {str(key): _normalize_arrow_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_normalize_arrow_value(item) for item in value]
+    return value
+
+
 def _reject_symlinked_path(path: Path) -> None:
     absolute = path if path.is_absolute() else Path.cwd() / path
     current = Path(absolute.anchor)
@@ -206,6 +240,52 @@ def _parquet_rows(path: Path) -> int:
         ) from error
 
 
+def _parquet_documents(path: Path) -> list[dict[str, Any]]:
+    import pyarrow.parquet as pq
+
+    try:
+        rows = pq.read_table(path).to_pylist()
+    except Exception as error:
+        raise ValueError(
+            f"representative Parquet is unreadable: {path.name}"
+        ) from error
+    if any(not isinstance(row, dict) for row in rows):
+        raise ValueError(f"representative Parquet rows are invalid: {path.name}")
+    return [_normalize_arrow_value(row) for row in rows]
+
+
+def _jsonl_documents(path: Path, label: str) -> list[dict[str, Any]]:
+    documents: list[dict[str, Any]] = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line:
+                raise ValueError
+            value = json.loads(line)
+            if not isinstance(value, dict):
+                raise ValueError
+            documents.append(value)
+    except (OSError, json.JSONDecodeError, ValueError) as error:
+        raise ValueError(f"representative {label} JSONL is invalid") from error
+    return documents
+
+
+def _documents_agree(
+    parquet_documents: list[dict[str, Any]],
+    jsonl_documents: list[dict[str, Any]],
+) -> bool:
+    if len(parquet_documents) != len(jsonl_documents):
+        return False
+    try:
+        return all(
+            _canonical(parquet_row) == _canonical(jsonl_row)
+            for parquet_row, jsonl_row in zip(
+                parquet_documents, jsonl_documents, strict=True
+            )
+        )
+    except (TypeError, ValueError):
+        return False
+
+
 def _validate_parquet(
     export_root: Path,
     manifest: dict[str, Any],
@@ -244,13 +324,73 @@ def _condition_path(evidence_root: Path, index: int) -> Path:
     return path
 
 
+def _feedback_acknowledgement_identity(
+    row: dict[str, Any],
+) -> tuple[str, int, int, str, UUID, UUID, UUID]:
+    required = {
+        "topic",
+        "partition",
+        "offset",
+        "key",
+        "eventId",
+        "requestId",
+        "runId",
+    }
+    if (
+        not required.issubset(row)
+        or not isinstance(row.get("topic"), str)
+        or type(row.get("partition")) is not int
+        or row["partition"] < 0
+        or type(row.get("offset")) is not int
+        or row["offset"] < 0
+        or not isinstance(row.get("key"), str)
+    ):
+        raise ValueError("representative feedback payload schema is invalid")
+    try:
+        event_id = _canonical_uuid(row["eventId"], "feedback eventId")
+        request_id = _canonical_uuid(row["requestId"], "feedback requestId")
+        run_id = _canonical_uuid(row["runId"], "feedback runId")
+    except ValueError as error:
+        raise ValueError("representative feedback payload schema is invalid") from error
+    return (
+        row["topic"],
+        row["partition"],
+        row["offset"],
+        row["key"],
+        event_id,
+        request_id,
+        run_id,
+    )
+
+
+def _validate_edge_payload(rows: list[dict[str, Any]]) -> None:
+    for row in rows:
+        if set(row) != _EDGE_FIELDS or any(
+            type(row.get(field)) is not int or row[field] < 0
+            for field in _EDGE_INTEGER_FIELDS
+        ):
+            raise ValueError("representative canonical edge payload schema is invalid")
+        try:
+            for field in _EDGE_UUID_FIELDS:
+                _canonical_uuid(row[field], f"canonical edge {field}")
+        except ValueError as error:
+            raise ValueError(
+                "representative canonical edge payload schema is invalid"
+            ) from error
+
+
 def _range_documents_for_records(
     records: list[dict[str, Any]],
-) -> tuple[list[dict[str, object]], set[tuple[str, int, int]]]:
+) -> tuple[
+    list[dict[str, object]],
+    set[tuple[str, int, int]],
+    set[tuple[str, int, int, str, UUID, UUID]],
+]:
     by_partition: dict[tuple[str, int], list[int]] = {}
     request_ids: set[UUID] = set()
     event_ids: set[UUID] = set()
     offsets: set[tuple[str, int, int]] = set()
+    acknowledgements: set[tuple[str, int, int, str, UUID, UUID]] = set()
     try:
         for record in records:
             if (
@@ -269,8 +409,12 @@ def _range_documents_for_records(
             topic = record["topic"]
             partition = record["partition"]
             offset = record["offset"]
-            request_id = UUID(str(record["requestId"]))
-            event_id = UUID(str(record["eventId"]))
+            request_id = _canonical_uuid(
+                record["requestId"], "condition feedback requestId"
+            )
+            event_id = _canonical_uuid(
+                record["eventId"], "condition feedback eventId"
+            )
             key = (topic, partition, offset)
             if (
                 key in offsets
@@ -281,6 +425,9 @@ def _range_documents_for_records(
             offsets.add(key)
             request_ids.add(request_id)
             event_ids.add(event_id)
+            acknowledgements.add(
+                (topic, partition, offset, record["key"], event_id, request_id)
+            )
             by_partition.setdefault((topic, partition), []).append(offset)
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError(
@@ -312,12 +459,16 @@ def _range_documents_for_records(
                 "endExclusive": previous + 1,
             }
         )
-    return ranges, offsets
+    return ranges, offsets, acknowledgements
 
 
 def _validate_completed_condition(
     raw: dict[str, Any], *, condition: _ConditionProfile, request_count: int
-) -> tuple[int, set[tuple[str, int, int]]]:
+) -> tuple[
+    int,
+    set[tuple[str, int, int]],
+    set[tuple[str, int, int, str, UUID, UUID]],
+]:
     expected_identity = condition.identity()
     if raw.get("conditionIdentity") != expected_identity:
         raise ValueError(
@@ -363,7 +514,7 @@ def _validate_completed_condition(
         or record_count != len(measurements)
     ):
         raise ValueError("representative feedback records are incomplete")
-    expected_ranges, offsets = _range_documents_for_records(records)
+    expected_ranges, offsets, acknowledgements = _range_documents_for_records(records)
     if (
         not isinstance(ranges, list)
         or any(
@@ -431,7 +582,7 @@ def _validate_completed_condition(
             for row in expected_ranges
         ):
             raise ValueError("representative training offsets do not cover ranges")
-    return record_count, offsets
+    return record_count, offsets, acknowledgements
 
 
 def _validate_sources(
@@ -488,6 +639,33 @@ def _validate_sources(
         export_root / "feedback.jsonl"
     ) or manifest.get("edgeJsonlSha256") != _sha256(export_root / "edges.jsonl"):
         raise ValueError("representative JSONL checksum differs")
+    feedback_parquet_documents = _parquet_documents(export_root / "feedback.parquet")
+    feedback_jsonl_documents = _jsonl_documents(
+        export_root / "feedback.jsonl", "feedback"
+    )
+    edge_parquet_documents = _parquet_documents(export_root / "edges.parquet")
+    edge_jsonl_documents = _jsonl_documents(export_root / "edges.jsonl", "edge")
+    if (
+        len(feedback_parquet_documents) != feedback_rows
+        or len(feedback_jsonl_documents) != feedback_rows
+    ):
+        raise ValueError("representative feedback payload row count differs")
+    if not _documents_agree(feedback_parquet_documents, feedback_jsonl_documents):
+        raise ValueError("representative feedback Parquet and JSONL differ")
+    if (
+        len(edge_parquet_documents) != edge_rows
+        or len(edge_jsonl_documents) != edge_rows
+    ):
+        raise ValueError("representative edge payload row count differs")
+    if not _documents_agree(edge_parquet_documents, edge_jsonl_documents):
+        raise ValueError("representative edge Parquet and JSONL differ")
+    exported_acknowledgements = [
+        _feedback_acknowledgement_identity(row)
+        for row in feedback_parquet_documents
+    ]
+    if len(set(exported_acknowledgements)) != len(exported_acknowledgements):
+        raise ValueError("representative exported acknowledgement is duplicated")
+    _validate_edge_payload(edge_parquet_documents)
 
     condition_paths = tuple(
         _condition_path(evidence_root, condition.condition_index)
@@ -506,6 +684,9 @@ def _validate_sources(
     seen_runs: set[UUID] = set()
     seen_conditions: set[UUID] = set()
     seen_record_offsets: set[tuple[str, int, int]] = set()
+    expected_acknowledgements: set[
+        tuple[str, int, int, str, UUID, UUID, UUID]
+    ] = set()
     condition_record_count = 0
     for condition, binding, path in zip(
         profile.conditions, bindings, condition_paths, strict=True
@@ -561,17 +742,34 @@ def _validate_sources(
             or float(p95_ms) < 0
         ):
             raise ValueError(f"representative condition {index} result is incomplete")
-        record_count, record_offsets = _validate_completed_condition(
-            raw, condition=condition, request_count=request_count
+        (
+            record_count,
+            record_offsets,
+            record_acknowledgements,
+        ) = _validate_completed_condition(
+            raw,
+            condition=condition,
+            request_count=request_count,
         )
         if seen_record_offsets.intersection(record_offsets):
             raise ValueError("representative condition feedback records overlap")
         seen_record_offsets.update(record_offsets)
+        condition_acknowledgements = {
+            (*acknowledgement, run_id)
+            for acknowledgement in record_acknowledgements
+        }
+        if expected_acknowledgements.intersection(condition_acknowledgements):
+            raise ValueError("representative condition acknowledgement is duplicated")
+        expected_acknowledgements.update(condition_acknowledgements)
         condition_record_count += record_count
         evidence.append(document)
     if condition_record_count != feedback_rows:
         raise ValueError(
             "representative feedback Parquet rows differ from condition records"
+        )
+    if set(exported_acknowledgements) != expected_acknowledgements:
+        raise ValueError(
+            "representative exported acknowledgement identities differ from conditions"
         )
     return _ValidatedSources(
         manifest=manifest,

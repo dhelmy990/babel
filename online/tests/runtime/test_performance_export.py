@@ -111,7 +111,13 @@ def _write_evidence(root, trial, bus):
                     "activationEnabled": condition.activation_enabled,
                     "retrievalBackend": "pgvector",
                 },
-                "measurements": [{"outcome": "success"}],
+                "measurements": [
+                    {
+                        "outcome": "success",
+                        "isWarmup": False,
+                        "requestId": str(event.requestId),
+                    }
+                ],
                 "feedbackKafka": {
                     "recordCount": 1,
                     "records": [
@@ -140,6 +146,41 @@ def _write_evidence(root, trial, bus):
         path.parent.mkdir(parents=True)
         path.write_text(json.dumps(document))
     return events
+
+
+def _append_condition_event(path, bus, event, *, is_warmup: bool):
+    record = bus.publish(key=str(event.creatorId), event=event)
+    document = json.loads(path.read_text())
+    raw = document["rawEvidence"]
+    kafka = raw["feedbackKafka"]
+    raw["measurements"].append(
+        {
+            "outcome": "success",
+            "isWarmup": is_warmup,
+            "requestId": str(event.requestId),
+        }
+    )
+    kafka["records"].append(
+        {
+            "topic": record.topic,
+            "partition": record.partition,
+            "offset": record.offset,
+            "key": record.key,
+            "eventId": str(event.eventId),
+            "requestId": str(event.requestId),
+        }
+    )
+    kafka["recordCount"] = len(kafka["records"])
+    kafka["offsetRanges"].append(
+        {
+            "topic": record.topic,
+            "partition": record.partition,
+            "startInclusive": record.offset,
+            "endExclusive": record.offset + 1,
+        }
+    )
+    path.write_text(json.dumps(document))
+    return event
 
 
 def test_completed_trial_export_replays_exact_ranges_and_matches_database_edges(tmp_path):
@@ -186,6 +227,147 @@ def test_completed_trial_export_replays_exact_ranges_and_matches_database_edges(
         "rows": 9,
         "sha256": hashlib.sha256(result.edge_parquet_path.read_bytes()).hexdigest(),
     }
+
+
+def test_completed_trial_export_accepts_warmup_record_outside_request_count(tmp_path):
+    from babel_online.runtime.performance_export import export_completed_performance_trial
+
+    trial = _completed_trial()
+    bus = InMemoryFeedbackBus()
+    events = _write_evidence(tmp_path / "conditions", trial, bus)
+    condition = trial.conditions[0]
+    warmup = feedback_event_v2(event_number=999).model_copy(
+        update={"runId": condition.run_id}
+    )
+    _append_condition_event(
+        tmp_path / "conditions/01/live-evidence.json",
+        bus,
+        warmup,
+        is_warmup=True,
+    )
+    database = SimpleNamespace(
+        load_performance_experiment=lambda _trial_id: trial,
+        canonical_edges=lambda run_id: reconstruct_canonical_edges(
+            [events[run_id], warmup]
+            if run_id == condition.run_id
+            else [events[run_id]]
+        ),
+    )
+
+    result = export_completed_performance_trial(
+        database=database,
+        experiment_id=trial.id,
+        evidence_root=tmp_path / "conditions",
+        output_root=tmp_path / "export",
+        feedback_source=bus,
+    )
+
+    assert len(result.records) == 10
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        lambda document: document["rawEvidence"]["measurements"][0].__setitem__(
+            "outcome", "timeout"
+        ),
+        lambda document: document["rawEvidence"]["measurements"][0].pop(
+            "isWarmup"
+        ),
+        lambda document: document["rawEvidence"]["measurements"][0].__setitem__(
+            "isWarmup", "false"
+        ),
+        lambda document: document.__setitem__("requestCount", 2),
+    ),
+)
+def test_completed_trial_export_rejects_invalid_measurement_contract(
+    tmp_path, mutation
+):
+    from babel_online.runtime.performance_export import export_completed_performance_trial
+
+    trial = _completed_trial()
+    bus = InMemoryFeedbackBus()
+    events = _write_evidence(tmp_path / "conditions", trial, bus)
+    path = tmp_path / "conditions/01/live-evidence.json"
+    document = json.loads(path.read_text())
+    mutation(document)
+    path.write_text(json.dumps(document))
+    database = SimpleNamespace(
+        load_performance_experiment=lambda _trial_id: trial,
+        canonical_edges=lambda run_id: reconstruct_canonical_edges([events[run_id]]),
+    )
+
+    with pytest.raises(ValueError, match="measurement|request count"):
+        export_completed_performance_trial(
+            database=database,
+            experiment_id=trial.id,
+            evidence_root=tmp_path / "conditions",
+            output_root=tmp_path / "export",
+            feedback_source=bus,
+        )
+
+
+def test_completed_trial_export_rejects_mismatched_measurement_request_id(tmp_path):
+    from babel_online.runtime.performance_export import export_completed_performance_trial
+
+    trial = _completed_trial()
+    bus = InMemoryFeedbackBus()
+    events = _write_evidence(tmp_path / "conditions", trial, bus)
+    path = tmp_path / "conditions/01/live-evidence.json"
+    document = json.loads(path.read_text())
+    document["rawEvidence"]["measurements"][0]["requestId"] = str(UUID(int=999))
+    path.write_text(json.dumps(document))
+    database = SimpleNamespace(
+        load_performance_experiment=lambda _trial_id: trial,
+        canonical_edges=lambda run_id: reconstruct_canonical_edges([events[run_id]]),
+    )
+
+    with pytest.raises(ValueError, match="request identities"):
+        export_completed_performance_trial(
+            database=database,
+            experiment_id=trial.id,
+            evidence_root=tmp_path / "conditions",
+            output_root=tmp_path / "export",
+            feedback_source=bus,
+        )
+
+
+def test_completed_trial_export_rejects_duplicate_request_ids(tmp_path):
+    from babel_online.runtime.performance_export import export_completed_performance_trial
+
+    trial = _completed_trial()
+    bus = InMemoryFeedbackBus()
+    events = _write_evidence(tmp_path / "conditions", trial, bus)
+    condition = trial.conditions[0]
+    duplicate = feedback_event_v2(event_number=999).model_copy(
+        update={
+            "runId": condition.run_id,
+            "requestId": events[condition.run_id].requestId,
+        }
+    )
+    _append_condition_event(
+        tmp_path / "conditions/01/live-evidence.json",
+        bus,
+        duplicate,
+        is_warmup=True,
+    )
+    database = SimpleNamespace(
+        load_performance_experiment=lambda _trial_id: trial,
+        canonical_edges=lambda run_id: reconstruct_canonical_edges(
+            [events[run_id], duplicate]
+            if run_id == condition.run_id
+            else [events[run_id]]
+        ),
+    )
+
+    with pytest.raises(ValueError, match="request identities"):
+        export_completed_performance_trial(
+            database=database,
+            experiment_id=trial.id,
+            evidence_root=tmp_path / "conditions",
+            output_root=tmp_path / "export",
+            feedback_source=bus,
+        )
 
 
 def test_formal_export_rejects_explicitly_representative_trial_before_reading_evidence(

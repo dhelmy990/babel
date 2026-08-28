@@ -28,23 +28,63 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _rewrite_feedback_export_rows(export: Path, row_count: int) -> None:
-    feedback = export / "feedback.parquet"
-    pq.write_table(
-        pa.table({"event": [f"event-{index}" for index in range(row_count)]}),
-        feedback,
-    )
+def _write_feedback_payload(export: Path, rows: list[dict[str, object]]) -> None:
+    pq.write_table(pa.Table.from_pylist(rows), export / "feedback.parquet")
     (export / "feedback.jsonl").write_text(
-        "".join(f'{{"event":"event-{index}"}}\n' for index in range(row_count))
+        "".join(
+            json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
+            for row in rows
+        )
     )
+
+
+def _write_edge_payload(export: Path, rows: list[dict[str, object]]) -> None:
+    schema = pa.schema(
+        [
+            ("runId", pa.string()),
+            ("sourceBabelId", pa.string()),
+            ("targetBabelId", pa.string()),
+            ("actingCreatorId", pa.string()),
+            ("requestId", pa.string()),
+            ("feedbackEventId", pa.string()),
+            ("feedbackOccurredAtNs", pa.int64()),
+            ("traversalSessionId", pa.string()),
+            ("traversalDepth", pa.int64()),
+        ]
+    )
+    pq.write_table(pa.Table.from_pylist(rows, schema=schema), export / "edges.parquet")
+    (export / "edges.jsonl").write_text(
+        "".join(
+            json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
+            for row in rows
+        )
+    )
+
+
+def _refresh_export_payload_manifest(export: Path) -> None:
+    feedback = export / "feedback.parquet"
+    edges = export / "edges.parquet"
+    feedback_rows = pq.read_table(feedback).num_rows
+    edge_rows = pq.read_table(edges).num_rows
     manifest_path = export / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
-    manifest["records"] = row_count
-    manifest["feedbackParquet"]["rows"] = row_count
+    manifest["records"] = feedback_rows
+    manifest["canonicalEdges"] = edge_rows
+    manifest["feedbackParquet"]["rows"] = feedback_rows
     manifest["feedbackParquet"]["sha256"] = _sha256(feedback)
+    manifest["edgesParquet"]["rows"] = edge_rows
+    manifest["edgesParquet"]["sha256"] = _sha256(edges)
     manifest["parquetSha256"] = _sha256(feedback)
+    manifest["edgeParquetSha256"] = _sha256(edges)
     manifest["jsonlSha256"] = _sha256(export / "feedback.jsonl")
+    manifest["edgeJsonlSha256"] = _sha256(export / "edges.jsonl")
     manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n")
+
+
+def _rewrite_feedback_export_rows(export: Path, row_count: int) -> None:
+    rows = pq.read_table(export / "feedback.parquet").to_pylist()[:row_count]
+    _write_feedback_payload(export, rows)
+    _refresh_export_payload_manifest(export)
 
 
 def _write_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
@@ -52,17 +92,8 @@ def _write_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
     export.mkdir()
     feedback = export / "feedback.parquet"
     edges = export / "edges.parquet"
-    pq.write_table(
-        pa.table({"event": [f"event-{index}" for index in range(18)]}), feedback
-    )
-    pq.write_table(pa.table({"source": ["a", "b", "c"]}), edges)
-    (export / "feedback.jsonl").write_text(
-        "".join(f'{{"event":"event-{index}"}}\n' for index in range(18))
-    )
-    (export / "edges.jsonl").write_text(
-        '{"source":"a"}\n{"source":"b"}\n{"source":"c"}\n'
-    )
     conditions = []
+    feedback_rows: list[dict[str, object]] = []
     evidence_root = tmp_path / "conditions"
     for index in range(1, 7):
         run_id = UUID(f"00000000-0000-5000-8000-{index:012d}")
@@ -100,6 +131,7 @@ def _write_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
             }
             for row_index, measurement in enumerate(measurements)
         ]
+        feedback_rows.extend({**record, "runId": str(run_id)} for record in records)
         training = index % 3 != 1
         final_trainer_state = {
             "available": True,
@@ -160,6 +192,22 @@ def _write_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
         (condition_root / "live-evidence.json").write_text(
             json.dumps(condition, sort_keys=True) + "\n"
         )
+    edge_rows = [
+        {
+            "runId": conditions[index - 1]["runId"],
+            "sourceBabelId": str(UUID(int=1000 + index)),
+            "targetBabelId": str(UUID(int=2000 + index)),
+            "actingCreatorId": str(UUID(int=3000 + index)),
+            "requestId": str(UUID(int=4000 + index)),
+            "feedbackEventId": str(UUID(int=5000 + index)),
+            "feedbackOccurredAtNs": index,
+            "traversalSessionId": str(UUID(int=6000 + index)),
+            "traversalDepth": index,
+        }
+        for index in range(1, 4)
+    ]
+    _write_feedback_payload(export, feedback_rows)
+    _write_edge_payload(export, edge_rows)
     manifest = {
         "schemaVersion": 1,
         "experimentId": str(TRIAL_ID),
@@ -459,6 +507,104 @@ def test_build_rejects_feedback_parquet_row_count_different_from_conditions(
     _rewrite_feedback_export_rows(export, 5)
 
     with pytest.raises(ValueError, match="condition records"):
+        build_representative_run_bundle(
+            tmp_path / "accepted",
+            trial_id=TRIAL_ID,
+            export_root=export,
+            evidence_root=evidence,
+            report_path=report,
+        )
+
+
+def test_build_rejects_feedback_parquet_jsonl_disagreement(tmp_path: Path) -> None:
+    export, evidence, report = _write_isolated_inputs(tmp_path)
+    jsonl_path = export / "feedback.jsonl"
+    rows = [json.loads(line) for line in jsonl_path.read_text().splitlines()]
+    rows[0]["key"] = "unrelated-key"
+    jsonl_path.write_text(
+        "".join(
+            json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
+            for row in rows
+        )
+    )
+    _refresh_export_payload_manifest(export)
+
+    with pytest.raises(ValueError, match="feedback Parquet and JSONL differ"):
+        build_representative_run_bundle(
+            tmp_path / "accepted",
+            trial_id=TRIAL_ID,
+            export_root=export,
+            evidence_root=evidence,
+            report_path=report,
+        )
+
+
+def test_build_rejects_self_consistent_unrelated_feedback_payload(tmp_path: Path) -> None:
+    export, evidence, report = _write_isolated_inputs(tmp_path)
+    rows = pq.read_table(export / "feedback.parquet").to_pylist()
+    rows[0]["eventId"] = str(UUID(int=999999))
+    _write_feedback_payload(export, rows)
+    _refresh_export_payload_manifest(export)
+
+    with pytest.raises(ValueError, match="acknowledgement identities"):
+        build_representative_run_bundle(
+            tmp_path / "accepted",
+            trial_id=TRIAL_ID,
+            export_root=export,
+            evidence_root=evidence,
+            report_path=report,
+        )
+
+
+def test_build_rejects_duplicate_exported_acknowledgement(tmp_path: Path) -> None:
+    export, evidence, report = _write_isolated_inputs(tmp_path)
+    rows = pq.read_table(export / "feedback.parquet").to_pylist()
+    rows[1] = dict(rows[0])
+    _write_feedback_payload(export, rows)
+    _refresh_export_payload_manifest(export)
+
+    with pytest.raises(ValueError, match="duplicated"):
+        build_representative_run_bundle(
+            tmp_path / "accepted",
+            trial_id=TRIAL_ID,
+            export_root=export,
+            evidence_root=evidence,
+            report_path=report,
+        )
+
+
+def test_build_rejects_feedback_payload_missing_required_schema(tmp_path: Path) -> None:
+    export, evidence, report = _write_isolated_inputs(tmp_path)
+    rows = pq.read_table(export / "feedback.parquet").to_pylist()
+    for row in rows:
+        row.pop("runId")
+    _write_feedback_payload(export, rows)
+    _refresh_export_payload_manifest(export)
+
+    with pytest.raises(ValueError, match="schema"):
+        build_representative_run_bundle(
+            tmp_path / "accepted",
+            trial_id=TRIAL_ID,
+            export_root=export,
+            evidence_root=evidence,
+            report_path=report,
+        )
+
+
+def test_build_rejects_edge_parquet_jsonl_disagreement(tmp_path: Path) -> None:
+    export, evidence, report = _write_isolated_inputs(tmp_path)
+    jsonl_path = export / "edges.jsonl"
+    rows = [json.loads(line) for line in jsonl_path.read_text().splitlines()]
+    rows[0]["targetBabelId"] = str(UUID(int=999999))
+    jsonl_path.write_text(
+        "".join(
+            json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
+            for row in rows
+        )
+    )
+    _refresh_export_payload_manifest(export)
+
+    with pytest.raises(ValueError, match="edge Parquet and JSONL differ"):
         build_representative_run_bundle(
             tmp_path / "accepted",
             trial_id=TRIAL_ID,
