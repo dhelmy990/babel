@@ -299,6 +299,19 @@ def test_isolated_representative_export_rejects_topology_drift(tmp_path):
         )
 
 
+def test_representative_topology_profiles_are_process_immutable():
+    from babel_online.runtime import performance_export
+
+    profiles = performance_export._REPRESENTATIVE_TOPOLOGY_PROFILES
+    original = profiles["representative_isolated_smoke"]
+    try:
+        with pytest.raises(TypeError):
+            profiles["representative_isolated_smoke"] = ("same_host_split",)
+    finally:
+        if isinstance(profiles, dict):
+            profiles["representative_isolated_smoke"] = original
+
+
 @pytest.mark.parametrize("cohort_size", (100, 500))
 def test_higher_cohort_export_replays_exact_six_condition_trial(
     tmp_path, cohort_size
@@ -347,6 +360,99 @@ def test_completed_trial_export_rejects_nonzero_training_lag(tmp_path):
     )
 
     with pytest.raises(ValueError, match="zero final Kafka lag"):
+        export_completed_performance_trial(
+            database=database,
+            experiment_id=trial.id,
+            evidence_root=tmp_path / "conditions",
+            output_root=tmp_path / "export",
+            feedback_source=bus,
+        )
+
+
+@pytest.mark.parametrize("kafka_lag", (False, "0", 0.0))
+def test_completed_trial_export_rejects_zero_like_training_lag_types(
+    tmp_path, kafka_lag
+):
+    from babel_online.runtime.performance_export import export_completed_performance_trial
+
+    trial = _completed_trial()
+    bus = InMemoryFeedbackBus()
+    events = _write_evidence(tmp_path / "conditions", trial, bus)
+    path = tmp_path / "conditions/02/live-evidence.json"
+    document = json.loads(path.read_text())
+    document["rawEvidence"]["feedbackKafka"]["finalTrainerState"][
+        "kafkaLag"
+    ] = kafka_lag
+    path.write_text(json.dumps(document))
+    database = SimpleNamespace(
+        load_performance_experiment=lambda _trial_id: trial,
+        canonical_edges=lambda run_id: reconstruct_canonical_edges([events[run_id]]),
+    )
+
+    with pytest.raises(ValueError, match="exactly zero final Kafka lag"):
+        export_completed_performance_trial(
+            database=database,
+            experiment_id=trial.id,
+            evidence_root=tmp_path / "conditions",
+            output_root=tmp_path / "export",
+            feedback_source=bus,
+        )
+
+
+@pytest.mark.parametrize(
+    ("condition_index", "mutation"),
+    (
+        (1, lambda document: document.__setitem__("requestCount", True)),
+        (
+            1,
+            lambda document: document["rawEvidence"]["feedbackKafka"].__setitem__(
+                "recordCount", True
+            ),
+        ),
+        (
+            1,
+            lambda document: document["rawEvidence"]["feedbackKafka"]["records"][
+                0
+            ].__setitem__("partition", False),
+        ),
+        (
+            1,
+            lambda document: document["rawEvidence"]["feedbackKafka"]["records"][
+                0
+            ].__setitem__("offset", 0.0),
+        ),
+        (
+            1,
+            lambda document: document["rawEvidence"]["feedbackKafka"][
+                "offsetRanges"
+            ][0].__setitem__("startInclusive", 0.0),
+        ),
+        (
+            2,
+            lambda document: document["rawEvidence"]["feedbackKafka"][
+                "finalTrainerState"
+            ]["nextOffsets"][0].__setitem__("nextOffset", 2.0),
+        ),
+    ),
+)
+def test_completed_trial_export_rejects_non_integer_evidence_numbers(
+    tmp_path, condition_index, mutation
+):
+    from babel_online.runtime.performance_export import export_completed_performance_trial
+
+    trial = _completed_trial()
+    bus = InMemoryFeedbackBus()
+    events = _write_evidence(tmp_path / "conditions", trial, bus)
+    path = tmp_path / f"conditions/{condition_index:02d}/live-evidence.json"
+    document = json.loads(path.read_text())
+    mutation(document)
+    path.write_text(json.dumps(document))
+    database = SimpleNamespace(
+        load_performance_experiment=lambda _trial_id: trial,
+        canonical_edges=lambda run_id: reconstruct_canonical_edges([events[run_id]]),
+    )
+
+    with pytest.raises(ValueError, match="integer"):
         export_completed_performance_trial(
             database=database,
             experiment_id=trial.id,

@@ -28,14 +28,37 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _rewrite_feedback_export_rows(export: Path, row_count: int) -> None:
+    feedback = export / "feedback.parquet"
+    pq.write_table(
+        pa.table({"event": [f"event-{index}" for index in range(row_count)]}),
+        feedback,
+    )
+    (export / "feedback.jsonl").write_text(
+        "".join(f'{{"event":"event-{index}"}}\n' for index in range(row_count))
+    )
+    manifest_path = export / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["records"] = row_count
+    manifest["feedbackParquet"]["rows"] = row_count
+    manifest["feedbackParquet"]["sha256"] = _sha256(feedback)
+    manifest["parquetSha256"] = _sha256(feedback)
+    manifest["jsonlSha256"] = _sha256(export / "feedback.jsonl")
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n")
+
+
 def _write_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
     export = tmp_path / "feedback-export"
     export.mkdir()
     feedback = export / "feedback.parquet"
     edges = export / "edges.parquet"
-    pq.write_table(pa.table({"event": ["a", "b"]}), feedback)
+    pq.write_table(
+        pa.table({"event": [f"event-{index}" for index in range(18)]}), feedback
+    )
     pq.write_table(pa.table({"source": ["a", "b", "c"]}), edges)
-    (export / "feedback.jsonl").write_text('{"event":"a"}\n{"event":"b"}\n')
+    (export / "feedback.jsonl").write_text(
+        "".join(f'{{"event":"event-{index}"}}\n' for index in range(18))
+    )
     (export / "edges.jsonl").write_text(
         '{"source":"a"}\n{"source":"b"}\n{"source":"c"}\n'
     )
@@ -46,6 +69,55 @@ def _write_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
         conditions.append({"conditionId": str(run_id), "runId": str(run_id)})
         condition_root = evidence_root / f"{index:02d}"
         condition_root.mkdir(parents=True)
+        start_offset = (index - 1) * 3
+        measurements = [
+            {
+                "modelId": "00000000-0000-5000-8000-000000000099",
+                "outcome": "success",
+                "isWarmup": row_index == 0,
+                "requestId": str(
+                    UUID(
+                        f"00000000-0000-5000-8002-"
+                        f"{start_offset + row_index + 1:012d}"
+                    )
+                ),
+            }
+            for row_index in range(3)
+        ]
+        records = [
+            {
+                "topic": "babel.feedback.v1",
+                "partition": 0,
+                "offset": start_offset + row_index,
+                "key": f"creator-{start_offset + row_index}",
+                "eventId": str(
+                    UUID(
+                        f"00000000-0000-5000-8001-"
+                        f"{start_offset + row_index + 1:012d}"
+                    )
+                ),
+                "requestId": measurement["requestId"],
+            }
+            for row_index, measurement in enumerate(measurements)
+        ]
+        training = index % 3 != 1
+        final_trainer_state = {
+            "available": True,
+            "kafkaLag": 0,
+            "offsetsCoverPublishedRanges": False,
+        }
+        if training:
+            final_trainer_state.update(
+                offsetsCoverPublishedRanges=True,
+                nextOffsets=[
+                    {
+                        "topic": "babel.feedback.v1",
+                        "partition": 0,
+                        "nextOffset": start_offset + len(records),
+                    }
+                ],
+                checkpointManifestSha256="c" * 64,
+            )
         condition = {
             "conditionId": str(run_id),
             "runId": str(run_id),
@@ -55,22 +127,11 @@ def _write_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
                 "evidenceScope": SCOPE,
                 "conditionIdentity": {
                     "topology": "same_process" if index <= 3 else "same_host_split",
-                    "trainingEnabled": index % 3 != 1,
+                    "trainingEnabled": training,
                     "activationEnabled": index % 3 == 0,
                     "retrievalBackend": "pgvector",
                 },
-                "measurements": [
-                    {
-                        "modelId": "00000000-0000-5000-8000-000000000099",
-                        "outcome": "success",
-                        "isWarmup": False,
-                    },
-                    {
-                        "modelId": "00000000-0000-5000-8000-000000000099",
-                        "outcome": "success",
-                        "isWarmup": False,
-                    },
-                ],
+                "measurements": measurements,
                 "finalServingIdentity": {
                     "modelId": f"00000000-0000-5000-8000-{100 + index:012d}",
                     "modelVersion": index,
@@ -82,12 +143,17 @@ def _write_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
                     ["00000000-0000-5000-8000-000000000099", 0, "b" * 64, "b" * 64]
                 ],
                 "feedbackKafka": {
-                    "recordCount": 2,
-                    "finalTrainerState": {
-                        "available": True,
-                        "kafkaLag": 0,
-                        "offsetsCoverPublishedRanges": index % 3 != 1,
-                    },
+                    "recordCount": len(records),
+                    "records": records,
+                    "offsetRanges": [
+                        {
+                            "topic": "babel.feedback.v1",
+                            "partition": 0,
+                            "startInclusive": start_offset,
+                            "endExclusive": start_offset + len(records),
+                        }
+                    ],
+                    "finalTrainerState": final_trainer_state,
                 },
             },
         }
@@ -100,11 +166,11 @@ def _write_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
         "creatorCohort": 50,
         "conditionCount": 6,
         "conditions": conditions,
-        "records": 2,
+        "records": 18,
         "canonicalEdges": 3,
         "feedbackParquet": {
             "path": "feedback.parquet",
-            "rows": 2,
+            "rows": 18,
             "sha256": _sha256(feedback),
         },
         "edgesParquet": {
@@ -150,6 +216,7 @@ def _write_isolated_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
         evidence_path.write_text(json.dumps(document, sort_keys=True) + "\n")
     for index in range(4, 7):
         shutil.rmtree(evidence_root / f"{index:02d}")
+    _rewrite_feedback_export_rows(export, 9)
     return export, evidence_root, report
 
 
@@ -201,7 +268,7 @@ def test_build_and_publish_closed_representative_bundle(tmp_path: Path) -> None:
     assert manifest["evidenceScope"] == SCOPE
     assert (
         json.loads((bundle.root / "trial-summary.json").read_text())["feedbackRows"]
-        == 2
+        == 18
     )
     results = json.loads((bundle.root / "trial-results.json").read_text())
     assert len(results["conditions"]) == 6
@@ -342,6 +409,236 @@ def test_build_isolated_bundle_rejects_same_host_split_identity_drift(
     evidence_path.write_text(json.dumps(document) + "\n")
 
     with pytest.raises(ValueError, match="ordered.*matrix"):
+        build_representative_run_bundle(
+            tmp_path / "accepted",
+            trial_id=TRIAL_ID,
+            export_root=export,
+            evidence_root=evidence,
+            report_path=report,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        (
+            lambda raw: raw["feedbackKafka"].pop("records"),
+            "records",
+        ),
+        (
+            lambda raw: raw["feedbackKafka"]["offsetRanges"][0].__setitem__(
+                "endExclusive", 4
+            ),
+            "ranges",
+        ),
+    ),
+)
+def test_build_rejects_missing_records_or_mismatched_ranges(
+    tmp_path: Path, mutation, message: str
+) -> None:
+    export, evidence, report = _write_isolated_inputs(tmp_path)
+    evidence_path = evidence / "01/live-evidence.json"
+    document = json.loads(evidence_path.read_text())
+    mutation(document["rawEvidence"])
+    evidence_path.write_text(json.dumps(document) + "\n")
+
+    with pytest.raises(ValueError, match=message):
+        build_representative_run_bundle(
+            tmp_path / "accepted",
+            trial_id=TRIAL_ID,
+            export_root=export,
+            evidence_root=evidence,
+            report_path=report,
+        )
+
+
+def test_build_rejects_feedback_parquet_row_count_different_from_conditions(
+    tmp_path: Path,
+) -> None:
+    export, evidence, report = _write_isolated_inputs(tmp_path)
+    _rewrite_feedback_export_rows(export, 5)
+
+    with pytest.raises(ValueError, match="condition records"):
+        build_representative_run_bundle(
+            tmp_path / "accepted",
+            trial_id=TRIAL_ID,
+            export_root=export,
+            evidence_root=evidence,
+            report_path=report,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        lambda final: final.pop("nextOffsets"),
+        lambda final: final["nextOffsets"][0].__setitem__("nextOffset", 3),
+        lambda final: final.__setitem__("checkpointManifestSha256", "not-a-digest"),
+    ),
+)
+def test_build_rejects_incomplete_training_checkpoint_evidence(
+    tmp_path: Path, mutation
+) -> None:
+    export, evidence, report = _write_isolated_inputs(tmp_path)
+    evidence_path = evidence / "02/live-evidence.json"
+    document = json.loads(evidence_path.read_text())
+    mutation(document["rawEvidence"]["feedbackKafka"]["finalTrainerState"])
+    evidence_path.write_text(json.dumps(document) + "\n")
+
+    with pytest.raises(ValueError, match="checkpoint|offset"):
+        build_representative_run_bundle(
+            tmp_path / "accepted",
+            trial_id=TRIAL_ID,
+            export_root=export,
+            evidence_root=evidence,
+            report_path=report,
+        )
+
+
+@pytest.mark.parametrize("kafka_lag", (False, "0", 0.0))
+def test_build_rejects_zero_like_kafka_lag_types(
+    tmp_path: Path, kafka_lag: object
+) -> None:
+    export, evidence, report = _write_isolated_inputs(tmp_path)
+    evidence_path = evidence / "02/live-evidence.json"
+    document = json.loads(evidence_path.read_text())
+    document["rawEvidence"]["feedbackKafka"]["finalTrainerState"][
+        "kafkaLag"
+    ] = kafka_lag
+    evidence_path.write_text(json.dumps(document) + "\n")
+
+    with pytest.raises(ValueError, match="exactly zero.*Kafka lag"):
+        build_representative_run_bundle(
+            tmp_path / "accepted",
+            trial_id=TRIAL_ID,
+            export_root=export,
+            evidence_root=evidence,
+            report_path=report,
+        )
+
+
+@pytest.mark.parametrize(
+    ("condition_index", "mutation"),
+    (
+        (
+            1,
+            lambda document: document["rawEvidence"]["feedbackKafka"]["records"][
+                0
+            ].__setitem__("partition", False),
+        ),
+        (
+            1,
+            lambda document: document["rawEvidence"]["feedbackKafka"]["records"][
+                0
+            ].__setitem__("offset", 0.0),
+        ),
+        (
+            1,
+            lambda document: document["rawEvidence"]["feedbackKafka"][
+                "offsetRanges"
+            ][0].__setitem__("startInclusive", 0.0),
+        ),
+        (
+            2,
+            lambda document: document["rawEvidence"]["feedbackKafka"][
+                "finalTrainerState"
+            ]["nextOffsets"][0].__setitem__("nextOffset", 4.0),
+        ),
+    ),
+)
+def test_build_rejects_non_integer_kafka_offsets(
+    tmp_path: Path, condition_index: int, mutation
+) -> None:
+    export, evidence, report = _write_isolated_inputs(tmp_path)
+    evidence_path = evidence / f"{condition_index:02d}/live-evidence.json"
+    document = json.loads(evidence_path.read_text())
+    mutation(document)
+    evidence_path.write_text(json.dumps(document) + "\n")
+
+    with pytest.raises(ValueError, match="integer"):
+        build_representative_run_bundle(
+            tmp_path / "accepted",
+            trial_id=TRIAL_ID,
+            export_root=export,
+            evidence_root=evidence,
+            report_path=report,
+        )
+
+
+def test_build_rejects_duplicate_condition_uuid_across_bindings(tmp_path: Path) -> None:
+    export, evidence, report = _write_isolated_inputs(tmp_path)
+    first = json.loads((evidence / "01/live-evidence.json").read_text())
+    second_path = evidence / "02/live-evidence.json"
+    second = json.loads(second_path.read_text())
+    second["conditionId"] = first["conditionId"]
+    second_path.write_text(json.dumps(second) + "\n")
+    manifest_path = export / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["conditions"][1]["conditionId"] = first["conditionId"]
+    manifest_path.write_text(json.dumps(manifest) + "\n")
+
+    with pytest.raises(ValueError, match="condition identity is duplicated"):
+        build_representative_run_bundle(
+            tmp_path / "accepted",
+            trial_id=TRIAL_ID,
+            export_root=export,
+            evidence_root=evidence,
+            report_path=report,
+        )
+
+
+def test_build_rejects_duplicate_run_uuid_in_alternate_spelling(tmp_path: Path) -> None:
+    export, evidence, report = _write_isolated_inputs(tmp_path)
+    first = json.loads((evidence / "01/live-evidence.json").read_text())
+    duplicate_run_id = "{" + first["runId"] + "}"
+    second_path = evidence / "02/live-evidence.json"
+    second = json.loads(second_path.read_text())
+    second["runId"] = duplicate_run_id
+    second_path.write_text(json.dumps(second) + "\n")
+    manifest_path = export / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["conditions"][1]["runId"] = duplicate_run_id
+    manifest_path.write_text(json.dumps(manifest) + "\n")
+
+    with pytest.raises(ValueError, match="run identity is duplicated"):
+        build_representative_run_bundle(
+            tmp_path / "accepted",
+            trial_id=TRIAL_ID,
+            export_root=export,
+            evidence_root=evidence,
+            report_path=report,
+        )
+
+
+def test_build_rejects_boolean_condition_index_binding(tmp_path: Path) -> None:
+    export, evidence, report = _write_isolated_inputs(tmp_path)
+    manifest_path = export / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["conditions"][0]["conditionIndex"] = True
+    manifest_path.write_text(json.dumps(manifest) + "\n")
+
+    with pytest.raises(ValueError, match="formal position"):
+        build_representative_run_bundle(
+            tmp_path / "accepted",
+            trial_id=TRIAL_ID,
+            export_root=export,
+            evidence_root=evidence,
+            report_path=report,
+        )
+
+
+def test_build_rejects_non_uuid_condition_binding(tmp_path: Path) -> None:
+    export, evidence, report = _write_isolated_inputs(tmp_path)
+    evidence_path = evidence / "01/live-evidence.json"
+    document = json.loads(evidence_path.read_text())
+    document["conditionId"] = "not-a-uuid"
+    evidence_path.write_text(json.dumps(document) + "\n")
+    manifest_path = export / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["conditions"][0]["conditionId"] = "not-a-uuid"
+    manifest_path.write_text(json.dumps(manifest) + "\n")
+
+    with pytest.raises(ValueError, match="UUID"):
         build_representative_run_bundle(
             tmp_path / "accepted",
             trial_id=TRIAL_ID,

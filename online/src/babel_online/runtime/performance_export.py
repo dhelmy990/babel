@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 from uuid import UUID
 
@@ -15,11 +17,17 @@ from ..feedback import FeedbackExport, FeedbackRecord, OffsetRange, TopicPartiti
 from ..feedback.export import export_offset_ranges
 
 
-_REPRESENTATIVE_TOPOLOGY_PROFILES = {
-    "representative_same_process_vs_split": ("same_process", "same_host_split"),
-    "representative_split_smoke": ("same_host_split",),
-    "representative_isolated_smoke": ("same_host_isolated",),
-}
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_REPRESENTATIVE_TOPOLOGY_PROFILES = MappingProxyType(
+    {
+        "representative_same_process_vs_split": (
+            "same_process",
+            "same_host_split",
+        ),
+        "representative_split_smoke": ("same_host_split",),
+        "representative_isolated_smoke": ("same_host_isolated",),
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,9 +107,19 @@ def _write_canonical(path: Path, value: object) -> None:
 def _range_documents_for_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_partition: dict[tuple[str, int], list[int]] = {}
     for record in records:
+        if (
+            not isinstance(record, dict)
+            or not isinstance(record.get("topic"), str)
+            or not record["topic"]
+            or type(record.get("partition")) is not int
+            or record["partition"] < 0
+            or type(record.get("offset")) is not int
+            or record["offset"] < 0
+        ):
+            raise ValueError("live feedback offsets must use nonnegative integers")
         by_partition.setdefault(
-            (str(record["topic"]), int(record["partition"])), []
-        ).append(int(record["offset"]))
+            (record["topic"], record["partition"]), []
+        ).append(record["offset"])
     ranges: list[dict[str, Any]] = []
     for (topic, partition), offsets in sorted(by_partition.items()):
         ordered = sorted(offsets)
@@ -138,11 +156,15 @@ def _load_condition_evidence(condition: Any, evidence_root: Path):
         document = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError(f"condition {condition.condition_index} evidence is unavailable") from error
-    if (
-        UUID(str(document.get("conditionId"))) != condition.id
-        or UUID(str(document.get("runId"))) != condition.run_id
-        or int(document.get("requestCount", 0)) <= 0
-    ):
+    try:
+        condition_id = UUID(str(document.get("conditionId")))
+        run_id = UUID(str(document.get("runId")))
+    except (TypeError, ValueError) as error:
+        raise ValueError("live condition evidence identity is not a UUID") from error
+    request_count = document.get("requestCount")
+    if type(request_count) is not int or request_count <= 0:
+        raise ValueError("live condition request count must be a positive integer")
+    if condition_id != condition.id or run_id != condition.run_id:
         raise ValueError("live condition evidence identity or request count differs")
     raw = document.get("rawEvidence")
     identity = raw.get("conditionIdentity") if isinstance(raw, dict) else None
@@ -158,32 +180,64 @@ def _load_condition_evidence(condition: Any, evidence_root: Path):
         raise ValueError("live condition lacks feedback Kafka evidence")
     records = kafka.get("records")
     ranges = kafka.get("offsetRanges")
+    record_count = kafka.get("recordCount")
+    measurements = raw.get("measurements")
     if (
         not isinstance(records, list)
         or not records
-        or int(kafka.get("recordCount", -1)) != len(records)
-        or len(raw.get("measurements", ())) != len(records)
+        or type(record_count) is not int
+        or record_count != len(records)
+        or not isinstance(measurements, list)
+        or len(measurements) != len(records)
         or not isinstance(ranges, list)
+        or any(
+            not isinstance(row, dict)
+            or not isinstance(row.get("topic"), str)
+            or not row["topic"]
+            or type(row.get("partition")) is not int
+            or row["partition"] < 0
+            or type(row.get("startInclusive")) is not int
+            or row["startInclusive"] < 0
+            or type(row.get("endExclusive")) is not int
+            or row["endExclusive"] <= row["startInclusive"]
+            for row in ranges
+        )
         or ranges != _range_documents_for_records(records)
     ):
-        raise ValueError("live feedback acknowledgement count or ranges differ")
+        raise ValueError(
+            "live feedback acknowledgement count and offsets require exact integers"
+        )
     final = kafka.get("finalTrainerState")
     if condition.training_enabled:
         if not isinstance(final, dict) or final.get("available") is not True:
             raise ValueError("training condition lacks final Kafka state")
-        if int(final.get("kafkaLag", -1)) != 0:
-            raise ValueError("training condition requires zero final Kafka lag")
+        if type(final.get("kafkaLag")) is not int or final["kafkaLag"] != 0:
+            raise ValueError("training condition requires exactly zero final Kafka lag")
+        next_offset_rows = final.get("nextOffsets")
         if (
             final.get("offsetsCoverPublishedRanges") is not True
-            or not isinstance(final.get("nextOffsets"), list)
-            or len(str(final.get("checkpointManifestSha256", ""))) != 64
+            or not isinstance(next_offset_rows, list)
+            or not next_offset_rows
+            or not isinstance(final.get("checkpointManifestSha256"), str)
+            or not _SHA256.fullmatch(final["checkpointManifestSha256"])
         ):
             raise ValueError("training checkpoint does not cover published feedback ranges")
-        next_offsets = {
-            (str(row["topic"]), int(row["partition"])): int(row["nextOffset"])
-            for row in final["nextOffsets"]
-        }
         if any(
+            not isinstance(row, dict)
+            or not isinstance(row.get("topic"), str)
+            or not row["topic"]
+            or type(row.get("partition")) is not int
+            or row["partition"] < 0
+            or type(row.get("nextOffset")) is not int
+            or row["nextOffset"] < 0
+            for row in next_offset_rows
+        ):
+            raise ValueError("training checkpoint offsets must use nonnegative integers")
+        next_offsets = {
+            (row["topic"], row["partition"]): row["nextOffset"]
+            for row in next_offset_rows
+        }
+        if len(next_offsets) != len(next_offset_rows) or any(
             next_offsets.get((row["topic"], row["partition"]), -1)
             < row["endExclusive"]
             for row in ranges
@@ -220,6 +274,7 @@ def _completed_formal_conditions(trial: Any) -> tuple[Any, ...]:
         len(ordered) != len(expected_order)
         or [row.condition_index for row in ordered]
         != list(range(1, len(expected_order) + 1))
+        or any(type(row.condition_index) is not int for row in ordered)
         or any(row.status != "completed" or row.run_id is None for row in ordered)
     ):
         raise ValueError("performance trial lacks its completed bound conditions")
@@ -254,6 +309,7 @@ def _completed_representative_conditions(trial: Any) -> tuple[Any, ...]:
         len(ordered) != len(expected_order)
         or [row.condition_index for row in ordered]
         != list(range(1, len(expected_order) + 1))
+        or any(type(row.condition_index) is not int for row in ordered)
         or any(row.status != "completed" or row.run_id is None for row in ordered)
         or actual_order != expected_order
     ):
@@ -294,7 +350,7 @@ def _export_completed_conditions(
     for condition in conditions:
         records, range_documents = _load_condition_evidence(condition, root)
         for row in records:
-            key = (str(row["topic"]), int(row["partition"]), int(row["offset"]))
+            key = (row["topic"], row["partition"], row["offset"])
             if key in expected:
                 raise ValueError("condition feedback acknowledgements overlap")
             expected[key] = _ExpectedAcknowledgement(
@@ -305,9 +361,9 @@ def _export_completed_conditions(
             )
         ranges.extend(
             OffsetRange(
-                TopicPartition(str(row["topic"]), int(row["partition"])),
-                int(row["startInclusive"]),
-                int(row["endExclusive"]),
+                TopicPartition(row["topic"], row["partition"]),
+                row["startInclusive"],
+                row["endExclusive"],
             )
             for row in range_documents
         )

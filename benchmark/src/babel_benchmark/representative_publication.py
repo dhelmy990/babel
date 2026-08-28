@@ -244,9 +244,80 @@ def _condition_path(evidence_root: Path, index: int) -> Path:
     return path
 
 
+def _range_documents_for_records(
+    records: list[dict[str, Any]],
+) -> tuple[list[dict[str, object]], set[tuple[str, int, int]]]:
+    by_partition: dict[tuple[str, int], list[int]] = {}
+    request_ids: set[UUID] = set()
+    event_ids: set[UUID] = set()
+    offsets: set[tuple[str, int, int]] = set()
+    try:
+        for record in records:
+            if (
+                not isinstance(record, dict)
+                or not isinstance(record.get("topic"), str)
+                or not record["topic"]
+                or not isinstance(record.get("key"), str)
+                or type(record.get("partition")) is not int
+                or record["partition"] < 0
+                or type(record.get("offset")) is not int
+                or record["offset"] < 0
+            ):
+                raise ValueError(
+                    "representative feedback offsets must use nonnegative integers"
+                )
+            topic = record["topic"]
+            partition = record["partition"]
+            offset = record["offset"]
+            request_id = UUID(str(record["requestId"]))
+            event_id = UUID(str(record["eventId"]))
+            key = (topic, partition, offset)
+            if (
+                key in offsets
+                or request_id in request_ids
+                or event_id in event_ids
+            ):
+                raise ValueError
+            offsets.add(key)
+            request_ids.add(request_id)
+            event_ids.add(event_id)
+            by_partition.setdefault((topic, partition), []).append(offset)
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(
+            "representative feedback records are malformed or use non-integer offsets"
+        ) from error
+
+    ranges: list[dict[str, object]] = []
+    for (topic, partition), partition_offsets in sorted(by_partition.items()):
+        ordered = sorted(partition_offsets)
+        start = previous = ordered[0]
+        for offset in ordered[1:]:
+            if offset == previous + 1:
+                previous = offset
+                continue
+            ranges.append(
+                {
+                    "topic": topic,
+                    "partition": partition,
+                    "startInclusive": start,
+                    "endExclusive": previous + 1,
+                }
+            )
+            start = previous = offset
+        ranges.append(
+            {
+                "topic": topic,
+                "partition": partition,
+                "startInclusive": start,
+                "endExclusive": previous + 1,
+            }
+        )
+    return ranges, offsets
+
+
 def _validate_completed_condition(
     raw: dict[str, Any], *, condition: _ConditionProfile, request_count: int
-) -> None:
+) -> tuple[int, set[tuple[str, int, int]]]:
     expected_identity = condition.identity()
     if raw.get("conditionIdentity") != expected_identity:
         raise ValueError(
@@ -257,7 +328,9 @@ def _validate_completed_condition(
         not isinstance(measurements, list)
         or not measurements
         or any(
-            not isinstance(row, dict) or row.get("outcome") != "success"
+            not isinstance(row, dict)
+            or row.get("outcome") != "success"
+            or type(row.get("isWarmup")) is not bool
             for row in measurements
         )
         or sum(row.get("isWarmup") is False for row in measurements) != request_count
@@ -267,24 +340,98 @@ def _validate_completed_condition(
     final_state = (
         feedback.get("finalTrainerState") if isinstance(feedback, dict) else None
     )
+    records = feedback.get("records") if isinstance(feedback, dict) else None
+    ranges = feedback.get("offsetRanges") if isinstance(feedback, dict) else None
+    record_count = feedback.get("recordCount") if isinstance(feedback, dict) else None
     if (
-        not isinstance(final_state, dict)
+        not isinstance(feedback, dict)
+        or not isinstance(final_state, dict)
         or final_state.get("available") is not True
-        or final_state.get("kafkaLag") != 0
     ):
         raise ValueError("representative condition must have zero final Kafka lag")
-    record_count = feedback.get("recordCount")
     if (
-        isinstance(record_count, bool)
-        or not isinstance(record_count, int)
-        or record_count < request_count
+        type(final_state.get("kafkaLag")) is not int
+        or final_state["kafkaLag"] != 0
     ):
-        raise ValueError("representative condition feedback evidence is incomplete")
+        raise ValueError("representative condition requires exactly zero final Kafka lag")
     if (
-        expected_identity["trainingEnabled"] is True
-        and final_state.get("offsetsCoverPublishedRanges") is not True
+        type(record_count) is not int
+        or record_count <= 0
+        or not isinstance(records, list)
+        or not records
+        or record_count != len(records)
+        or record_count != len(measurements)
     ):
-        raise ValueError("representative training offsets are not completely covered")
+        raise ValueError("representative feedback records are incomplete")
+    expected_ranges, offsets = _range_documents_for_records(records)
+    if (
+        not isinstance(ranges, list)
+        or any(
+            not isinstance(row, dict)
+            or not isinstance(row.get("topic"), str)
+            or not row["topic"]
+            or type(row.get("partition")) is not int
+            or row["partition"] < 0
+            or type(row.get("startInclusive")) is not int
+            or row["startInclusive"] < 0
+            or type(row.get("endExclusive")) is not int
+            or row["endExclusive"] <= row["startInclusive"]
+            for row in ranges
+        )
+    ):
+        raise ValueError(
+            "representative feedback ranges must use nonnegative integers"
+        )
+    if ranges != expected_ranges:
+        raise ValueError("representative feedback offset ranges differ from records")
+    try:
+        measurement_request_ids = [
+            UUID(str(row["requestId"])) for row in measurements
+        ]
+        record_request_ids = [UUID(str(row["requestId"])) for row in records]
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("representative feedback request identities are malformed") from error
+    if (
+        len(set(measurement_request_ids)) != len(measurement_request_ids)
+        or set(measurement_request_ids) != set(record_request_ids)
+    ):
+        raise ValueError("representative feedback request identity coverage differs")
+
+    if expected_identity["trainingEnabled"] is True:
+        next_offset_rows = final_state.get("nextOffsets")
+        checkpoint_digest = final_state.get("checkpointManifestSha256")
+        if (
+            final_state.get("offsetsCoverPublishedRanges") is not True
+            or not isinstance(next_offset_rows, list)
+            or not next_offset_rows
+            or not isinstance(checkpoint_digest, str)
+            or not _SHA256.fullmatch(checkpoint_digest)
+        ):
+            raise ValueError("representative training checkpoint evidence is incomplete")
+        if any(
+            not isinstance(row, dict)
+            or not isinstance(row.get("topic"), str)
+            or not row["topic"]
+            or type(row.get("partition")) is not int
+            or row["partition"] < 0
+            or type(row.get("nextOffset")) is not int
+            or row["nextOffset"] < 0
+            for row in next_offset_rows
+        ):
+            raise ValueError(
+                "representative training offsets must use nonnegative integers"
+            )
+        next_offsets = {
+            (row["topic"], row["partition"]): row["nextOffset"]
+            for row in next_offset_rows
+        }
+        if len(next_offsets) != len(next_offset_rows) or any(
+            next_offsets.get((row["topic"], row["partition"]), -1)
+            < row["endExclusive"]
+            for row in expected_ranges
+        ):
+            raise ValueError("representative training offsets do not cover ranges")
+    return record_count, offsets
 
 
 def _validate_sources(
@@ -356,7 +503,10 @@ def _validate_sources(
         )
 
     evidence: list[dict[str, Any]] = []
-    seen_runs: set[str] = set()
+    seen_runs: set[UUID] = set()
+    seen_conditions: set[UUID] = set()
+    seen_record_offsets: set[tuple[str, int, int]] = set()
+    condition_record_count = 0
     for condition, binding, path in zip(
         profile.conditions, bindings, condition_paths, strict=True
     ):
@@ -369,8 +519,9 @@ def _validate_sources(
         )
         expected_positions = (index, condition.formal_condition_index)
         positions_declared = any(value is not None for value in positions)
-        if positions != expected_positions and (
-            profile.require_position_bindings or positions_declared
+        if (profile.require_position_bindings or positions_declared) and (
+            any(type(value) is not int for value in positions)
+            or positions != expected_positions
         ):
             raise ValueError(
                 f"representative condition {index} formal position differs"
@@ -378,36 +529,50 @@ def _validate_sources(
         _reject_symlinked_path(path)
         _reject_secret(path)
         document = _json_object(path, f"representative condition {index}")
-        run_id = document.get("runId")
-        condition_id = document.get("conditionId")
+        run_id_value = document.get("runId")
+        condition_id_value = document.get("conditionId")
         raw = document.get("rawEvidence")
-        if (
-            not isinstance(run_id, str)
-            or not isinstance(condition_id, str)
-            or binding.get("runId") != run_id
-            or binding.get("conditionId") != condition_id
-        ):
+        try:
+            run_id = UUID(str(run_id_value))
+            condition_id = UUID(str(condition_id_value))
+            binding_run_id = UUID(str(binding.get("runId")))
+            binding_condition_id = UUID(str(binding.get("conditionId")))
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                f"representative condition {index} binding is not a UUID"
+            ) from error
+        if binding_run_id != run_id or binding_condition_id != condition_id:
             raise ValueError(f"representative condition {index} identity differs")
         if run_id in seen_runs:
             raise ValueError("representative condition run identity is duplicated")
+        if condition_id in seen_conditions:
+            raise ValueError("representative condition identity is duplicated")
         seen_runs.add(run_id)
+        seen_conditions.add(condition_id)
         if not isinstance(raw, dict) or raw.get("evidenceScope") != scope:
             raise ValueError(f"representative condition {index} scope differs")
         request_count = document.get("requestCount")
         p95_ms = document.get("p95Ms")
         if (
-            isinstance(request_count, bool)
-            or not isinstance(request_count, int)
+            type(request_count) is not int
             or request_count < 1
             or isinstance(p95_ms, bool)
             or not isinstance(p95_ms, (int, float))
             or float(p95_ms) < 0
         ):
             raise ValueError(f"representative condition {index} result is incomplete")
-        _validate_completed_condition(
+        record_count, record_offsets = _validate_completed_condition(
             raw, condition=condition, request_count=request_count
         )
+        if seen_record_offsets.intersection(record_offsets):
+            raise ValueError("representative condition feedback records overlap")
+        seen_record_offsets.update(record_offsets)
+        condition_record_count += record_count
         evidence.append(document)
+    if condition_record_count != feedback_rows:
+        raise ValueError(
+            "representative feedback Parquet rows differ from condition records"
+        )
     return _ValidatedSources(
         manifest=manifest,
         evidence=tuple(evidence),
