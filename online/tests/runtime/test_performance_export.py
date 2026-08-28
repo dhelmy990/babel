@@ -13,7 +13,7 @@ import pytest
 from babel_online.feedback import InMemoryFeedbackBus, TopicPartition
 from babel_online.feedback.export import reconstruct_canonical_edges
 from babel_online.runtime.performance_worker import PerformanceCondition
-from tests.feedback.test_bus import feedback_event_v2
+from online.tests.feedback.test_bus import feedback_event_v2
 
 
 EXPERIMENT_ID = UUID("aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa")
@@ -52,6 +52,22 @@ def _completed_trial(cohort_size: int = 50):
         creator_count=cohort_size,
         population_bundle_path=None,
         conditions=tuple(conditions),
+    )
+
+
+def _completed_isolated_trial():
+    trial = _completed_trial()
+    conditions = tuple(
+        replace(condition, condition_index=index)
+        for index, condition in enumerate(trial.conditions[6:], start=1)
+    )
+    return SimpleNamespace(
+        **{
+            **trial.__dict__,
+            "evidence_scope": "representative_isolated_smoke",
+            "creator_count": 50,
+            "conditions": conditions,
+        }
     )
 
 
@@ -225,6 +241,62 @@ def test_representative_export_is_saved_with_non_formal_scope(tmp_path):
     assert manifest["formalPerformanceClaim"] is False
     assert manifest["conditionCount"] == 6
     assert manifest["feedbackParquet"]["rows"] == 6
+
+
+def test_isolated_representative_export_preserves_exact_formal_positions(tmp_path):
+    from babel_online.runtime.performance_export import (
+        export_completed_representative_trial,
+    )
+
+    trial = _completed_isolated_trial()
+    bus = InMemoryFeedbackBus()
+    events = _write_evidence(tmp_path / "conditions", trial, bus)
+    database = SimpleNamespace(
+        load_performance_experiment=lambda _trial_id: trial,
+        canonical_edges=lambda run_id: reconstruct_canonical_edges([events[run_id]]),
+    )
+
+    result = export_completed_representative_trial(
+        database=database,
+        experiment_id=trial.id,
+        evidence_root=tmp_path / "conditions",
+        output_root=tmp_path / "representative-export",
+        feedback_source=bus,
+    )
+
+    manifest = json.loads(result.manifest_path.read_text())
+    assert manifest["evidenceScope"] == "representative_isolated_smoke"
+    assert manifest["formalPerformanceClaim"] is False
+    assert manifest["conditionCount"] == 3
+    assert manifest["conditions"] == [
+        {
+            "conditionId": str(condition.id),
+            "runId": str(condition.run_id),
+            "conditionIndex": condition.condition_index,
+            "formalConditionIndex": condition.condition_index + 6,
+        }
+        for condition in trial.conditions
+    ]
+
+
+def test_isolated_representative_export_rejects_topology_drift(tmp_path):
+    from babel_online.runtime.performance_export import (
+        export_completed_representative_trial,
+    )
+
+    original = _completed_isolated_trial()
+    conditions = list(original.conditions)
+    conditions[1] = replace(conditions[1], topology="same_host_split")
+    trial = SimpleNamespace(**{**original.__dict__, "conditions": tuple(conditions)})
+
+    with pytest.raises(ValueError, match="exact completed condition matrix"):
+        export_completed_representative_trial(
+            database=SimpleNamespace(load_performance_experiment=lambda _id: trial),
+            experiment_id=trial.id,
+            evidence_root=tmp_path / "conditions",
+            output_root=tmp_path / "representative-export",
+            feedback_source=object(),
+        )
 
 
 @pytest.mark.parametrize("cohort_size", (100, 500))

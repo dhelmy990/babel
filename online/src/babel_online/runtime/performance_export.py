@@ -15,6 +15,13 @@ from ..feedback import FeedbackExport, FeedbackRecord, OffsetRange, TopicPartiti
 from ..feedback.export import export_offset_ranges
 
 
+_REPRESENTATIVE_TOPOLOGY_PROFILES = {
+    "representative_same_process_vs_split": ("same_process", "same_host_split"),
+    "representative_split_smoke": ("same_host_split",),
+    "representative_isolated_smoke": ("same_host_isolated",),
+}
+
+
 @dataclass(frozen=True, slots=True)
 class _ExpectedAcknowledgement:
     run_id: UUID
@@ -227,12 +234,9 @@ def _completed_formal_conditions(trial: Any) -> tuple[Any, ...]:
 
 def _completed_representative_conditions(trial: Any) -> tuple[Any, ...]:
     scope = getattr(trial, "evidence_scope", "formal")
-    if scope == "representative_same_process_vs_split":
-        topologies = ("same_process", "same_host_split")
-    elif scope == "representative_split_smoke":
-        topologies = ("same_host_split",)
-    else:
+    if not isinstance(scope, str) or scope not in _REPRESENTATIVE_TOPOLOGY_PROFILES:
         raise ValueError("performance trial is not an explicitly representative rerun")
+    topologies = _REPRESENTATIVE_TOPOLOGY_PROFILES[scope]
     expected_order = tuple(
         (topology, training_enabled, activation_enabled)
         for topology in topologies
@@ -255,6 +259,19 @@ def _completed_representative_conditions(trial: Any) -> tuple[Any, ...]:
     ):
         raise ValueError("representative trial lacks its exact completed condition matrix")
     return ordered
+
+
+def _condition_manifest_binding(condition: Any, evidence_scope: str) -> dict[str, object]:
+    binding: dict[str, object] = {
+        "conditionId": str(condition.id),
+        "runId": str(condition.run_id),
+    }
+    if evidence_scope == "representative_isolated_smoke":
+        binding.update(
+            conditionIndex=condition.condition_index,
+            formalConditionIndex=condition.condition_index + 6,
+        )
+    return binding
 
 
 def _export_completed_conditions(
@@ -318,7 +335,7 @@ def _export_completed_conditions(
             "evidenceScope": evidence_scope,
             "formalPerformanceClaim": evidence_scope == "formal",
             "conditions": [
-                {"conditionId": str(row.id), "runId": str(row.run_id)}
+                _condition_manifest_binding(row, evidence_scope)
                 for row in conditions
             ],
             "feedbackParquet": {

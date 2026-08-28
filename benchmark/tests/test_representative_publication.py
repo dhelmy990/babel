@@ -21,6 +21,7 @@ from babel_benchmark.representative_publication import (
 
 TRIAL_ID = UUID("00000000-0000-5000-8000-000000000130")
 SCOPE = "representative_same_process_vs_split"
+ISOLATED_SCOPE = "representative_isolated_smoke"
 
 
 def _sha256(path: Path) -> str:
@@ -124,6 +125,34 @@ def _write_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
     return export, evidence_root, report
 
 
+def _write_isolated_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
+    export, evidence_root, report = _write_inputs(tmp_path)
+    manifest_path = export / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["evidenceScope"] = ISOLATED_SCOPE
+    manifest["conditionCount"] = 3
+    manifest["conditions"] = [
+        {
+            **binding,
+            "conditionIndex": index,
+            "formalConditionIndex": index + 6,
+        }
+        for index, binding in enumerate(manifest["conditions"][:3], start=1)
+    ]
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n")
+
+    for index in range(1, 4):
+        evidence_path = evidence_root / f"{index:02d}" / "live-evidence.json"
+        document = json.loads(evidence_path.read_text())
+        raw = document["rawEvidence"]
+        raw["evidenceScope"] = ISOLATED_SCOPE
+        raw["conditionIdentity"]["topology"] = "same_host_isolated"
+        evidence_path.write_text(json.dumps(document, sort_keys=True) + "\n")
+    for index in range(4, 7):
+        shutil.rmtree(evidence_root / f"{index:02d}")
+    return export, evidence_root, report
+
+
 def test_build_and_publish_closed_representative_bundle(tmp_path: Path) -> None:
     export, evidence, report = _write_inputs(tmp_path)
     formal = tmp_path / "accepted" / "runs" / str(TRIAL_ID) / "manifest.json"
@@ -204,6 +233,98 @@ def test_build_and_publish_closed_representative_bundle(tmp_path: Path) -> None:
             bundle,
             repo_id="owner/private-dataset",
             token="secret-token-never-written",
+        )
+
+
+def test_build_isolated_bundle_closes_three_conditions_at_formal_positions(
+    tmp_path: Path,
+) -> None:
+    export, evidence, report = _write_isolated_inputs(tmp_path)
+
+    bundle = build_representative_run_bundle(
+        tmp_path / "accepted",
+        trial_id=TRIAL_ID,
+        export_root=export,
+        evidence_root=evidence,
+        report_path=report,
+    )
+
+    condition_files = {
+        path.relative_to(bundle.root).as_posix()
+        for path in (bundle.root / "conditions").rglob("*")
+        if path.is_file()
+    }
+    assert condition_files == {
+        "conditions/01/live-evidence.json",
+        "conditions/02/live-evidence.json",
+        "conditions/03/live-evidence.json",
+    }
+    manifest = json.loads(bundle.manifest_path.read_text())
+    summary = json.loads((bundle.root / "trial-summary.json").read_text())
+    results = json.loads((bundle.root / "trial-results.json").read_text())
+    assert manifest["evidenceScope"] == ISOLATED_SCOPE
+    assert manifest["formalPerformanceClaim"] is False
+    assert summary["conditionCount"] == 3
+    assert [row["conditionIndex"] for row in results["conditions"]] == [1, 2, 3]
+    assert [row["formalConditionIndex"] for row in results["conditions"]] == [
+        7,
+        8,
+        9,
+    ]
+
+
+def test_build_isolated_bundle_rejects_fourth_evidence_file(tmp_path: Path) -> None:
+    export, evidence, report = _write_isolated_inputs(tmp_path)
+    fourth = evidence / "04/live-evidence.json"
+    fourth.parent.mkdir()
+    shutil.copyfile(evidence / "03/live-evidence.json", fourth)
+
+    with pytest.raises(ValueError, match="inventory"):
+        build_representative_run_bundle(
+            tmp_path / "accepted",
+            trial_id=TRIAL_ID,
+            export_root=export,
+            evidence_root=evidence,
+            report_path=report,
+        )
+
+
+@pytest.mark.parametrize("condition_index", (2, 3))
+def test_build_isolated_bundle_rejects_nonzero_training_kafka_lag(
+    tmp_path: Path, condition_index: int
+) -> None:
+    export, evidence, report = _write_isolated_inputs(tmp_path)
+    evidence_path = evidence / f"{condition_index:02d}/live-evidence.json"
+    document = json.loads(evidence_path.read_text())
+    document["rawEvidence"]["feedbackKafka"]["finalTrainerState"]["kafkaLag"] = 1
+    evidence_path.write_text(json.dumps(document) + "\n")
+
+    with pytest.raises(ValueError, match="zero final Kafka lag"):
+        build_representative_run_bundle(
+            tmp_path / "accepted",
+            trial_id=TRIAL_ID,
+            export_root=export,
+            evidence_root=evidence,
+            report_path=report,
+        )
+
+
+def test_build_isolated_bundle_rejects_same_host_split_identity_drift(
+    tmp_path: Path,
+) -> None:
+    export, evidence, report = _write_isolated_inputs(tmp_path)
+    evidence_path = evidence / "01/live-evidence.json"
+    document = json.loads(evidence_path.read_text())
+    document["rawEvidence"]["conditionIdentity"]["topology"] = "same_host_split"
+    evidence_path.write_text(json.dumps(document) + "\n")
+
+    with pytest.raises(ValueError, match="ordered.*matrix"):
+        build_representative_run_bundle(
+            tmp_path / "accepted",
+            trial_id=TRIAL_ID,
+            export_root=export,
+            evidence_root=evidence,
+            report_path=report,
         )
 
 

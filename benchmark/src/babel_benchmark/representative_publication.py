@@ -8,6 +8,7 @@ import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Any
 from uuid import UUID
 
@@ -35,44 +36,83 @@ _ROOT_FILES = {
     "trial-results.json",
     "trial-summary.json",
 }
-_CONDITION_IDENTITIES = (
+
+
+@dataclass(frozen=True, slots=True)
+class _ConditionProfile:
+    condition_index: int
+    formal_condition_index: int
+    topology: str
+    training_enabled: bool
+    activation_enabled: bool
+
+    def identity(self) -> dict[str, object]:
+        return {
+            "topology": self.topology,
+            "trainingEnabled": self.training_enabled,
+            "activationEnabled": self.activation_enabled,
+            "retrievalBackend": "pgvector",
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class _ScopeProfile:
+    evidence_scope: str
+    conditions: tuple[_ConditionProfile, ...]
+    require_position_bindings: bool = False
+
+    @property
+    def condition_count(self) -> int:
+        return len(self.conditions)
+
+
+def _condition_profiles(
+    topologies: tuple[str, ...], *, formal_start: int
+) -> tuple[_ConditionProfile, ...]:
+    identities = tuple(
+        (topology, training_enabled, activation_enabled)
+        for topology in topologies
+        for training_enabled, activation_enabled in (
+            (False, False),
+            (True, False),
+            (True, True),
+        )
+    )
+    return tuple(
+        _ConditionProfile(
+            condition_index=index,
+            formal_condition_index=formal_start + index - 1,
+            topology=topology,
+            training_enabled=training_enabled,
+            activation_enabled=activation_enabled,
+        )
+        for index, (topology, training_enabled, activation_enabled) in enumerate(
+            identities, start=1
+        )
+    )
+
+
+_SCOPE_PROFILES = MappingProxyType(
     {
-        "topology": "same_process",
-        "trainingEnabled": False,
-        "activationEnabled": False,
-        "retrievalBackend": "pgvector",
-    },
-    {
-        "topology": "same_process",
-        "trainingEnabled": True,
-        "activationEnabled": False,
-        "retrievalBackend": "pgvector",
-    },
-    {
-        "topology": "same_process",
-        "trainingEnabled": True,
-        "activationEnabled": True,
-        "retrievalBackend": "pgvector",
-    },
-    {
-        "topology": "same_host_split",
-        "trainingEnabled": False,
-        "activationEnabled": False,
-        "retrievalBackend": "pgvector",
-    },
-    {
-        "topology": "same_host_split",
-        "trainingEnabled": True,
-        "activationEnabled": False,
-        "retrievalBackend": "pgvector",
-    },
-    {
-        "topology": "same_host_split",
-        "trainingEnabled": True,
-        "activationEnabled": True,
-        "retrievalBackend": "pgvector",
-    },
+        "representative_same_process_vs_split": _ScopeProfile(
+            evidence_scope="representative_same_process_vs_split",
+            conditions=_condition_profiles(
+                ("same_process", "same_host_split"), formal_start=1
+            ),
+        ),
+        "representative_isolated_smoke": _ScopeProfile(
+            evidence_scope="representative_isolated_smoke",
+            conditions=_condition_profiles(("same_host_isolated",), formal_start=7),
+            require_position_bindings=True,
+        ),
+    }
 )
+
+
+def _scope_profile(scope: object) -> _ScopeProfile:
+    if not isinstance(scope, str) or scope not in _SCOPE_PROFILES:
+        raise ValueError("representative evidence scope is unsupported")
+    return _SCOPE_PROFILES[scope]
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +138,15 @@ class RepresentativeRunPublicationReceipt:
     trial_id: UUID
     evidence_scope: str
     verified_files: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class _ValidatedSources:
+    manifest: dict[str, Any]
+    evidence: tuple[dict[str, Any], ...]
+    feedback_rows: int
+    edge_rows: int
+    profile: _ScopeProfile
 
 
 def _canonical(value: object) -> bytes:
@@ -200,11 +249,13 @@ def _condition_path(evidence_root: Path, index: int) -> Path:
 
 
 def _validate_completed_condition(
-    raw: dict[str, Any], *, index: int, request_count: int
+    raw: dict[str, Any], *, condition: _ConditionProfile, request_count: int
 ) -> None:
-    expected_identity = _CONDITION_IDENTITIES[index - 1]
+    expected_identity = condition.identity()
     if raw.get("conditionIdentity") != expected_identity:
-        raise ValueError("representative evidence is not the ordered 2x3 matrix")
+        raise ValueError(
+            "representative evidence is not the ordered 2x3 or isolated scope matrix"
+        )
     measurements = raw.get("measurements")
     if (
         not isinstance(measurements, list)
@@ -245,7 +296,7 @@ def _validate_sources(
     trial_id: UUID,
     export_root: Path,
     evidence_root: Path,
-) -> tuple[dict[str, Any], list[dict[str, Any]], int, int]:
+) -> _ValidatedSources:
     _reject_symlinked_path(export_root)
     _reject_symlinked_path(evidence_root)
     export_files = _regular_files(export_root)
@@ -262,18 +313,18 @@ def _validate_sources(
         raise ValueError("representative export belongs to another trial")
     if manifest.get("formalPerformanceClaim") is not False:
         raise ValueError("representative formalPerformanceClaim must be exactly false")
-    scope = manifest.get("evidenceScope")
-    if not isinstance(scope, str) or not scope.startswith("representative_"):
-        raise ValueError(
-            "representative evidence scope must start with representative_"
-        )
+    profile = _scope_profile(manifest.get("evidenceScope"))
+    scope = profile.evidence_scope
+    condition_count = profile.condition_count
     bindings = manifest.get("conditions")
     if (
-        manifest.get("conditionCount") != 6
+        manifest.get("conditionCount") != condition_count
         or not isinstance(bindings, list)
-        or len(bindings) != 6
+        or len(bindings) != condition_count
     ):
-        raise ValueError("representative export must declare exactly six conditions")
+        raise ValueError(
+            "representative export condition count differs from its exact scope profile"
+        )
     feedback_rows, _ = _validate_parquet(
         export_root,
         manifest,
@@ -295,12 +346,39 @@ def _validate_sources(
     ) or manifest.get("edgeJsonlSha256") != _sha256(export_root / "edges.jsonl"):
         raise ValueError("representative JSONL checksum differs")
 
+    condition_paths = tuple(
+        _condition_path(evidence_root, condition.condition_index)
+        for condition in profile.conditions
+    )
+    evidence_files = _regular_files(evidence_root)
+    expected_evidence_files = {
+        path.relative_to(evidence_root).as_posix() for path in condition_paths
+    }
+    if set(evidence_files) != expected_evidence_files:
+        raise ValueError(
+            "representative condition evidence inventory differs from the exact scope profile"
+        )
+
     evidence: list[dict[str, Any]] = []
     seen_runs: set[str] = set()
-    for index, binding in enumerate(bindings, start=1):
+    for condition, binding, path in zip(
+        profile.conditions, bindings, condition_paths, strict=True
+    ):
+        index = condition.condition_index
         if not isinstance(binding, dict):
             raise TypeError("representative condition binding is invalid")
-        path = _condition_path(evidence_root, index)
+        positions = (
+            binding.get("conditionIndex"),
+            binding.get("formalConditionIndex"),
+        )
+        expected_positions = (index, condition.formal_condition_index)
+        positions_declared = any(value is not None for value in positions)
+        if positions != expected_positions and (
+            profile.require_position_bindings or positions_declared
+        ):
+            raise ValueError(
+                f"representative condition {index} formal position differs"
+            )
         _reject_symlinked_path(path)
         _reject_secret(path)
         document = _json_object(path, f"representative condition {index}")
@@ -330,15 +408,25 @@ def _validate_sources(
             or float(p95_ms) < 0
         ):
             raise ValueError(f"representative condition {index} result is incomplete")
-        _validate_completed_condition(raw, index=index, request_count=request_count)
+        _validate_completed_condition(
+            raw, condition=condition, request_count=request_count
+        )
         evidence.append(document)
-    return manifest, evidence, feedback_rows, edge_rows
+    return _ValidatedSources(
+        manifest=manifest,
+        evidence=tuple(evidence),
+        feedback_rows=feedback_rows,
+        edge_rows=edge_rows,
+        profile=profile,
+    )
 
 
-def _condition_result(index: int, evidence: dict[str, Any]) -> dict[str, object]:
+def _condition_result(
+    condition: _ConditionProfile, evidence: dict[str, Any]
+) -> dict[str, object]:
     raw = evidence["rawEvidence"]
-    return {
-        "conditionIndex": index,
+    result: dict[str, object] = {
+        "conditionIndex": condition.condition_index,
         "conditionId": evidence["conditionId"],
         "runId": evidence["runId"],
         "requestCount": evidence["requestCount"],
@@ -350,6 +438,9 @@ def _condition_result(index: int, evidence: dict[str, Any]) -> dict[str, object]
             else None
         ),
     }
+    if condition.formal_condition_index != condition.condition_index:
+        result["formalConditionIndex"] = condition.formal_condition_index
+    return result
 
 
 def _model_lineage(evidence: list[dict[str, Any]]) -> dict[str, object]:
@@ -394,15 +485,19 @@ def build_representative_run_bundle(
     evidence_root: str | Path,
     report_path: str | Path,
 ) -> RepresentativeRunBundle:
-    """Validate and stage one completed representative six-condition trial."""
+    """Validate and stage one completed exact representative trial profile."""
     source_export = Path(export_root)
     source_evidence = Path(evidence_root)
     source_report = Path(report_path)
-    manifest, evidence, feedback_rows, edge_rows = _validate_sources(
+    validated = _validate_sources(
         trial_id=trial_id,
         export_root=source_export,
         evidence_root=source_evidence,
     )
+    manifest = validated.manifest
+    evidence = validated.evidence
+    profile = validated.profile
+    condition_count = profile.condition_count
     _reject_symlinked_path(source_report)
     if not source_report.is_file() or source_report.is_symlink():
         raise ValueError("representative report markdown is missing")
@@ -423,7 +518,7 @@ def build_representative_run_bundle(
         (partial / "export").mkdir()
         for name in sorted(_EXPORT_FILES):
             shutil.copyfile(source_export / name, partial / "export" / name)
-        for index in range(1, 7):
+        for index in range(1, condition_count + 1):
             destination = partial / "conditions" / f"{index:02d}" / "live-evidence.json"
             destination.parent.mkdir(parents=True)
             shutil.copyfile(_condition_path(source_evidence, index), destination)
@@ -434,8 +529,10 @@ def build_representative_run_bundle(
             "evidenceScope": scope,
             "formalPerformanceClaim": False,
             "conditions": [
-                _condition_result(index, document)
-                for index, document in enumerate(evidence, start=1)
+                _condition_result(condition, document)
+                for condition, document in zip(
+                    profile.conditions, evidence, strict=True
+                )
             ],
         }
         summary = {
@@ -444,9 +541,9 @@ def build_representative_run_bundle(
             "evidenceScope": scope,
             "formalPerformanceClaim": False,
             "creatorCohort": manifest.get("creatorCohort"),
-            "conditionCount": 6,
-            "feedbackRows": feedback_rows,
-            "edgeRows": edge_rows,
+            "conditionCount": condition_count,
+            "feedbackRows": validated.feedback_rows,
+            "edgeRows": validated.edge_rows,
         }
         bundle_manifest = {
             "schemaVersion": 1,
@@ -460,7 +557,7 @@ def build_representative_run_bundle(
                 | {f"export/{name}" for name in _EXPORT_FILES}
                 | {
                     f"conditions/{index:02d}/live-evidence.json"
-                    for index in range(1, 7)
+                    for index in range(1, condition_count + 1)
                 }
             ),
         }
@@ -496,7 +593,7 @@ def build_representative_run_bundle(
 
 def _validate_bundle_identity(
     bundle: RepresentativeRunBundle, manifest: dict[str, Any]
-) -> None:
+) -> _ScopeProfile:
     if (
         bundle.root.parent.name != str(bundle.trial_id)
         or bundle.root.parent.parent.name != "representative-runs"
@@ -505,15 +602,16 @@ def _validate_bundle_identity(
         raise ValueError(
             "representative bundle must remain beneath representative-runs"
         )
+    profile = _scope_profile(bundle.evidence_scope)
     if (
         manifest.get("artifactType") != "representative_performance_evidence"
         or manifest.get("namespace") != "representative-runs"
         or manifest.get("trialId") != str(bundle.trial_id)
         or manifest.get("formalPerformanceClaim") is not False
         or manifest.get("evidenceScope") != bundle.evidence_scope
-        or not bundle.evidence_scope.startswith("representative_")
     ):
         raise ValueError("representative bundle identity or namespace differs")
+    return profile
 
 
 def _validate_local_bundle(bundle: RepresentativeRunBundle) -> dict[str, str]:
@@ -525,10 +623,16 @@ def _validate_local_bundle(bundle: RepresentativeRunBundle) -> dict[str, str]:
     document = _json_object(files["checksums.json"], "representative checksums")
     if set(files) != set(document) | {"checksums.json"}:
         raise ValueError("representative bundle file inventory differs")
+    manifest = _json_object(files["manifest.json"], "representative manifest")
+    profile = _validate_bundle_identity(bundle, manifest)
+    condition_count = profile.condition_count
     expected = (
         _ROOT_FILES
         | {f"export/{name}" for name in _EXPORT_FILES}
-        | {f"conditions/{index:02d}/live-evidence.json" for index in range(1, 7)}
+        | {
+            f"conditions/{index:02d}/live-evidence.json"
+            for index in range(1, condition_count + 1)
+        }
     )
     if set(document) != expected:
         raise ValueError("representative bundle checksum inventory is incomplete")
@@ -546,15 +650,15 @@ def _validate_local_bundle(bundle: RepresentativeRunBundle) -> dict[str, str]:
             raise ValueError(f"representative bundle checksum mismatch: {name}")
         _reject_secret(files[name])
         checksums[name] = digest
-    manifest = _json_object(files["manifest.json"], "representative manifest")
-    _validate_bundle_identity(bundle, manifest)
     if manifest.get("files") != sorted(expected):
         raise ValueError("representative manifest inventory differs")
-    export, evidence, feedback_rows, edge_rows = _validate_sources(
+    validated = _validate_sources(
         trial_id=bundle.trial_id,
         export_root=bundle.root / "export",
         evidence_root=bundle.root / "conditions",
     )
+    if validated.profile != profile:
+        raise ValueError("representative bundle scope profile differs")
     for name in ("trial-summary.json", "trial-results.json", "model-lineage.json"):
         derived = _json_object(files[name], f"representative {name}")
         if (
@@ -565,14 +669,19 @@ def _validate_local_bundle(bundle: RepresentativeRunBundle) -> dict[str, str]:
             raise ValueError(f"representative {name} identity differs")
     summary = _json_object(files["trial-summary.json"], "representative trial summary")
     results = _json_object(files["trial-results.json"], "representative trial results")
+    expected_results = [
+        _condition_result(condition, document)
+        for condition, document in zip(
+            profile.conditions, validated.evidence, strict=True
+        )
+    ]
     if (
-        summary.get("feedbackRows") != feedback_rows
-        or summary.get("edgeRows") != edge_rows
-        or summary.get("conditionCount") != 6
-        or not isinstance(results.get("conditions"), list)
-        or len(results["conditions"]) != 6
-        or export.get("formalPerformanceClaim") is not False
-        or len(evidence) != 6
+        summary.get("feedbackRows") != validated.feedback_rows
+        or summary.get("edgeRows") != validated.edge_rows
+        or summary.get("conditionCount") != condition_count
+        or results.get("conditions") != expected_results
+        or validated.manifest.get("formalPerformanceClaim") is not False
+        or len(validated.evidence) != condition_count
         or not files["report.md"].read_text(encoding="utf-8").strip()
     ):
         raise ValueError("representative derived evidence is incomplete")
