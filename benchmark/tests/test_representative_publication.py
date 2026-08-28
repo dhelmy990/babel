@@ -203,10 +203,16 @@ def test_build_and_publish_closed_representative_bundle(tmp_path: Path) -> None:
         json.loads((bundle.root / "trial-summary.json").read_text())["feedbackRows"]
         == 2
     )
-    assert (
-        len(json.loads((bundle.root / "trial-results.json").read_text())["conditions"])
-        == 6
-    )
+    results = json.loads((bundle.root / "trial-results.json").read_text())
+    assert len(results["conditions"]) == 6
+    assert [row["formalConditionIndex"] for row in results["conditions"]] == [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+    ]
     assert json.loads((bundle.root / "model-lineage.json").read_text())[
         "sourceModelIds"
     ] == ["00000000-0000-5000-8000-000000000099"]
@@ -280,6 +286,23 @@ def test_build_isolated_bundle_rejects_fourth_evidence_file(tmp_path: Path) -> N
     shutil.copyfile(evidence / "03/live-evidence.json", fourth)
 
     with pytest.raises(ValueError, match="inventory"):
+        build_representative_run_bundle(
+            tmp_path / "accepted",
+            trial_id=TRIAL_ID,
+            export_root=export,
+            evidence_root=evidence,
+            report_path=report,
+        )
+
+
+def test_build_isolated_bundle_rejects_unpadded_condition_directories(
+    tmp_path: Path,
+) -> None:
+    export, evidence, report = _write_isolated_inputs(tmp_path)
+    for index in range(1, 4):
+        shutil.move(evidence / f"{index:02d}", evidence / str(index))
+
+    with pytest.raises(ValueError, match="zero-padded"):
         build_representative_run_bundle(
             tmp_path / "accepted",
             trial_id=TRIAL_ID,

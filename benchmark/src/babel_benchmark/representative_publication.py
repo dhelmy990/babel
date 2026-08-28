@@ -236,16 +236,12 @@ def _validate_parquet(
 
 
 def _condition_path(evidence_root: Path, index: int) -> Path:
-    candidates = [
-        evidence_root / f"{index:02d}" / "live-evidence.json",
-        evidence_root / str(index) / "live-evidence.json",
-    ]
-    present = [path for path in candidates if path.is_file()]
-    if len(present) != 1:
+    path = evidence_root / f"{index:02d}" / "live-evidence.json"
+    if not path.is_file():
         raise ValueError(
-            f"representative condition {index} must have exactly one live-evidence.json"
+            f"representative condition {index} must use its exact zero-padded evidence path"
         )
-    return present[0]
+    return path
 
 
 def _validate_completed_condition(
@@ -427,6 +423,7 @@ def _condition_result(
     raw = evidence["rawEvidence"]
     result: dict[str, object] = {
         "conditionIndex": condition.condition_index,
+        "formalConditionIndex": condition.formal_condition_index,
         "conditionId": evidence["conditionId"],
         "runId": evidence["runId"],
         "requestCount": evidence["requestCount"],
@@ -438,8 +435,6 @@ def _condition_result(
             else None
         ),
     }
-    if condition.formal_condition_index != condition.condition_index:
-        result["formalConditionIndex"] = condition.formal_condition_index
     return result
 
 
