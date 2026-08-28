@@ -649,6 +649,7 @@ def _performance_export(argv: list[str]) -> None:
 def _performance_rerun_create(argv: list[str]) -> None:
     """Prepare a checksum-verified, unapproved rerun from frozen trial bytes."""
     from .performance_rerun import (
+        ISOLATED_SMOKE_SCOPE,
         REPRESENTATIVE_SCOPE,
         SPLIT_SMOKE_SCOPE,
         create_representative_rerun,
@@ -664,16 +665,20 @@ def _performance_rerun_create(argv: list[str]) -> None:
     identity = parser.add_mutually_exclusive_group(required=True)
     identity.add_argument("--rerun-id", type=UUID)
     identity.add_argument("--nonce")
-    parser.add_argument("--matrix", choices=("2x3", "split-smoke"), default="2x3")
+    parser.add_argument(
+        "--matrix",
+        choices=("2x3", "split-smoke", "isolated-smoke"),
+        default="2x3",
+    )
     parser.add_argument("--warmup-seconds", type=int, default=5)
     parser.add_argument("--duration-seconds", type=int, default=25)
     parser.add_argument("--target-rps", type=float, default=5.0)
     arguments = parser.parse_args(argv)
-    scope = (
-        REPRESENTATIVE_SCOPE
-        if arguments.matrix == "2x3"
-        else SPLIT_SMOKE_SCOPE
-    )
+    scope = {
+        "2x3": REPRESENTATIVE_SCOPE,
+        "split-smoke": SPLIT_SMOKE_SCOPE,
+        "isolated-smoke": ISOLATED_SMOKE_SCOPE,
+    }[arguments.matrix]
     receipt = create_representative_rerun(
         database=RuntimeDatabase(_required("BABEL_DATABASE_URL")),
         source_trial_id=arguments.source_trial_id,
@@ -685,13 +690,14 @@ def _performance_rerun_create(argv: list[str]) -> None:
         duration_seconds=arguments.duration_seconds,
         target_rps=arguments.target_rps,
     )
+    condition_count = 6 if receipt.evidence_scope == REPRESENTATIVE_SCOPE else 3
     print(
         json.dumps(
             {
                 "trialId": str(receipt.rerun_id),
                 "sourceTrialId": str(receipt.source_trial_id),
                 "evidenceScope": receipt.evidence_scope,
-                "conditionCount": 6 if receipt.evidence_scope == REPRESENTATIVE_SCOPE else 3,
+                "conditionCount": condition_count,
                 "requestLimit": receipt.request_limit,
                 "warmupSeconds": receipt.warmup_seconds,
                 "durationSeconds": receipt.duration_seconds,

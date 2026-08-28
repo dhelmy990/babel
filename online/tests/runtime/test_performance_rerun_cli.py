@@ -101,6 +101,50 @@ def test_cli_labels_optional_split_only_smoke(monkeypatch, tmp_path: Path, capsy
     assert json.loads(capsys.readouterr().out)["conditionCount"] == 3
 
 
+def test_cli_labels_isolated_smoke_as_three_condition_non_formal(
+    monkeypatch, tmp_path: Path, capsys
+):
+    source_id = UUID("aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa")
+    rerun_id = UUID("bbbbbbbb-bbbb-5bbb-8bbb-bbbbbbbbbbbb")
+    calls = []
+    monkeypatch.setenv("BABEL_DATABASE_URL", "postgresql://unused")
+    monkeypatch.setattr(runtime_cli, "RuntimeDatabase", lambda _dsn: object())
+    monkeypatch.setattr(
+        "babel_online.runtime.performance_rerun.create_representative_rerun",
+        lambda **values: calls.append(values)
+        or SimpleNamespace(
+            rerun_id=rerun_id,
+            source_trial_id=source_id,
+            evidence_scope="representative_isolated_smoke",
+            population_manifest_sha256="a" * 64,
+            workload_identity=("b" * 64,) * 6,
+            request_limit=125,
+            warmup_seconds=5,
+            duration_seconds=25,
+            target_rps=5.0,
+        ),
+    )
+
+    runtime_cli.main(
+        [
+            "performance-rerun-create",
+            "--source-trial-id",
+            str(source_id),
+            "--state-root",
+            str(tmp_path),
+            "--nonce",
+            "isolated-interview-smoke",
+            "--matrix",
+            "isolated-smoke",
+        ]
+    )
+
+    assert calls[0]["evidence_scope"] == "representative_isolated_smoke"
+    output = json.loads(capsys.readouterr().out)
+    assert output["conditionCount"] == 3
+    assert output["formalPerformanceClaim"] is False
+
+
 def test_cli_exports_representative_results_with_non_formal_receipt(
     monkeypatch, tmp_path: Path, capsys
 ):

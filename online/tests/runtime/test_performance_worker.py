@@ -29,6 +29,7 @@ from babel_online.runtime.performance_worker import (
     create_performance_control_app,
     validate_condition3_gate_evidence,
 )
+from babel_online.runtime.performance_rerun import ISOLATED_SMOKE_SCOPE
 
 
 EXPERIMENT_ID = UUID("aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa")
@@ -1326,27 +1327,31 @@ def test_control_app_authenticates_exact_cpp_routes(tmp_path: Path):
     rerun_id = UUID("dddddddd-dddd-5ddd-8ddd-dddddddddddd")
     prepared = []
     manager.prepare_representative_rerun = lambda **values: prepared.append(values)
-    assert (
-        client.post(
-            f"/v1/performance/{EXPERIMENT_ID}/prepare-rerun/{rerun_id}",
-            params={
-                "matrix": "2x3",
-                "warmup_seconds": 5,
-                "duration_seconds": 25,
-                "target_rps": 5.0,
-            },
-            headers={"X-Babel-Worker-Token": token},
-        ).status_code
-        == 202
-    )
-    assert prepared == [{
-        "source_trial_id": EXPERIMENT_ID,
-        "rerun_id": rerun_id,
-        "matrix": "2x3",
-        "warmup_seconds": 5,
-        "duration_seconds": 25,
-        "target_rps": 5.0,
-    }]
+    for matrix in ("2x3", "split-smoke", "isolated-smoke"):
+        assert (
+            client.post(
+                f"/v1/performance/{EXPERIMENT_ID}/prepare-rerun/{rerun_id}",
+                params={
+                    "matrix": matrix,
+                    "warmup_seconds": 5,
+                    "duration_seconds": 25,
+                    "target_rps": 5.0,
+                },
+                headers={"X-Babel-Worker-Token": token},
+            ).status_code
+            == 202
+        )
+    assert prepared == [
+        {
+            "source_trial_id": EXPERIMENT_ID,
+            "rerun_id": rerun_id,
+            "matrix": matrix,
+            "warmup_seconds": 5,
+            "duration_seconds": 25,
+            "target_rps": 5.0,
+        }
+        for matrix in ("2x3", "split-smoke", "isolated-smoke")
+    ]
     assert (
         client.post(
             f"/v1/performance/{EXPERIMENT_ID}/graceful-stop",
@@ -1354,6 +1359,50 @@ def test_control_app_authenticates_exact_cpp_routes(tmp_path: Path):
         ).status_code
         == 202
     )
+
+
+def test_manager_routes_isolated_smoke_to_exact_scope(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = FakeDatabase()
+    rerun_id = UUID("dddddddd-dddd-5ddd-8ddd-dddddddddddd")
+    created = []
+    started = []
+    monkeypatch.setattr(
+        "babel_online.runtime.performance_rerun.create_representative_rerun",
+        lambda **values: created.append(values),
+    )
+    manager = PerformanceJobManager(
+        database=database,
+        output_root=tmp_path,
+        population_builder=lambda *_args: None,
+        workload_freezer=lambda *_args: None,
+        condition_runner=lambda *_args: None,
+    )
+    monkeypatch.setattr(manager, "start", started.append)
+
+    manager.prepare_representative_rerun(
+        source_trial_id=EXPERIMENT_ID,
+        rerun_id=rerun_id,
+        matrix="isolated-smoke",
+        warmup_seconds=5,
+        duration_seconds=25,
+        target_rps=5.0,
+    )
+
+    assert created == [
+        {
+            "database": database,
+            "source_trial_id": EXPERIMENT_ID,
+            "rerun_id": rerun_id,
+            "state_root": tmp_path,
+            "evidence_scope": ISOLATED_SMOKE_SCOPE,
+            "warmup_seconds": 5,
+            "duration_seconds": 25,
+            "target_rps": 5.0,
+        }
+    ]
+    assert started == [rerun_id]
 
 
 def test_real_population_builder_closes_trial_into_canonical_qwen_run(

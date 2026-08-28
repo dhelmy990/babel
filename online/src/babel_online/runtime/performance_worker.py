@@ -1536,21 +1536,25 @@ class PerformanceJobManager:
     ) -> None:
         """Stage verified frozen inputs; execution still waits on dashboard approval."""
         from .performance_rerun import (
+            ISOLATED_SMOKE_SCOPE,
             REPRESENTATIVE_SCOPE,
             SPLIT_SMOKE_SCOPE,
             create_representative_rerun,
         )
 
-        if matrix not in {"2x3", "split-smoke"}:
+        scopes = {
+            "2x3": REPRESENTATIVE_SCOPE,
+            "split-smoke": SPLIT_SMOKE_SCOPE,
+            "isolated-smoke": ISOLATED_SMOKE_SCOPE,
+        }
+        if matrix not in scopes:
             raise ValueError("representative rerun matrix is unsupported")
         create_representative_rerun(
             database=self.database,
             source_trial_id=source_trial_id,
             rerun_id=rerun_id,
             state_root=self.output_root,
-            evidence_scope=(
-                REPRESENTATIVE_SCOPE if matrix == "2x3" else SPLIT_SMOKE_SCOPE
-            ),
+            evidence_scope=scopes[matrix],
             warmup_seconds=warmup_seconds,
             duration_seconds=duration_seconds,
             target_rps=target_rps,
