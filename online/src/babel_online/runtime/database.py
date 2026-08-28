@@ -580,11 +580,20 @@ class RuntimeDatabase:
                 raise PerformanceBindingConflict(
                     "representative rerun source changed or destination already exists"
                 )
-            topologies = (
-                ("same_process", "same_host_split")
-                if binding.evidence_scope == "representative_same_process_vs_split"
-                else ("same_host_split",)
-            )
+            representative_topologies = {
+                "representative_same_process_vs_split": (
+                    "same_process",
+                    "same_host_split",
+                ),
+                "representative_split_smoke": ("same_host_split",),
+                "representative_isolated_smoke": ("same_host_isolated",),
+            }
+            try:
+                topologies = representative_topologies[binding.evidence_scope]
+            except KeyError:
+                raise ValueError(
+                    "representative rerun evidence scope is unsupported"
+                ) from None
             conditions = []
             condition_values = (
                 (topology, training, activation)

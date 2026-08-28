@@ -5,7 +5,7 @@ import json
 import struct
 from pathlib import Path
 from types import SimpleNamespace
-from uuid import UUID
+from uuid import UUID, uuid5
 
 import pytest
 from babel_online.contracts import (
@@ -455,6 +455,49 @@ def test_database_creates_labelled_unapproved_split_rerun_from_locked_source(
         (True, True),
     ]
     assert "population_ready" in cursor.queries[2][0]
+
+
+def test_database_creates_only_the_isolated_smoke_trio(tmp_path: Path) -> None:
+    from babel_online.runtime.performance_rerun import (
+        ISOLATED_SMOKE_SCOPE,
+        RepresentativeRerunBinding,
+    )
+
+    source_id = UUID(int=101)
+    rerun_id = UUID(int=102)
+    binding = RepresentativeRerunBinding(
+        rerun_id=rerun_id,
+        source_trial_id=source_id,
+        evidence_scope=ISOLATED_SMOKE_SCOPE,
+        population_run_id=UUID(int=103),
+        population_path=(tmp_path / "source" / "population").resolve(),
+        population_manifest_sha256="a" * 64,
+        workload_path=(tmp_path / "source" / "workload").resolve(),
+        workload_identity=tuple(str(index) * 64 for index in range(6)),
+        warmup_seconds=5,
+        duration_seconds=25,
+        target_rps=5.0,
+        request_limit=150,
+    )
+    cursor = RecordingCursor(rows=[(rerun_id,)])
+    database = RuntimeDatabase(
+        "unused", connect=lambda: RecordingConnection(cursor)
+    )
+
+    database.create_representative_performance_rerun(binding)
+
+    _condition_query, condition_rows = cursor.queries[1]
+    assert len(condition_rows) == 3
+    assert [row[0] for row in condition_rows] == [
+        uuid5(rerun_id, f"condition:{index}") for index in range(1, 4)
+    ]
+    assert [row[2] for row in condition_rows] == [1, 2, 3]
+    assert [row[3] for row in condition_rows] == ["same_host_isolated"] * 3
+    assert [(row[4], row[5]) for row in condition_rows] == [
+        (False, False),
+        (True, False),
+        (True, True),
+    ]
 
 
 def test_database_persists_performance_progress_and_result_ratios() -> None:

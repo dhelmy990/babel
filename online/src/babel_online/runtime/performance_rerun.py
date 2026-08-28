@@ -15,6 +15,10 @@ from .performance_worker import FrozenWorkload, PerformanceExperiment
 
 REPRESENTATIVE_SCOPE = "representative_same_process_vs_split"
 SPLIT_SMOKE_SCOPE = "representative_split_smoke"
+ISOLATED_SMOKE_SCOPE = "representative_isolated_smoke"
+_SUPPORTED_REPRESENTATIVE_SCOPES = frozenset(
+    {REPRESENTATIVE_SCOPE, SPLIT_SMOKE_SCOPE, ISOLATED_SMOKE_SCOPE}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,7 +56,7 @@ def validate_representative_reuse(
     """Fail closed unless every reusable population/workload identity is exact."""
     if rerun_id == source.id:
         raise ValueError("rerun identity must differ from source trial")
-    if evidence_scope not in {REPRESENTATIVE_SCOPE, SPLIT_SMOKE_SCOPE}:
+    if evidence_scope not in _SUPPORTED_REPRESENTATIVE_SCOPES:
         raise ValueError("representative rerun evidence scope is unsupported")
     if warmup_seconds < 0 or duration_seconds <= 0 or target_rps <= 0:
         raise ValueError("representative rerun load window is invalid")
@@ -181,6 +185,7 @@ def create_representative_rerun(
 
 
 __all__ = [
+    "ISOLATED_SMOKE_SCOPE",
     "REPRESENTATIVE_SCOPE",
     "SPLIT_SMOKE_SCOPE",
     "RepresentativeRerunBinding",

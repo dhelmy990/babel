@@ -133,20 +133,22 @@ class PerformanceExperiment:
             raise ValueError("saved trial does not contain its exact condition matrix")
 
     def validate_runnable_contract(self) -> None:
-        """Accept formal matrices or the explicitly non-formal split-service trio."""
+        """Accept formal matrices or an explicitly scoped representative matrix."""
         if self.evidence_scope == "formal":
             self.validate_formal_defaults()
             return
-        if self.evidence_scope not in {
-            "representative_same_process_vs_split",
-            "representative_split_smoke",
-        }:
+        representative_topologies = {
+            "representative_same_process_vs_split": (
+                "same_process",
+                "same_host_split",
+            ),
+            "representative_split_smoke": ("same_host_split",),
+            "representative_isolated_smoke": ("same_host_isolated",),
+        }
+        try:
+            topologies = representative_topologies[self.evidence_scope]
+        except KeyError:
             raise ValueError("saved trial has an unsupported evidence scope")
-        topologies = (
-            ("same_process", "same_host_split")
-            if self.evidence_scope == "representative_same_process_vs_split"
-            else ("same_host_split",)
-        )
         expected = {
             (topology, training, activation)
             for topology in topologies
@@ -174,7 +176,7 @@ class PerformanceExperiment:
             or actual != expected
         ):
             raise ValueError(
-                "saved representative trial does not contain the exact same-host split trio"
+                "saved representative trial does not contain its exact topology matrix"
             )
 
 

@@ -8,6 +8,7 @@ from uuid import UUID, uuid5
 import pytest
 
 from babel_online.runtime.performance_rerun import (
+    ISOLATED_SMOKE_SCOPE,
     REPRESENTATIVE_SCOPE,
     SPLIT_SMOKE_SCOPE,
     create_representative_rerun,
@@ -186,6 +187,29 @@ def test_reuse_validation_binds_exact_population_and_workload_identity(tmp_path:
     assert binding.request_limit == 150
 
 
+def test_isolated_smoke_reuse_preserves_scope_population_and_request_limit(
+    tmp_path: Path,
+):
+    population_dir = tmp_path / "population"
+    population_dir.mkdir()
+    source = _ready_source(population_dir)
+    workload_dir = tmp_path / "workload"
+    workload_dir.mkdir()
+    workload = FrozenWorkload(workload_dir, ("1" * 64,) * 6)
+
+    binding = validate_representative_reuse(
+        source=source,
+        manifest=_population_manifest(),
+        workload=workload,
+        rerun_id=RERUN_ID,
+        evidence_scope=ISOLATED_SMOKE_SCOPE,
+    )
+
+    assert binding.evidence_scope == ISOLATED_SMOKE_SCOPE
+    assert binding.population_run_id == POPULATION_RUN_ID
+    assert binding.request_limit == 150
+
+
 @pytest.mark.parametrize(
     ("source_change", "manifest_change", "message"),
     [
@@ -340,6 +364,41 @@ def test_split_only_smoke_is_distinctly_labelled_and_runnable(tmp_path: Path):
     )
 
     trial.validate_runnable_contract()
+
+
+def test_isolated_smoke_runs_exact_same_host_isolated_trio(tmp_path: Path):
+    conditions = tuple(
+        PerformanceCondition(
+            id=uuid5(RERUN_ID, f"condition:{index}"),
+            condition_index=index,
+            topology="same_host_isolated",
+            training_enabled=training,
+            activation_enabled=activation,
+            run_id=None,
+            status="pending",
+        )
+        for index, (training, activation) in enumerate(
+            ((False, False), (True, False), (True, True)), start=1
+        )
+    )
+    trial = replace(
+        _trial(),
+        id=RERUN_ID,
+        evidence_scope=ISOLATED_SMOKE_SCOPE,
+        source_trial_id=SOURCE_ID,
+        source_workload_path=str(tmp_path / "workload"),
+        source_workload_identity=("1" * 64,) * 6,
+        replay_request_limit=150,
+        population_ready=True,
+        population_run_id=POPULATION_RUN_ID,
+        population_bundle_path=str(tmp_path / "population"),
+        population_manifest_sha256="2" * 64,
+        conditions=conditions,
+    )
+
+    trial.validate_runnable_contract()
+    with pytest.raises(ValueError, match="formal"):
+        trial.validate_formal_defaults()
 
 
 def test_representative_population_may_only_name_declared_source_trial(tmp_path: Path):
