@@ -360,28 +360,66 @@ not create another instance or resource:
   ZONE='asia-southeast1-b'
   EXPECTED_SOURCE_COMMIT='<final audited 40-char SHA>'
   [[ "$EXPECTED_SOURCE_COMMIT" =~ ^[a-f0-9]{40}$ ]]
-  git cat-file -e "$EXPECTED_SOURCE_COMMIT^{commit}"
+  RESOLVED_SOURCE_COMMIT="$(
+    git rev-parse --verify "$EXPECTED_SOURCE_COMMIT^{commit}"
+  )"
+  test "$RESOLVED_SOURCE_COMMIT" = "$EXPECTED_SOURCE_COMMIT"
   git merge-base --is-ancestor \
     b5b0c5d2ae5cd2d9535402e6cbdeb2d6f061fc5d \
     "$EXPECTED_SOURCE_COMMIT"
+  git fetch origin demo
+  REMOTE_DEMO_BEFORE="$(
+    git rev-parse --verify 'refs/remotes/origin/demo^{commit}'
+  )"
+  git merge-base --is-ancestor \
+    "$REMOTE_DEMO_BEFORE" \
+    "$EXPECTED_SOURCE_COMMIT"
 
-  VM_WAS_TERMINATED=false
+  STARTED_VM_HERE=false
+  describe_vm_status() {
+    gcloud compute instances describe "$VM" \
+      --project "$PROJECT" \
+      --zone "$ZONE" \
+      --format='value(status)'
+  }
   cleanup_local_preflight() {
     local status="${1:-1}"
     local current_status=''
+    local cleanup_verified=false
+    local stop_issued=false
     trap - ERR INT TERM HUP
     set +e
-    if [[ "$VM_WAS_TERMINATED" == true ]]; then
-      current_status="$(
-        gcloud compute instances describe "$VM" \
-          --project "$PROJECT" \
-          --zone "$ZONE" \
-          --format='value(status)'
-      )"
-      if [[ "$current_status" == RUNNING ]]; then
-        gcloud compute instances stop "$VM" \
-          --project "$PROJECT" \
-          --zone "$ZONE"
+    if [[ "$STARTED_VM_HERE" == true ]]; then
+      for _ in $(seq 1 120); do
+        current_status="$(describe_vm_status 2>/dev/null)" \
+          || current_status='UNKNOWN'
+        case "$current_status" in
+          TERMINATED)
+            cleanup_verified=true
+            break
+            ;;
+          RUNNING)
+            if [[ "$stop_issued" == false ]]; then
+              stop_issued=true
+              gcloud compute instances stop "$VM" \
+                --project "$PROJECT" \
+                --zone "$ZONE"
+            fi
+            ;;
+          STAGING|PROVISIONING|REPAIRING|STOPPING|SUSPENDING|SUSPENDED)
+            ;;
+          *)
+            ;;
+        esac
+        sleep 5
+      done
+      if [[ "$cleanup_verified" != true ]]; then
+        printf '%s\n' \
+          'FATAL: cleanup could not verify TERMINATED for babel-gpu-serving.' \
+          'Run this exact manual stop command and verify TERMINATED:' \
+          'gcloud compute instances stop babel-gpu-serving --project chloe-tutoring-bot --zone asia-southeast1-b' \
+          >&2
+        exit 125
       fi
     fi
     exit "$status"
@@ -391,40 +429,109 @@ not create another instance or resource:
   trap 'cleanup_local_preflight 143' TERM
   trap 'cleanup_local_preflight 129' HUP
 
-  PRIOR_VM_STATUS="$(
-    gcloud compute instances describe "$VM" \
-      --project "$PROJECT" \
-      --zone "$ZONE" \
-      --format='value(status)'
-  )"
+  PRIOR_VM_STATUS="$(describe_vm_status)"
   case "$PRIOR_VM_STATUS" in
     RUNNING)
       ;;
     TERMINATED)
-      VM_WAS_TERMINATED=true
+      # Arm ownership first: a client-side error can still leave an
+      # asynchronously accepted start request transitioning the instance.
+      STARTED_VM_HERE=true
       gcloud compute instances start "$VM" \
         --project "$PROJECT" \
         --zone "$ZONE"
       ;;
     *)
-      echo "unexpected VM status: $PRIOR_VM_STATUS" >&2
+      echo "unexpected initial VM status: $PRIOR_VM_STATUS" >&2
       false
       ;;
   esac
 
-  RUN_ID="$(
+  VM_RUNNING=false
+  for _ in $(seq 1 120); do
+    if [[ "$(describe_vm_status)" == RUNNING ]]; then
+      VM_RUNNING=true
+      break
+    fi
+    sleep 5
+  done
+  test "$VM_RUNNING" = true
+
+  RUN_IDS_BEFORE="$(
     gh run list \
       --workflow deploy-gcp-demo.yml \
+      --branch demo \
       --commit "$EXPECTED_SOURCE_COMMIT" \
-      --limit 1 \
+      --limit 100 \
       --json databaseId \
-      --jq '.[0].databaseId'
+      --jq '.[].databaseId'
   )"
+
+  PUSH_WAS_NOOP=false
+  if [[ "$REMOTE_DEMO_BEFORE" == "$EXPECTED_SOURCE_COMMIT" ]]; then
+    PUSH_WAS_NOOP=true
+  fi
+  git push origin "$EXPECTED_SOURCE_COMMIT:refs/heads/demo"
+
+  REMOTE_DEMO_LINE="$(
+    git ls-remote --exit-code origin refs/heads/demo
+  )"
+  IFS=$'\t' read -r REMOTE_DEMO_HEAD REMOTE_DEMO_REF \
+    <<< "$REMOTE_DEMO_LINE"
+  test "$REMOTE_DEMO_REF" = refs/heads/demo
+  test "$REMOTE_DEMO_HEAD" = "$EXPECTED_SOURCE_COMMIT"
+
+  RUN_ID=''
+  REQUIRE_NEW_RUN=false
+  if [[ "$PUSH_WAS_NOOP" == true ]]; then
+    RUN_ID="$(
+      gh run list \
+        --workflow deploy-gcp-demo.yml \
+        --branch demo \
+        --commit "$EXPECTED_SOURCE_COMMIT" \
+        --status success \
+        --limit 1 \
+        --json databaseId \
+        --jq '.[0].databaseId // empty'
+    )"
+    if ! [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+      RUN_ID=''
+      test "$REMOTE_DEMO_HEAD" = "$EXPECTED_SOURCE_COMMIT"
+      test "$(describe_vm_status)" = RUNNING
+      gh workflow run deploy-gcp-demo.yml --ref demo
+      REQUIRE_NEW_RUN=true
+    fi
+  else
+    REQUIRE_NEW_RUN=true
+  fi
+
+  if [[ "$REQUIRE_NEW_RUN" == true ]]; then
+    for _ in $(seq 1 120); do
+      CANDIDATE_RUN_IDS="$(
+        gh run list \
+          --workflow deploy-gcp-demo.yml \
+          --branch demo \
+          --commit "$EXPECTED_SOURCE_COMMIT" \
+          --limit 20 \
+          --json databaseId \
+          --jq '.[].databaseId'
+      )"
+      while IFS= read -r candidate_run_id; do
+        [[ "$candidate_run_id" =~ ^[1-9][0-9]*$ ]] || continue
+        if ! grep -Fqx "$candidate_run_id" <<< "$RUN_IDS_BEFORE"; then
+          RUN_ID="$candidate_run_id"
+          break
+        fi
+      done <<< "$CANDIDATE_RUN_IDS"
+      [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]] && break
+      sleep 5
+    done
+  fi
   [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]]
   gh run watch "$RUN_ID" --exit-status
   DEPLOY_RUN_JSON="$(
     gh run view "$RUN_ID" \
-      --json databaseId,headSha,conclusion,jobs
+      --json databaseId,headSha,headBranch,conclusion,event,jobs,workflowName
   )"
   python3 - "$EXPECTED_SOURCE_COMMIT" "$RUN_ID" "$DEPLOY_RUN_JSON" <<'PY'
 import json
@@ -435,8 +542,10 @@ run = json.loads(encoded)
 jobs = run.get("jobs")
 if (
     run.get("databaseId") != int(expected_run_id)
-    or
-    run.get("headSha") != expected
+    or run.get("workflowName") != "Deploy GCP demo"
+    or run.get("headBranch") != "demo"
+    or run.get("headSha") != expected
+    or run.get("event") not in {"push", "workflow_dispatch"}
     or run.get("conclusion") != "success"
     or not isinstance(jobs, list)
     or not any(
@@ -454,16 +563,24 @@ PY
 )
 ```
 
-If that workflow check finds no success, stop. Put only the reviewed, audited
-commit on the `demo` branch through the normal reviewed process, run **Deploy
-GCP demo**, wait for its `publish-and-deploy` job to succeed, and repeat the
-check. This runbook deliberately contains no blind `git push` or deployment of
-an unspecified working tree. The strict block stops the VM on an error or
-terminal signal only when it observed `TERMINATED` and started that VM; a VM
-that was already `RUNNING` is not stopped. On success it disarms cleanup and
-leaves the VM running for SSH. Record the printed `RUN_ID` and
-`EXPECTED_SOURCE_COMMIT`: shell variables do not cross the code fences or SSH
-session, so both values are entered again below.
+The block is the complete safe deployment sequence. It fetches `origin/demo`,
+requires the remote branch to be an ancestor of the exact local commit, and
+uses one non-force exact-SHA push—never a merge or force push. A changed push
+must produce a new exact workflow run. A no-op push may reuse a successful
+exact run; otherwise the block verifies the remote head and running VM before
+dispatching an exact `demo` run itself. Selection excludes every matching run
+seen before the trigger, so an older failed run cannot be mistaken for the new
+deployment.
+
+Cleanup owns the VM only when this block observed `TERMINATED` and initiated
+its start. On an error or terminal signal it polls transitional states,
+requests the exact stop once after `RUNNING`, and verifies `TERMINATED`. If it
+cannot verify cleanup within the bound, it fails loudly with the exact manual
+stop command. A VM that was already `RUNNING` remains unowned and is not
+stopped. On verified deployment success cleanup is disarmed and the VM remains
+running for SSH. Record the printed `RUN_ID` and `EXPECTED_SOURCE_COMMIT`:
+shell variables do not cross the code fences or SSH session, so both values
+are entered again below.
 
 Use only the existing `babel-gpu-serving` VM in project
 `chloe-tutoring-bot`, zone `asia-southeast1-b`, and connect through IAP:
