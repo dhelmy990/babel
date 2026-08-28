@@ -347,6 +347,68 @@ export, import, audit, or re-encode it. The hard
 Only Qwen encoding and new-request serving use CUDA in this smoke. The CPU
 trainer, Kafka, PostgreSQL, and index work remain unchanged.
 
+On the local workstation, select the final audited commit explicitly. It must
+include the isolated-topology persistence fix at
+`b5b0c5d2ae5cd2d9535402e6cbdeb2d6f061fc5d`. Start only the existing VM; do
+not create another instance or resource:
+
+```bash
+(
+  set -euo pipefail
+  EXPECTED_SOURCE_COMMIT='<final audited 40-char SHA>'
+  [[ "$EXPECTED_SOURCE_COMMIT" =~ ^[a-f0-9]{40}$ ]]
+  git cat-file -e "$EXPECTED_SOURCE_COMMIT^{commit}"
+  git merge-base --is-ancestor \
+    b5b0c5d2ae5cd2d9535402e6cbdeb2d6f061fc5d \
+    "$EXPECTED_SOURCE_COMMIT"
+  gcloud compute instances start babel-gpu-serving \
+    --project chloe-tutoring-bot \
+    --zone asia-southeast1-b
+
+  DEPLOY_RUN_ID="$(
+    gh run list \
+      --workflow deploy-gcp-demo.yml \
+      --commit "$EXPECTED_SOURCE_COMMIT" \
+      --status success \
+      --limit 1 \
+      --json databaseId \
+      --jq '.[0].databaseId'
+  )"
+  [[ "$DEPLOY_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+  DEPLOY_RUN_JSON="$(
+    gh run view "$DEPLOY_RUN_ID" \
+      --json databaseId,headSha,conclusion,jobs
+  )"
+  python3 - "$EXPECTED_SOURCE_COMMIT" "$DEPLOY_RUN_JSON" <<'PY'
+import json
+import sys
+
+expected, encoded = sys.argv[1:]
+run = json.loads(encoded)
+jobs = run.get("jobs")
+if (
+    run.get("headSha") != expected
+    or run.get("conclusion") != "success"
+    or not isinstance(jobs, list)
+    or not any(
+        job.get("name") == "publish-and-deploy"
+        and job.get("conclusion") == "success"
+        for job in jobs
+    )
+):
+    raise SystemExit("exact commit lacks a successful Deploy GCP demo deployment")
+print(f"verified deployment workflow run {run['databaseId']}")
+PY
+  printf 'EXPECTED_SOURCE_COMMIT=%s\n' "$EXPECTED_SOURCE_COMMIT"
+)
+```
+
+If that workflow check finds no success, stop. Put only the reviewed, audited
+commit on the `demo` branch through the normal reviewed process, run **Deploy
+GCP demo**, wait for its `publish-and-deploy` job to succeed, and repeat the
+check. This runbook deliberately contains no blind `git push` or deployment of
+an unspecified working tree.
+
 Use only the existing `babel-gpu-serving` VM in project
 `chloe-tutoring-bot`, zone `asia-southeast1-b`, and connect through IAP:
 
@@ -371,6 +433,8 @@ readable by that operator rather than becoming root-owned:
 ```bash
 set -euo pipefail
 test "$(id -u)" -eq 0
+EXPECTED_SOURCE_COMMIT='<same final audited 40-char SHA printed locally>'
+[[ "$EXPECTED_SOURCE_COMMIT" =~ ^[a-f0-9]{40}$ ]]
 OPERATOR_UID="${SUDO_UID:?sudo -s must preserve the original operator UID}"
 OPERATOR_GID="${SUDO_GID:?sudo -s must preserve the original operator GID}"
 [[ "$OPERATOR_UID" =~ ^[1-9][0-9]*$ ]]
@@ -387,8 +451,10 @@ ISOLATED_TRIAL_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 test "$ISOLATED_TRIAL_ID" != "$SOURCE_TRIAL_ID"
 PERF_ROOT='/var/lib/babel-online/performance'
 RUN_ROOT="/var/lib/babel-online/results/28-august-morning-run/isolated-smoke/$ISOLATED_TRIAL_ID"
+CLOSED_EVIDENCE_ROOT="$RUN_ROOT/closed-evidence"
 STAGE_ROOT="/tmp/babel-isolated-$ISOLATED_TRIAL_ID"
 test ! -e "$STAGE_ROOT"
+ISOLATED_TRIAL_MAY_BE_ACTIVE=false
 
 compose=(
   docker compose
@@ -475,6 +541,95 @@ stage_results() (
   test -d "$STAGE_ROOT"
 )
 
+stage_closed_evidence() (
+  trap - ERR INT TERM HUP
+  set -euo pipefail
+  raw_root="$PERF_ROOT/$ISOLATED_TRIAL_ID/conditions"
+  test -d "$raw_root"
+  test ! -e "$CLOSED_EVIDENCE_ROOT"
+
+  expected_receipts="$(
+    printf '%s\n' \
+      01/live-evidence.json \
+      02/live-evidence.json \
+      03/live-evidence.json
+  )"
+  actual_receipts="$(
+    find "$raw_root" -mindepth 1 -name live-evidence.json -printf '%P\n' \
+      | LC_ALL=C sort
+  )"
+  test "$actual_receipts" = "$expected_receipts"
+
+  install -d -m 0770 -o "$OPERATOR_UID" -g 10001 \
+    "$CLOSED_EVIDENCE_ROOT"
+  for index in 01 02 03; do
+    source_receipt="$raw_root/$index/live-evidence.json"
+    test -f "$source_receipt"
+    test ! -L "$source_receipt"
+    install -d -m 0770 -o "$OPERATOR_UID" -g 10001 \
+      "$CLOSED_EVIDENCE_ROOT/$index"
+    install -m 0660 -o "$OPERATOR_UID" -g 10001 \
+      "$source_receipt" "$CLOSED_EVIDENCE_ROOT/$index/live-evidence.json"
+    test -f "$CLOSED_EVIDENCE_ROOT/$index/live-evidence.json"
+    test ! -L "$CLOSED_EVIDENCE_ROOT/$index/live-evidence.json"
+  done
+
+  closed_inventory="$(
+    find "$CLOSED_EVIDENCE_ROOT" -type f -printf '%P\n' | LC_ALL=C sort
+  )"
+  test "$closed_inventory" = "$expected_receipts"
+  test -z "$(
+    find "$CLOSED_EVIDENCE_ROOT" -mindepth 1 \
+      ! -type d ! -type f -print -quit
+  )"
+)
+
+quiesce_failure_snapshot() (
+  trap - ERR INT TERM HUP
+  set +e
+  worker_curl --fail-with-body --silent --show-error --max-time 10 \
+    --request POST \
+    --url "http://127.0.0.1:8792/v1/performance/$ISOLATED_TRIAL_ID/graceful-stop" \
+    --output "$RUN_ROOT/graceful-stop-receipt.json"
+  if [[ $? -ne 0 ]]; then
+    exit 1
+  fi
+
+  for _ in $(seq 1 90); do
+    status_json="$(
+      worker_curl --fail --silent --show-error --max-time 5 \
+        --url http://127.0.0.1:8792/v1/performance/status
+    )"
+    if [[ $? -eq 0 && -n "$status_json" ]]; then
+      printf '%s\n' "$status_json" \
+        >> "$RUN_ROOT/quiescence-status.jsonl"
+      phase="$(
+        printf '%s' "$status_json" | python3 -c '
+import json
+import sys
+expected = sys.argv[1]
+document = json.load(sys.stdin)
+if document.get("experimentId") != expected:
+    raise SystemExit(1)
+print(document.get("phase", ""))
+' "$ISOLATED_TRIAL_ID"
+      )"
+      case "$phase" in
+        completed|failed|interrupted)
+          printf '%s\n' \
+            '# Quiesced failure snapshot' \
+            '' \
+            "Worker reached terminal phase \`$phase\` before evidence copy." \
+            > "$RUN_ROOT/QUIESCED_SNAPSHOT.md"
+          exit 0
+          ;;
+      esac
+    fi
+    sleep 1
+  done
+  exit 1
+)
+
 fail_and_stage() {
   trap - ERR INT TERM HUP
   set +e
@@ -482,6 +637,25 @@ fail_and_stage() {
   local reason="${2:-unexpected isolated smoke failure}"
   if [[ ! "$status" =~ ^[1-9][0-9]*$ ]]; then
     status=1
+  fi
+  if [[ "$ISOLATED_TRIAL_MAY_BE_ACTIVE" == true \
+      && -n "${BABEL_PERFORMANCE_WORKER_TOKEN:-}" \
+      && "$ISOLATED_TRIAL_ID" =~ ^[a-f0-9-]{36}$ ]]; then
+    if ! quiesce_failure_snapshot; then
+      {
+        echo '# Non-atomic failure snapshot'
+        echo
+        echo 'Worker quiescence could not be requested or proven.'
+        echo 'Condition state may have changed during this best-effort copy.'
+      } > "$RUN_ROOT/NON_ATOMIC_SNAPSHOT.md"
+    fi
+  else
+    {
+      echo '# No active-trial quiescence'
+      echo
+      echo 'Failure occurred before a trial could be active or authenticated.'
+      echo 'No active-trial quiescence was possible or needed.'
+    } > "$RUN_ROOT/NO_ACTIVE_TRIAL_QUIESCENCE.md"
   fi
   capture_evidence
   {
@@ -523,13 +697,168 @@ trap 'fail_and_stage 143 "received TERM"' TERM
 trap 'fail_and_stage 129 "received HUP"' HUP
 ```
 
-With failure handling active, load the protected release and enforce the hard
-population-build guard before changing the topology:
+With failure handling active, validate the deployed release, its rollout
+receipts, the saved CUDA recommendation smoke, and all three standalone roles
+before changing the topology. The expected commit is manually re-entered after
+SSH because local shell variables are not forwarded into the root shell:
 
 ```bash
+python3 /opt/babel/current/release.py validate \
+  /opt/babel/current/release.env
 set -a
 source /opt/babel/current/release.env
 set +a
+test "$BABEL_SOURCE_COMMIT" = "$EXPECTED_SOURCE_COMMIT"
+
+BABEL_PERFORMANCE_WORKER_TOKEN="$(
+  python3 /opt/babel/current/release.py runtime-token /etc/babel/runtime.env
+)"
+test -n "$BABEL_PERFORMANCE_WORKER_TOKEN"
+
+python3 - \
+  /opt/babel/current/release.env \
+  /opt/babel/current/predeploy-evidence.json \
+  /opt/babel/current/deployment-receipt.json \
+  "$SOURCE_TRIAL_ID" \
+  "$EXPECTED_SOURCE_COMMIT" \
+  > "$RUN_ROOT/deployment-preflight.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+env_path, predeploy_path, receipt_path, source_trial_id, expected_commit = sys.argv[1:]
+
+def regular_json(path_value, label):
+    path = Path(path_value)
+    if path.is_symlink() or not path.is_file():
+        raise SystemExit(f"{label} must be a regular non-symlink file")
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise SystemExit(f"{label} must be a JSON object")
+    return value
+
+release = {}
+for line in Path(env_path).read_text(encoding="utf-8").splitlines():
+    if line and not line.startswith("#"):
+        key, value = line.split("=", 1)
+        release[key] = value
+if release.get("BABEL_SOURCE_COMMIT") != expected_commit:
+    raise SystemExit("release source commit differs from the audited commit")
+
+predeploy = regular_json(predeploy_path, "predeploy evidence")
+expected_predeploy = {
+    "verified": True,
+    "trialId": source_trial_id,
+    "runId": release["BABEL_GCP_RUN_ID"],
+    "catalogCount": 10_000,
+    "activeEmbeddingCount": 10_000,
+    "embeddingDimension": 100,
+    "modelRevision": release["BABEL_MODEL_REVISION"],
+    "datasetRevision": release["BABEL_DATASET_REVISION"],
+    "orderedVectorSha256": release["BABEL_POPULATION_VECTOR_SHA256"],
+    "pgvectorSnapshotSha256": release["BABEL_POPULATION_SNAPSHOT_SHA256"],
+}
+for key, value in expected_predeploy.items():
+    if predeploy.get(key) != value:
+        raise SystemExit(f"predeploy evidence {key} differs")
+
+deployment_receipt_validated = False
+receipt_file = Path(receipt_path)
+if receipt_file.exists() or receipt_file.is_symlink():
+    receipt = regular_json(receipt_path, "deployment receipt")
+    expected_receipt = {
+        "sourceCommit": expected_commit,
+        "backendImageDigest": release["BABEL_BACKEND_IMAGE"].rsplit("@", 1)[1],
+        "servingImageDigest": release["BABEL_SERVING_IMAGE"].rsplit("@", 1)[1],
+        "trainerImageDigest": release["BABEL_TRAINER_IMAGE"].rsplit("@", 1)[1],
+        "performanceWorkerImageDigest": release[
+            "BABEL_PERFORMANCE_WORKER_IMAGE"
+        ].rsplit("@", 1)[1],
+        "modelRevision": release["BABEL_MODEL_REVISION"],
+        "datasetRevision": release["BABEL_DATASET_REVISION"],
+        "trialId": release["BABEL_GCP_TRIAL_ID"],
+        "runId": release["BABEL_GCP_RUN_ID"],
+        "populationVectorSha256": release["BABEL_POPULATION_VECTOR_SHA256"],
+        "populationSnapshotSha256": release[
+            "BABEL_POPULATION_SNAPSHOT_SHA256"
+        ],
+        "deploymentRunId": int(release["BABEL_DEPLOYMENT_RUN_ID"]),
+        "deploymentRunAttempt": int(release["BABEL_DEPLOYMENT_RUN_ATTEMPT"]),
+    }
+    for key, value in expected_receipt.items():
+        if receipt.get(key) != value:
+            raise SystemExit(f"deployment receipt {key} differs")
+    deployment_receipt_validated = True
+
+print(
+    json.dumps(
+        {
+            "schemaVersion": 1,
+            "verified": True,
+            "sourceCommit": expected_commit,
+            "sourceTrialId": source_trial_id,
+            "runId": release["BABEL_GCP_RUN_ID"],
+            "catalogCount": predeploy["catalogCount"],
+            "activeEmbeddingCount": predeploy["activeEmbeddingCount"],
+            "embeddingDimension": predeploy["embeddingDimension"],
+            "orderedVectorSha256": predeploy["orderedVectorSha256"],
+            "pgvectorSnapshotSha256": predeploy["pgvectorSnapshotSha256"],
+            "deploymentReceiptValidated": deployment_receipt_validated,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+)
+PY
+
+test -f /opt/babel/current/smoke-response.json
+test ! -L /opt/babel/current/smoke-response.json
+test -f /opt/babel/current/smoke-headers.txt
+test ! -L /opt/babel/current/smoke-headers.txt
+grep -qi $'^x-babel-encoder-device: cuda\r$' \
+  /opt/babel/current/smoke-headers.txt
+python3 /opt/babel/current/release.py validate-serving-smoke \
+  /opt/babel/current/smoke-response.json \
+  --run-id "$BABEL_GCP_RUN_ID"
+install -m 0660 -o "$OPERATOR_UID" -g 10001 \
+  /opt/babel/current/predeploy-evidence.json \
+  "$RUN_ROOT/predeploy-evidence.json"
+install -m 0660 -o "$OPERATOR_UID" -g 10001 \
+  /opt/babel/current/smoke-response.json \
+  "$RUN_ROOT/smoke-response.json"
+install -m 0660 -o "$OPERATOR_UID" -g 10001 \
+  /opt/babel/current/smoke-headers.txt \
+  "$RUN_ROOT/smoke-headers.txt"
+if [[ -f /opt/babel/current/deployment-receipt.json \
+    && ! -L /opt/babel/current/deployment-receipt.json ]]; then
+  install -m 0660 -o "$OPERATOR_UID" -g 10001 \
+    /opt/babel/current/deployment-receipt.json \
+    "$RUN_ROOT/deployment-receipt.json"
+fi
+
+running_services="$("${compose[@]}" ps --status running --services)"
+for service in backend serving trainer; do
+  test "$(printf '%s\n' "$running_services" | grep -cx "$service")" -eq 1
+done
+python3 /opt/babel/current/release.py validate-trainer-readiness \
+  /var/lib/babel-online/trainer-ready.json \
+  --run-id "$BABEL_GCP_RUN_ID" \
+  --not-before-ns 0
+curl --fail --silent --show-error --max-time 5 \
+  http://127.0.0.1:8787/health \
+  > "$RUN_ROOT/preflight-backend-health.json"
+python3 - "$RUN_ROOT/preflight-backend-health.json" <<'PY'
+import json
+import sys
+
+if json.load(open(sys.argv[1], encoding="utf-8")).get("status") != "ok":
+    raise SystemExit("backend preflight health differs")
+PY
+curl --fail --silent --show-error --max-time 5 \
+  http://127.0.0.1:8791/health \
+  > "$RUN_ROOT/preflight-serving-health.json"
+python3 /opt/babel/current/release.py validate-serving-health \
+  "$RUN_ROOT/preflight-serving-health.json"
 
 guard="$(
   "${compose[@]}" run --rm --no-deps --entrypoint /bin/sh performance-worker \
@@ -537,6 +866,11 @@ guard="$(
 )"
 test "$guard" = false
 ```
+
+This preflight reuses the rollout's nonsecret predeploy evidence and saved
+recommendation smoke. It does not issue a new recommendation, audit the
+population, export/import vectors, or re-encode them. Any mismatch fails through
+the already-armed evidence path before the standalone roles are stopped.
 
 The isolated topology runner owns the per-condition serving and trainer roles,
 so stop the standalone roles before the matrix. Keep exactly one performance
@@ -560,11 +894,6 @@ curl --fail --silent --show-error --max-time 2 \
 curl --fail --silent --show-error --max-time 2 \
   http://127.0.0.1:8792/health >/dev/null
 
-BABEL_PERFORMANCE_WORKER_TOKEN="$(
-  python3 /opt/babel/current/release.py runtime-token /etc/babel/runtime.env
-)"
-test -n "$BABEL_PERFORMANCE_WORKER_TOKEN"
-
 BABEL_ADMIN_NONCE="$(
   curl --fail --silent --show-error --max-time 5 \
     http://127.0.0.1:8787/admin \
@@ -574,11 +903,19 @@ test -n "$BABEL_ADMIN_NONCE"
 ```
 
 Every error or terminal signal uses that single fail-and-stage path. It disables
-its own traps, captures worker/dashboard/log evidence, writes the explicitly
-non-formal `FAILED.md`, copies available condition state, inventories the
-result, and stages it for IAP retrieval. On failure it exits the root shell
-nonzero; skip all success-only VM commands that follow, exit the remaining SSH
-shell, and resume at **Local retrieval after success or staged failure** below.
+its own traps and, once approval may have made the trial active, requests an
+authenticated graceful stop and waits at most 90 seconds for a terminal worker
+phase before copying condition state. A proven terminal boundary writes
+`QUIESCED_SNAPSHOT.md`; an unproven boundary writes
+`NON_ATOMIC_SNAPSHOT.md`, explicitly warning that state may have changed during
+the copy. A failure before authentication or possible trial start instead
+records `NO_ACTIVE_TRIAL_QUIESCENCE.md`. The same path then captures
+worker/dashboard/log evidence, writes the explicitly non-formal `FAILED.md`,
+copies available condition state, inventories the result, and stages it for IAP
+retrieval. On failure it exits the root shell nonzero; skip all success-only VM
+commands that follow, exit the remaining SSH shell, and resume at **Local
+retrieval after success or staged failure** below. The VM remains available
+until the one final local stop command.
 
 Create the exact isolated-smoke request, prepare it through the source trial's
 nonce-protected dashboard route, and save the create receipt:
@@ -613,6 +950,7 @@ Approve only the fresh isolated trial and save the approval receipt. Do not
 mutate the database directly and do not start a second performance worker.
 
 ```bash
+ISOLATED_TRIAL_MAY_BE_ACTIVE=true
 admin_curl --fail-with-body --silent --show-error --max-time 30 \
   --request POST \
   --url "http://127.0.0.1:8787/admin/api/v1/performance/$ISOLATED_TRIAL_ID/approve-next-scale" \
@@ -657,10 +995,20 @@ if [[ "$completed" != true ]]; then
   fail_and_stage 1 'worker did not complete before the 15-minute timeout'
 fi
 capture_evidence
+stage_closed_evidence
 ```
 
-Export that exact trial from the performance-worker container. This does not
-export or rebuild the frozen population:
+The real runner's raw condition directories may also contain workload,
+selected-replay, candidate, topology, and other support artifacts. The staging
+step permits those support files but requires the complete raw
+`live-evidence.json` receipt set to be exactly the padded `01`/`02`/`03` paths.
+It copies only those three regular, non-symlink receipts into fresh
+`$CLOSED_EVIDENCE_ROOT` and proves that closed input contains no other files or
+special entries.
+
+Export that exact trial from the performance-worker container. Export continues
+to read the raw condition root because it needs the receipts alongside runner
+support artifacts; it does not export or rebuild the frozen population:
 
 ```bash
 ID="$ISOLATED_TRIAL_ID"
@@ -680,7 +1028,7 @@ bundle:
 ```bash
 python3 - \
   "$ID" \
-  "$PERF_ROOT/$ID/conditions" \
+  "$CLOSED_EVIDENCE_ROOT" \
   "$RUN_ROOT" \
   /opt/babel/current/release.env <<'PY'
 import json
@@ -710,6 +1058,7 @@ request_identity = trial.get("requestIdentity") if isinstance(trial, dict) else 
 if (
     not isinstance(request_identity, dict)
     or trial.get("experimentId") != trial_id
+    or trial.get("topology") != "same_host_isolated"
     or trial.get("retrievalBackend") != "pgvector"
     or trial.get("warmupSeconds") != 5
     or trial.get("durationSeconds") != 25
@@ -1065,7 +1414,7 @@ PY
   babel-friday-benchmark representative-run-build \
   --trial-id "$ID" \
   --export-root "$RUN_ROOT/export/feedback-export" \
-  --evidence-root "$PERF_ROOT/$ID/conditions" \
+  --evidence-root "$CLOSED_EVIDENCE_ROOT" \
   --report "$RUN_ROOT/REPORT.md" \
   --output-root "$RUN_ROOT/representative-accepted" \
   > "$RUN_ROOT/representative-build-receipt.json"
@@ -1073,7 +1422,8 @@ PY
 
 The builder requires exactly three condition evidence files, complete training
 offset coverage, zero final Kafka lag, and the formal-position bindings
-`7`/`8`/`9`. It preserves `formalPerformanceClaim=false`.
+`7`/`8`/`9`. It receives only the dedicated closed-evidence root, never the raw
+runner condition tree, and preserves `formalPerformanceClaim=false`.
 
 The existing private publication command is optional. If publication is
 explicitly requested, use the exact closed bundle returned by the build
