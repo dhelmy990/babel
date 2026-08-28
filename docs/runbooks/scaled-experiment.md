@@ -355,38 +355,87 @@ not create another instance or resource:
 ```bash
 (
   set -euo pipefail
+  PROJECT='chloe-tutoring-bot'
+  VM='babel-gpu-serving'
+  ZONE='asia-southeast1-b'
   EXPECTED_SOURCE_COMMIT='<final audited 40-char SHA>'
   [[ "$EXPECTED_SOURCE_COMMIT" =~ ^[a-f0-9]{40}$ ]]
   git cat-file -e "$EXPECTED_SOURCE_COMMIT^{commit}"
   git merge-base --is-ancestor \
     b5b0c5d2ae5cd2d9535402e6cbdeb2d6f061fc5d \
     "$EXPECTED_SOURCE_COMMIT"
-  gcloud compute instances start babel-gpu-serving \
-    --project chloe-tutoring-bot \
-    --zone asia-southeast1-b
 
-  DEPLOY_RUN_ID="$(
+  VM_WAS_TERMINATED=false
+  cleanup_local_preflight() {
+    local status="${1:-1}"
+    local current_status=''
+    trap - ERR INT TERM HUP
+    set +e
+    if [[ "$VM_WAS_TERMINATED" == true ]]; then
+      current_status="$(
+        gcloud compute instances describe "$VM" \
+          --project "$PROJECT" \
+          --zone "$ZONE" \
+          --format='value(status)'
+      )"
+      if [[ "$current_status" == RUNNING ]]; then
+        gcloud compute instances stop "$VM" \
+          --project "$PROJECT" \
+          --zone "$ZONE"
+      fi
+    fi
+    exit "$status"
+  }
+  trap 'cleanup_local_preflight "$?"' ERR
+  trap 'cleanup_local_preflight 130' INT
+  trap 'cleanup_local_preflight 143' TERM
+  trap 'cleanup_local_preflight 129' HUP
+
+  PRIOR_VM_STATUS="$(
+    gcloud compute instances describe "$VM" \
+      --project "$PROJECT" \
+      --zone "$ZONE" \
+      --format='value(status)'
+  )"
+  case "$PRIOR_VM_STATUS" in
+    RUNNING)
+      ;;
+    TERMINATED)
+      VM_WAS_TERMINATED=true
+      gcloud compute instances start "$VM" \
+        --project "$PROJECT" \
+        --zone "$ZONE"
+      ;;
+    *)
+      echo "unexpected VM status: $PRIOR_VM_STATUS" >&2
+      false
+      ;;
+  esac
+
+  RUN_ID="$(
     gh run list \
       --workflow deploy-gcp-demo.yml \
       --commit "$EXPECTED_SOURCE_COMMIT" \
-      --status success \
       --limit 1 \
       --json databaseId \
       --jq '.[0].databaseId'
   )"
-  [[ "$DEPLOY_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+  [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]]
+  gh run watch "$RUN_ID" --exit-status
   DEPLOY_RUN_JSON="$(
-    gh run view "$DEPLOY_RUN_ID" \
+    gh run view "$RUN_ID" \
       --json databaseId,headSha,conclusion,jobs
   )"
-  python3 - "$EXPECTED_SOURCE_COMMIT" "$DEPLOY_RUN_JSON" <<'PY'
+  python3 - "$EXPECTED_SOURCE_COMMIT" "$RUN_ID" "$DEPLOY_RUN_JSON" <<'PY'
 import json
 import sys
 
-expected, encoded = sys.argv[1:]
+expected, expected_run_id, encoded = sys.argv[1:]
 run = json.loads(encoded)
 jobs = run.get("jobs")
 if (
+    run.get("databaseId") != int(expected_run_id)
+    or
     run.get("headSha") != expected
     or run.get("conclusion") != "success"
     or not isinstance(jobs, list)
@@ -399,7 +448,9 @@ if (
     raise SystemExit("exact commit lacks a successful Deploy GCP demo deployment")
 print(f"verified deployment workflow run {run['databaseId']}")
 PY
-  printf 'EXPECTED_SOURCE_COMMIT=%s\n' "$EXPECTED_SOURCE_COMMIT"
+  printf 'RUN_ID=%s\nEXPECTED_SOURCE_COMMIT=%s\n' \
+    "$RUN_ID" "$EXPECTED_SOURCE_COMMIT"
+  trap - ERR INT TERM HUP
 )
 ```
 
@@ -407,7 +458,12 @@ If that workflow check finds no success, stop. Put only the reviewed, audited
 commit on the `demo` branch through the normal reviewed process, run **Deploy
 GCP demo**, wait for its `publish-and-deploy` job to succeed, and repeat the
 check. This runbook deliberately contains no blind `git push` or deployment of
-an unspecified working tree.
+an unspecified working tree. The strict block stops the VM on an error or
+terminal signal only when it observed `TERMINATED` and started that VM; a VM
+that was already `RUNNING` is not stopped. On success it disarms cleanup and
+leaves the VM running for SSH. Record the printed `RUN_ID` and
+`EXPECTED_SOURCE_COMMIT`: shell variables do not cross the code fences or SSH
+session, so both values are entered again below.
 
 Use only the existing `babel-gpu-serving` VM in project
 `chloe-tutoring-bot`, zone `asia-southeast1-b`, and connect through IAP:
@@ -434,7 +490,9 @@ readable by that operator rather than becoming root-owned:
 set -euo pipefail
 test "$(id -u)" -eq 0
 EXPECTED_SOURCE_COMMIT='<same final audited 40-char SHA printed locally>'
+EXPECTED_DEPLOY_RUN_ID='<RUN_ID printed locally>'
 [[ "$EXPECTED_SOURCE_COMMIT" =~ ^[a-f0-9]{40}$ ]]
+[[ "$EXPECTED_DEPLOY_RUN_ID" =~ ^[1-9][0-9]*$ ]]
 OPERATOR_UID="${SUDO_UID:?sudo -s must preserve the original operator UID}"
 OPERATOR_GID="${SUDO_GID:?sudo -s must preserve the original operator GID}"
 [[ "$OPERATOR_UID" =~ ^[1-9][0-9]*$ ]]
@@ -700,7 +758,10 @@ trap 'fail_and_stage 129 "received HUP"' HUP
 With failure handling active, validate the deployed release, its rollout
 receipts, the saved CUDA recommendation smoke, and all three standalone roles
 before changing the topology. The expected commit is manually re-entered after
-SSH because local shell variables are not forwarded into the root shell:
+SSH because local shell variables are not forwarded into the root shell. The
+deployment receipt is mandatory: validation writes the final
+`deployment-preflight.json` only after that regular, non-symlink receipt passes,
+then copies the receipt into the result root unconditionally:
 
 ```bash
 python3 /opt/babel/current/release.py validate \
@@ -709,24 +770,38 @@ set -a
 source /opt/babel/current/release.env
 set +a
 test "$BABEL_SOURCE_COMMIT" = "$EXPECTED_SOURCE_COMMIT"
+test "$BABEL_DEPLOYMENT_RUN_ID" = "$EXPECTED_DEPLOY_RUN_ID"
 
 BABEL_PERFORMANCE_WORKER_TOKEN="$(
   python3 /opt/babel/current/release.py runtime-token /etc/babel/runtime.env
 )"
 test -n "$BABEL_PERFORMANCE_WORKER_TOKEN"
 
+DEPLOYMENT_PREFLIGHT_TMP="$RUN_ROOT/.deployment-preflight.json.tmp"
+test ! -e "$DEPLOYMENT_PREFLIGHT_TMP"
+test ! -e "$RUN_ROOT/deployment-preflight.json"
 python3 - \
   /opt/babel/current/release.env \
   /opt/babel/current/predeploy-evidence.json \
   /opt/babel/current/deployment-receipt.json \
   "$SOURCE_TRIAL_ID" \
   "$EXPECTED_SOURCE_COMMIT" \
-  > "$RUN_ROOT/deployment-preflight.json" <<'PY'
+  "$EXPECTED_DEPLOY_RUN_ID" \
+  > "$DEPLOYMENT_PREFLIGHT_TMP" <<'PY'
+from datetime import datetime, timedelta, timezone
 import json
+import re
 import sys
 from pathlib import Path
 
-env_path, predeploy_path, receipt_path, source_trial_id, expected_commit = sys.argv[1:]
+(
+    env_path,
+    predeploy_path,
+    receipt_path,
+    source_trial_id,
+    expected_commit,
+    expected_deploy_run_id,
+) = sys.argv[1:]
 
 def regular_json(path_value, label):
     path = Path(path_value)
@@ -744,6 +819,19 @@ for line in Path(env_path).read_text(encoding="utf-8").splitlines():
         release[key] = value
 if release.get("BABEL_SOURCE_COMMIT") != expected_commit:
     raise SystemExit("release source commit differs from the audited commit")
+if release.get("BABEL_GCP_TRIAL_ID") != source_trial_id:
+    raise SystemExit("release source trial differs from the immutable source trial")
+if release.get("BABEL_DEPLOYMENT_RUN_ID") != expected_deploy_run_id:
+    raise SystemExit("release deployment run differs from the watched workflow")
+
+def image_digest(name):
+    image = release.get(name, "")
+    if "@" not in image:
+        raise SystemExit(f"{name} is not digest-qualified")
+    digest = image.rsplit("@", 1)[1]
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise SystemExit(f"{name} has an invalid digest")
+    return digest
 
 predeploy = regular_json(predeploy_path, "predeploy evidence")
 expected_predeploy = {
@@ -762,33 +850,45 @@ for key, value in expected_predeploy.items():
     if predeploy.get(key) != value:
         raise SystemExit(f"predeploy evidence {key} differs")
 
-deployment_receipt_validated = False
-receipt_file = Path(receipt_path)
-if receipt_file.exists() or receipt_file.is_symlink():
-    receipt = regular_json(receipt_path, "deployment receipt")
-    expected_receipt = {
-        "sourceCommit": expected_commit,
-        "backendImageDigest": release["BABEL_BACKEND_IMAGE"].rsplit("@", 1)[1],
-        "servingImageDigest": release["BABEL_SERVING_IMAGE"].rsplit("@", 1)[1],
-        "trainerImageDigest": release["BABEL_TRAINER_IMAGE"].rsplit("@", 1)[1],
-        "performanceWorkerImageDigest": release[
-            "BABEL_PERFORMANCE_WORKER_IMAGE"
-        ].rsplit("@", 1)[1],
-        "modelRevision": release["BABEL_MODEL_REVISION"],
-        "datasetRevision": release["BABEL_DATASET_REVISION"],
-        "trialId": release["BABEL_GCP_TRIAL_ID"],
-        "runId": release["BABEL_GCP_RUN_ID"],
-        "populationVectorSha256": release["BABEL_POPULATION_VECTOR_SHA256"],
-        "populationSnapshotSha256": release[
-            "BABEL_POPULATION_SNAPSHOT_SHA256"
-        ],
-        "deploymentRunId": int(release["BABEL_DEPLOYMENT_RUN_ID"]),
-        "deploymentRunAttempt": int(release["BABEL_DEPLOYMENT_RUN_ATTEMPT"]),
-    }
-    for key, value in expected_receipt.items():
-        if receipt.get(key) != value:
-            raise SystemExit(f"deployment receipt {key} differs")
-    deployment_receipt_validated = True
+receipt = regular_json(receipt_path, "deployment receipt")
+expected_receipt = {
+    "schemaVersion": 1,
+    "sourceCommit": expected_commit,
+    "backendImageDigest": image_digest("BABEL_BACKEND_IMAGE"),
+    "servingImageDigest": image_digest("BABEL_SERVING_IMAGE"),
+    "trainerImageDigest": image_digest("BABEL_TRAINER_IMAGE"),
+    "performanceWorkerImageDigest": image_digest(
+        "BABEL_PERFORMANCE_WORKER_IMAGE"
+    ),
+    "modelRevision": release["BABEL_MODEL_REVISION"],
+    "datasetRevision": release["BABEL_DATASET_REVISION"],
+    "trialId": source_trial_id,
+    "runId": release["BABEL_GCP_RUN_ID"],
+    "populationVectorSha256": release["BABEL_POPULATION_VECTOR_SHA256"],
+    "populationSnapshotSha256": release[
+        "BABEL_POPULATION_SNAPSHOT_SHA256"
+    ],
+    "deploymentRunId": int(expected_deploy_run_id),
+    "deploymentRunAttempt": int(release["BABEL_DEPLOYMENT_RUN_ATTEMPT"]),
+}
+if expected_receipt["deploymentRunAttempt"] < 1:
+    raise SystemExit("deployment receipt attempt must be positive")
+if set(receipt) != set(expected_receipt) | {"deployedAt"}:
+    raise SystemExit("deployment receipt has an unexpected schema")
+for key, value in expected_receipt.items():
+    if receipt.get(key) != value:
+        raise SystemExit(f"deployment receipt {key} differs")
+try:
+    deployed_at = datetime.strptime(
+        receipt.get("deployedAt", ""), "%Y-%m-%dT%H:%M:%SZ"
+    ).replace(tzinfo=timezone.utc)
+except (TypeError, ValueError) as error:
+    raise SystemExit("deployment receipt deployedAt is not canonical UTC") from error
+now = datetime.now(timezone.utc)
+if deployed_at < datetime(2020, 1, 1, tzinfo=timezone.utc):
+    raise SystemExit("deployment receipt deployedAt is implausibly old")
+if deployed_at > now + timedelta(minutes=5):
+    raise SystemExit("deployment receipt deployedAt is in the future")
 
 print(
     json.dumps(
@@ -803,13 +903,14 @@ print(
             "embeddingDimension": predeploy["embeddingDimension"],
             "orderedVectorSha256": predeploy["orderedVectorSha256"],
             "pgvectorSnapshotSha256": predeploy["pgvectorSnapshotSha256"],
-            "deploymentReceiptValidated": deployment_receipt_validated,
+            "deploymentReceiptValidated": True,
         },
         sort_keys=True,
         separators=(",", ":"),
     )
 )
 PY
+mv -- "$DEPLOYMENT_PREFLIGHT_TMP" "$RUN_ROOT/deployment-preflight.json"
 
 test -f /opt/babel/current/smoke-response.json
 test ! -L /opt/babel/current/smoke-response.json
@@ -829,12 +930,9 @@ install -m 0660 -o "$OPERATOR_UID" -g 10001 \
 install -m 0660 -o "$OPERATOR_UID" -g 10001 \
   /opt/babel/current/smoke-headers.txt \
   "$RUN_ROOT/smoke-headers.txt"
-if [[ -f /opt/babel/current/deployment-receipt.json \
-    && ! -L /opt/babel/current/deployment-receipt.json ]]; then
-  install -m 0660 -o "$OPERATOR_UID" -g 10001 \
-    /opt/babel/current/deployment-receipt.json \
-    "$RUN_ROOT/deployment-receipt.json"
-fi
+install -m 0660 -o "$OPERATOR_UID" -g 10001 \
+  /opt/babel/current/deployment-receipt.json \
+  "$RUN_ROOT/deployment-receipt.json"
 
 running_services="$("${compose[@]}" ps --status running --services)"
 for service in backend serving trainer; do
