@@ -375,6 +375,66 @@ not create another instance or resource:
     "$REMOTE_DEMO_BEFORE" \
     "$EXPECTED_SOURCE_COMMIT"
 
+  exact_demo_runs() {
+    gh api \
+      'repos/dhelmy990/babel/actions/workflows/deploy-gcp-demo.yml/runs?branch=demo&per_page=100' \
+      | python3 -c '
+import json
+import sys
+
+expected = sys.argv[1]
+payload = json.load(sys.stdin)
+runs = payload.get("workflow_runs")
+if not isinstance(runs, list):
+    raise SystemExit("Actions workflow-runs response is not an object list")
+
+selected = []
+for run in runs:
+    if not isinstance(run, dict):
+        continue
+    workflow_path = str(run.get("path", "")).split("@", 1)[0]
+    if (
+        run.get("head_sha") != expected
+        or run.get("head_branch") != "demo"
+        or run.get("name") != "Deploy GCP demo"
+        or workflow_path != ".github/workflows/deploy-gcp-demo.yml"
+        or run.get("event") not in {"push", "workflow_dispatch"}
+    ):
+        continue
+    run_id = run.get("id")
+    status = run.get("status")
+    conclusion = run.get("conclusion")
+    created_at = run.get("created_at")
+    run_started_at = run.get("run_started_at")
+    if (
+        not isinstance(run_id, int)
+        or run_id < 1
+        or not isinstance(status, str)
+        or conclusion is not None and not isinstance(conclusion, str)
+        or not isinstance(created_at, str)
+        or not created_at
+        or run_started_at is not None and not isinstance(run_started_at, str)
+    ):
+        raise SystemExit("exact Actions run has malformed identity or state")
+    selected.append(
+        (run_started_at or created_at, created_at, run_id, status,
+         conclusion or "", run_started_at or "")
+    )
+
+for _, created_at, run_id, status, conclusion, run_started_at in sorted(
+    selected, reverse=True
+):
+    print(run_id, status, conclusion, created_at, run_started_at, sep="\t")
+' "$EXPECTED_SOURCE_COMMIT"
+  }
+
+  # These read-only checks happen before this block can own or start the VM.
+  # Output is suppressed so authentication credentials are never printed.
+  gh auth status >/dev/null 2>&1
+  gh api \
+    'repos/dhelmy990/babel/actions/workflows/deploy-gcp-demo.yml' \
+    >/dev/null
+
   STARTED_VM_HERE=false
   describe_vm_status() {
     gcloud compute instances describe "$VM" \
@@ -457,15 +517,12 @@ not create another instance or resource:
   done
   test "$VM_RUNNING" = true
 
-  RUN_IDS_BEFORE="$(
-    gh run list \
-      --workflow deploy-gcp-demo.yml \
-      --branch demo \
-      --commit "$EXPECTED_SOURCE_COMMIT" \
-      --limit 100 \
-      --json databaseId \
-      --jq '.[].databaseId'
-  )"
+  EXACT_RUNS_BEFORE="$(exact_demo_runs)"
+  RUN_IDS_BEFORE="$({
+    while IFS=$'\t' read -r run_id _; do
+      [[ "$run_id" =~ ^[1-9][0-9]*$ ]] && printf '%s\n' "$run_id"
+    done <<< "$EXACT_RUNS_BEFORE"
+  })"
 
   PUSH_WAS_NOOP=false
   if [[ "$REMOTE_DEMO_BEFORE" == "$EXPECTED_SOURCE_COMMIT" ]]; then
@@ -484,16 +541,12 @@ not create another instance or resource:
   RUN_ID=''
   REQUIRE_NEW_RUN=false
   if [[ "$PUSH_WAS_NOOP" == true ]]; then
-    RUN_ID="$(
-      gh run list \
-        --workflow deploy-gcp-demo.yml \
-        --branch demo \
-        --commit "$EXPECTED_SOURCE_COMMIT" \
-        --status success \
-        --limit 1 \
-        --json databaseId \
-        --jq '.[0].databaseId // empty'
-    )"
+    while IFS=$'\t' read -r run_id status conclusion _; do
+      if [[ "$status" == completed && "$conclusion" == success ]]; then
+        RUN_ID="$run_id"
+        break
+      fi
+    done <<< "$EXACT_RUNS_BEFORE"
     if ! [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
       RUN_ID=''
       test "$REMOTE_DEMO_HEAD" = "$EXPECTED_SOURCE_COMMIT"
@@ -507,55 +560,96 @@ not create another instance or resource:
 
   if [[ "$REQUIRE_NEW_RUN" == true ]]; then
     for _ in $(seq 1 120); do
-      CANDIDATE_RUN_IDS="$(
-        gh run list \
-          --workflow deploy-gcp-demo.yml \
-          --branch demo \
-          --commit "$EXPECTED_SOURCE_COMMIT" \
-          --limit 20 \
-          --json databaseId \
-          --jq '.[].databaseId'
-      )"
-      while IFS= read -r candidate_run_id; do
+      CANDIDATE_RUNS="$(exact_demo_runs)"
+      while IFS=$'\t' read -r candidate_run_id _; do
         [[ "$candidate_run_id" =~ ^[1-9][0-9]*$ ]] || continue
         if ! grep -Fqx "$candidate_run_id" <<< "$RUN_IDS_BEFORE"; then
           RUN_ID="$candidate_run_id"
           break
         fi
-      done <<< "$CANDIDATE_RUN_IDS"
+      done <<< "$CANDIDATE_RUNS"
       [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]] && break
       sleep 5
     done
   fi
   [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]]
-  gh run watch "$RUN_ID" --exit-status
-  DEPLOY_RUN_JSON="$(
-    gh run view "$RUN_ID" \
-      --json databaseId,headSha,headBranch,conclusion,event,jobs,workflowName
-  )"
-  python3 - "$EXPECTED_SOURCE_COMMIT" "$RUN_ID" "$DEPLOY_RUN_JSON" <<'PY'
+  RUN_COMPLETED=false
+  DEPLOY_RUN_JSON=''
+  for _ in $(seq 1 360); do
+    DEPLOY_RUN_JSON="$(
+      gh api "repos/dhelmy990/babel/actions/runs/$RUN_ID"
+    )"
+    IFS=$'\t' read -r run_status run_conclusion <<< "$({
+      printf '%s' "$DEPLOY_RUN_JSON" \
+        | python3 -c '
 import json
 import sys
 
-expected, expected_run_id, encoded = sys.argv[1:]
-run = json.loads(encoded)
-jobs = run.get("jobs")
+expected_id = int(sys.argv[1])
+run = json.load(sys.stdin)
+if not isinstance(run, dict) or run.get("id") != expected_id:
+    raise SystemExit("Actions run identity differs while polling")
+status = run.get("status")
+conclusion = run.get("conclusion")
+if status not in {
+    "requested", "waiting", "pending", "queued", "in_progress", "completed"
+}:
+    raise SystemExit("Actions run has an unknown status")
+if conclusion is not None and not isinstance(conclusion, str):
+    raise SystemExit("Actions run conclusion is malformed")
+print(status, conclusion or "", sep="\t")
+' "$RUN_ID"
+    })"
+    if [[ "$run_status" == completed ]]; then
+      test "$run_conclusion" = success
+      RUN_COMPLETED=true
+      break
+    fi
+    sleep 10
+  done
+  test "$RUN_COMPLETED" = true
+
+  DEPLOY_JOBS_JSON="$(
+    gh api "repos/dhelmy990/babel/actions/runs/$RUN_ID/jobs?per_page=100"
+  )"
+  python3 - \
+    "$EXPECTED_SOURCE_COMMIT" \
+    "$RUN_ID" \
+    <(printf '%s' "$DEPLOY_RUN_JSON") \
+    <(printf '%s' "$DEPLOY_JOBS_JSON") <<'PY'
+import json
+import sys
+
+expected, expected_run_id, run_path, jobs_path = sys.argv[1:]
+run = json.load(open(run_path, encoding="utf-8"))
+jobs_payload = json.load(open(jobs_path, encoding="utf-8"))
+workflow_path = str(run.get("path", "")).split("@", 1)[0]
 if (
-    run.get("databaseId") != int(expected_run_id)
-    or run.get("workflowName") != "Deploy GCP demo"
-    or run.get("headBranch") != "demo"
-    or run.get("headSha") != expected
+    run.get("id") != int(expected_run_id)
+    or run.get("name") != "Deploy GCP demo"
+    or workflow_path != ".github/workflows/deploy-gcp-demo.yml"
+    or run.get("head_branch") != "demo"
+    or run.get("head_sha") != expected
     or run.get("event") not in {"push", "workflow_dispatch"}
+    or run.get("status") != "completed"
     or run.get("conclusion") != "success"
-    or not isinstance(jobs, list)
-    or not any(
-        job.get("name") == "publish-and-deploy"
-        and job.get("conclusion") == "success"
-        for job in jobs
-    )
 ):
     raise SystemExit("exact commit lacks a successful Deploy GCP demo deployment")
-print(f"verified deployment workflow run {run['databaseId']}")
+jobs = jobs_payload.get("jobs")
+if not isinstance(jobs, list):
+    raise SystemExit("Actions jobs response is not an object list")
+required_jobs = {"test", "publish-and-deploy"}
+successful_jobs = {
+    job.get("name")
+    for job in jobs
+    if isinstance(job, dict) and job.get("conclusion") == "success"
+}
+missing_jobs = required_jobs - successful_jobs
+if missing_jobs:
+    raise SystemExit(
+        "required successful Actions jobs missing: " + ", ".join(sorted(missing_jobs))
+    )
+print(f"verified deployment workflow run {run['id']}")
 PY
   printf 'RUN_ID=%s\nEXPECTED_SOURCE_COMMIT=%s\n' \
     "$RUN_ID" "$EXPECTED_SOURCE_COMMIT"
@@ -571,6 +665,11 @@ exact run; otherwise the block verifies the remote head and running VM before
 dispatching an exact `demo` run itself. Selection excludes every matching run
 seen before the trigger, so an older failed run cannot be mistaken for the new
 deployment.
+
+Workflow discovery, deterministic selection, completion polling, and final
+run/job validation use quoted Actions REST endpoints plus Python so they work
+with the installed GitHub CLI 2.4.0. The supported `gh workflow run --ref`
+command is used only for the explicit no-op dispatch.
 
 Cleanup owns the VM only when this block observed `TERMINATED` and initiated
 its start. On an error or terminal signal it polls transitional states,
