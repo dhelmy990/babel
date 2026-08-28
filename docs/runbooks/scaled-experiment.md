@@ -357,12 +357,29 @@ gcloud compute ssh babel-gpu-serving \
   --tunnel-through-iap
 ```
 
-Run the following on the VM. Record the printed fresh ID for the later local
-copy command; do not reuse it for another attempt.
+At the VM prompt, enter an explicit root shell before accessing the protected
+current release, runtime environment, or Docker daemon:
+
+```bash
+sudo -s
+```
+
+Verify the privilege boundary and capture the original IAP SSH operator's UID.
+It must be a positive integer so the retrieved result remains readable by that
+operator rather than becoming root-owned:
 
 ```bash
 set -Eeuo pipefail
+test "$(id -u)" -eq 0
+OPERATOR_UID="${SUDO_UID:?sudo -s must preserve the original operator UID}"
+[[ "$OPERATOR_UID" =~ ^[1-9][0-9]*$ ]]
+```
 
+Run all remaining VM command blocks inside this same root shell. Record the
+printed fresh ID for the later local copy command; do not reuse it for another
+attempt.
+
+```bash
 SOURCE_TRIAL_ID='dd8c6ee6-1a4b-443d-ae2c-2a0c02792f28'
 ISOLATED_TRIAL_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 test "$ISOLATED_TRIAL_ID" != "$SOURCE_TRIAL_ID"
@@ -381,7 +398,7 @@ compose=(
   --file /opt/babel/current/compose.yaml
 )
 
-sudo install -d -m 0770 -o "$(id -u)" -g 10001 "$RUN_ROOT"
+install -d -m 0770 -o "$OPERATOR_UID" -g 10001 "$RUN_ROOT"
 printf 'ISOLATED_TRIAL_ID=%s\n' "$ISOLATED_TRIAL_ID"
 
 guard="$(
@@ -611,8 +628,16 @@ inventory itself:
 )
 ```
 
-Exit the VM, set the same recorded ID on the local workstation, and retrieve
-the result only through IAP. The local destination is exactly
+Exit the root shell and then the VM SSH shell before running any local copy
+command:
+
+```bash
+exit
+exit
+```
+
+On the local workstation, set the same recorded ID and retrieve the result only
+through IAP. The local destination is exactly
 `results/28-august-morning-run/isolated-smoke/$ISOLATED_TRIAL_ID`:
 
 ```bash
