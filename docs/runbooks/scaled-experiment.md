@@ -333,6 +333,309 @@ complete inventory at the returned commit to verify every checksum. The printed
 receipt contains no token. This representative receipt must not be passed to
 `trial-bundle-attach` and cannot claim formal performance evidence.
 
+### 28 August isolated interview smoke on the existing GCP VM
+
+This is a non-formal representative run only. Its three local conditions
+`01`/`02`/`03` map to formal matrix positions `7`/`8`/`9`, respectively, but
+`formalPerformanceClaim` remains `false`. The failed/formal source trial
+`dd8c6ee6-1a4b-443d-ae2c-2a0c02792f28` is immutable. Generate a fresh
+`ISOLATED_TRIAL_ID`; never resume, restart, or mutate the source trial.
+
+Reuse the existing imported 10,000-vector population unchanged. Do not
+export, import, audit, or re-encode it. The hard
+`BABEL_ONLINE_ALLOW_POPULATION_BUILD=false` guard must pass before launch.
+Only Qwen encoding and new-request serving use CUDA in this smoke. The CPU
+trainer, Kafka, PostgreSQL, and index work remain unchanged.
+
+Use only the existing `babel-gpu-serving` VM in project
+`chloe-tutoring-bot`, zone `asia-southeast1-b`, and connect through IAP:
+
+```bash
+gcloud compute ssh babel-gpu-serving \
+  --project chloe-tutoring-bot \
+  --zone asia-southeast1-b \
+  --tunnel-through-iap
+```
+
+Run the following on the VM. Record the printed fresh ID for the later local
+copy command; do not reuse it for another attempt.
+
+```bash
+set -Eeuo pipefail
+
+SOURCE_TRIAL_ID='dd8c6ee6-1a4b-443d-ae2c-2a0c02792f28'
+ISOLATED_TRIAL_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+test "$ISOLATED_TRIAL_ID" != "$SOURCE_TRIAL_ID"
+PERF_ROOT='/var/lib/babel-online/performance'
+RUN_ROOT="/var/lib/babel-online/results/28-august-morning-run/isolated-smoke/$ISOLATED_TRIAL_ID"
+
+set -a
+source /opt/babel/current/release.env
+set +a
+
+compose=(
+  docker compose
+  --project-name babel-gcp-demo
+  --profile matrix
+  --env-file /opt/babel/current/release.env
+  --file /opt/babel/current/compose.yaml
+)
+
+sudo install -d -m 0770 -o "$(id -u)" -g 10001 "$RUN_ROOT"
+printf 'ISOLATED_TRIAL_ID=%s\n' "$ISOLATED_TRIAL_ID"
+
+guard="$(
+  "${compose[@]}" run --rm --no-deps --entrypoint /bin/sh performance-worker \
+    -c 'printf %s "$BABEL_ONLINE_ALLOW_POPULATION_BUILD"'
+)"
+test "$guard" = false
+```
+
+The isolated topology runner owns the per-condition serving and trainer roles,
+so stop the standalone roles before the matrix. Keep exactly one performance
+worker, then require both the backend and worker to answer on loopback:
+
+```bash
+"${compose[@]}" stop serving trainer
+"${compose[@]}" up --detach backend performance-worker
+
+for _ in $(seq 1 120); do
+  if curl --fail --silent --show-error --max-time 2 \
+      http://127.0.0.1:8787/health >/dev/null \
+    && curl --fail --silent --show-error --max-time 2 \
+      http://127.0.0.1:8792/health >/dev/null; then
+    break
+  fi
+  sleep 1
+done
+curl --fail --silent --show-error --max-time 2 \
+  http://127.0.0.1:8787/health >/dev/null
+curl --fail --silent --show-error --max-time 2 \
+  http://127.0.0.1:8792/health >/dev/null
+
+BABEL_PERFORMANCE_WORKER_TOKEN="$(
+  python3 /opt/babel/current/release.py runtime-token /etc/babel/runtime.env
+)"
+
+worker_curl() {
+  printf 'header = "X-Babel-Worker-Token: %s"\n' \
+    "$BABEL_PERFORMANCE_WORKER_TOKEN" \
+    | curl --config - "$@"
+}
+
+BABEL_ADMIN_NONCE="$(
+  curl --fail --silent --show-error --max-time 5 \
+    http://127.0.0.1:8787/admin \
+    | sed -n 's/.*name="babel-admin-nonce" content="\([^"]*\)".*/\1/p'
+)"
+test -n "$BABEL_ADMIN_NONCE"
+
+admin_curl() {
+  printf '%s\n%s\n' \
+    'header = "Origin: http://127.0.0.1:8787"' \
+    "header = \"X-Babel-Admin-Nonce: $BABEL_ADMIN_NONCE\"" \
+    | curl --config - "$@"
+}
+
+capture_evidence() (
+  set +e
+  worker_curl --silent --show-error --max-time 5 \
+    --url http://127.0.0.1:8792/v1/performance/status \
+    > "$RUN_ROOT/worker-status-final.json"
+  curl --silent --show-error --max-time 5 \
+    "http://127.0.0.1:8787/admin/api/v1/performance/$ISOLATED_TRIAL_ID" \
+    > "$RUN_ROOT/trial-final.json"
+  "${compose[@]}" logs --no-color --timestamps backend performance-worker \
+    > "$RUN_ROOT/compose.log" 2>&1
+)
+trap 'capture_evidence' ERR
+```
+
+Create the exact isolated-smoke request, prepare it through the source trial's
+nonce-protected dashboard route, and save the create receipt:
+
+```bash
+python3 -c '
+import json
+import sys
+json.dump(
+    {
+        "rerunId": sys.argv[1],
+        "matrix": "isolated-smoke",
+        "warmupSeconds": 5,
+        "durationSeconds": 25,
+        "targetRps": 5.0,
+    },
+    sys.stdout,
+    separators=(",", ":"),
+)
+print()
+' "$ISOLATED_TRIAL_ID" > "$RUN_ROOT/create-request.json"
+
+admin_curl --fail-with-body --silent --show-error --max-time 30 \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --data-binary "@$RUN_ROOT/create-request.json" \
+  --url "http://127.0.0.1:8787/admin/api/v1/performance/$SOURCE_TRIAL_ID/representative-rerun" \
+  --output "$RUN_ROOT/create-receipt.json"
+```
+
+Approve only the fresh isolated trial and save the approval receipt. Do not
+mutate the database directly and do not start a second performance worker.
+
+```bash
+admin_curl --fail-with-body --silent --show-error --max-time 30 \
+  --request POST \
+  --url "http://127.0.0.1:8787/admin/api/v1/performance/$ISOLATED_TRIAL_ID/approve-next-scale" \
+  --output "$RUN_ROOT/approval-receipt.json"
+```
+
+Poll the authenticated worker status. A failed or interrupted phase, a status
+for another trial, or the bounded 15-minute timeout is a hard failure. Preserve
+the receipts, last status, and logs; do not retry with changed configuration.
+
+```bash
+completed=false
+for _ in $(seq 1 900); do
+  status_json="$(
+    worker_curl --fail --silent --show-error --max-time 5 \
+      --url http://127.0.0.1:8792/v1/performance/status
+  )"
+  printf '%s\n' "$status_json" >> "$RUN_ROOT/worker-status.jsonl"
+  phase="$(
+    printf '%s' "$status_json" | python3 -c '
+import json
+import sys
+expected = sys.argv[1]
+document = json.load(sys.stdin)
+if document.get("experimentId") != expected:
+    raise SystemExit("worker status belongs to another trial")
+print(document.get("phase", ""))
+' "$ISOLATED_TRIAL_ID"
+  )"
+  case "$phase" in
+    completed)
+      completed=true
+      break
+      ;;
+    failed|interrupted)
+      capture_evidence
+      echo "isolated smoke hard-failed with phase $phase" >&2
+      exit 1
+      ;;
+  esac
+  sleep 1
+done
+if [[ "$completed" != true ]]; then
+  capture_evidence
+  echo 'isolated smoke hard-failed after the 15-minute timeout' >&2
+  exit 1
+fi
+capture_evidence
+trap - ERR
+```
+
+Export that exact trial from the performance-worker container. This does not
+export or rebuild the frozen population:
+
+```bash
+ID="$ISOLATED_TRIAL_ID"
+"${compose[@]}" exec -T performance-worker \
+  babel-online performance-export \
+  --representative \
+  --experiment-id "$ID" \
+  --evidence-root "/var/lib/babel-online/performance/$ID/conditions" \
+  --output-root "$RUN_ROOT/export" \
+  > "$RUN_ROOT/export-receipt.json"
+```
+
+Create `$RUN_ROOT/REPORT.md` after completion, add any operator observations,
+then build the closed bundle:
+
+```bash
+cat > "$RUN_ROOT/REPORT.md" <<EOF
+# 28 August isolated interview smoke
+
+- Trial: $ID
+- Evidence: non-formal representative smoke only
+- Local conditions: 01/02/03
+- Formal position mapping: 7/8/9
+- Formal performance claim: false
+EOF
+
+"${compose[@]}" exec -T performance-worker \
+  babel-friday-benchmark representative-run-build \
+  --trial-id "$ID" \
+  --export-root "$RUN_ROOT/export/feedback-export" \
+  --evidence-root "$PERF_ROOT/$ID/conditions" \
+  --report "$RUN_ROOT/REPORT.md" \
+  --output-root "$RUN_ROOT/representative-accepted" \
+  > "$RUN_ROOT/representative-build-receipt.json"
+```
+
+The builder requires exactly three condition evidence files, complete training
+offset coverage, zero final Kafka lag, and the formal-position bindings
+`7`/`8`/`9`. It preserves `formalPerformanceClaim=false`.
+
+The existing private publication command is optional. If publication is
+explicitly requested, use the exact closed bundle returned by the build
+receipt:
+
+```bash
+BUNDLE_ROOT="$(
+  python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["bundleRoot"])' \
+    "$RUN_ROOT/representative-build-receipt.json"
+)"
+"${compose[@]}" exec -T performance-worker \
+  babel-friday-benchmark representative-run-publish \
+  --trial-id "$ID" \
+  --bundle-root "$BUNDLE_ROOT" \
+  --repo-id 'dhelmy990/babel-wikipedia-experiment' \
+  --revision main \
+  > "$RUN_ROOT/representative-publication-receipt.json"
+```
+
+That optional representative publication must never be attached or presented
+as formal evidence.
+
+Generate and check one SHA-256 inventory for every result file other than the
+inventory itself:
+
+```bash
+(
+  cd "$RUN_ROOT"
+  find . -type f ! -name SHA256SUMS -print0 \
+    | sort -z \
+    | xargs -0 sha256sum > SHA256SUMS
+  sha256sum --check SHA256SUMS
+)
+```
+
+Exit the VM, set the same recorded ID on the local workstation, and retrieve
+the result only through IAP. The local destination is exactly
+`results/28-august-morning-run/isolated-smoke/$ISOLATED_TRIAL_ID`:
+
+```bash
+ISOLATED_TRIAL_ID='<recorded fresh UUID>'
+mkdir -p results/28-august-morning-run/isolated-smoke
+gcloud compute scp --recurse --tunnel-through-iap \
+  --project chloe-tutoring-bot \
+  --zone asia-southeast1-b \
+  "babel-gpu-serving:/var/lib/babel-online/results/28-august-morning-run/isolated-smoke/$ISOLATED_TRIAL_ID" \
+  results/28-august-morning-run/isolated-smoke/
+(
+  cd "results/28-august-morning-run/isolated-smoke/$ISOLATED_TRIAL_ID"
+  sha256sum --check SHA256SUMS
+)
+```
+
+Stop the VM after completion or after an extended or indefinite blocker. The
+exact stop command is:
+
+```bash
+gcloud compute instances stop babel-gpu-serving --project chloe-tutoring-bot --zone asia-southeast1-b
+```
+
 Do not begin this phase until the trial's complete formal matrix is durably
 `completed` (nine conditions at cohort 50; six at cohorts 100/500), training
 conditions report zero final Kafka lag, and the selected child is present in
