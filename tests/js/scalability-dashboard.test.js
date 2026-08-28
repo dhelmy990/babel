@@ -1,5 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 
 const dashboard = require('../../backend/admin/scalability-dashboard.js');
 const progress = require('../../backend/admin/trial-progress.js');
@@ -88,11 +90,14 @@ async function initializeController({ failPoll = false, status = 'running', prep
       return response({ trial });
     }
     if (prepareRerun && url === '/admin/api/v1/performance/trial-1/representative-rerun') {
+      const isolated = JSON.parse(options.body).matrix === 'isolated-smoke';
       return response({ trial: {
         ...trial, experimentId: '11111111-1111-4111-8111-111111111111',
         status: 'population_ready', operatorApproved: false,
-        requestIdentity: { evidenceScope: 'representative_same_process_vs_split' },
-        progress: { ...trial.progress, conditionCount: 6 },
+        requestIdentity: { evidenceScope: isolated
+          ? 'representative_isolated_smoke'
+          : 'representative_same_process_vs_split' },
+        progress: { ...trial.progress, conditionCount: isolated ? 3 : 6 },
       } }, { status: 201 });
     }
     throw new Error(`unexpected request: ${url}`);
@@ -129,6 +134,34 @@ test('dashboard prepares an unapproved bounded 2x3 rerun from the selected froze
   assert.match(context.document.getElementById('performance-status').textContent,
     /representative · non-formal/i);
   assert.equal(context.document.getElementById('performance-approve').disabled, false);
+});
+
+test('dashboard exposes and prepares the three-condition isolated smoke rerun', async () => {
+  const index = fs.readFileSync(path.join(__dirname, '../../backend/admin/index.html'), 'utf8');
+  const option = '<option value="isolated-smoke">1×3 · isolated interview smoke</option>';
+  assert.equal(index.split(option).length - 1, 1);
+  assert.deepEqual(dashboard.evidenceScope({
+    requestIdentity: { evidenceScope: 'representative_isolated_smoke' },
+  }), {
+    label: 'representative · non-formal isolated smoke', conditionCount: 3,
+  });
+
+  const context = await initializeController({ status: 'population_ready', prepareRerun: true });
+  context.document.getElementById('performance-rerun-matrix').value = 'isolated-smoke';
+  context.document.getElementById('performance-rerun-warmup').value = '5';
+  context.document.getElementById('performance-rerun-duration').value = '25';
+  context.document.getElementById('performance-rerun-rps').value = '5';
+
+  await context.document.getElementById('performance-rerun').dispatch('click');
+
+  const [, options] = context.calls.find(([candidate]) =>
+    candidate.endsWith('/representative-rerun'));
+  assert.deepEqual(JSON.parse(options.body), {
+    rerunId: '11111111-1111-4111-8111-111111111111',
+    matrix: 'isolated-smoke', warmupSeconds: 5, durationSeconds: 25, targetRps: 5,
+  });
+  assert.match(context.document.getElementById('performance-status').textContent,
+    /representative · non-formal isolated smoke · 50 creators · 3 conditions/i);
 });
 
 test('trial defaults preserve the real split Qwen experiment', () => {

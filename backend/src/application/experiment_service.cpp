@@ -340,7 +340,8 @@ Result<PerformanceExperimentDto> ExperimentService::preparePerformanceRerun(
   if (source_experiment_id.empty() ||
       !ExperimentRunId::parse(request.rerun_id).has_value() ||
       source_experiment_id == request.rerun_id ||
-      (request.matrix != "2x3" && request.matrix != "split-smoke") ||
+      (request.matrix != "2x3" && request.matrix != "split-smoke" &&
+       request.matrix != "isolated-smoke") ||
       request.warmup_seconds > 3600 || request.duration_seconds == 0 ||
       request.duration_seconds > 86400 || !std::isfinite(request.target_rps) ||
       request.target_rps <= 0) {

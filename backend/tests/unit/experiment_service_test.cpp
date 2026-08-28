@@ -574,7 +574,7 @@ TEST_CASE("formal performance approval is blocked until exact population evidenc
   CHECK(approved->operator_approved);
 }
 
-TEST_CASE("representative rerun preparation delegates to worker and remains unapproved") {
+TEST_CASE("isolated smoke rerun preparation delegates unchanged and remains unapproved") {
   FakeRepository repository;
   repository.performance.population_ready = true;
   repository.performance.run_id = ExperimentRunId::parse(
@@ -585,7 +585,8 @@ TEST_CASE("representative rerun preparation delegates to worker and remains unap
   FakePerformanceWorker performance_worker;
   ExperimentService service(repository, worker, sourcePin(), &performance_worker);
   const PerformanceRerunRequest request{
-      .rerun_id = "44444444-4444-5444-8444-444444444444"};
+      .rerun_id = "44444444-4444-5444-8444-444444444444",
+      .matrix = "isolated-smoke"};
 
   const auto prepared = service.preparePerformanceRerun(
       repository.performance.experiment_id, request);
@@ -593,8 +594,30 @@ TEST_CASE("representative rerun preparation delegates to worker and remains unap
   REQUIRE(prepared.has_value());
   CHECK(performance_worker.prepared_source == repository.performance.experiment_id);
   REQUIRE(performance_worker.prepared_request.has_value());
-  CHECK(performance_worker.prepared_request->matrix == "2x3");
+  CHECK(performance_worker.prepared_request->matrix == "isolated-smoke");
   CHECK(prepared->operator_approved == false);
+}
+
+TEST_CASE("representative rerun preparation rejects unknown matrix selectors") {
+  FakeRepository repository;
+  repository.performance.population_ready = true;
+  repository.performance.run_id = ExperimentRunId::parse(
+      "55555555-5555-5555-8555-555555555555").value();
+  repository.performance.population_manifest_sha256 = std::string(64, 'a');
+  repository.performance.population_bundle_path = "/verified/population";
+  FakeWorker worker;
+  FakePerformanceWorker performance_worker;
+  ExperimentService service(repository, worker, sourcePin(), &performance_worker);
+  const PerformanceRerunRequest request{
+      .rerun_id = "44444444-4444-5444-8444-444444444444",
+      .matrix = "unknown-matrix"};
+
+  const auto prepared = service.preparePerformanceRerun(
+      repository.performance.experiment_id, request);
+
+  REQUIRE_FALSE(prepared.has_value());
+  CHECK(prepared.error().code == ErrorCode::invalid_argument);
+  CHECK_FALSE(performance_worker.prepared_request.has_value());
 }
 
 TEST_CASE("population ready receipt must match frozen model dataset and vector target") {

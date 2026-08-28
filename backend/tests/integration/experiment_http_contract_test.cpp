@@ -492,7 +492,7 @@ TEST_CASE("completed performance trial attaches one verified remote artifact rec
   CHECK(body(attached).at("trial").at("remoteHfCommitSha") == std::string(40, 'b'));
 }
 
-TEST_CASE("dashboard prepares one unapproved representative rerun through worker") {
+TEST_CASE("dashboard forwards one isolated smoke rerun through worker") {
   Repository repository;
   repository.performance.population_ready = true;
   repository.performance.run_id = ExperimentRunId::parse(
@@ -509,7 +509,7 @@ TEST_CASE("dashboard prepares one unapproved representative rerun through worker
   auto prepare = request(
       drogon::Post,
       NJson{{"rerunId", "44444444-4444-5444-8444-444444444444"},
-            {"matrix", "2x3"},
+            {"matrix", "isolated-smoke"},
             {"warmupSeconds", 5},
             {"durationSeconds", 25},
             {"targetRps", 5.0}}
@@ -524,6 +524,39 @@ TEST_CASE("dashboard prepares one unapproved representative rerun through worker
   REQUIRE(response->getStatusCode() == drogon::k201Created);
   REQUIRE(performance_worker.prepared.has_value());
   CHECK(performance_worker.prepared_source == repository.performance.experiment_id);
-  CHECK(performance_worker.prepared->matrix == "2x3");
+  CHECK(performance_worker.prepared->matrix == "isolated-smoke");
   CHECK(body(response).at("trial").at("operatorApproved") == false);
+}
+
+TEST_CASE("dashboard rejects an unknown representative matrix selector") {
+  Repository repository;
+  repository.performance.population_ready = true;
+  repository.performance.run_id = ExperimentRunId::parse(
+      "55555555-5555-5555-8555-555555555555").value();
+  repository.performance.population_manifest_sha256 = std::string(64, 'a');
+  repository.performance.population_bundle_path = "/verified/population";
+  Worker worker;
+  PerformanceWorker performance_worker;
+  ExperimentService service(repository, worker,
+                            ExperimentSourcePin{"repo", "config", std::string(40, 'e')},
+                            &performance_worker);
+  AdminSecurity security("nonce");
+  ExperimentController controller(security, service);
+  auto prepare = request(
+      drogon::Post,
+      NJson{{"rerunId", "44444444-4444-5444-8444-444444444444"},
+            {"matrix", "unknown-matrix"},
+            {"warmupSeconds", 5},
+            {"durationSeconds", 25},
+            {"targetRps", 5.0}}
+          .dump());
+  prepare->addHeader("x-babel-admin-nonce", "nonce");
+
+  const auto response = invoke([&](auto callback) {
+    controller.preparePerformanceRerun(
+        prepare, repository.performance.experiment_id, std::move(callback));
+  });
+
+  CHECK(response->getStatusCode() == drogon::k400BadRequest);
+  CHECK_FALSE(performance_worker.prepared.has_value());
 }

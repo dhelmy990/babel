@@ -104,6 +104,9 @@
     if (scope === 'representative_split_smoke') {
       return { label: 'representative · non-formal split smoke', conditionCount: 3 };
     }
+    if (scope === 'representative_isolated_smoke') {
+      return { label: 'representative · non-formal isolated smoke', conditionCount: 3 };
+    }
     return { label: 'formal', conditionCount: cohortConditionCount(trial?.creatorCount || 50) };
   }
 
