@@ -2,15 +2,28 @@
 {% load static %}
 {% block title %}{{ article.title }} — dhelmy.stream{% endblock %}
 {% block content %}
-<main class="article-shell">
-  <aside class="prereqs" aria-label="Before you read">{% if prerequisites %}<h2>Before you read</h2>{% for neighbor in prerequisites %}{% include "study/babel_anchor.html" %}{% endfor %}{% endif %}</aside>
-  <article class="article-text">
-    <header><span class="article-dot" style="background: {{ article.color }}"></span><p class="article-date">{{ article.published_at|date:"j M Y" }}</p><h1>{{ article.title }}</h1></header>
-    <div class="article-body">{{ article.rendered_html|safe }}</div>
-    {% if article.sources %}<section class="sources" aria-labelledby="sources-title"><h2 id="sources-title">Sources</h2><div>{% for label, url in article.sources %}<a href="{{ url }}" rel="noopener noreferrer" target="_blank">{{ label }}</a>{% endfor %}</div></section>{% endif %}
-    {% if can_publish and identity_mode == 'admin' %}<section class="owner-actions" aria-label="Article owner actions"><a class="owner-link" href="{% url 'article_edit' article.pk %}">Edit article</a><button type="button" data-archive-article="{{ article.pk }}">Archive</button><p role="status" aria-live="polite"></p></section>{% endif %}
-  </article>
-  <section class="next" aria-labelledby="next-title"><h2 id="next-title">Articles to read next</h2><div class="next-links">{% for neighbor in successors %}{% include "study/babel_anchor.html" %}{% endfor %}</div></section>
+<main class="article-shell" data-notes-article="{{ article.pk }}">
+  <div class="notes-toolbar"><button class="note-toggle" type="button" data-notes-toggle aria-expanded="false" aria-controls="notes-sidebar" hidden>My notes</button><a data-notes-signin href="{% url 'account_login' %}">Sign in with Google to keep private notes</a></div>
+  <div class="annotation-surface" data-annotation-surface>
+    <aside class="prereqs" aria-label="Before you read">{% if prerequisites %}<h2>Before you read</h2>{% for neighbor in prerequisites %}{% include "study/babel_anchor.html" %}{% endfor %}{% endif %}</aside>
+    <article class="article-text">
+      <header>{% if article.archived_at %}<p class="archived-label">Archived</p>{% endif %}<span class="article-dot" style="background: {{ article.color }}"></span><p class="article-date">{{ article.published_at|date:"j M Y" }}</p><h1>{{ article.title }}</h1></header>
+      <div class="article-body">{{ article.rendered_html|safe }}</div>
+      {% if article.sources %}<section class="sources" aria-labelledby="sources-title"><h2 id="sources-title">Sources</h2><div>{% for label, url in article.sources %}<a href="{{ url }}" rel="noopener noreferrer" target="_blank">{{ label }}</a>{% endfor %}</div></section>{% endif %}
+      {% if can_publish and identity_mode == 'admin' and not article.archived_at %}<section class="owner-actions" aria-label="Article owner actions"><a class="owner-link" href="{% url 'article_edit' article.pk %}">Edit article</a><button type="button" data-archive-article="{{ article.pk }}">Archive</button><p role="status" aria-live="polite"></p></section>{% endif %}
+    </article>
+    <section class="next" aria-labelledby="next-title"><h2 id="next-title">Articles to read next</h2><div class="next-links">{% for neighbor in successors %}{% include "study/babel_anchor.html" %}{% endfor %}</div></section>
+    <div class="notes-overlay" data-notes-overlay></div>
+  </div>
+  <aside id="notes-sidebar" class="notes-panel" data-notes-sidebar aria-label="My notes" hidden>
+    <header><span>My notes</span><button type="button" data-notes-close aria-label="Close notes">✕</button></header>
+    <p>Private to you · <span data-notes-count>0</span> notes on this article</p>
+    <p data-notes-status role="status" aria-live="polite"></p>
+    <button type="button" class="add-note" data-notes-reload hidden>Retry loading notes</button>
+    <div data-notes-list></div>
+    <div class="note-create-actions" data-notes-create hidden><button type="button" class="add-note" data-new-note="sticky">New sticky note</button><button type="button" class="add-note" data-new-note="text">New text box</button></div>
+  </aside>
 </main>
-{% if can_publish and identity_mode == 'admin' %}<script type="module" src="{% static 'study/publishing.js' %}"></script>{% endif %}
+<script type="module" src="{% static 'study/notes.js' %}"></script>
+{% if can_publish and identity_mode == 'admin' and not article.archived_at %}<script type="module" src="{% static 'study/publishing.js' %}"></script>{% endif %}
 {% endblock %}

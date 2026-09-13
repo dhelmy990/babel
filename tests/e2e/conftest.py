@@ -133,3 +133,40 @@ def other_reader_page(live_server, client, db):
     from study.services.identity import profile_for
     profile_for(reader)
     yield from _page(_session_cookie(live_server, client, reader))
+
+
+@pytest.fixture
+def notes_browser(live_server, article_factory, publisher, reader, other_reader, client):
+    """Seed all ORM/session work before synchronous Playwright owns its loop."""
+    from types import SimpleNamespace
+    from uuid import uuid4
+    from study.services.content import update_article
+    from study.services.notes import create_note
+
+    article = article_factory("Private reading")
+    article = update_article(
+        publisher, article.pk, expected_revision=article.revision,
+        title=article.title, color=article.color,
+        markdown="# Private reading\n\n" + "\n\n".join(
+            f"Paragraph {i}. A reader considers ownership and revisits this explanation in their own words."
+            for i in range(45)
+        ), images={},
+    )
+    first = create_note(reader, article.pk, note_id=uuid4(), kind="sticky", text="Reader one's private note", x=40, y=1600)
+    second = create_note(other_reader, article.pk, note_id=uuid4(), kind="text", text="Reader two's private note", x=None, y=None)
+    from django.test import Client
+    cookies = {"reader": _session_cookie(live_server, Client(), reader),
+               "other": _session_cookie(live_server, Client(), other_reader),
+               "owner": _session_cookie(live_server, Client(), publisher, mode="admin")}
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        context = browser.new_context(viewport={"width": 1280, "height": 900})
+        context.add_cookies([cookies["reader"]])
+        page = context.new_page()
+        page.set_default_timeout(5000)
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        yield SimpleNamespace(page=page, article=article, first=first, second=second,
+                              cookies=cookies, browser=browser, url=live_server.url)
+        browser.close()
+        assert errors == []
