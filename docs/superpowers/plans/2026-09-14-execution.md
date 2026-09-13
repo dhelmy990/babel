@@ -22,8 +22,8 @@ the task and remain untouched.
 | P5 — Publishing UI | Complete (`ede825c` through `8a8e151`) | Passed | Passed |
 | N1 — Private note storage | Complete (`e91442c`) | Passed | Passed |
 | N2 — Note placement/sidebar | Complete (`e89b992`, `f461feb`, `d30b98b`) | Passed | Passed |
-| R1 — Review schedules | Follow-on timezone correction (`8c3fac3` base) | Recheck pending | Recheck pending |
-| R2 — Read detection/list | Tests started; waiting for R1 correction | Pending | Pending |
+| R1 — Review schedules | Complete (`8c3fac3`, `9cf6428`) | Passed | Passed |
+| R2 — Read detection/list | In progress | Pending | Pending |
 | R3 — Owner digest | Pending | Pending | Pending |
 | D1 — Packaging/recovery | Pending | Pending | Pending |
 | D2 — Deployment runbook | Pending | Pending | Pending |
