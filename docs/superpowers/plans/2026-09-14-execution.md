@@ -5,6 +5,10 @@ Implementation plan: [master plan](2026-09-14-personal-website.md).
 Execution uses a fresh implementer per task followed by spec and code-quality
 review. Work stays in the existing `personal-website` branch as the plan directs.
 
+The environment reached its agent-thread limit at N2. Previously created task
+agents are reused from that point; implementation, spec review, and quality
+review continue to use separate agents.
+
 The approved UI was preserved in commit `dfbd1b0` before implementation began.
 Existing credentials, build/results directories, and user documents are outside
 the task and remain untouched.
