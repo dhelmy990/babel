@@ -110,6 +110,11 @@ No review state for anonymous readers. Email only verified owner account at
   0..2 in the same transaction. Return existing slots without backfilling.
   Keep a completed slot with completed_at set; retain a cancelled slot if its
   article is archived. A new day reselects oldest outstanding schedules.
+  Completing a selected review also fulfills any still-open, uncancelled slots
+  for that same schedule on earlier days, using the actual completion timestamp.
+  This preserves slot identities and prevents a reused historical date from
+  showing carried-over work that has already been completed; it never refills
+  either day with a replacement.
 
   Extend archive_article while it holds the Article lock to set suspended=True
   on its ReviewSchedules and cancelled_at on uncompleted ReviewSlots. Archival
