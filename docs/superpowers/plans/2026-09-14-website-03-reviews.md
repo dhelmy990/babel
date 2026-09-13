@@ -223,7 +223,9 @@ and the server generation remains authoritative across tabs/reloads.
   a success. After expiry refresh context and reevaluate eligibility. Keep the
   article readable on failure and expose a small Retry control. Announce the
   first-read or reviewed result unobtrusively. No scheduling call on archived
-  articles, previews, or anonymous pages.
+  articles, previews, or anonymous pages. On archived articles and publishing/
+  preview pages, keep a plain Review today navigation link without fetching a
+  count or materializing a day; following it loads the list on the homepage.
 
   Review today lives in the approved collapsible homepage section. Hide it for
   anonymous users; show an empty state for signed-in users with no work. Links
