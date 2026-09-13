@@ -111,7 +111,8 @@ No review state for anonymous readers. Email only verified owner account at
   Keep a completed slot with completed_at set; retain a cancelled slot if its
   article is archived. A new day reselects oldest outstanding schedules.
   Completing a selected review also fulfills any still-open, uncancelled slots
-  for that same schedule on earlier days, using the actual completion timestamp.
+  for that same schedule on previously selected days, using the actual completion
+  timestamp. Do not filter by local-date ordering, which can reverse after travel.
   This preserves slot identities and prevents a reused historical date from
   showing carried-over work that has already been completed; it never refills
   either day with a replacement.
