@@ -1,6 +1,6 @@
 # Publishing and Public Reading Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Replace sample articles with published Markdown and images, preserve layout B, and connect a strictly directed Babel galaxy to article pages.
 
@@ -31,7 +31,7 @@ database query. `GET /` uses the real home template and an empty article list
 until P3 introduces records. `npm run start:desktop` preserves the old Electron
 command; `npm start` launches `python manage.py runserver 127.0.0.1:8000`.
 
-- [ ] **Preserve the approved UI and establish the test harness.** Review and
+- [x] **Preserve the approved UI and establish the test harness.** Review and
   commit only `index.html`, `galaxy/index.html`, and `README.md`. Add Python 3.13
   environment setup, Django 5.2, allauth, psycopg 3, markdown-it-py, Pillow,
   Gunicorn, WhiteNoise, and httpx; dev dependencies are pytest, pytest-django, pytest-playwright,
@@ -71,7 +71,7 @@ command; `npm start` launches `python manage.py runserver 127.0.0.1:8000`.
   collected static files, browser output, and Python caches. Preserve existing
   ignore lines and existing user files.
 
-- [ ] **Write the first behavior test and run it red.**
+- [x] **Write the first behavior test and run it red.**
 
   ```python
   import pytest
@@ -90,7 +90,7 @@ command; `npm start` launches `python manage.py runserver 127.0.0.1:8000`.
 
   Run `pytest tests/test_pages.py -q`; expect missing public route/content.
 
-- [ ] **Implement the rendered shell without redesign.** Extract the approved
+- [x] **Implement the rendered shell without redesign.** Extract the approved
   CSS and functional shell markup from `index.html`; retain the original as the
   visual reference until final integration. Replace timeline samples with a
   template loop and a quiet empty state. Replace mock navigation with real
@@ -110,7 +110,7 @@ command; `npm start` launches `python manage.py runserver 127.0.0.1:8000`.
   existing CSS classes. Make `site.js` handle the owner mode and timezone UI
   only after P2 supplies the session contract. Do not ship dummy logged-in state.
 
-- [ ] **Verify and commit.** Run `pytest tests/test_pages.py -q`,
+- [x] **Verify and commit.** Run `pytest tests/test_pages.py -q`,
   `python manage.py check`, and `git diff --check`. Run the page at 1440×1100 and
   390×844 and verify the introduction/galaxy order and absence of horizontal
   overflow. Commit the explicit files with `feat: serve approved website shell`.
@@ -131,7 +131,7 @@ or `is_staff` flag. Allauth's adapter is `study.adapters.GoogleAccountAdapter`.
 Create ReaderProfile on first verified login; accept a validated IANA timezone
 from the authenticated browser, using `Asia/Singapore` for Diego.
 
-- [ ] **Write identity tests before privileged routes.** Use allauth's real
+- [x] **Write identity tests before privileged routes.** Use allauth's real
   `SocialAccount`, `EmailAddress`, and a test publisher binding; `force_login`
   exercises session authorization without calling Google.
 
@@ -152,7 +152,7 @@ from the authenticated browser, using `Asia/Singapore` for Diego.
   subject/email, reader admin-mode requests, GET login initiation, missing CSRF,
   POST logout, and unauthenticated session reads. Run `pytest tests/test_identity.py -q` red.
 
-- [ ] **Implement allauth and the owner binding.** Follow current allauth
+- [x] **Implement allauth and the owner binding.** Follow current allauth
   quickstart for installed apps, authentication backends, request context
   processor, and account middleware. Register Google only, use `profile` and
   `email` scopes, PKCE, online access, and no refresh-token storage. Configure one
@@ -192,7 +192,7 @@ from the authenticated browser, using `Asia/Singapore` for Diego.
   custom publishing UI is the supported admin interface. Add a real mode toggle
   and sign-out control to the approved navigation.
 
-- [ ] **Verify and commit.** Run `pytest tests/test_identity.py tests/test_pages.py -q`.
+- [x] **Verify and commit.** Run `pytest tests/test_identity.py tests/test_pages.py -q`.
   Use `Client(enforce_csrf_checks=True)` for explicit CSRF cases, rather than
   relying on the permissive default test client. Commit `feat: add Google reader and publisher identity`.
 
@@ -213,7 +213,7 @@ returns safe HTML, excerpt, source label/URL pairs, and validated image bytes;
 PreparedArticle is a frozen dataclass defined in `study/markdown.py`. `images`
 maps normalized Markdown-relative paths such as `images/layout.png` to bytes.
 
-- [ ] **Write a meaningful publication test.**
+- [x] **Write a meaningful publication test.**
 
   ```python
   from uuid import uuid4
@@ -238,7 +238,7 @@ maps normalized Markdown-relative paths such as `images/layout.png` to bytes.
   storage failure, unsafe Markdown, non-owner request, stable slug/date, and
   asset-access tests. Run the three new test files red.
 
-- [ ] **Implement models, validation, rendering, and private asset writes.**
+- [x] **Implement models, validation, rendering, and private asset writes.**
   Use master-plan fields and constraints. Insert GraphState(pk=1) in the data
   migration. Slugify the initial title, reject empty/reserved/conflicting slugs,
   validate title 1..200 characters and color `#[0-9a-fA-F]{6}`. Bound Markdown
@@ -285,7 +285,7 @@ maps normalized Markdown-relative paths such as `images/layout.png` to bytes.
   uses `FileResponse` with verified MIME and `X-Content-Type-Options: nosniff`.
   Never expose MEDIA_ROOT via a public static route.
 
-- [ ] **Wire real pages and verify.** Home orders by `-published_at,-id`; fetch
+- [x] **Wire real pages and verify.** Home orders by `-published_at,-id`; fetch
   20 articles per page and render older pages through a regular next link.
   Article routes include source pills, neighbor regions, and a persistent empty
   “Articles to read next” section even for terminal nodes. Escape all metadata;
@@ -309,7 +309,7 @@ Directed edges are authoritative server state; loading the galaxy never edits
 them. Preserve explicitly chosen redundant edges: they still mean an immediate
 prerequisite in this product.
 
-- [ ] **Write cycle and immediate-neighbor tests.**
+- [x] **Write cycle and immediate-neighbor tests.**
 
   ```python
   import pytest
@@ -331,7 +331,7 @@ prerequisite in this product.
   neighbor tests. Use separate DB connections and a thread barrier for concurrent
   A→B/B→A and multi-edge cycle attempts; exactly one conflicting write succeeds.
 
-- [ ] **Implement serialized graph writes.**
+- [x] **Implement serialized graph writes.**
 
   ```python
   def path_exists(edges, start, destination):
@@ -358,7 +358,7 @@ prerequisite in this product.
   results without deleting or rewiring them. N1 adds note-owner grants and R1
   adds review suspension to this same transaction when those records exist.
 
-- [ ] **Adapt the graph entry point.** Preserve rendering/lighting/shaders,
+- [x] **Adapt the graph entry point.** Preserve rendering/lighting/shaders,
   animation, hierarchy circles, camera dragging, hover effects, and configuration
   in the current visual modules. `website-graph.js` loads those modules plus the
   API graph and initializes ForceGraph3D with the existing node/link factories.
@@ -378,7 +378,7 @@ prerequisite in this product.
   to localStorage or import Electron data automatically. Handle failed API loads
   with retry and retain the last visibly loaded graph during a failed mutation.
 
-- [ ] **Verify and commit.** Run graph/archive tests including PostgreSQL
+- [x] **Verify and commit.** Run graph/archive tests including PostgreSQL
   concurrency cases. Browser-check graph rendering, article click, archive
   exclusion, reverse-cycle error, and return-to-timeline navigation. Commit
   `feat: connect articles through a directed Babel galaxy`.
