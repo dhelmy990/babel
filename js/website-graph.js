@@ -11,6 +11,7 @@
     let hoveredNode = null, hoveredSphere = null, draggedUntil = 0;
     let unavailable = false, busy = false, holdTimer = null;
     let pageActive = true, loadController = null;
+    let detachContextLoss = null;
     const timers = new Set(), frames = new Set();
     let raycaster, mouse;
 
@@ -33,11 +34,20 @@
         stopAnimation = null;
         timers.forEach(clearTimeout); timers.clear();
         frames.forEach(cancelAnimationFrame); frames.clear();
-        if (typeof LevelCircles !== 'undefined') LevelCircles.dispose(graph);
-        if (graph) {
-            graph.pauseAnimation();
-            graph._destructor();
-            graph = null;
+        const retiredGraph = graph;
+        graph = null;
+        if (detachContextLoss) detachContextLoss();
+        detachContextLoss = null;
+        if (typeof LevelCircles !== 'undefined') LevelCircles.dispose(retiredGraph);
+        if (retiredGraph) {
+            const renderer = retiredGraph.renderer();
+            retiredGraph.enableNodeDrag(false).enablePointerInteraction(false);
+            // In 1.73.0 the destructor only stops animation and empties graph data.
+            retiredGraph._destructor();
+            retiredGraph.controls().dispose();
+            retiredGraph.postProcessingComposer().dispose();
+            renderer.dispose();
+            renderer.forceContextLoss();
         }
         container.replaceChildren();
         reset.hidden = true;
@@ -139,7 +149,15 @@
             .onDagError(() => { status.textContent = 'The galaxy could not arrange these links.'; })
             .onEngineStop(() => { if (graph) LevelCircles.updateLevelCircles(graph); });
         Rendering.setupLighting(graph.scene());
-        graph.renderer().domElement.addEventListener('webglcontextlost', event => { event.preventDefault(); fallback(); });
+        const owningGraph = graph;
+        const canvas = graph.renderer().domElement;
+        const onContextLoss = event => {
+            if (graph !== owningGraph) return;
+            event.preventDefault();
+            fallback();
+        };
+        canvas.addEventListener('webglcontextlost', onContextLoss);
+        detachContextLoss = () => canvas.removeEventListener('webglcontextlost', onContextLoss);
         stopAnimation = Animation.startLoop(graph);
         reset.hidden = false;
     }

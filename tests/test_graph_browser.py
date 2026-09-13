@@ -240,3 +240,49 @@ def test_browser_back_returns_to_functional_galaxy(galaxy_page):
     expect(page).to_have_url(url + '/galaxy')
     expect(page.locator('#website-graph canvas')).to_be_visible()
     expect(page.locator('#graph-status')).to_have_text('2 articles · 0 read-before links')
+
+
+def test_retired_context_loss_cannot_dispose_current_galaxy(galaxy_page):
+    page, url, cookie = galaxy_page
+    page.goto(url + '/galaxy')
+    expect(page.locator('#graph-status')).to_have_text('2 articles · 0 read-before links')
+    page.evaluate("""() => {
+        window.retiredCanvas = testGraph.renderer().domElement;
+        window.dispatchEvent(new PageTransitionEvent('pagehide', {persisted: true}));
+        window.dispatchEvent(new PageTransitionEvent('pageshow', {persisted: true}));
+    }""")
+    expect(page.locator('#graph-status')).to_have_text('2 articles · 0 read-before links')
+    page.evaluate("retiredCanvas.dispatchEvent(new Event('webglcontextlost', {cancelable: true}))")
+    expect(page.locator('#website-graph canvas')).to_be_visible()
+    expect(page.locator('#graph-status')).to_have_text('2 articles · 0 read-before links')
+    # The current context still activates the functional fallback.
+    page.locator('#website-graph canvas').evaluate("canvas => canvas.dispatchEvent(new Event('webglcontextlost', {cancelable: true}))")
+    expect(page.locator('#website-graph')).to_be_hidden()
+    expect(page.locator('#graph-status')).to_contain_text('article list')
+
+
+def test_twenty_persisted_restorations_release_webgl_contexts_and_controls(galaxy_page):
+    page, url, cookie = galaxy_page
+    warnings, errors = [], []
+    page.on('console', lambda message: warnings.append(message.text) if 'Too many active WebGL contexts' in message.text else None)
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.goto(url + '/galaxy')
+    expect(page.locator('#graph-status')).to_have_text('2 articles · 0 read-before links')
+    page.evaluate('window.retiredContexts = []; window.disposedControls = 0;')
+    for _ in range(20):
+        page.evaluate("""() => {
+            retiredContexts.push(testGraph.renderer().getContext());
+            const controls = testGraph.controls();
+            const dispose = controls.dispose.bind(controls);
+            controls.dispose = () => { disposedControls++; dispose(); };
+            window.dispatchEvent(new PageTransitionEvent('pagehide', {persisted: true}));
+            window.dispatchEvent(new PageTransitionEvent('pageshow', {persisted: true}));
+        }""")
+        expect(page.locator('#graph-status')).to_have_text('2 articles · 0 read-before links')
+        expect(page.locator('#website-graph canvas')).to_be_visible()
+        # Allow asynchronous WebGL context-loss delivery between restorations.
+        page.evaluate('() => new Promise(resolve => setTimeout(resolve, 150))')
+    assert page.evaluate('retiredContexts.every(context => context.isContextLost())')
+    assert page.evaluate('disposedControls') == 20
+    assert warnings == []
+    assert errors == []
