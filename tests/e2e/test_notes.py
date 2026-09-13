@@ -150,7 +150,7 @@ def test_definitively_rejected_creation_can_be_corrected_or_discarded(notes_brow
         assert len(api(page, f"/api/articles/{env.article.pk}/notes")["notes"]) == 1
 
 
-@pytest.mark.parametrize("failure", ["network", "server_error", "unreadable_success"])
+@pytest.mark.parametrize("failure", ["network", "server_error", "unreadable_success", "incomplete_success"])
 def test_network_failure_retains_current_tab_input_and_exact_create_retry(notes_browser, failure):
     env = notes_browser
     page = open_notes(env)
@@ -158,6 +158,8 @@ def test_network_failure_retains_current_tab_input_and_exact_create_retry(notes_
     item = page.locator("[data-notes-list] [data-note-id]").last
     item.get_by_label("Note text", exact=True).fill("Original attempted creation")
     payloads = []
+    patches = []
+    page.on("request", lambda req: patches.append(req.post_data_json) if req.method == "PATCH" else None)
 
     def lose_response(route):
         payloads.append(route.request.post_data_json)
@@ -166,6 +168,8 @@ def test_network_failure_retains_current_tab_input_and_exact_create_retry(notes_
             route.abort()
         elif failure == "server_error":
             route.fulfill(status=500, json={"error": {"code": "server_error", "message": "Response failed"}})
+        elif failure == "incomplete_success":
+            route.fulfill(status=201, json={"note": {"id": route.request.post_data_json["id"]}})
         else:
             route.fulfill(status=201, content_type="application/json", body="{unreadable")
 
@@ -180,7 +184,8 @@ def test_network_failure_retains_current_tab_input_and_exact_create_retry(notes_
     page.on("request", lambda req: payloads.append(req.post_data_json) if req.method == "POST" and req.url.endswith("/notes") else None)
     item.get_by_role("button", name="Retry", exact=True).click()
     saved(item)
-    assert payloads[0] == payloads[1]
+    assert len(payloads) == 2 and payloads[0] == payloads[1]
+    assert patches == [{"version": 1, "text": "Newer typing after failure", "x": None, "y": None}]
     notes = api(page, f"/api/articles/{env.article.pk}/notes")["notes"]
     assert len(notes) == 2
     assert notes[1]["text"] == "Newer typing after failure"

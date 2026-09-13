@@ -104,8 +104,15 @@ export function createNotesStore({articleId, signal, changed, removed, unauthori
           });
         }
         if (disposed) return;
-        if (!result?.note || result.note.id !== entry.id) throw new Error("The saved note response could not be read.");
-        entry.confirmed = result.note;
+        const note = result?.note;
+        const validPosition = note && ((note.x === null && note.y === null)
+          || [note.x, note.y].every((value) => Number.isFinite(value) && value >= 0 && value <= 1e6));
+        if (note?.id !== entry.id || note.kind !== entry.kind || note.article_id !== articleId
+          || !Number.isInteger(note.version) || note.version < 1 || note.version > 2147483647
+          || typeof note.text !== "string" || !validPosition) {
+          throw new Error("The saved note response could not be read.");
+        }
+        entry.confirmed = note;
         entry.creation = null;
         // Creation retry may confirm an older body; the queued desired edit follows.
         if (!same(attempted, entry.confirmed) && !entry.queued) entry.queued = attempted;
