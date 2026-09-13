@@ -37,6 +37,14 @@ export function createNotesStore({articleId, signal, changed, removed, unauthori
     const result = await request(endpoint);
     if (disposed) return;
     const server = result.notes.find((note) => note.id === entry.id);
+    if (entry.deleting) {
+      // Delete supersedes the stale edit; it does not require a comparison retry.
+      entry.confirmed = server || entry.confirmed;
+      entry.creation = entry.conflict = null;
+      entry.error = "";
+      entry.refreshConflict = false;
+      return;
+    }
     if (!server) {
       entry.status = "This note is no longer available. Your unsaved text is still here.";
       entry.refreshConflict = false;
@@ -56,7 +64,16 @@ export function createNotesStore({articleId, signal, changed, removed, unauthori
       unauthorized();
       return;
     }
+    entry.error = "retry";
     entry.status = "The server copy could not be loaded. Your text is still here; Retry to compare.";
+  }
+
+  function finishOperation(entry) {
+    entry.busy = false;
+    notify(entry);
+    // An explicit deletion can arrive while either conflict-refresh path awaits.
+    // Never restart an ordinary stale save, a failed operation, or a disposed note.
+    if (!disposed && entries.has(entry.id) && entry.deleting && !entry.error) void pump(entry);
   }
 
   async function pump(entry) {
@@ -113,8 +130,7 @@ export function createNotesStore({articleId, signal, changed, removed, unauthori
         entry.status = `The note could not be saved. Your text is still here. ${error.message}`;
       }
     } finally {
-      entry.busy = false;
-      notify(entry);
+      finishOperation(entry);
     }
   }
 
@@ -129,8 +145,8 @@ export function createNotesStore({articleId, signal, changed, removed, unauthori
       entry.busy = true;
       try { await refreshConflict(entry); }
       catch (error) { conflictRefreshFailed(entry, error); }
-      finally { entry.busy = false; notify(entry); }
-      return; // The reader must see the server copy before choosing to overwrite it.
+      finally { finishOperation(entry); }
+      return; // Ordinary edits require an explicit retry after comparing the server copy.
     }
     entry.error = "";
     entry.conflict = null;

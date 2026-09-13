@@ -555,3 +555,68 @@ def test_pointer_cancel_uses_confirmation_received_after_drag_started(notes_brow
         saved(item)
     assert held == []
     assert api(page, f"/api/articles/{env.article.pk}/notes")["notes"][0]["x"] == 50
+
+
+@pytest.mark.parametrize("retry_refresh", [False, True])
+def test_delete_during_conflict_refresh_resumes_after_response(notes_browser, retry_refresh):
+    env = notes_browser
+    page = open_notes(env)
+    item = card(page, env.first.pk)
+    item.get_by_role("button", name="Edit", exact=True).click()
+    item.get_by_label("Note text", exact=True).fill("A stale edit I chose to delete")
+    api(page, f"/api/notes/{env.first.pk}", "PATCH", {
+        "version": 1, "text": "Newer server note", "x": 40, "y": 1600,
+    })
+    writes = []
+    page.on("request", lambda req: writes.append(req.method) if req.method in {"PATCH", "DELETE"} else None)
+    endpoint = f"**/api/articles/{env.article.pk}/notes"
+    held = []
+    if retry_refresh:
+        page.route(endpoint, lambda route: route.abort())
+        item.get_by_role("button", name="Save note", exact=True).click()
+        expect(item.get_by_role("status")).to_contain_text("server copy could not be loaded")
+        page.unroute(endpoint)
+    page.route(endpoint, lambda route: held.append(route))
+    with page.expect_request(lambda req: req.method == "GET" and req.url.endswith(f"/api/articles/{env.article.pk}/notes")):
+        item.get_by_role("button", name="Retry" if retry_refresh else "Save note", exact=True).click()
+    item.get_by_role("button", name="Delete", exact=True).click()
+    assert len(held) == 1
+    held.pop().continue_()
+    expect(item).to_have_count(0)
+    expect(page.locator("[data-note-copy]")).to_have_count(0)
+    expect(page.get_by_role("button", name="New sticky note", exact=True)).to_be_enabled()
+    assert writes == ["PATCH", "DELETE"]
+    page.unroute(endpoint)
+    assert api(page, f"/api/articles/{env.article.pk}/notes")["notes"] == []
+
+
+@pytest.mark.parametrize("refresh_status", [0, 403])
+def test_pending_delete_keeps_draft_when_conflict_refresh_fails(notes_browser, refresh_status):
+    env = notes_browser
+    page = open_notes(env)
+    item = card(page, env.first.pk)
+    item.get_by_role("button", name="Edit", exact=True).click()
+    item.get_by_label("Note text", exact=True).fill("Retained until deletion can finish")
+    api(page, f"/api/notes/{env.first.pk}", "PATCH", {
+        "version": 1, "text": "Newer server note", "x": 40, "y": 1600,
+    })
+    endpoint = f"**/api/articles/{env.article.pk}/notes"
+    held = []
+    page.route(endpoint, lambda route: held.append(route))
+    with page.expect_request(lambda req: req.method == "GET" and req.url.endswith(f"/api/articles/{env.article.pk}/notes")):
+        item.get_by_role("button", name="Save note", exact=True).click()
+    item.get_by_role("button", name="Delete", exact=True).click()
+    assert len(held) == 1
+    route = held.pop()
+    if refresh_status:
+        route.fulfill(status=refresh_status, json={"error": {"code": "csrf_failed", "message": "CSRF validation failed."}})
+    else:
+        route.abort()
+    expect(item.get_by_role("status")).to_contain_text("server copy could not be loaded")
+    expect(item.get_by_label("Note text", exact=True)).to_have_value("Retained until deletion can finish")
+    expect(item.get_by_role("button", name="Retry", exact=True)).to_be_visible()
+    page.unroute(endpoint)
+    assert len(api(page, f"/api/articles/{env.article.pk}/notes")["notes"]) == 1
+    item.get_by_role("button", name="Retry", exact=True).click()
+    expect(item).to_have_count(0)
+    assert api(page, f"/api/articles/{env.article.pk}/notes")["notes"] == []
