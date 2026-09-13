@@ -263,7 +263,7 @@ calendar date or timezone. Its unique user/day constraint and idempotency key
 enforce one digest per Singapore day while its content comes from the same
 active review list as the owner's website. R1 may leave the Digest model for R3.
 
-- [ ] **Write owner-only and retry tests with a fake adapter.**
+- [x] **Write owner-only and retry tests with a fake adapter.**
 
   ```python
   class FakeDelivery:
@@ -285,7 +285,7 @@ active review list as the owner's website. R1 may leave the Digest model for R3.
   receives only Diego's address and at most one provider message per day.
   Run `pytest tests/test_digest.py -q` red.
 
-- [ ] **Implement daily preparation and durable delivery state.** The command
+- [x] **Implement daily preparation and durable delivery state.** The command
   runs every five minutes; prepare only at/after 09:00 and before the end of the
   current Singapore day. Catch up that day's digest after downtime; never send
   a backlog of old daily emails. Use the same get_review_day function as the UI.
@@ -334,7 +334,7 @@ active review list as the owner's website. R1 may leave the Digest model for R3.
   production security settings active; production must not silently default to
   console delivery.
 
-- [ ] **Verify and commit.** Run `pytest tests/test_digest.py -q` plus review
+- [x] **Verify and commit.** Run `pytest tests/test_digest.py -q` plus review
   concurrency tests. Run `python manage.py send_review_digest --dry-run` against
   test data and verify the output shows the daily selection without writing a
   delivery attempt or sending mail. Document dry-run behavior. Commit

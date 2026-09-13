@@ -24,9 +24,17 @@ the task and remain untouched.
 | N2 — Note placement/sidebar | Complete (`e89b992`, `f461feb`, `d30b98b`) | Passed | Passed |
 | R1 — Review schedules | Complete (`8c3fac3`, `9cf6428`) | Passed | Passed |
 | R2 — Read detection/list | Complete (`16ef07d`) | Passed | Passed |
-| R3 — Owner digest | In progress | Pending | Pending |
+| R3 — Owner digest | Complete (`09c25da`) | Passed | Passed |
+| N2/R2 — Integration recovery fixes | In progress | Pending | Pending |
 | D1 — Packaging/recovery | Pending | Pending | Pending |
 | D2 — Deployment runbook | Pending | Pending | Pending |
 
 Production account setup, cloud provisioning, DNS changes, and live email are
 separate from local implementation and verification.
+
+The broader integration review found two browser recovery gaps after the initial
+N2/R2 approvals: a definitively rejected new note retained its original invalid
+creation payload, and a page initially ineligible for review never observed its
+end after crossing midnight. Both have narrow fixes and browser regressions queued
+before packaging. R3 passed independent spec and quality reviews, each rerunning
+115 digest and review tests without live email.
