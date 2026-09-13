@@ -50,7 +50,7 @@ services:
       POSTGRES_PASSWORD: disposable-restore-only
     volumes: [database:/var/lib/postgresql/data]
     healthcheck:
-      test: [CMD-SHELL, 'pg_isready -U study_restore -d study_restore']
+      test: [CMD-SHELL, 'pg_isready -h 127.0.0.1 -U study_restore -d study_restore']
       interval: 1s
       timeout: 3s
       retries: 40

@@ -30,6 +30,55 @@ def run(*args, input=None, env=None, check=True):
     return result
 
 
+def test_postgres_health_waits_for_final_tcp_server():
+    """Hold the socket-only init server so an early healthy signal is deterministic."""
+    config = (ROOT / "compose.prod.yaml").read_text()
+    postgres = re.search(r"image: (postgres:\S+)", config)[1]
+    health_command = re.search(r"'(pg_isready[^']+)'", config)[1].replace("$$", "$")
+    container = None
+    with tempfile.TemporaryDirectory(prefix="study-d1-readiness-", dir=Path.home()) as temporary:
+        initializer = Path(temporary) / "hold-init.sh"
+        initializer.write_text("#!/bin/sh\ntouch /tmp/study-init-held\nwhile [ ! -e /tmp/study-init-release ]; do sleep 0.1; done\n")
+        try:
+            container = run("docker", "create", "--name", "study-d1-readiness-" + uuid4().hex,
+                            "--network", "none", "--env", "POSTGRES_DB=study", "--env", "POSTGRES_USER=study",
+                            "--env", "POSTGRES_PASSWORD=disposable", "--health-cmd", health_command,
+                            "--health-interval", "1s", "--health-timeout", "1s", "--health-retries", "1", postgres).stdout.strip()
+            run("docker", "cp", str(initializer), container + ":/docker-entrypoint-initdb.d/hold-init.sh")
+            run("docker", "start", container)
+            for _ in range(300):
+                if run("docker", "exec", container, "test", "-f", "/tmp/study-init-held", check=False).returncode == 0:
+                    break
+                time.sleep(0.1)
+            else:
+                pytest.fail("PostgreSQL never reached the held initialization script")
+            assert run("docker", "exec", container, "pg_isready", "-U", "study", "-d", "study").returncode == 0
+            assert run("docker", "exec", container, "pg_isready", "-h", "127.0.0.1", "-U", "study", "-d", "study", check=False).returncode != 0
+            initial_log = json.loads(run("docker", "inspect", "--format", "{{json .State.Health.Log}}", container).stdout) or []
+            previous_probes = {entry["Start"] for entry in initial_log}
+            for _ in range(100):
+                health = json.loads(run("docker", "inspect", "--format", "{{json .State.Health}}", container).stdout)
+                # Two new probes exclude an already-running pre-hold probe and
+                # prove continued unreadiness while initialization is blocked.
+                if len({entry["Start"] for entry in health["Log"]} - previous_probes) >= 2:
+                    break
+                time.sleep(0.1)
+            else:
+                pytest.fail("Docker did not probe the held initialization server")
+            assert health["Status"] == "unhealthy", "The socket-only temporary server must not satisfy readiness"
+            run("docker", "exec", container, "touch", "/tmp/study-init-release")
+            for _ in range(300):
+                if run("docker", "inspect", "--format", "{{.State.Health.Status}}", container).stdout.strip() == "healthy":
+                    break
+                time.sleep(0.1)
+            else:
+                pytest.fail("Final PostgreSQL TCP server never became healthy")
+            run("docker", "exec", container, "pg_isready", "-h", "127.0.0.1", "-U", "study", "-d", "study")
+        finally:
+            if container:
+                run("docker", "rm", "--force", "--volumes", container)
+
+
 SEED = r'''
 import base64, json
 from uuid import uuid4
