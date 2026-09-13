@@ -68,3 +68,19 @@ def test_failed_low_level_asset_write_removes_its_partial_file(monkeypatch, sett
     with pytest.raises(OSError, match="disk failure"):
         write_asset(b"partial")
     assert not list(tmp_path.rglob("*"))
+
+
+def test_colliding_storage_key_never_deletes_the_existing_file(monkeypatch, settings, tmp_path):
+    import uuid
+    from study.storage import write_asset
+
+    settings.PRIVATE_MEDIA_ROOT = tmp_path
+    collision = uuid.UUID("12345678-1234-5678-1234-567812345678")
+    path = tmp_path / "assets" / collision.hex
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"existing")
+    monkeypatch.setattr("study.storage.uuid.uuid4", lambda: collision)
+
+    with pytest.raises(FileExistsError):
+        write_asset(b"replacement")
+    assert path.read_bytes() == b"existing"

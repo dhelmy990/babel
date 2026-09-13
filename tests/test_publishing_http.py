@@ -90,3 +90,18 @@ def test_preview_validates_metadata_and_can_reuse_the_article_image(publisher):
         HTTP_X_CSRFTOKEN=token,
     )
     assert invalid.status_code == 400
+
+
+@pytest.mark.django_db
+def test_oversized_markdown_multipart_is_a_json_validation_error_after_csrf(publisher):
+    client = Client(enforce_csrf_checks=True)
+    client.force_login(publisher)
+    client.get("/")
+    response = client.post(
+        "/api/articles/preview",
+        {"title": "Large", "color": "#1a5276", "markdown": "x" * (3 * 1024 * 1024)},
+        HTTP_X_CSRFTOKEN=client.cookies["csrftoken"].value,
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_article"

@@ -85,6 +85,9 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 # Deliberately absent from URL routing: article images are authorized through /assets/<uuid>.
 MEDIA_ROOT = BASE_DIR / "private-media"
 PRIVATE_MEDIA_ROOT = MEDIA_ROOT
+# Authenticated multipart writers impose the 64 MiB request cap themselves so
+# the CSRF middleware can parse valid requests before article validation.
+DATA_UPLOAD_MAX_MEMORY_SIZE = 64 * 1024 * 1024
 STORAGES = {
     "staticfiles": {
         "BACKEND": (

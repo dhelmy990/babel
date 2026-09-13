@@ -33,6 +33,33 @@ def test_final_sources_collect_each_link_with_its_own_label():
     assert prepared.sources == (("First", "https://one.example"), ("Second", "https://two.example"))
 
 
+def test_normalizes_dot_and_percent_encoded_image_names_for_rendering():
+    from io import BytesIO
+    from PIL import Image
+    from study.markdown import prepare_article, render_article
+
+    output = BytesIO()
+    Image.new("RGB", (2, 2), "blue").save(output, "PNG")
+    prepared = prepare_article(
+        "![one](./images/x.png)\n\n![two](<images/my pic.png>)",
+        {"images/x.png": output.getvalue(), "images/my pic.png": output.getvalue()},
+    )
+
+    rendered = render_article(prepared, {"images/x.png": "/assets/one", "images/my pic.png": "/assets/two"})
+    assert 'src="/assets/one"' in rendered
+    assert 'src="/assets/two"' in rendered
+
+
+def test_nested_sources_heading_remains_article_body():
+    from study.markdown import prepare_article
+
+    prepared = prepare_article("Body\n\n> ## Sources\n> [Ref](https://example.com)", {})
+
+    assert prepared.sources == ()
+    assert "blockquote" in prepared.html
+    assert "Ref" in prepared.html
+
+
 def test_sources_must_be_a_final_heading_and_keep_each_link_label():
     from study.markdown import prepare_article
 

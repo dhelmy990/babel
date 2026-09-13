@@ -10,7 +10,7 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 from django.utils.text import slugify
 
-from study.markdown import PreparedArticle, normalize_image_name, prepare_article, render_article
+from study.markdown import PreparedArticle, normalize_image_mapping, normalize_image_name, prepare_article, render_article
 from study.models import ArchiveAccess, Article, Asset, GraphState
 from study.services.identity import is_publisher, require_publisher
 from study.storage import path_for, remove_asset, write_asset
@@ -94,8 +94,9 @@ def publish_article(user, *, title, color, markdown, images, submission_id) -> A
         except (ValueError, TypeError, AttributeError) as exc:
             raise ValueError("Invalid submission id") from exc
     title, color = validate_article_metadata(title, color, markdown)
-    prepared = prepare_article(markdown, images)
-    digest = _submission_digest(title, color, markdown, images)
+    uploads = normalize_image_mapping(images)
+    prepared = prepare_article(markdown, uploads)
+    digest = _submission_digest(title, color, markdown, uploads)
     written: list[str] = []
     try:
         with transaction.atomic():
@@ -144,9 +145,10 @@ def update_article(user, article_id, *, expected_revision, title, color, markdow
                     combined[name] = path_for(asset.storage_key).read_bytes()
                 except OSError as exc:
                     raise ValueError("Stored asset is unavailable") from exc
-            combined.update(images)
+            uploads = normalize_image_mapping(images)
+            combined.update(uploads)
             prepared = prepare_article(markdown, combined)
-            replacements = set(images)
+            replacements = set(uploads)
             created = _new_assets(article, prepared, replacements, written)
             resolved = {**existing, **created}
             article.title = title

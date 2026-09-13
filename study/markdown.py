@@ -5,7 +5,7 @@ from io import BytesIO
 import re
 import warnings
 from pathlib import PurePosixPath
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from markdown_it import MarkdownIt
 from PIL import Image, ImageFile
@@ -33,15 +33,27 @@ def markdown_parser():
 
 
 def normalize_image_name(name: str) -> str:
-    parsed = urlparse(name)
-    if parsed.scheme or parsed.netloc or name.startswith(("/", "\\")):
+    decoded = unquote(name)
+    parsed = urlparse(decoded)
+    if parsed.scheme or parsed.netloc or parsed.query or parsed.fragment or decoded.startswith(("/", "\\")):
         raise ValueError("Invalid image path")
-    path = PurePosixPath(name.replace("\\", "/"))
-    if not name or any(part in {"", ".", ".."} for part in path.parts):
+    path = PurePosixPath(decoded.replace("\\", "/"))
+    if not decoded or not path.parts or ".." in path.parts:
         raise ValueError("Invalid image path")
     normalized = path.as_posix()
     if normalized.lower().endswith((".svg", ".html", ".htm")):
         raise ValueError("Unsupported image type")
+    return normalized
+
+
+def normalize_image_mapping(images: dict[str, bytes]) -> dict[str, bytes]:
+    """Canonicalize upload names before combining them with stored assets."""
+    normalized = {}
+    for supplied_name, data in images.items():
+        name = normalize_image_name(supplied_name)
+        if name in normalized:
+            raise ValueError("Duplicate image")
+        normalized[name] = data
     return normalized
 
 
@@ -70,7 +82,10 @@ def _split_sources(markdown: str) -> tuple[str, tuple[tuple[str, str], ...]]:
     """Separate only a real final H2 Sources section, using block tokens."""
     parser = markdown_parser()
     tokens = parser.parse(markdown)
-    headings = [index for index, token in enumerate(tokens) if token.type == "heading_open"]
+    headings = [
+        index for index, token in enumerate(tokens)
+        if token.type == "heading_open" and token.level == 0
+    ]
     if not headings:
         return markdown, ()
     index = headings[-1]
@@ -164,10 +179,7 @@ def prepare_article(markdown: str, images: dict[str, bytes]) -> PreparedArticle:
         raise ValueError("Too many images")
     normal_images: dict[str, bytes] = {}
     media_types: dict[str, str] = {}
-    for supplied_name, data in images.items():
-        name = normalize_image_name(supplied_name)
-        if name in normal_images:
-            raise ValueError("Duplicate image")
+    for name, data in normalize_image_mapping(images).items():
         normal_images[name], media_types[name] = _validated_image(data)
 
     body, sources = _split_sources(markdown)
@@ -180,6 +192,7 @@ def prepare_article(markdown: str, images: dict[str, bytes]) -> PreparedArticle:
                 name = normalize_image_name(source)
                 if name not in normal_images:
                     raise ValueError("Missing image")
+                child.attrSet("src", name)
             elif child.type == "link_open":
                 _validate_url(child.attrGet("href") or "")
     # Do not duplicate a leading title that the page already renders.

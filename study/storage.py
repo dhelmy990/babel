@@ -13,17 +13,20 @@ def write_asset(data: bytes) -> str:
     key = f"assets/{uuid.uuid4().hex}"
     path = private_media_root() / key
     path.parent.mkdir(parents=True, exist_ok=True)
+    created = False
     try:
         with path.open("xb") as output:
+            created = True
             output.write(data)
             output.flush()
             os.fsync(output.fileno())
     except Exception:
-        try:
-            path.unlink()
-            path.parent.rmdir()
-        except OSError:
-            pass
+        if created:
+            try:
+                path.unlink()
+                path.parent.rmdir()
+            except OSError:
+                pass
         raise
     return key
 

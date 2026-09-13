@@ -7,7 +7,7 @@ from django.shortcuts import get_object_or_404, render
 from django.views.decorators.http import require_GET, require_POST
 
 from study.forms import ArticleSubmissionForm
-from study.markdown import prepare_article, render_article
+from study.markdown import normalize_image_mapping, prepare_article, render_article
 from study.models import Article, Asset
 from study.services.content import RevisionConflict, SubmissionConflict, can_read_article, publish_article, stored_images_for_article, update_article, validate_article_metadata
 from study.services.identity import require_publisher
@@ -51,7 +51,7 @@ def preview(request):
         return _form_error(form)
     try:
         validate_article_metadata(form.cleaned_data["title"], form.cleaned_data["color"], form.cleaned_data["markdown"])
-        images = form.cleaned_data["images"]
+        images = normalize_image_mapping(form.cleaned_data["images"])
         article_id = form.cleaned_data.get("article_id")
         if article_id:
             article = Article.objects.get(pk=article_id)

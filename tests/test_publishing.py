@@ -159,3 +159,31 @@ def test_archived_article_is_hidden_from_public_but_visible_to_publisher(publish
     publisher_response = client.get("/archived")
     assert publisher_response.status_code == 200
     assert publisher_response["Cache-Control"] == "private, no-store"
+
+
+@pytest.mark.django_db
+def test_publish_and_update_normalized_upload_paths_write_and_render_the_replacement(publisher):
+    from io import BytesIO
+    from PIL import Image
+    from study.services.content import publish_article, update_article
+
+    first, second = BytesIO(), BytesIO()
+    Image.new("RGB", (2, 2), "blue").save(first, "PNG")
+    Image.new("RGB", (2, 2), "red").save(second, "PNG")
+    article = publish_article(
+        publisher, title="Normalized", color="#1a5276", markdown="# Normalized\n\n![x](./images/x.png)",
+        images={"./images/x.png": first.getvalue()}, submission_id=uuid4(),
+    )
+    original = article.assets.get()
+    assert original.logical_name == "images/x.png"
+    assert str(original.pk) in article.rendered_html
+
+    revised = update_article(
+        publisher, article.pk, expected_revision=1, title="Normalized", color="#1a5276",
+        markdown="# Normalized\n\n![x](images/x.png)", images={"./images/x.png": second.getvalue()},
+    )
+    newest = revised.assets.order_by("created_at").last()
+    assert revised.assets.count() == 2
+    assert newest.logical_name == "images/x.png"
+    assert newest.sha256 != original.sha256
+    assert str(newest.pk) in revised.rendered_html

@@ -3,6 +3,7 @@ from functools import wraps
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.http import JsonResponse
+from django.core.exceptions import RequestDataTooBig
 from django.shortcuts import render
 from django.middleware.csrf import CsrfViewMiddleware
 from django.views.decorators.csrf import csrf_exempt
@@ -39,8 +40,11 @@ def authenticated_json_write(view):
     def wrapped(request, *args, **kwargs):
         if not request.user.is_authenticated:
             return error("authentication_required", "Sign in is required.", 401)
-        if csrf_response := _csrf_check(request):
-            return csrf_response
+        try:
+            if csrf_response := _csrf_check(request):
+                return csrf_response
+        except RequestDataTooBig:
+            return error("request_too_large", "Request is too large.", 400)
         return view(request, *args, **kwargs)
 
     return wrapped
