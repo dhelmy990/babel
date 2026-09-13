@@ -113,29 +113,52 @@ def test_publish_form_denies_normal_reader(other_reader_page, live_server):
     assert other_reader_page.goto(live_server.url + "/publish").status == 403
 
 
-def test_owner_edits_metadata_without_reuploading_markdown_or_images(editable_owner_page, live_server):
+def test_owner_edits_metadata_while_retaining_existing_markdown_and_image(editable_owner_page, live_server):
     page, article = editable_owner_page
+    page.goto(live_server.url + "/editable")
+    original_image = page.locator(".article-body img")
+    original_url = original_image.get_attribute("src")
+    original_date = page.locator(".article-date").inner_text()
     page.goto(f"{live_server.url}/publish/{article.pk}")
+    page.get_by_role("button", name="Preview", exact=True).click()
+    expect(page.locator("[data-preview-body] img")).to_have_attribute("src", re.compile(r"data:image/png;base64,"))
     page.get_by_label("Title", exact=True).fill("Edited title")
     page.get_by_role("button", name="Save", exact=True).click()
     page.wait_for_url("**/editable")
     expect(page.get_by_role("heading", name="Edited title", exact=True)).to_be_visible()
+    retained_image = page.locator(".article-body img")
+    assert retained_image.get_attribute("src") == original_url
+    assert retained_image.evaluate("image => image.naturalWidth") == 1
+    assert page.locator(".article-date").inner_text() == original_date
+    expect(page.locator(".article-body")).to_contain_text("Original body.")
 
 
 def test_stale_edit_keeps_typed_title_and_selected_files(editable_owner_page, live_server):
     page, article = editable_owner_page
     page.goto(f"{live_server.url}/publish/{article.pk}")
+    newer_context = page.context.browser.new_context()
+    newer_context.add_cookies(page.context.cookies())
+    newer = newer_context.new_page()
+    newer.goto(f"{live_server.url}/publish/{article.pk}")
+    newer.get_by_label("Title", exact=True).fill("Newer server content")
+    newer.get_by_role("button", name="Save", exact=True).click()
+    newer.wait_for_url("**/editable")
     page.get_by_label("Title", exact=True).fill("My conflicting edit")
     page.get_by_label("Markdown file", exact=True).set_input_files({
         "name": "edit.md", "mimeType": "text/markdown", "buffer": b"# My conflicting edit\n\nKept.",
     })
-    page.route(f"**/api/articles/{article.pk}", lambda route: route.fulfill(
-        status=409, content_type="application/json", body='{"error":{"code":"revision_conflict","message":"Article has changed"}}',
-    ))
+    page.get_by_label("Image files", exact=True).set_input_files({
+        "name": "new.png", "mimeType": "image/png", "buffer": b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDAT\x08\xd7c\xf8\xcf\xc0\x00\x00\x03\x01\x01\x00\x18\xdd\x8d\xb1\x00\x00\x00\x00IEND\xaeB`\x82",
+    })
+    page.get_by_label("Logical path for new.png", exact=True).fill("images/new.png")
     page.get_by_role("button", name="Save", exact=True).click()
     expect(page.get_by_role("status")).to_contain_text("changed elsewhere")
     assert page.get_by_label("Title", exact=True).input_value() == "My conflicting edit"
     assert page.get_by_label("Markdown file", exact=True).evaluate("input => input.files.length") == 1
+    assert page.get_by_label("Image files", exact=True).evaluate("input => input.files.length") == 1
+    expect(newer.get_by_role("heading", name="Newer server content", exact=True)).to_be_visible()
+    expect(newer.locator(".article-body")).to_contain_text("Original body.")
+    newer_context.close()
 
 
 def test_lost_publish_response_retries_the_same_submission_without_duplicate(retry_publish_page, live_server):

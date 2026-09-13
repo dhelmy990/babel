@@ -4,6 +4,13 @@ from django.contrib.auth import get_user_model
 from playwright.sync_api import sync_playwright
 
 
+PNG = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+    b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDAT\x08\xd7c\xf8\xcf\xc0"
+    b"\x00\x00\x03\x01\x01\x00\x18\xdd\x8d\xb1\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+
+
 pytestmark = pytest.mark.django_db(transaction=True)
 
 
@@ -49,7 +56,13 @@ def published_owner_page(live_server, article_factory, publisher, client):
 @pytest.fixture
 def editable_owner_page(live_server, article_factory, publisher, client):
     """An existing article and admin session, both prepared before browser work."""
-    article = article_factory("Editable")
+    from uuid import uuid4
+    from study.services.content import publish_article
+    article = publish_article(
+        publisher, title="Editable", color="#1a5276",
+        markdown="# Editable\n\n![Kept image](images/kept.png)\n\nOriginal body.",
+        images={"images/kept.png": PNG}, submission_id=uuid4(),
+    )
     cookie = _session_cookie(live_server, client, publisher, mode="admin")
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
