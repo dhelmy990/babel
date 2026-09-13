@@ -6,6 +6,7 @@ from allauth.core import context
 from allauth.socialaccount.adapter import get_adapter
 from allauth.socialaccount.helpers import complete_social_login
 from allauth.socialaccount.models import SocialAccount, SocialLogin
+from allauth.socialaccount.providers.base.constants import AuthProcess
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
 from django.contrib.messages.middleware import MessageMiddleware
@@ -84,6 +85,32 @@ def test_complete_unverified_google_login_returns_branded_rejection_without_emai
     assert "Google sign-in requires a verified email" in response.content.decode()
     assert not SocialAccount.objects.exists()
     assert not EmailAddress.objects.exists()
+
+
+@pytest.mark.django_db
+def test_connecting_a_second_google_subject_cannot_grant_publisher_access():
+    complete_google_login(make_request(), google_login())
+    owner = SocialAccount.objects.get(uid="google-owner-subject").user
+    connect_request = make_request()
+    connect_request.user = owner
+    connection_login = google_login(email="reader@example.com", subject="second-subject")
+    connection_login.state["process"] = AuthProcess.CONNECT
+
+    rejected = complete_google_login(connect_request, connection_login)
+
+    assert rejected.status_code == 403
+    assert "Google account linking is unavailable" in rejected.content.decode()
+    assert SocialAccount.objects.filter(user=owner).count() == 1
+    assert not SocialAccount.objects.filter(uid="second-subject").exists()
+
+    reader_response = complete_google_login(
+        make_request(),
+        google_login(email="reader@example.com", subject="second-subject"),
+    )
+    reader = SocialAccount.objects.get(uid="second-subject").user
+    assert reader_response.status_code == 302
+    assert reader != owner
+    assert is_publisher(reader) is False
 
 
 @pytest.mark.django_db

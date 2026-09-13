@@ -5,6 +5,7 @@ from allauth.core.exceptions import ImmediateHttpResponse
 from allauth.socialaccount.adapter import DefaultSocialAccountAdapter
 from allauth.account.models import EmailAddress
 from allauth.socialaccount.models import SocialAccount
+from allauth.socialaccount.providers.base.constants import AuthProcess
 
 from study.models import PublisherIdentity, ReaderProfile
 from study.services.identity import OWNER_EMAIL
@@ -12,6 +13,10 @@ from study.services.identity import OWNER_EMAIL
 
 class GoogleAccountAdapter(DefaultSocialAccountAdapter):
     def pre_social_login(self, request, sociallogin):
+        if sociallogin.state.get("process") == AuthProcess.CONNECT:
+            raise ImmediateHttpResponse(
+                render(request, "account/google_connection_rejected.html", status=403)
+            )
         super().pre_social_login(request, sociallogin)
         if (
             sociallogin.account.provider == "google"
