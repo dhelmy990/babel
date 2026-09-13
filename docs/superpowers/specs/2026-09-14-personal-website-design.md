@@ -1,7 +1,7 @@
 # dhelmy.stream website design
 
-Status: ready for user review. This document consolidates the brainstorming
-decisions. Defaults explicitly marked below are proposed for approval.
+Status: approved by the user on September 14, 2026, including the defaults below.
+This document consolidates the brainstorming decisions.
 
 ## Purpose and current state
 
@@ -141,7 +141,7 @@ The archived content is the version present when it was archived. Readers may
 continue managing their own notes on it. This design does not require a general
 article version-history system or a permanent-delete feature.
 
-## Proposed defaults for approval
+## Approved defaults
 
 These fill operational gaps without adding new product features:
 
