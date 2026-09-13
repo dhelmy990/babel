@@ -1,0 +1,6 @@
+<!doctype html>
+<html lang="en"><body>
+<p>Your study reviews for {{ review_date }} ({{ timezone }}).</p>
+<ol>{% for article in articles %}<li><a href="{{ article.url }}">{{ article.title }}</a></li>{% endfor %}</ol>
+<p>Open an article to finish its review.</p>
+</body></html>

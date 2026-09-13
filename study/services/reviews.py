@@ -33,6 +33,11 @@ class ReadingTokenExpired(ReadingTokenError):
 def _clock(user, now):
     if not getattr(user, "is_authenticated", False):
         raise PermissionDenied("Sign in is required")
+    return utc_clock(now)
+
+
+def utc_clock(now):
+    """Normalize an explicit aware service clock without overflowing terminal dates."""
     if not isinstance(now, datetime) or now.utcoffset() is None:
         raise ValueError("An aware service clock is required")
     try:
@@ -52,14 +57,14 @@ def _article_id(value):
         raise ValueError("Invalid article UUID") from exc
 
 
-def _local_date(now, timezone_name):
+def local_date_for(now, timezone_name):
     try:
         return now.astimezone(ZoneInfo(timezone_name)).date()
     except OverflowError:
         return date.max if now.year == date.max.year else date.min
 
 
-def _next_boundary(local_date, timezone_name):
+def next_day_boundary(local_date, timezone_name):
     if local_date == date.max:
         return TERMINAL_BOUNDARY
     midnight = datetime.combine(local_date + timedelta(days=1), time.min, ZoneInfo(timezone_name))
@@ -76,10 +81,10 @@ def _effective_boundary(day, timezone_name):
         return TERMINAL_BOUNDARY
     if day.timezone == timezone_name:
         return day.next_boundary_at
-    return _next_boundary(day.local_date, timezone_name)
+    return next_day_boundary(day.local_date, timezone_name)
 
 
-def _expired(day, timezone_name, now):
+def review_day_expired(day, timezone_name, now):
     return day.local_date != date.max and now >= _effective_boundary(day, timezone_name)
 
 
@@ -111,15 +116,15 @@ def _select_slots(day):
 
 def _resolve_day(profile, now):
     day = profile.active_day
-    if day is not None and not _expired(day, profile.timezone, now):
+    if day is not None and not review_day_expired(day, profile.timezone, now):
         return day
     if profile.pending_timezone is not None:
         profile.timezone = profile.pending_timezone
         profile.pending_timezone = None
-    local_date = _local_date(now, profile.timezone)
+    local_date = local_date_for(now, profile.timezone)
     day, created = ReviewDay.objects.get_or_create(
         user_id=profile.user_id, local_date=local_date,
-        defaults={"timezone": profile.timezone, "next_boundary_at": _next_boundary(local_date, profile.timezone)},
+        defaults={"timezone": profile.timezone, "next_boundary_at": next_day_boundary(local_date, profile.timezone)},
     )
     if created:
         _select_slots(day)
@@ -161,7 +166,7 @@ def _with_article(user, article_id, now, operation):
         day = get_review_day(user, now=now)  # Completed transaction, no Article lock held.
         with transaction.atomic():
             profile = _locked_profile(user)
-            if profile.active_day_id != day.pk or _expired(day, profile.timezone, now):
+            if profile.active_day_id != day.pk or review_day_expired(day, profile.timezone, now):
                 continue  # Release locks before any new multi-Article selection.
             try:
                 article = Article.objects.select_for_update().get(pk=article_id, archived_at__isnull=True)
@@ -186,7 +191,7 @@ def reading_context(user, article_id, *, now) -> dict:
     article_id = _article_id(article_id)
 
     def context(profile, day, article, schedule):
-        status = _eligibility(schedule, day, _local_date(now, profile.timezone))
+        status = _eligibility(schedule, day, local_date_for(now, profile.timezone))
         token = signing.Signer(salt="study-reading").sign_object({
             "user_id": user.pk, "article_id": str(article.pk),
             "generation": schedule.generation if schedule else 0, "issued_at": now.timestamp(),
@@ -244,7 +249,7 @@ def complete_article(user, article_id, *, token, now) -> dict:
     generation = _token_generation(user, article_id, token, now)
 
     def complete(profile, day, article, schedule):
-        completed_date = _local_date(now, profile.timezone)
+        completed_date = local_date_for(now, profile.timezone)
         if schedule is not None and generation != schedule.generation:
             return _result("already_processed", schedule)
         if schedule is None:
@@ -282,7 +287,7 @@ def today_payload(user, *, now) -> dict:
         day = get_review_day(user, now=now)
         with transaction.atomic():
             profile = _locked_profile(user)
-            if profile.active_day_id != day.pk or _expired(day, profile.timezone, now):
+            if profile.active_day_id != day.pk or review_day_expired(day, profile.timezone, now):
                 continue
             return {
                 "date": day.local_date.isoformat(), "timezone": profile.timezone,

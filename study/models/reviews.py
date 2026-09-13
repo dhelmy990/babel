@@ -50,3 +50,38 @@ class ReviewSlot(models.Model):
             models.UniqueConstraint(fields=("day", "article"), name="review_slot_day_article_unique"),
             models.CheckConstraint(condition=Q(ordinal__gte=0, ordinal__lte=2), name="review_slot_ordinal_bounds"),
         ]
+
+
+class Digest(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "pending"
+        SENDING = "sending"
+        SENT = "sent"
+        SKIPPED = "skipped"
+        FAILED = "failed"
+        UNKNOWN = "unknown"
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    day = models.DateField()  # Singapore delivery date, independent of ReviewDay.
+    payload = models.JSONField(default=dict)
+    idempotency_key = models.CharField(max_length=128, unique=True)
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
+    first_attempt_at = models.DateTimeField(null=True, blank=True)
+    lease_until = models.DateTimeField(null=True, blank=True)
+    provider_id = models.CharField(max_length=200, blank=True, default="")
+    retry_until = models.DateTimeField(null=True, blank=True)
+    last_error = models.CharField(max_length=63, blank=True, default="")
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=("user", "day"), name="digest_user_day_unique"),
+            models.CheckConstraint(condition=Q(status__in=("pending", "sending", "sent", "skipped", "failed", "unknown")), name="digest_status_valid"),
+            models.CheckConstraint(condition=(
+                Q(first_attempt_at__isnull=True, retry_until__isnull=True, lease_until__isnull=True)
+                | Q(first_attempt_at__isnull=False, retry_until__isnull=False, lease_until__isnull=False,
+                    retry_until__gt=models.F("first_attempt_at"), lease_until__gt=models.F("first_attempt_at"))
+            ), name="digest_attempt_window_valid"),
+            models.CheckConstraint(condition=~Q(status="sending") | Q(first_attempt_at__isnull=False), name="digest_sending_has_attempt"),
+            models.CheckConstraint(condition=~Q(status="sent") | (~Q(provider_id="") & Q(first_attempt_at__isnull=False)), name="digest_sent_has_receipt"),
+        ]
+        indexes = [models.Index(fields=("status", "day"), name="digest_status_day")]

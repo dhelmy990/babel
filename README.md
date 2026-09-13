@@ -65,3 +65,67 @@ and removes the article from public reading and the galaxy.
 The application serves uploaded images from private storage and does not need a
 live Google account or OAuth configuration to run tests. Browser tests create
 ordinary Django test sessions and use disposable test media.
+
+## Owner review digest
+
+The digest goes only to `dhelmy990@gmail.com`, and only while that user has the
+verified publisher email and matching Google identity binding. It contains up to
+three outstanding, published articles from the same active daily selection as
+**Your reviews**. Private notes never enter the message. Browser timezone changes
+can affect the review selection; the email's daily identity always uses the
+Singapore calendar date.
+
+Run the command every five minutes through the deployment scheduler:
+
+```bash
+.venv/bin/python manage.py send_review_digest
+```
+
+It sends at or after 09:00 Singapore time and catches up only within the current
+Singapore day. It never sends an old backlog. A day with no remaining reviews is
+recorded as skipped and is not reconsidered automatically.
+
+Development defaults to console delivery, which prints the message without
+contacting an email provider. Production (`DJANGO_DEBUG=false`) defaults to
+Resend and requires a nonempty `RESEND_API_KEY`. Set the trusted public site
+origin with `PUBLIC_BASE_URL=https://dhelmy.stream`; the default production origin
+is that address. `REVIEW_FROM_EMAIL` defaults to
+`Study notes <reviews@dhelmy.stream>` and must be an approved sender at Resend.
+Neither setting controls the recipient. Keep the provider key only in the server
+environment. `.env.example` documents the names; Django does not load `.env`.
+
+An explicit server-side `REVIEW_EMAIL_DELIVERY=console` override is available for
+disposable verification and isolated restores, including with production security
+settings enabled. It suppresses real email and permits an empty Resend key. It
+must be deliberately removed or changed to `resend` for actual delivery. This is
+not a browser setting.
+
+To inspect disposable test data without attempting delivery:
+
+```bash
+REVIEW_EMAIL_DELIVERY=console .venv/bin/python manage.py send_review_digest --dry-run
+```
+
+Dry-run shows the selected owner, Singapore date, titles, and URLs. It may create
+or freeze the owner's `ReviewDay`, just as opening the review interface does, but
+it creates no `Digest`, delivery attempt, or provider request.
+
+At the first delivery claim, the sender, recipient, subject, article titles,
+URLs, and text/HTML are frozen. Every retry uses the identical canonical JSON
+payload and `study-review/{user_id}/{Singapore_date}` idempotency key. Requests
+have a ten-second HTTP timeout; workers claim a two-minute lease. Retries stop
+at the earlier of 23 hours after the first attempt or the end of the Singapore
+day. Resend documents a 24-hour idempotency window:
+[Resend idempotency keys](https://resend.com/docs/dashboard/emails/idempotency-keys).
+This provides safe bounded retries after a lost response; it does not promise
+exactly-once delivery beyond the provider's retention window.
+
+Confirmed acceptance becomes `sent`. Permanent malformed/authentication
+rejections, including an idempotency payload mismatch, become terminal `failed`.
+Transient provider/network failures can retry within the window. An attempted
+delivery whose acceptance cannot be confirmed by the deadline becomes terminal
+`unknown`; it is not resent automatically. An expired digest that was never
+attempted becomes `skipped`. The command also retires expired unresolved records
+without contacting the provider. A matching late response may confirm acceptance
+only while its claim has not been replaced or made terminal. Logs store safe
+error categories rather than raw provider bodies or credentials.
