@@ -1,0 +1,8 @@
+Django>=5.2,<5.3
+django-allauth
+psycopg[binary]
+markdown-it-py
+Pillow
+gunicorn
+whitenoise
+httpx

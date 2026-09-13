@@ -1,0 +1,17 @@
+node_modules/
+text
+prompts/
+.superpowers/
+.venv/
+.env*
+!.env.example
+build/
+results/
+private/
+media/
+staticfiles/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+test-results/
+playwright-report/

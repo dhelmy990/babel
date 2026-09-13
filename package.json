@@ -2,9 +2,11 @@
   "name": "babel",
   "version": "1.0.0",
   "description": "Knowledge Graph",
+  "license": "Apache-2.0",
   "main": "main.js",
   "scripts": {
-    "start": "electron ."
+    "start": ".venv/bin/python manage.py runserver 127.0.0.1:8000",
+    "start:desktop": "electron ."
   },
   "devDependencies": {
     "electron": "^33.0.0"
