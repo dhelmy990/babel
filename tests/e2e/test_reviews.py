@@ -36,6 +36,8 @@ def review_browser(request, live_server, publisher, reader, other_reader, monkey
 
     options = getattr(request, "param", {})
     clock = SimpleNamespace(now=datetime(2026, 9, 13, 23, tzinfo=UTC))
+    if options.get("midnight"):
+        clock.now = datetime(2026, 9, 14, 15, 59, tzinfo=UTC)
     monkeypatch.setattr("study.views.reviews.timezone.now", lambda: clock.now)
     ReaderProfile.objects.filter(user__in=[reader, other_reader]).update(timezone="UTC")
 
@@ -49,6 +51,9 @@ def review_browser(request, live_server, publisher, reader, other_reader, monkey
         for i in range(80)
     ))
     short = article("Short reading")
+    if options.get("midnight"):
+        ReviewSchedule.objects.create(user=reader, article=long_article, interval_days=1,
+            next_due_date=clock.now.date() + timedelta(days=1), last_completed_at=clock.now - timedelta(days=1))
     image_bytes = BytesIO()
     Image.new("RGB", (500, 1900), "#214656").save(image_bytes, format="PNG")
     illustrated = article("Illustrated reading", "# Illustrated reading\n\n![Tall diagram](images/tall.png)", {"images/tall.png": image_bytes.getvalue()})
@@ -503,7 +508,7 @@ def test_unselected_due_article_does_not_advance_its_schedule(review_browser):
     page.on("request", lambda req: completions.append(req) if req.url.endswith("/complete") else None)
     page.goto(f"{env.url}/{env.due[4].slug}")
     expect(page.locator("[data-reading-status]")).to_have_text("This article is not in today's review selection.")
-    assert completions == []
+    assert len(completions) == 1
     assert schedules(env, env.due[4])[0]["generation"] == 1
     expect(page.locator("[data-review-link]")).to_have_text("Review today · 3")
 
@@ -523,3 +528,63 @@ def test_home_empty_state_and_anonymous_section_visibility(review_browser):
     expect(other.locator("[data-review-link]")).to_be_hidden()
     assert calls == []
     anonymous.close()
+
+
+@pytest.mark.parametrize("review_browser", [{"midnight": True}], indirect=True)
+def test_initially_not_due_context_records_current_eligibility_after_midnight(review_browser):
+    from study.models import ReviewSlot
+    env = review_browser
+    page = env.page
+    contexts, completions = [], []
+    page.on("request", lambda req: contexts.append(req) if req.url.endswith("/reading-context") else None)
+    page.on("request", lambda req: completions.append(req.post_data_json) if req.url.endswith("/complete") else None)
+    with page.expect_response("**/reading-context") as response:
+        page.goto(f"{env.url}/{env.long.slug}")
+    original = response.value.json()
+    assert original["eligible"] is False and original["status"] == "not_due"
+    expect(page.locator("[data-review-link]")).to_have_text("Review today · 0")
+    assert completions == []
+    assert schedules(env, env.long)[0]["generation"] == 1
+    env.clock.now += timedelta(minutes=2)
+    reach_end(page)
+    expect(page.locator("[data-reading-status]")).to_have_text("Review recorded")
+    assert completions == [{"token": original["token"]}]
+    assert len(contexts) == 1
+    schedule = schedules(env, env.long)[0]
+    assert schedule["interval_days"] == 2 and schedule["generation"] == 2
+    assert schedule["next_due_date"].isoformat() == "2026-09-17"
+    slots = read_db(lambda: list(ReviewSlot.objects.filter(day__user=env.reader,
+        schedule__article=env.long).values("day__local_date", "completed_at")))
+    assert len(slots) == 1
+    assert slots[0]["day__local_date"].isoformat() == "2026-09-15"
+    assert slots[0]["completed_at"] == env.clock.now
+
+
+@pytest.mark.parametrize("review_browser", [{"due": True}], indirect=True)
+@pytest.mark.parametrize("repeated_expiry", [False, True])
+def test_expiry_refresh_still_requires_completion_and_is_bounded(review_browser, repeated_expiry):
+    env = review_browser
+    page = env.page
+    page.add_init_script("Object.defineProperty(document, 'visibilityState', {configurable: true, get: () => 'hidden'});")
+    contexts, completions = [], []
+    page.on("request", lambda req: contexts.append(req) if req.url.endswith("/reading-context") else None)
+    page.on("request", lambda req: completions.append(req.post_data_json) if req.url.endswith("/complete") else None)
+    with page.expect_response("**/reading-context") as response:
+        page.goto(f"{env.url}/{env.due[4].slug}")
+    original = response.value.json()
+    assert original["eligible"] is False
+    assert completions == []
+    env.clock.now += timedelta(hours=25)
+    if repeated_expiry:
+        page.route("**/complete", lambda route: route.fulfill(status=400,
+            json={"error": {"code": "token_expired", "message": "Expired token"}}))
+    page.evaluate("Object.defineProperty(document, 'visibilityState', {configurable: true, get: () => 'visible'}); document.dispatchEvent(new Event('visibilitychange'));")
+    if repeated_expiry:
+        expect(page.locator("[data-reading-status]")).to_contain_text("could not")
+        expect(page.locator("[data-reading-retry]")).to_be_enabled()
+    else:
+        expect(page.locator("[data-reading-status]")).to_have_text("This article is not in today's review selection.")
+    assert len(contexts) == len(completions) == 2
+    assert completions[0] == {"token": original["token"]}
+    assert completions[1]["token"] != original["token"]
+    assert schedules(env, env.due[4])[0]["generation"] == 1

@@ -104,6 +104,7 @@ export function createNotesStore({articleId, signal, changed, removed, unauthori
           });
         }
         if (disposed) return;
+        if (!result?.note || result.note.id !== entry.id) throw new Error("The saved note response could not be read.");
         entry.confirmed = result.note;
         entry.creation = null;
         // Creation retry may confirm an older body; the queued desired edit follows.
@@ -114,6 +115,9 @@ export function createNotesStore({articleId, signal, changed, removed, unauthori
       }
     } catch (error) {
       if (disposed) return;
+      // Validation definitively rejected this creation; an ambiguous failure must
+      // retain its exact body so an accepted POST can still be retried safely.
+      if (!entry.confirmed && error.status === 400 && error.code === "invalid_note") entry.creation = null;
       entry.queued ||= content(entry.draft);
       if (error.status === 401) {
         unauthorized();

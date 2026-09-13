@@ -119,7 +119,39 @@ def test_return_to_sidebar_and_recover_after_real_article_shortening(notes_brows
     owner_context.close()
 
 
-def test_network_failure_retains_current_tab_input_and_exact_create_retry(notes_browser):
+@pytest.mark.parametrize("recovery", ["retry", "delete"])
+def test_definitively_rejected_creation_can_be_corrected_or_discarded(notes_browser, recovery):
+    env = notes_browser
+    page = open_notes(env)
+    page.get_by_role("button", name="New text box", exact=True).click()
+    item = page.locator("[data-notes-list] [data-note-id]").last
+    note_id = item.get_attribute("data-note-id")
+    item.get_by_label("Note text", exact=True).evaluate("el => { el.value = 'Invalid\\u0000text'; el.dispatchEvent(new Event('input', {bubbles: true})); }")
+    writes = []
+    page.on("request", lambda req: writes.append((req.method, req.post_data_json)) if req.method in ("POST", "DELETE") and "/notes" in req.url else None)
+    with page.expect_response(lambda response: response.request.method == "POST" and response.url.endswith("/notes")) as rejected:
+        item.get_by_role("button", name="Save note", exact=True).click()
+    assert rejected.value.status == 400
+    assert rejected.value.json()["error"]["code"] == "invalid_note"
+    expect(item.get_by_role("status")).to_contain_text("could not")
+    assert len(api(page, f"/api/articles/{env.article.pk}/notes")["notes"]) == 1
+    if recovery == "retry":
+        item.get_by_label("Note text", exact=True).fill("Corrected text")
+        item.get_by_role("button", name="Retry", exact=True).click()
+        saved(item)
+        assert writes[1][1]["id"] == note_id
+        assert writes[1][1]["text"] == "Corrected text"
+        notes = api(page, f"/api/articles/{env.article.pk}/notes")["notes"]
+        assert next(note for note in notes if note["id"] == note_id)["text"] == "Corrected text"
+    else:
+        item.get_by_role("button", name="Delete", exact=True).click()
+        expect(card(page, note_id)).to_have_count(0)
+        assert len(writes) == 1
+        assert len(api(page, f"/api/articles/{env.article.pk}/notes")["notes"]) == 1
+
+
+@pytest.mark.parametrize("failure", ["network", "server_error", "unreadable_success"])
+def test_network_failure_retains_current_tab_input_and_exact_create_retry(notes_browser, failure):
     env = notes_browser
     page = open_notes(env)
     page.get_by_role("button", name="New text box", exact=True).click()
@@ -130,7 +162,12 @@ def test_network_failure_retains_current_tab_input_and_exact_create_retry(notes_
     def lose_response(route):
         payloads.append(route.request.post_data_json)
         route.fetch()
-        route.abort()
+        if failure == "network":
+            route.abort()
+        elif failure == "server_error":
+            route.fulfill(status=500, json={"error": {"code": "server_error", "message": "Response failed"}})
+        else:
+            route.fulfill(status=201, content_type="application/json", body="{unreadable")
 
     endpoint = f"**/api/articles/{env.article.pk}/notes"
     page.route(endpoint, lambda route: lose_response(route) if route.request.method == "POST" else route.continue_())

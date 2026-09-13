@@ -104,7 +104,7 @@ export function mountReadingCompletion({articleId, marker}) {
   }
 
   async function record(allowExpiryRefresh = true) {
-    if (busy || acknowledged || !context?.eligible || !layoutReady || !endIsVisible(marker)) return;
+    if (busy || acknowledged || !context || !layoutReady || !endIsVisible(marker)) return;
     const current = generation;
     const signal = controller.signal;
     busy = true;
@@ -129,13 +129,7 @@ export function mountReadingCompletion({articleId, marker}) {
           const refreshed = await fetchContext(signal);
           if (current !== generation) return;
           context = refreshed;
-          if (context.eligible) retryFreshContext = true;
-          else {
-            acknowledged = true;
-            status.textContent = messages[context.status] || "No review is due.";
-            stopObserving();
-            window.dispatchEvent(new Event("review-updated"));
-          }
+          retryFreshContext = true;
         } catch (refreshError) { fail(refreshError, current); }
       } else fail(error, current);
     } finally {
@@ -161,11 +155,8 @@ export function mountReadingCompletion({articleId, marker}) {
       const result = await fetchContext(signal);
       if (current !== generation) return;
       context = result;
-      if (!context.eligible) {
-        acknowledged = true;
-        status.textContent = messages[context.status] || "No review is due.";
-        return;
-      }
+      // Eligibility can change at midnight while this page remains open. Only
+      // completion at the visible end can authoritatively acknowledge this read.
       await articleLayoutReady(marker, signal);
       if (current !== generation) return;
       layoutReady = true;
