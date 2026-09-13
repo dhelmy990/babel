@@ -1,6 +1,6 @@
 # Study Reviews and Owner Email Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Schedule reviews from article completion, keep each reader's daily list at three, and email only Diego's outstanding daily reviews.
 
@@ -36,7 +36,7 @@ No review state for anonymous readers. Email only verified owner account at
   `{date, timezone, slots:[{ordinal,article_id,slug,title,completed,cancelled}]}`.
 - API views supply `timezone.now()`; tests pass explicit aware datetimes.
 
-- [ ] **Write interval and daily-cap tests before services.**
+- [x] **Write interval and daily-cap tests before services.**
 
   ```python
   from datetime import datetime, timedelta, timezone
@@ -66,7 +66,7 @@ No review state for anonymous readers. Email only verified owner account at
   leap day, DST, first read just before midnight, overflow beyond year 9999,
   archival before completion, and API ownership. Run `pytest tests/test_reviews.py -q` red.
 
-- [ ] **Implement calendar arithmetic and generation tokens.** Store due dates
+- [x] **Implement calendar arithmetic and generation tokens.** Store due dates
   in the reader's calendar, not UTC midnight. A day interval is a calendar-day
   increment from the actual completion date. The scheduling equation is:
 
@@ -103,7 +103,7 @@ No review state for anonymous readers. Email only verified owner account at
   today's three, and `first_read`/`reviewed` for real transitions. Each status is
   explicit; do not display a review-complete success for a no-op.
 
-- [ ] **Freeze daily lists and integrate archival.** Under the reader lock,
+- [x] **Freeze daily lists and integrate archival.** Under the reader lock,
   get or create `ReviewDay(user, local_date)`. Only its creator selects up to
   three unsuspended published-article schedules with next_due_date<=today,
   ordered by next_due_date, last_completed_at, and article_id. Insert ordinals
@@ -149,7 +149,7 @@ No review state for anonymous readers. Email only verified owner account at
   Use Python integers for interval arithmetic before storing DecimalField
   values, avoiding the default Decimal context's 28-digit rounding.
 
-- [ ] **Verify concurrent behavior and commit.** In transaction tests use two
+- [x] **Verify concurrent behavior and commit.** In transaction tests use two
   independent database connections with synchronized starts: materialize the same
   day concurrently, complete the same token concurrently, and archive during
   completion. Assert one ReviewDay, at most three slots, one interval increment,
