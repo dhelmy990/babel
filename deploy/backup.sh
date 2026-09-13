@@ -24,8 +24,12 @@ media=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/app/med
 web_was_running=$(docker inspect --format '{{.State.Running}}' "$web")
 timer_was_running=false
 digest_was_running=false
-"$systemctl" is-active --quiet review-digest.timer && timer_was_running=true
-"$systemctl" is-active --quiet review-digest.service && digest_was_running=true
+timer_state=$("$systemctl" show --property=ActiveState --value review-digest.timer)
+digest_state=$("$systemctl" show --property=ActiveState --value review-digest.service)
+case $timer_state in active|activating) timer_was_running=true ;; esac
+# A oneshot without RemainAfterExit is activating throughout ExecStart and
+# becomes inactive when finished; is-active misses the in-progress command.
+case $digest_state in active|activating|reloading) digest_was_running=true ;; esac
 restore_states() {
     result=$?
     trap - EXIT

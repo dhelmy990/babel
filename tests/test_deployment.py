@@ -172,22 +172,31 @@ import json, os, sys
 from pathlib import Path
 path=Path(os.environ['SHIM_STATE']); state=json.loads(path.read_text())
 action, unit=sys.argv[1],sys.argv[-1]
-if action=='is-active': sys.exit(0 if state[unit] else 3)
+if action=='is-active': sys.exit(0 if state[unit]=='active' else 3)
+if action=='show': print(state[unit]); sys.exit(0)
 if action=='stop' and os.environ.get('SHIM_FAIL')==unit: sys.exit(42)
-state[unit]=action=='start';path.write_text(json.dumps(state))
+if action=='start': state['started'].append(unit)
+# systemctl start waits for a oneshot to finish; without RemainAfterExit its
+# resulting state is inactive. Its in-progress ExecStart state is activating.
+state[unit]='active' if action=='start' and unit.endswith('.timer') else 'inactive'
+path.write_text(json.dumps(state))
 ''')
     shim.chmod(0o700)
     script_env = {**environment, "TMPDIR": str(temporary), "STUDY_PROJECT": project, "STUDY_ENV_FILE": str(env_file), "STUDY_COMPOSE_OVERRIDE": str(override), "STUDY_SYSTEMCTL": str(shim), "SHIM_STATE": str(state)}
     for active in (True, False):
-        states = {"review-digest.timer": active, "review-digest.service": active}
+        states = {"review-digest.timer": "active" if active else "inactive", "review-digest.service": "inactive", "started": []}
         state.write_text(json.dumps(states))
         if not active: compose("stop", "web")
         failed = run("bash", "deploy/backup.sh", str(temporary / ("failure-" + str(active))), env={**script_env, "SHIM_FAIL": "review-digest.service"}, check=False)
         assert failed.returncode == 42
-        assert json.loads(state.read_text()) == states
+        assert json.loads(state.read_text()) == {**states, "started": ["review-digest.timer"] if active else []}
         assert bool(compose("ps", "-q", "web").stdout.strip()) == active
     compose("start", "web")
-    state.write_text(json.dumps({"review-digest.timer": True, "review-digest.service": True}))
+    running_oneshot = {"review-digest.timer": "active", "review-digest.service": "activating", "started": []}
+    restored_oneshot = {"review-digest.timer": "active", "review-digest.service": "inactive", "started": ["review-digest.service", "review-digest.timer"]}
+    state.write_text(json.dumps(running_oneshot))
+    assert run(str(shim), "is-active", "--quiet", "review-digest.service", env=script_env, check=False).returncode != 0
+    assert run(str(shim), "show", "--property=ActiveState", "--value", "review-digest.service", env=script_env).stdout.strip() == "activating"
     # Fail only the media helper, after real pg_dump and web shutdown.
     bin_dir = temporary / "bin"
     bin_dir.mkdir()
@@ -204,13 +213,22 @@ state[unit]=action=='start';path.write_text(json.dumps(state))
     assert (failed_destination / "database.dump").stat().st_size > 0
     assert not (failed_destination / "COMPLETE").exists()
     assert compose("ps", "-q", "web").stdout.strip()
-    assert all(json.loads(state.read_text()).values())
+    assert json.loads(state.read_text()) == restored_oneshot
+    state.write_text(json.dumps(running_oneshot))
     backup = temporary / "backup"
     run("bash", "deploy/backup.sh", str(backup), env=script_env)
     assert (backup / "COMPLETE").exists()
     assert re.fullmatch(r"[a-f0-9]{7,40}\n", (backup / "release.txt").read_text())
     assert backup.stat().st_mode & 0o077 == 0
-    assert all(json.loads(state.read_text()).values())
+    assert json.loads(state.read_text()) == restored_oneshot
+    assert compose("ps", "-q", "web").stdout.strip()
+    inactive = {"review-digest.timer": "inactive", "review-digest.service": "inactive", "started": []}
+    state.write_text(json.dumps(inactive))
+    compose("stop", "web")
+    run("bash", "deploy/backup.sh", str(temporary / "backup-inactive"), env=script_env)
+    assert json.loads(state.read_text()) == inactive
+    assert not compose("ps", "-q", "web").stdout.strip()
+    compose("start", "web")
     incomplete = temporary / "incomplete"
     incomplete.mkdir()
     assert run("bash", "deploy/restore-test.sh", str(incomplete), env={"PATH": os.environ["PATH"]}, check=False).returncode != 0
