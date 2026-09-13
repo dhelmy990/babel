@@ -396,7 +396,7 @@ Reusing the form for edits carries article id/revision; submission UUID stays
 stable across retries. `publishing.js` uses the shared CSRF-protected API helper
 `requestJSON(url, options)` from `site.js`; export that helper as an ES module.
 
-- [ ] **Write an end-to-end publication test.** `publisher_page` signs in by
+- [x] **Write an end-to-end publication test.** `publisher_page` signs in by
   installing a test Django session cookie from the real publisher fixture;
   create no testing authentication endpoint in the production app.
 
@@ -421,7 +421,7 @@ stable across retries. `publishing.js` uses the shared CSRF-protected API helper
   source labels, hover/focus preview, and mobile single-tap tests. Run
   `pytest tests/e2e/test_publishing.py tests/e2e/test_public_reading.py -q` red.
 
-- [ ] **Implement the complete interaction.** Form preview uses the exact P3
+- [x] **Implement the complete interaction.** Form preview uses the exact P3
   rendering pipeline without durable publication. Files are kept selected on
   network failure. Disable duplicate submit while in flight, re-enable on failure,
   and announce a successful write only after the server confirms it. Navigate to
@@ -436,7 +436,7 @@ stable across retries. `publishing.js` uses the shared CSRF-protected API helper
   through real URLs. Hide notes/review features until their respective slices
   supply real data instead of leaving sample controls live.
 
-- [ ] **Verify and commit.** Run all publishing slice tests and capture desktop
+- [x] **Verify and commit.** Run all publishing slice tests and capture desktop
   and mobile screenshots against the approved reference. Check browser console
   errors and link destinations. Update README with Django development commands,
   PostgreSQL setup, and supported publishing behavior. Commit

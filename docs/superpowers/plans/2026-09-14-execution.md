@@ -15,8 +15,8 @@ the task and remain untouched.
 | P2 — Google identity | Complete (`cb65f68`, `cb10338`, `7123300`) | Passed | Passed |
 | P3 — Markdown publishing | Complete (`ebe4986` through `e314e0b`) | Passed | Passed |
 | P4 — Directed graph | Complete (`8cb2d80`, `d597931`, `10fc4eb`) | Passed | Passed |
-| P5 — Publishing UI | In progress | Pending | Pending |
-| N1 — Private note storage | Pending | Pending | Pending |
+| P5 — Publishing UI | Complete (`ede825c` through `8a8e151`) | Passed | Passed |
+| N1 — Private note storage | In progress | Pending | Pending |
 | N2 — Note placement/sidebar | Pending | Pending | Pending |
 | R1 — Review schedules | Pending | Pending | Pending |
 | R2 — Read detection/list | Pending | Pending | Pending |
