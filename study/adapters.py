@@ -1,5 +1,7 @@
 from django.db import IntegrityError, transaction
+from django.shortcuts import render
 
+from allauth.core.exceptions import ImmediateHttpResponse
 from allauth.socialaccount.adapter import DefaultSocialAccountAdapter
 from allauth.account.models import EmailAddress
 from allauth.socialaccount.models import SocialAccount
@@ -11,6 +13,13 @@ from study.services.identity import OWNER_EMAIL
 class GoogleAccountAdapter(DefaultSocialAccountAdapter):
     def pre_social_login(self, request, sociallogin):
         super().pre_social_login(request, sociallogin)
+        if (
+            sociallogin.account.provider == "google"
+            and not self._has_verified_google_email(sociallogin)
+        ):
+            raise ImmediateHttpResponse(
+                render(request, "account/google_identity_rejected.html", status=403)
+            )
         if sociallogin.user and sociallogin.user.pk:
             self._provision_verified_google_login(sociallogin)
 
@@ -56,9 +65,13 @@ class GoogleAccountAdapter(DefaultSocialAccountAdapter):
                 pass
 
     @staticmethod
-    def _is_verified_google_login(sociallogin):
+    def _has_verified_google_email(sociallogin):
+        return any(address.verified for address in sociallogin.email_addresses)
+
+    @classmethod
+    def _is_verified_google_login(cls, sociallogin):
         return (
             sociallogin.account.provider == "google"
             and bool(sociallogin.account.uid)
-            and any(address.verified for address in sociallogin.email_addresses)
+            and cls._has_verified_google_email(sociallogin)
         )

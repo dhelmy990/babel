@@ -2,10 +2,15 @@ import json
 
 import pytest
 from allauth.account.models import EmailAddress
+from allauth.core import context
+from allauth.socialaccount.adapter import get_adapter
+from allauth.socialaccount.helpers import complete_social_login
 from allauth.socialaccount.models import SocialAccount, SocialLogin
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
+from django.contrib.messages.middleware import MessageMiddleware
 from django.contrib.sessions.middleware import SessionMiddleware
+from django.db import IntegrityError, transaction
 from django.test import Client, RequestFactory
 
 from study.adapters import GoogleAccountAdapter
@@ -19,6 +24,7 @@ OWNER_EMAIL = "dhelmy990@gmail.com"
 def make_request():
     request = RequestFactory().get("/")
     SessionMiddleware(lambda request: None).process_request(request)
+    MessageMiddleware(lambda request: None).process_request(request)
     request.session.save()
     request.user = AnonymousUser()
     return request
@@ -38,6 +44,12 @@ def google_login(email=OWNER_EMAIL, subject="google-owner-subject", verified=Tru
     )
 
 
+def complete_google_login(request, login):
+    with context.request_context(request):
+        login.provider = get_adapter(request).get_provider(request, "google")
+        return complete_social_login(request, login)
+
+
 @pytest.mark.django_db
 def test_google_adapter_binds_verified_owner_on_initial_login():
     request = make_request()
@@ -49,6 +61,29 @@ def test_google_adapter_binds_verified_owner_on_initial_login():
     assert PublisherIdentity.objects.get(pk=1).user == login.user
     assert ReaderProfile.objects.get(user=login.user).timezone == "Asia/Singapore"
     assert is_publisher(login.user) is True
+
+
+@pytest.mark.django_db
+def test_complete_verified_google_login_redirects_to_the_site():
+    request = make_request()
+
+    response = complete_google_login(request, google_login())
+
+    assert response.status_code == 302
+    assert response.url == "/"
+    assert is_publisher(SocialAccount.objects.get(uid="google-owner-subject").user)
+
+
+@pytest.mark.django_db
+def test_complete_unverified_google_login_returns_branded_rejection_without_email_flow():
+    request = make_request()
+
+    response = complete_google_login(request, google_login(verified=False))
+
+    assert response.status_code == 403
+    assert "Google sign-in requires a verified email" in response.content.decode()
+    assert not SocialAccount.objects.exists()
+    assert not EmailAddress.objects.exists()
 
 
 @pytest.mark.django_db
@@ -108,6 +143,16 @@ def test_publisher_requires_matching_social_subject_and_verified_owner_email():
 
 
 @pytest.mark.django_db
+def test_publisher_identity_database_constraint_allows_only_primary_key_one():
+    user = get_user_model().objects.create_user(username="owner", email=OWNER_EMAIL)
+
+    with pytest.raises(IntegrityError), transaction.atomic():
+        PublisherIdentity.objects.create(
+            id=2, user=user, google_subject="forbidden-secondary-owner"
+        )
+
+
+@pytest.mark.django_db
 def test_profile_for_creates_reader_profile_with_utc_default():
     user = get_user_model().objects.create_user(username="reader", email="reader@example.com")
 
@@ -129,6 +174,7 @@ def test_public_session_and_google_login_get_are_safe(client):
         "mode": "reader",
         "timezone": None,
     }
+    assert response["Cache-Control"] == "private, no-store"
 
     login_response = client.get("/accounts/google/login/")
     assert login_response.status_code == 200
@@ -174,6 +220,16 @@ def test_reader_cannot_elevate_mode_but_can_set_a_valid_timezone():
     assert denied.status_code == 403
     assert denied.json()["error"]["code"] == "publisher_required"
 
+    for attempted_mode in ([], {}):
+        invalid_mode = csrf_client.post(
+            "/api/mode",
+            data=json.dumps({"mode": attempted_mode}),
+            content_type="application/json",
+            HTTP_X_CSRFTOKEN=token,
+        )
+        assert invalid_mode.status_code == 400
+        assert invalid_mode.json()["error"]["code"] == "invalid_mode"
+
     changed = csrf_client.post(
         "/api/timezone",
         data=json.dumps({"timezone": "America/New_York"}),
@@ -191,6 +247,16 @@ def test_reader_cannot_elevate_mode_but_can_set_a_valid_timezone():
     )
     assert invalid.status_code == 400
     assert invalid.json()["error"]["code"] == "invalid_timezone"
+
+    for attempted_timezone in ("", "/UTC", "../UTC", "America/../New_York"):
+        invalid_shape = csrf_client.post(
+            "/api/timezone",
+            data=json.dumps({"timezone": attempted_timezone}),
+            content_type="application/json",
+            HTTP_X_CSRFTOKEN=token,
+        )
+        assert invalid_shape.status_code == 400
+        assert invalid_shape.json()["error"]["code"] == "invalid_timezone"
 
 
 @pytest.mark.django_db

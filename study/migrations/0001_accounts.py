@@ -29,5 +29,13 @@ class Migration(migrations.Migration):
                 ("google_subject", models.CharField(max_length=191, unique=True)),
                 ("user", models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, to=settings.AUTH_USER_MODEL)),
             ],
+            options={
+                "constraints": [
+                    models.CheckConstraint(
+                        condition=models.Q(("id", 1)),
+                        name="publisher_identity_singleton_pk_one",
+                    )
+                ],
+            },
         ),
     ]

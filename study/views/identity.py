@@ -75,18 +75,21 @@ def _session_payload(request):
 
 @require_GET
 def session(request):
-    return JsonResponse(_session_payload(request))
+    response = JsonResponse(_session_payload(request))
+    response["Cache-Control"] = "private, no-store"
+    return response
 
 
 @require_POST
 @authenticated_json_write
 def mode(request):
     payload = _payload(request)
-    if payload is None or payload.get("mode") not in {"reader", "admin"}:
+    value = payload.get("mode") if payload else None
+    if not isinstance(value, str) or value not in {"reader", "admin"}:
         return error("invalid_mode", "Mode must be reader or admin.", 400)
-    if payload["mode"] == "admin" and not is_publisher(request.user):
+    if value == "admin" and not is_publisher(request.user):
         return error("publisher_required", "Publisher access is required.", 403)
-    request.session["study.mode"] = payload["mode"]
+    request.session["study.mode"] = value
     return JsonResponse(_session_payload(request))
 
 
@@ -99,7 +102,7 @@ def timezone(request):
         return error("invalid_timezone", "Timezone must be an IANA timezone name.", 400)
     try:
         ZoneInfo(value)
-    except ZoneInfoNotFoundError:
+    except (ValueError, ZoneInfoNotFoundError):
         return error("invalid_timezone", "Timezone must be an IANA timezone name.", 400)
     profile = profile_for(request.user)
     profile.timezone = value
