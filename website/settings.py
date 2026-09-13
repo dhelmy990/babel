@@ -7,7 +7,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 def env(name, default=None):
     value = os.environ.get(name, default)
-    if value is None:
+    if value is None or (default is None and not value.strip()):
         raise RuntimeError(f"Missing required environment variable: {name}")
     return value
 
@@ -87,7 +87,7 @@ STATICFILES_FINDERS = [
     "study.staticfiles.WebsiteModuleFinder",
 ]
 # Deliberately absent from URL routing: article images are authorized through /assets/<uuid>.
-MEDIA_ROOT = BASE_DIR / "private-media"
+MEDIA_ROOT = Path(env("MEDIA_ROOT", str(BASE_DIR / "private-media")))
 PRIVATE_MEDIA_ROOT = MEDIA_ROOT
 # Authenticated multipart writers impose the 64 MiB request cap themselves so
 # the CSRF middleware can parse valid requests before article validation.
@@ -97,7 +97,7 @@ STORAGES = {
         "BACKEND": (
             "django.contrib.staticfiles.storage.StaticFilesStorage"
             if DEBUG
-            else "whitenoise.storage.CompressedManifestStaticFilesStorage"
+            else "study.staticfiles.WebsiteStaticStorage"
         ),
     }
 }

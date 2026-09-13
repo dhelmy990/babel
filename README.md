@@ -12,7 +12,7 @@ Use Python 3.13 and start the dedicated PostgreSQL 17 service on host port 5433:
 uv venv --python 3.13 .venv
 source .venv/bin/activate
 uv pip install --python .venv/bin/python -r requirements-dev.txt
-docker compose up -d --wait db
+docker compose --env-file /dev/null up -d --wait db
 python manage.py migrate
 npm ci
 npm run vendor
@@ -129,3 +129,91 @@ attempted becomes `skipped`. The command also retires expired unresolved records
 without contacting the provider. A matching late response may confirm acceptance
 only while its claim has not been replaced or made terminal. Logs store safe
 error categories rather than raw provider bodies or credentials.
+
+## Production image and local recovery verification
+
+The production image runs as UID/GID 10001, stores private uploads in `/app/media`,
+serves only collected static files through WhiteNoise, and starts Gunicorn with
+2 workers, 2 threads and a 60-second timeout. Its default settings module is
+`website.production_settings`, which refuses debug mode and missing or empty
+secret, database, and Google configuration. `website.build_settings` is only for
+static collection; it uses a dummy database and must never serve requests.
+The runtime lock includes allauth's social-account dependencies.
+
+Prepare a private `.env.production` (mode 0600) from the variable descriptions in
+`.env.example`. Set `DJANGO_SECRET_KEY`, all `DB_*` values, Google client ID/secret,
+and matching `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`. Set production
+URLs, sender, and `RESEND_API_KEY` before using the `resend` backend. Disposable
+verification must explicitly use `REVIEW_EMAIL_DELIVERY=console` and dummy OAuth.
+Django does not load environment files itself. Always pass Compose an explicit
+`--env-file`: its service `env_file` does not supply `${...}` interpolation.
+
+```bash
+docker compose --env-file .env.production -f compose.prod.yaml config --quiet
+docker compose --env-file .env.production -f compose.prod.yaml build --build-arg STUDY_RELEASE="$(git rev-parse HEAD)" web
+docker compose --env-file .env.production -f compose.prod.yaml up -d --wait db
+docker compose --env-file .env.production -f compose.prod.yaml run --rm web python manage.py migrate
+docker compose --env-file .env.production -f compose.prod.yaml up -d web proxy
+```
+
+Migrations are an explicit one-off step. The production Compose file exposes
+only Caddy's ports 80/443; it never merges development database port mappings.
+Caddy overwrites forwarded scheme headers and limits request bodies to 64 MB.
+The pinned base images support CPU-only amd64. The image build allowlist excludes
+secrets, private media, documents, tests, and the Electron/experiment application.
+Node vendors the three licensed renderer bundles with `npm ci --omit=dev`.
+
+Backups require the running database, an existing web container, the matching
+release image, and installed digest units. The backup stops the timer, an active
+digest service, and web before creating a matched database/media pair. It restores
+prior running states on success or failure; this is a maintenance window.
+
+```bash
+deploy/backup.sh /var/backups/dhelmy-stream/2026-09-14
+deploy/restore-test.sh /var/backups/dhelmy-stream/2026-09-14
+```
+
+Use a new backup destination outside the repository. Artifacts and checksums have
+owner-only permissions; `COMPLETE` is written last. Preserve the exact recorded
+application and PostgreSQL images with the release: restore refuses unavailable
+image IDs and never silently substitutes newer images or runs downgrade migrations.
+Copy each completed backup to an encrypted off-VM destination and retain its key
+outside the VM. Choosing that destination and configuring real infrastructure are
+separate deployment steps.
+
+Restore creates fresh `study-restore` resources, refuses any existing project
+resources or production target, and runs console delivery without a Resend key.
+It compares restored records and image hashes, then checks real HTTP article,
+asset and note permissions for anonymous and local session users. Schedule and
+frozen slot identities are included in the record hashes. Production security
+stays enabled; the helper supplies `Host: dhelmy.stream` and
+`X-Forwarded-Proto: https` over the isolated loopback transport. The script prints
+the temporary dummy Compose file and exact cleanup command after success. Keep
+that file until removing the disposable containers/volumes; then delete its
+containing temporary directory. Never reuse its settings for public deployment.
+
+The scheduler units target `/opt/dhelmy-stream` with an apt-installed Docker
+service. `/usr/bin/env docker` resolves the executable. Local snap Docker lacks
+`docker.service`; local unit validation uses an isolated `SYSTEMD_UNIT_PATH`
+containing a dummy dependency and does not install/start any host unit.
+
+Local verification uses real disposable containers and a controlled systemctl
+shim. `STUDY_ENV_FILE`, `STUDY_COMPOSE_FILE`, `STUDY_COMPOSE_OVERRIDE`,
+`STUDY_PROJECT`, and `STUDY_SYSTEMCTL` are trusted operator/test overrides for
+backup invocation. Default production invocation needs none of them.
+
+```bash
+source .venv/bin/activate
+python -m pytest -q
+python manage.py makemigrations --check --dry-run
+docker build --build-arg STUDY_RELEASE="$(git rev-parse HEAD)" -t study-d1:verification .
+STUDY_DEPLOYMENT_IMAGE=study-d1:verification python -m pytest tests/test_deployment.py -q
+for script in deploy/*.sh; do bash -n "$script"; done
+```
+
+The opt-in deployment tests build no images themselves. They exercise the selected
+image's HTTP security, secure cookies, hashed ES-module imports and single
+initialization in Chromium, followed by real backup, isolated restore, restart
+persistence, and failure-state recovery. They remove only resources they create.
+CI runs the full Python/browser suite, locked vendor build, migration checks,
+production deployment checks, image build, and this disposable recovery suite.

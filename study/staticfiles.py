@@ -2,6 +2,11 @@
 from django.conf import settings
 from django.contrib.staticfiles.finders import BaseFinder
 from django.core.files.storage import FileSystemStorage
+from whitenoise.storage import CompressedManifestStaticFilesStorage
+
+
+class WebsiteStaticStorage(CompressedManifestStaticFilesStorage):
+    support_js_module_import_aggregation = True
 
 
 class WebsiteModuleFinder(BaseFinder):

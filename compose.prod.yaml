@@ -1,0 +1,47 @@
+name: dhelmy-stream
+services:
+  db:
+    image: postgres:17.11-trixie@sha256:67f41722b7a8cbdb868a44a4995c846eddfdc2973bccb291ce937dce88ad5675
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    volumes:
+      - database:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+  web:
+    image: ${STUDY_IMAGE:-dhelmy-stream:local}
+    build: .
+    env_file: ${STUDY_RUNTIME_ENV_FILE:-.env.production}
+    environment:
+      DB_HOST: db
+      DB_PORT: '5432'
+      DJANGO_SETTINGS_MODULE: website.production_settings
+      DJANGO_DEBUG: 'false'
+      MEDIA_ROOT: /app/media
+    expose: ['8000']
+    volumes:
+      - media:/app/media
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+  proxy:
+    image: caddy:2.11.4@sha256:13ba145cba2f3e28fa801994876e4c086d1b95d5aa2a520a734765ffb6b12017
+    ports: ['80:80', '443:443']
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [web]
+    restart: unless-stopped
+volumes:
+  database:
+  media:
+  caddy_data:
+  caddy_config:
