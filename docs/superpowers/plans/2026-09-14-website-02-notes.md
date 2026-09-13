@@ -1,6 +1,6 @@
 # Private Reader Notes Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Let signed-in readers save, move, recover, and edit only their own sticky notes and text boxes.
 
@@ -38,7 +38,7 @@ Only the authenticated session supplies user identity. Requests cannot set
 Missing and inaccessible note IDs both return 404. API note responses use
 `Cache-Control: private, no-store`.
 
-- [ ] **Write ownership tests and run them red.** Add `reader` and `other_reader`
+- [x] **Write ownership tests and run them red.** Add `reader` and `other_reader`
   fixtures using real users/ReaderProfiles. Give no reader publishing authority.
 
   ```python
@@ -72,7 +72,7 @@ Missing and inaccessible note IDs both return 404. API note responses use
   fields, stale version, repeated create id, malformed coordinates, and CSRF.
   Run `pytest tests/test_notes.py -q` red.
 
-- [ ] **Implement the note service and optimistic updates.** Use `Note` fields
+- [x] **Implement the note service and optimistic updates.** Use `Note` fields
   from the master schema and `kind` choices `sticky`/`text`. Limit text to 20,000
   characters; permit x/y both null for a sidebar-only note, otherwise validate
   finite x/y in [0, 1,000,000]. Reject a single null coordinate. Store positioned
@@ -100,7 +100,7 @@ Missing and inaccessible note IDs both return 404. API note responses use
   and new version. Delete only an owned note and preserve ArchiveAccess grants.
   Services enforce these checks independently of the HTTP layer.
 
-- [ ] **Integrate archival atomically.** Extend P4's archive transaction:
+- [x] **Integrate archival atomically.** Extend P4's archive transaction:
   while holding the article lock, snapshot distinct Note.user IDs into
   ArchiveAccess with the unique pair constraint, then mark the article archived.
   New-note creation takes that same article lock before checking visibility.
@@ -115,7 +115,7 @@ Missing and inaccessible note IDs both return 404. API note responses use
   tests with two independent connections for archive/create races; either valid
   serialization is accepted, but no note owner is stranded.
 
-- [ ] **Verify and commit.** Run
+- [x] **Verify and commit.** Run
   `pytest tests/test_notes.py tests/test_archive.py tests/test_note_archive_races.py -q`
   and `python manage.py makemigrations --check --dry-run`. Commit
   `feat: persist private notes and archive access`.
