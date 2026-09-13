@@ -1,5 +1,7 @@
 # dhelmy.stream
 
+For production deployment, recovery, DNS, OAuth, email, and encrypted off-VM backup procedures, see [the operator runbook](docs/deployment.md).
+
 The public website is a Django study log with an integrated Babel galaxy at
 `/galaxy`. Published Markdown articles, their directed reading relationships,
 and private image assets are stored in PostgreSQL and the local media directory.
