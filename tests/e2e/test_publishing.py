@@ -71,3 +71,106 @@ def test_owner_uploads_an_image_at_an_editable_logical_path(publisher_page, live
     page.get_by_role("button", name="Publish", exact=True).click()
     page.wait_for_url("**/diagram")
     expect(page.locator(".article-body img")).to_have_attribute("src", re.compile(r"/assets/"))
+    assert page.locator(".article-body img").evaluate("image => image.naturalWidth") == 1
+
+
+def test_owner_archives_article_and_anonymous_reading_is_removed(published_owner_page, live_server):
+    page, article = published_owner_page
+    page.goto(live_server.url + "/archive-me")
+    page.get_by_role("button", name="Archive", exact=True).click()
+    page.wait_for_url(live_server.url + "/")
+    anonymous = page.context.browser.new_context()
+    try:
+        assert anonymous.request.get(live_server.url + "/archive-me").status == 404
+    finally:
+        anonymous.close()
+
+
+def test_request_json_normalizes_a_response_body_disconnect(publisher_page, live_server):
+    page = publisher_page
+    page.goto(live_server.url + "/")
+    result = page.evaluate("""async () => {
+        const originalFetch = window.fetch;
+        window.fetch = async () => ({ok: true, status: 200, text: () => Promise.reject(new TypeError('body lost'))});
+        try {
+          const {requestJSON} = await import('/static/study/site.js?body-stream-test');
+          await requestJSON('/lost-response');
+          return null;
+        } catch (error) {
+          return {name: error.name, status: error.status, code: error.code, body: error.body?.message};
+        } finally {
+          window.fetch = originalFetch;
+        }
+    }""")
+    assert result == {"name": "RequestError", "status": 200, "code": "response_body_error", "body": "body lost"}
+
+
+def test_publish_form_denies_anonymous(anonymous_page, live_server):
+    assert anonymous_page.goto(live_server.url + "/publish").status == 403
+
+
+def test_publish_form_denies_normal_reader(other_reader_page, live_server):
+    assert other_reader_page.goto(live_server.url + "/publish").status == 403
+
+
+def test_owner_edits_metadata_without_reuploading_markdown_or_images(editable_owner_page, live_server):
+    page, article = editable_owner_page
+    page.goto(f"{live_server.url}/publish/{article.pk}")
+    page.get_by_label("Title", exact=True).fill("Edited title")
+    page.get_by_role("button", name="Save", exact=True).click()
+    page.wait_for_url("**/editable")
+    expect(page.get_by_role("heading", name="Edited title", exact=True)).to_be_visible()
+
+
+def test_stale_edit_keeps_typed_title_and_selected_files(editable_owner_page, live_server):
+    page, article = editable_owner_page
+    page.goto(f"{live_server.url}/publish/{article.pk}")
+    page.get_by_label("Title", exact=True).fill("My conflicting edit")
+    page.get_by_label("Markdown file", exact=True).set_input_files({
+        "name": "edit.md", "mimeType": "text/markdown", "buffer": b"# My conflicting edit\n\nKept.",
+    })
+    page.route(f"**/api/articles/{article.pk}", lambda route: route.fulfill(
+        status=409, content_type="application/json", body='{"error":{"code":"revision_conflict","message":"Article has changed"}}',
+    ))
+    page.get_by_role("button", name="Save", exact=True).click()
+    expect(page.get_by_role("status")).to_contain_text("changed elsewhere")
+    assert page.get_by_label("Title", exact=True).input_value() == "My conflicting edit"
+    assert page.get_by_label("Markdown file", exact=True).evaluate("input => input.files.length") == 1
+
+
+def test_lost_publish_response_retries_the_same_submission_without_duplicate(retry_publish_page, live_server):
+    page = retry_publish_page
+    page.goto(live_server.url + "/publish")
+    page.get_by_label("Title", exact=True).fill("Retry on lost response")
+    page.get_by_label("Markdown file", exact=True).set_input_files({
+        "name": "retry.md", "mimeType": "text/markdown", "buffer": b"# Retry on lost response\n\nOnly once.",
+    })
+
+    def lose_response(route):
+        route.fetch()
+        route.abort()
+
+    page.route("**/api/articles", lose_response)
+    page.get_by_role("button", name="Publish", exact=True).click()
+    expect(page.get_by_role("status")).to_contain_text("could not be saved")
+    page.unroute("**/api/articles")
+    page.get_by_role("button", name="Publish", exact=True).click()
+    page.wait_for_url("**/retry-on-lost-response")
+
+
+def test_reference_layout_screenshots_have_no_mobile_overflow(visual_owner_page, live_server):
+    desktop, mobile, article = visual_owner_page
+    desktop.goto(live_server.url + "/")
+    desktop.screenshot(path="/tmp/babel-p5-followup-home-desktop.png", full_page=True)
+    desktop.goto(live_server.url + "/foundations")
+    desktop.screenshot(path="/tmp/babel-p5-followup-article-desktop.png", full_page=True)
+    desktop.goto(live_server.url + f"/publish/{article.pk}")
+    desktop.screenshot(path="/tmp/babel-p5-followup-form-desktop.png", full_page=True)
+    for path, screenshot in [
+        ("/", "/tmp/babel-p5-followup-home-mobile.png"),
+        ("/foundations", "/tmp/babel-p5-followup-article-mobile.png"),
+        (f"/publish/{article.pk}", "/tmp/babel-p5-followup-form-mobile.png"),
+    ]:
+        mobile.goto(live_server.url + path)
+        assert mobile.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        mobile.screenshot(path=screenshot, full_page=True)

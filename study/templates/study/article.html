@@ -1,4 +1,5 @@
 {% extends "study/base.html" %}
+{% load static %}
 {% block title %}{{ article.title }} — dhelmy.stream{% endblock %}
 {% block content %}
 <main class="article-shell">
@@ -11,4 +12,5 @@
   </article>
   <section class="next" aria-labelledby="next-title"><h2 id="next-title">Articles to read next</h2><div class="next-links">{% for neighbor in successors %}{% include "study/babel_anchor.html" %}{% endfor %}</div></section>
 </main>
+{% if can_publish and identity_mode == 'admin' %}<script type="module" src="{% static 'study/publishing.js' %}"></script>{% endif %}
 {% endblock %}

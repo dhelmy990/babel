@@ -1,8 +1,8 @@
 # dhelmy.stream
 
-The public website serves the approved split-layout study log through Django. The
-original Babel graph remains available in `galaxy/index.html` for its later route
-integration.
+The public website is a Django study log with an integrated Babel galaxy at
+`/galaxy`. Published Markdown articles, their directed reading relationships,
+and private image assets are stored in PostgreSQL and the local media directory.
 
 ## Local setup
 
@@ -14,11 +14,15 @@ source .venv/bin/activate
 uv pip install --python .venv/bin/python -r requirements-dev.txt
 docker compose up -d --wait db
 python manage.py migrate
+npm ci
+npm run vendor
 npm start
 ```
 
 Open http://127.0.0.1:8000/. `npm start` calls the virtual environment's Python
-directly. To open the preserved Electron app, use `npm run start:desktop`.
+directly. `npm run vendor` copies the browser graph dependencies into the
+versioned static-vendor layout. To open the preserved Electron app, use
+`npm run start:desktop`.
 
 Development defaults use the `study_dev` database and credentials. Settings read
 only process environment variables and do not load a local `.env` file. Copy
@@ -30,6 +34,7 @@ secret key and every database setting are required.
 ```bash
 source .venv/bin/activate
 pytest tests/test_pages.py -q
+pytest -q
 python manage.py check
 ```
 
@@ -46,10 +51,11 @@ uv pip compile --generate-hashes --output-file requirements-dev.txt requirements
 The verified publisher can switch to Admin mode, open **New article** from the
 galaxy or timeline, upload a UTF-8 Markdown file, assign logical paths to image
 uploads, preview the exact rendered article, and publish it. Existing articles
-use the same form at their Edit article link. A title, Babel color, stable slug,
-and original publication date remain part of the article; editing changes only
-the current revision. The owner can archive an article from its page, which
-returns it to the timeline and removes it from public reading.
+use the same form at their Edit article link; an edit can retain its current
+Markdown and images, while a replacement image wins at the same logical path.
+Titles can change without changing the stable slug or original publication date.
+The owner can archive an article from its page, which returns to the timeline
+and removes the article from public reading and the galaxy.
 
 The application serves uploaded images from private storage and does not need a
 live Google account or OAuth configuration to run tests. Browser tests create

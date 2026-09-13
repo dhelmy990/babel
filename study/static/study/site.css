@@ -154,27 +154,37 @@ svg {
   font-size: 13px;
 }
 
-.entry { border-top: 1px solid #282828; padding: 20px 0; }
-.entry:hover h3 { color: #fff; }
-.entry time, .entry p, .article-date { color: #858585; font-size: 12px; }
-.entry h3 { font-size: 18px; font-weight: 450; margin: 4px 0; }
-.entry p { margin: 0; line-height: 1.55; font-size: 13px; }
-.entry-dot, .article-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; }
+.entry { border-top: 1px solid #282828; padding: 26px 0; }
+.entry-main { display: grid; grid-template-columns: 95px 1fr 42px; gap: 23px; align-items: center; }
+.entry-main:hover h3 { color: #fff; }
+.entry time { align-self: start; color: #8f8f8f; font-size: 11px; padding-top: 6px; }
+.entry h3 { font-size: 20px; font-weight: 500; letter-spacing: -.35px; margin: 0 0 5px; }
+.entry p { color: #929292; font-size: 13px; line-height: 1.55; margin: 0; }
+.planet { display: inline-block; width: 28px; height: 28px; border-radius: 50%; background: radial-gradient(circle at 28% 23%, color-mix(in srgb, var(--planet-color) 58%, white) 0%, var(--planet-color) 30%, color-mix(in srgb, var(--planet-color) 38%, #000) 61%, #040708 84%); box-shadow: 0 0 17px color-mix(in srgb, var(--planet-color) 25%, transparent), inset -4px -3px 7px #000; }
+.article-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; }
 .next-page { display: inline-block; margin-top: 24px; color: #aaa; font-size: 13px; }
-.article-shell { max-width: 900px; margin: 0 auto; padding: 70px 35px 100px; }
-.article-text { max-width: 680px; }
-.article-text header { border-bottom: 1px solid #282828; margin-bottom: 38px; }
-.article-text h1 { margin: 5px 0 32px; }
-.article-body { color: #d3d3d3; font-size: 16px; }
-.article-body h2 { margin-top: 42px; color: #f0f0f0; }
+.article-shell { max-width: 1180px; margin: 35px auto 90px; padding: 0 36px; }
+.article-text, .article-shell > .prereqs, .article-shell > .next { max-width: 690px; margin-left: auto; margin-right: auto; }
+.article-text header { margin-bottom: 35px; }
+.article-text h1 { font-size: 42px; letter-spacing: -1.3px; margin: 5px 0 17px; }
+.article-date { color: #878787; font-size: 11px; margin-bottom: 35px; }
+.article-body { color: #bcbcbc; font-size: 15px; line-height: 1.95; }
+.article-body h2 { color: #e8e8e8; font-size: 25px; margin: 34px 0 16px; }
 .article-body p { margin-bottom: 22px; }
 .article-body a, .sources a { color: #9cbdc5; text-decoration: underline; }
 .article-body img { max-width: 100%; height: auto; border-radius: 4px; }
-.sources, .next, .prereqs { border-top: 1px solid #282828; margin-top: 52px; padding-top: 20px; }
-.sources h2, .next h2 { font-size: 15px; margin-bottom: 12px; }
-.sources a { display: inline-block; border: 1px solid #444; border-radius: 999px; padding: 4px 10px; margin: 0 8px 8px 0; font-size: 12px; text-decoration: none; }
+.article-body pre { background: #111; border: 1px solid #292929; color: #b6cad1; font: 13px/1.8 ui-monospace, monospace; overflow: auto; padding: 24px; }
+.article-body code { font-family: ui-monospace, monospace; font-size: 13px; }
+.sources { display: flex; flex-wrap: wrap; gap: 9px; margin: 38px 0 40px; }
+.sources h2 { width: 100%; font-size: 15px; margin: 0 0 3px; }
+.sources > div { display: flex; flex-wrap: wrap; gap: 9px; }
+.sources a { border: 1px solid #3c3c3c; border-radius: 30px; color: #bdbdbd; display: inline-block; font-size: 11px; padding: 6px 13px; text-decoration: none; }
+.next, .prereqs { border-top: 1px solid #303030; margin-top: 30px; padding-top: 20px; }
+.next h2, .prereqs h2 { font-size: 15px; margin-bottom: 12px; }
 .owner-link, .owner-actions button { display: inline-block; color: #9cbdc5; font-size: 12px; margin-top: 12px; }
-.owner-actions { border-top: 1px solid #282828; margin-top: 30px; padding-top: 18px; }
+.entry > .owner-link { margin-left: 118px; }
+.owner-actions { align-items: center; border-top: 1px solid #282828; display: flex; flex-wrap: wrap; gap: 14px; margin-top: 30px; padding-top: 18px; }
+.owner-actions .owner-link, .owner-actions button { margin-top: 0; }
 .owner-actions button { appearance: none; border: 1px solid #555; background: #171717; border-radius: 4px; padding: 7px 10px; cursor: pointer; }
 .owner-actions p, #publish-status { color: #aaa; font-size: 13px; min-height: 1.65em; }
 
@@ -265,10 +275,11 @@ svg {
 #publishing-form input { width: 100%; max-width: 100%; background: #141414; color: #ececec; border: 1px solid #4b4b4b; border-radius: 4px; padding: 9px 10px; font: inherit; }
 #publishing-form input[type=color] { width: 64px; height: 38px; padding: 3px; cursor: pointer; }
 #publishing-form input[type=file] { padding: 8px; }
+#publishing-form input[type=file]::file-selector-button { background: #202020; border: 1px solid #555; border-radius: 3px; color: #eee; cursor: pointer; font: inherit; margin-right: 9px; padding: 4px 8px; }
 #image-paths { display: grid; gap: 12px; }
 .field-note { margin: -9px 0 0; }
 .existing-images { border-top: 1px solid #282828; padding-top: 18px; margin-top: 6px; }
-.existing-images h2, .article-preview h2 { font-size: 16px; }
+.existing-images h2, .article-preview > h2 { font-size: 16px; }
 .existing-images ul { margin: 0; padding-left: 20px; color: #aaa; font-size: 13px; }
 .publish-actions { display: flex; gap: 10px; }
 .publish-actions button { appearance: none; border: 1px solid #555; border-radius: 4px; background: #171717; color: #e8e8e8; padding: 9px 14px; cursor: pointer; font: inherit; }
@@ -315,6 +326,13 @@ svg {
   }
 
   .publishing-shell { padding: 42px 25px 70px; }
+
+  .article-shell { margin-top: 25px; padding: 0 25px; }
+  .article-text h1 { font-size: 34px; }
+  .entry-main { grid-template-columns: 65px 1fr 25px; gap: 13px; }
+  .entry h3 { font-size: 17px; }
+  .planet { width: 23px; height: 23px; }
+  .entry > .owner-link { margin-left: 78px; }
 }
 
 /* Babel links keep navigation immediate; previews also work on keyboard focus. */

@@ -13,19 +13,27 @@ def published_reader_page(live_server, article_factory, publisher):
     add_edge(publisher, first.pk, second.pk)
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
-        page = browser.new_page(viewport={"width": 390, "height": 844})
-        yield page, first, second
+        desktop = browser.new_page(viewport={"width": 1280, "height": 900})
+        mobile_context = browser.new_context(viewport={"width": 390, "height": 844}, has_touch=True, is_mobile=True)
+        mobile = mobile_context.new_page()
+        yield desktop, mobile, first, second
+        mobile_context.close()
         browser.close()
 
 
 def test_reader_can_open_article_and_babel_preview_does_not_block_navigation(live_server, published_reader_page):
-    page, first, second = published_reader_page
-    page.goto(live_server.url + "/second")
-    expect(page.get_by_role("link", name="Edit article")).to_have_count(0)
-    anchor = page.locator(".babel-anchor").filter(has_text="First")
+    desktop, mobile, first, second = published_reader_page
+    desktop.goto(live_server.url + "/second")
+    expect(desktop.get_by_role("link", name="Edit article")).to_have_count(0)
+    anchor = desktop.locator(".babel-anchor").filter(has_text="First")
+    anchor.hover()
+    expect(anchor.locator(".babel-preview")).to_be_visible()
     anchor.focus()
     expect(anchor.locator(".babel-preview")).to_be_visible()
-    anchor.click()
-    expect(page).to_have_url(live_server.url + "/first")
-    page.go_back()
-    expect(page).to_have_url(live_server.url + "/second")
+    mobile.goto(live_server.url + "/second")
+    mobile.locator(".babel-anchor").filter(has_text="First").tap()
+    expect(mobile).to_have_url(live_server.url + "/first")
+    mobile.go_back()
+    expect(mobile).to_have_url(live_server.url + "/second")
+    mobile.go_forward()
+    expect(mobile).to_have_url(live_server.url + "/first")

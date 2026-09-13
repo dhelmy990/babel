@@ -32,7 +32,14 @@ export async function requestJSON(url, options = {}) {
   } catch (cause) {
     throw new RequestError("The network request could not be completed.", {body: cause});
   }
-  const text = response.status === 204 ? "" : await response.text();
+  let text = "";
+  try {
+    text = response.status === 204 ? "" : await response.text();
+  } catch (cause) {
+    throw new RequestError("The response body could not be read.", {
+      status: response.status, code: "response_body_error", body: cause,
+    });
+  }
   let parsed = null;
   if (text) {
     try { parsed = JSON.parse(text); } catch { parsed = text; }

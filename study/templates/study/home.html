@@ -22,7 +22,7 @@
       <span>Newest first{% if can_publish and identity_mode == 'admin' %} · <a class="owner-link" href="{% url 'article_new' %}">New article</a>{% endif %}</span>
     </div>
     {% for article in articles %}
-      <article class="entry"><a href="/{{ article.slug }}"><span class="entry-dot" style="background: {{ article.color }}"></span><time datetime="{{ article.published_at|date:'c' }}">{{ article.published_at|date:"j M Y" }}</time><h3>{{ article.title }}</h3><p>{{ article.excerpt }}</p></a>{% if can_publish and identity_mode == 'admin' %}<a class="owner-link" href="{% url 'article_edit' article.pk %}">Edit article</a>{% endif %}</article>
+      <article class="entry"><a class="entry-main" href="/{{ article.slug }}"><time datetime="{{ article.published_at|date:'c' }}">{{ article.published_at|date:"j M Y" }}</time><div class="entry-copy"><h3>{{ article.title }}</h3><p>{{ article.excerpt }}</p></div><span class="planet" style="--planet-color: {{ article.color }}" aria-hidden="true"></span></a>{% if can_publish and identity_mode == 'admin' %}<a class="owner-link" href="{% url 'article_edit' article.pk %}">Edit article</a>{% endif %}</article>
     {% empty %}
       <p class="empty-state">No articles published yet.</p>
     {% endfor %}
