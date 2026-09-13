@@ -16,14 +16,22 @@ def test_owner_publishes_previewed_markdown_and_returns_to_real_article(publishe
     expect(page.get_by_role("link", name="New article", exact=True)).to_be_visible()
     page.get_by_role("link", name="New article", exact=True).click()
     page.screenshot(path="/tmp/babel-p5-owner-form-desktop.png", full_page=True)
+    expect(page.locator("[data-preview-sources]")).to_be_hidden()
     page.get_by_label("Title", exact=True).fill("Ownership")
+    page.get_by_label("Markdown file", exact=True).set_input_files({
+        "name": "source-free.md", "mimeType": "text/markdown",
+        "buffer": b"# Ownership\n\nA clear lifetime.",
+    })
+    page.get_by_role("button", name="Preview", exact=True).click()
+    expect(page.locator("[data-preview-body]")).to_contain_text("A clear lifetime.")
+    expect(page.locator("[data-preview-sources]")).to_be_hidden()
     page.get_by_label("Markdown file", exact=True).set_input_files({
         "name": "ownership.md", "mimeType": "text/markdown",
         "buffer": b"# Ownership\n\nA clear lifetime.\n\n## Sources\n\n[The source](https://example.com/source)",
     })
     page.get_by_role("button", name="Preview", exact=True).click()
-    expect(page.locator("[data-preview-body]")).to_contain_text("A clear lifetime.")
     expect(page.locator("[data-preview-sources]")).to_contain_text("The source")
+    expect(page.locator("[data-preview-sources]")).to_be_visible()
     page.get_by_role("button", name="Publish", exact=True).click()
     page.wait_for_url("**/ownership")
     expect(page.get_by_role("heading", name="Ownership", exact=True)).to_be_visible()

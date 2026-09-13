@@ -16,6 +16,7 @@ docker compose up -d --wait db
 python manage.py migrate
 npm ci
 npm run vendor
+.venv/bin/python -m playwright install chromium
 npm start
 ```
 
@@ -23,6 +24,10 @@ Open http://127.0.0.1:8000/. `npm start` calls the virtual environment's Python
 directly. `npm run vendor` copies the browser graph dependencies into the
 versioned static-vendor layout. To open the preserved Electron app, use
 `npm run start:desktop`.
+
+On a new Linux development machine, install the Chromium system libraries first
+with `.venv/bin/python -m playwright install-deps chromium` when Playwright
+reports missing dependencies.
 
 Development defaults use the `study_dev` database and credentials. Settings read
 only process environment variables and do not load a local `.env` file. Copy

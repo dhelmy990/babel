@@ -176,6 +176,7 @@ svg {
 .article-body pre { background: #111; border: 1px solid #292929; color: #b6cad1; font: 13px/1.8 ui-monospace, monospace; overflow: auto; padding: 24px; }
 .article-body code { font-family: ui-monospace, monospace; font-size: 13px; }
 .sources { display: flex; flex-wrap: wrap; gap: 9px; margin: 38px 0 40px; }
+.sources[hidden] { display: none; }
 .sources h2 { width: 100%; font-size: 15px; margin: 0 0 3px; }
 .sources > div { display: flex; flex-wrap: wrap; gap: 9px; }
 .sources a { border: 1px solid #3c3c3c; border-radius: 30px; color: #bdbdbd; display: inline-block; font-size: 11px; padding: 6px 13px; text-decoration: none; }
