@@ -129,6 +129,26 @@ No review state for anonymous readers. Email only verified owner account at
   allocation during the same frozen day. Preserve outstanding due dates as local
   calendar dates on timezone changes; display the active timezone in preferences.
 
+  **Reactivating an existing date:** Preserve the reused ReviewDay's original
+  timezone, boundary, and slots. If its timezone differs from the effective
+  ReaderProfile.timezone, derive its active boundary from the next midnight
+  after its local_date in that effective timezone; otherwise use the stored
+  boundary. All rollover decisions use this shared effective-boundary helper.
+  For example, September 14 UTC reused in Los Angeles at September 15 00:00 UTC
+  stays frozen until 07:00 UTC, even though its historical boundary has passed.
+  Return the reused day without looping against its historical boundary.
+  Today responses and preferences display the effective profile timezone.
+  A timezone update arriving after expiry first resolves the rollover under
+  the profile lock, then stages the new preference for the next boundary.
+  Before any day exists, the first timezone preference still applies immediately.
+
+  The maximum representable local date has no subsequent boundary. Treat it as
+  terminal; a nonnullable next_boundary_at may store aware UTC datetime.max as
+  a sentinel recognized through local_date == date.max. Never convert that
+  sentinel into another timezone, and guard local-date conversion overflow.
+  Use Python integers for interval arithmetic before storing DecimalField
+  values, avoiding the default Decimal context's 28-digit rounding.
+
 - [ ] **Verify concurrent behavior and commit.** In transaction tests use two
   independent database connections with synchronized starts: materialize the same
   day concurrently, complete the same token concurrently, and archive during
@@ -229,6 +249,11 @@ Modify review models/migration if Digest was not created with R1, settings,
 or `unknown`). Delivery adapter exposes `send(payload: dict, idempotency_key: str) -> str`
 returning the provider message id. Only the configured PublisherIdentity and
 verified `dhelmy990@gmail.com` are eligible, regardless of caller-supplied data.
+
+Digest.day is the Singapore delivery date, independent of the active ReviewDay's
+calendar date or timezone. Its unique user/day constraint and idempotency key
+enforce one digest per Singapore day while its content comes from the same
+active review list as the owner's website. R1 may leave the Digest model for R3.
 
 - [ ] **Write owner-only and retry tests with a fake adapter.**
 

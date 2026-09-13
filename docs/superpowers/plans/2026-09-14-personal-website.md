@@ -175,6 +175,16 @@ Large doubling intervals retain their exact decimal value. When the computed
 date exceeds year 9999, store `next_due_date=NULL` (not due within representable
 calendar time), rather than wrapping or silently resetting the schedule.
 
+An existing ReviewDay reused after a timezone change keeps its historical
+timezone, boundary, and slots. When its timezone differs from the effective
+profile timezone, derive the active boundary from the next midnight after that
+day's local_date in the profile timezone. Today responses expose the effective
+timezone. The final representable date is terminal. The review slice specifies
+the shared rollover helper and overflow handling.
+
+Digest.day is a Singapore calendar date, not a ReviewDay foreign key; email's
+daily identity stays independent of the owner's effective browsing timezone.
+
 ## Cross-slice transaction rules
 
 - Graph writes lock `GraphState(pk=1)`, then affected Article rows in UUID order.
