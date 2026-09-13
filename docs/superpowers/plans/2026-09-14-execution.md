@@ -12,8 +12,8 @@ the task and remain untouched.
 | Task | Implementation | Spec review | Quality review |
 | --- | --- | --- | --- |
 | P1 — Django shell | Complete (`c3fd898`, `230ba58`) | Passed | Passed |
-| P2 — Google identity | In progress | Pending | Pending |
-| P3 — Markdown publishing | Pending | Pending | Pending |
+| P2 — Google identity | Complete (`cb65f68`, `cb10338`, `7123300`) | Passed | Passed |
+| P3 — Markdown publishing | In progress | Pending | Pending |
 | P4 — Directed graph | Pending | Pending | Pending |
 | P5 — Publishing UI | Pending | Pending | Pending |
 | N1 — Private note storage | Pending | Pending | Pending |
