@@ -329,7 +329,10 @@ active review list as the owner's website. R1 may leave the Digest model for R3.
   `REVIEW_FROM_EMAIL=Study notes <reviews@dhelmy.stream>`; destination is fixed
   server-side. Use `https://api.resend.com/emails` via httpx and the
   `Idempotency-Key` header. Local default delivery is a console/fake adapter;
-  production requires explicit Resend configuration.
+  production requires explicit Resend configuration. Disposable verification
+  and isolated restore runs may explicitly select console delivery while keeping
+  production security settings active; production must not silently default to
+  console delivery.
 
 - [ ] **Verify and commit.** Run `pytest tests/test_digest.py -q` plus review
   concurrency tests. Run `python manage.py send_review_digest --dry-run` against
