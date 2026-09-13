@@ -1,128 +1,56 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Babel - Knowledge Graph</title>
-    <link rel="stylesheet" href="styles.css">
-    <!-- Quill Editor (Tiptap requires bundler, Quill works via CDN) -->
-    <link href="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.snow.css" rel="stylesheet">
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>dhelmy.stream — Diego Helmy's study notes</title>
+<meta name="description" content="A compilation of my various learnings about C++, finance, and model serving and model development.">
+<style>
+*{box-sizing:border-box}body{margin:0;background:#0a0a0a;color:#e8e8e8;font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}button,a{-webkit-tap-highlight-color:transparent}button{font:inherit;color:inherit;cursor:pointer}a{color:inherit;text-decoration:none}button:focus-visible,a:focus-visible{outline:2px solid #9cbdc5;outline-offset:5px}button{background:none;border:0}small,.muted{color:#929292}h1,h2,h3,p{margin-top:0}h1{font-size:54px;font-weight:500;letter-spacing:-2px;line-height:1.2}h2{font-weight:450;letter-spacing:-.6px}h3{font-weight:500}svg{width:19px;height:19px;fill:currentColor}.site-nav{height:86px;padding:0 6vw;display:flex;align-items:center;gap:26px;font-size:13px}.site-nav .brand{margin-right:auto;letter-spacing:-.4px}.site-nav button{padding:5px 0;color:#a0a0a0}.site-nav button.active{color:#f2f2f2}.hairline{border-top:1px solid #252525}.home{max-width:900px;padding:60px 35px 80px;margin:auto}.intro{padding-bottom:64px}.eyebrow{text-transform:uppercase;letter-spacing:2px;font-size:10px;color:#9b9b9b;margin-bottom:19px}.intro h1{margin-bottom:22px}.intro p{max-width:535px;font-size:16px;color:#ababab;line-height:1.8}.socials{display:flex;gap:21px;margin-top:26px;color:#aaa}.socials a:hover{color:#fff}.section-title{display:flex;justify-content:space-between;align-items:center;margin:0 0 24px}.section-title h2{font-size:17px;margin:0}.section-title span{font-size:11px;color:#858585}.entry{padding:26px 0;border-top:1px solid #282828;display:grid;grid-template-columns:95px 1fr 42px;gap:23px;align-items:center}.entry time{font-size:11px;color:#8f8f8f;align-self:start;padding-top:6px}.entry h3{font-size:20px;letter-spacing:-.35px;margin:0 0 5px}.entry p{font-size:13px;color:#929292;margin:0}.entry .tag{font-size:10px;color:#848484;display:block;margin-top:10px}.planet{display:inline-block;flex:none;width:28px;height:28px;border-radius:50%;background:radial-gradient(circle at 28% 23%,#4f8293 0,#214656 30%,#102531 61%,#040708 84%);box-shadow:0 0 17px #22465925,inset -4px -3px 7px #000;vertical-align:middle}.planet.purple{background:radial-gradient(circle at 28% 23%,#8c689b,#473351 33%,#211725 65%,#080609 85%)}.planet.amber{background:radial-gradient(circle at 28% 23%,#928250,#514322 33%,#282111 65%,#080704 85%)}.planet.green{background:radial-gradient(circle at 28% 23%,#538b78,#254d3e 33%,#12271f 65%,#030806 85%)}.review{margin:39px 0 0;padding:23px 0;border-top:1px solid #282828}.review summary{cursor:pointer;font-size:13px;list-style:none;display:flex;justify-content:space-between}.review summary span{color:#999}.review-items{display:flex;gap:12px;margin-top:20px;flex-wrap:wrap}.review-items button{font-size:12px;border:1px solid #333;padding:10px 13px}.review-items .planet{width:15px;height:15px;margin-right:7px}.footer{color:#747474;font-size:11px;margin-top:60px;display:flex;justify-content:space-between}.split .home{max-width:1340px;display:grid;grid-template-columns:1fr 1.1fr;gap:90px;padding-top:85px}.split .intro{position:sticky;top:45px;align-self:start}.split .intro h1{font-size:56px}.split .intro p{max-width:350px}.split .timeline{padding-top:9px}.split .footer{grid-column:1/-1;margin-top:10px}.article-view{display:none}.article-mode .home{display:none}.article-mode .article-view{display:block}.article-shell{max-width:1180px;margin:35px auto 90px;position:relative;padding:0 36px}.article-text{max-width:690px;margin:auto;transition:margin .2s}.notes-open .article-text{margin-left:0;margin-right:340px}.prereqs{margin:30px 0 40px;border-top:1px solid #282828;border-bottom:1px solid #282828;padding:20px 0}.label{font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:#999;margin-bottom:14px}.babel-link{position:relative;display:inline-flex;align-items:center;gap:13px;font-size:13px;padding:3px 0}.preview{position:absolute;bottom:calc(100% + 10px);left:0;width:250px;border:1px solid #555;background:#101010;padding:16px;box-shadow:0 10px 35px #000;display:none;z-index:8;font-size:12px;color:#aaa}.preview strong{display:block;font-weight:500;color:#eee;margin-bottom:7px}.babel-link:hover .preview,.babel-link:focus-visible .preview{display:block}.article-text h1{font-size:42px;letter-spacing:-1.3px;margin-bottom:17px}.article-text .deck{font-size:18px;color:#aaa;line-height:1.7}.article-text .meta{font-size:11px;color:#878787;margin-bottom:35px}.article-text h2{font-size:25px;margin:34px 0 16px}.article-text p{color:#bcbcbc;font-size:15px;line-height:1.95}.article-text pre{background:#111;border:1px solid #292929;padding:24px;overflow:auto;color:#b6cad1;font:13px/1.8 ui-monospace,monospace}.article-text code{font-family:ui-monospace,monospace;font-size:13px}.sources{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:40px}.pill{border:1px solid #3c3c3c;border-radius:30px;padding:6px 13px;font-size:11px;color:#bdbdbd}.next{padding-top:25px;border-top:1px solid #303030}.next .next-links{display:flex;gap:28px;flex-wrap:wrap}.note-toggle{border:1px solid #454545!important;padding:5px 12px!important;border-radius:3px}.notes-panel{display:none;position:absolute;right:30px;top:30px;width:275px;border-left:1px solid #303030;padding-left:25px}.notes-open .notes-panel{display:block}.notes-panel header{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;font-size:14px}.notes-panel>p{font-size:11px;color:#8a8a8a;margin-bottom:22px}.note{position:relative;background:#050505;border:1px solid #ddd;width:210px;min-height:170px;margin-bottom:24px;padding:15px;color:#d9d9d9;font-size:13px;box-shadow:0 8px 20px #0007}.note .handle{font-size:10px;letter-spacing:1px;text-transform:uppercase;color:#999;cursor:grab;touch-action:none;display:flex;justify-content:space-between;padding-bottom:15px;user-select:none}.note p{margin-bottom:10px}.note small{font-size:10px}.add-note{font-size:12px;color:#aaa;border:1px dashed #555;padding:10px 15px}.note-recover{font-size:11px;text-decoration:underline;color:#aaa;display:block;margin-top:15px}.sample{display:inline-block;color:#7c7c7c;font-size:10px;letter-spacing:1px}.toast{position:fixed;bottom:25px;left:50%;transform:translateX(-50%);background:#202020;border:1px solid #555;padding:12px 20px;font-size:12px;display:none;z-index:20}
+@media(max-width:850px){h1{font-size:43px}.site-nav{padding:0 23px;gap:17px}.home{padding:35px 25px}.split .home{display:block;padding:35px 25px;max-width:900px}.split .intro{position:static}.split .intro h1{font-size:43px}.split .intro p{max-width:535px}.article-shell{padding:0 25px}.notes-open .article-text{margin:auto}.notes-panel{position:fixed;top:0;bottom:0;right:0!important;z-index:15;width:285px;padding:25px;background:#090909;overflow:auto;box-shadow:-25px 0 50px #000a}.article-text h1{font-size:34px}.entry{grid-template-columns:65px 1fr 25px;gap:13px}.entry h3{font-size:17px}.entry .planet{width:23px;height:23px}.intro{padding-bottom:40px}}
+.galaxy-button{display:inline-flex;align-items:center;gap:25px;border:1px solid #555;border-radius:4px;padding:9px 16px;font-size:13px;color:#dedede;margin:0 0 25px;transition:background .15s,border-color .15s}.galaxy-button:hover{background:#171717;border-color:#999}
+</style>
 </head>
-<body>
-    <div id="graph-container"></div>
+<body class="split">
+<nav class="site-nav"><button class="brand" onclick="showPage('home')">dhelmy.stream</button><button id="timeline-nav" class="active" onclick="showPage('home')">Timeline</button><button onclick="showPage('home'); document.querySelector('.review').open=true; document.querySelector('.review').scrollIntoView({behavior:'smooth',block:'center'})">Review today · 3</button><button class="note-toggle" onclick="showPage('article');toggleNotes()">My notes</button></nav>
+<main class="home">
+<section class="intro"><div class="eyebrow">Diego Helmy's study notes</div><h1>dhelmy.stream</h1><a class="galaxy-button" href="galaxy/index.html">Explore the galaxy <span aria-hidden="true">↗</span></a><p>A compilation of my various learnings about C++, finance, and model serving and model development.</p><div class="socials">
+<a href="https://github.com/dhelmy990" target="_blank" rel="noopener noreferrer" aria-label="GitHub"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 .7a11.5 11.5 0 0 0-3.64 22.4c.58.1.79-.25.79-.56v-2.2c-3.22.7-3.9-1.36-3.9-1.36-.52-1.34-1.29-1.7-1.29-1.7-1.05-.72.08-.71.08-.71 1.17.08 1.79 1.2 1.79 1.2 1.04 1.77 2.72 1.26 3.39.96.1-.75.41-1.26.74-1.55-2.57-.29-5.27-1.29-5.27-5.72 0-1.26.45-2.29 1.19-3.09-.12-.29-.52-1.47.11-3.05 0 0 .97-.31 3.16 1.18a11 11 0 0 1 5.75 0c2.19-1.49 3.15-1.18 3.15-1.18.63 1.58.23 2.76.12 3.05.74.8 1.18 1.83 1.18 3.09 0 4.44-2.7 5.42-5.29 5.71.42.36.79 1.06.79 2.14v3.23c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .7Z"/></svg></a>
+<a href="https://www.linkedin.com/in/dhelmy990/" target="_blank" rel="noopener noreferrer" aria-label="LinkedIn"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.45 2H3.55C2.7 2 2 2.67 2 3.5v17c0 .83.7 1.5 1.55 1.5h16.9c.85 0 1.55-.67 1.55-1.5v-17c0-.83-.7-1.5-1.55-1.5ZM8 19H5V9h3v10ZM6.5 7.7a1.75 1.75 0 1 1 0-3.5 1.75 1.75 0 0 1 0 3.5ZM19 19h-3v-5.3c0-1.27-.02-2.9-1.77-2.9-1.77 0-2.04 1.38-2.04 2.8V19h-3V9h2.88v1.37h.04c.4-.76 1.38-1.57 2.84-1.57C18 8.8 19 10.8 19 13.4V19Z"/></svg></a>
+</div></section>
+<section class="timeline"><div class="section-title"><h2>The study log</h2><span>Newest first</span></div>
+<a href="#article" onclick="showPage('article');return false" class="entry"><time>14 SEP 2026</time><div><h3>Who owns this memory?</h3><p>Thinking about lifetimes, ownership, and the cost of a copy.</p><span class="tag">C++ · 6 min read</span></div><span class="planet"></span></a>
+<a href="#article" onclick="showPage('article');return false" class="entry"><time>11 SEP 2026</time><div><h3>What the yield curve tells us</h3><p>Rates, expectations, and the shape of time.</p><span class="tag">FINANCE · 8 min read</span></div><span class="planet amber"></span></a>
+<a href="#article" onclick="showPage('article');return false" class="entry"><time>08 SEP 2026</time><div><h3>A request's journey through a model server</h3><p>From the queue to the GPU and back again.</p><span class="tag">MODEL SERVING · 10 min read</span></div><span class="planet purple"></span></a>
+<a href="#article" onclick="showPage('article');return false" class="entry"><time>04 SEP 2026</time><div><h3>Learning a smaller representation</h3><p>A few notes on what we ask an embedding to preserve.</p><span class="tag">MODEL DEVELOPMENT · 7 min read</span></div><span class="planet green"></span></a>
+<details class="review"><summary>Review today <span>3 articles · yours only ＋</span></summary><div class="review-items"><button onclick="showPage('article')"><span class="planet"></span>Stack and heap</button><button onclick="showPage('article')"><span class="planet amber"></span>Discounting cash flows</button><button onclick="showPage('article')"><span class="planet purple"></span>Batching inference</button></div></details></section>
+<footer class="footer"><span>dhelmy.stream</span><span>A growing collection of things understood.</span></footer>
+</main>
+<main class="article-view"><div class="article-shell"><article class="article-text">
+<div class="prereqs"><div class="label">Before you read</div><a class="babel-link" href="#article" onclick="notify('This sample prerequisite has no article yet.');return false"><span class="planet green"></span>Stack, heap, and object lifetimes<span class="preview"><strong>Stack, heap, and object lifetimes</strong>Where objects live, when they disappear, and why the distinction matters.<br><br>4 min read · C++</span></a></div>
+<div class="eyebrow">C++ · study note 004</div><h1>Who owns this memory?</h1><p class="deck">Thinking about lifetimes, ownership, and the cost of a copy.</p><div class="meta">14 September 2026 · 6 min read</div>
+<p>The useful question is often less about where a value lives, and more about who is responsible for its lifetime. Ownership gives that responsibility a name.</p>
+<h2>A lifetime with a clear ending</h2><p>A resource should have an owner whose lifetime is easy to follow. When the owner leaves scope, the resource is released. This makes cleanup a property of the program's structure.</p>
+<pre><code>auto model = std::make_unique&lt;Model&gt;();
+model-&gt;predict(input);
 
-    <!-- Hint text for empty state -->
-    <div id="hint-text">Hold R to create your first babel</div>
-
-    <!-- Creation animation overlay -->
-    <div id="creation-overlay">
-        <div id="creation-circle"></div>
-    </div>
-
-    <!-- Creation form -->
-    <div id="creation-form" class="form-panel">
-        <h2>New Babel</h2>
-        <div class="form-group">
-            <label for="babel-title">Title</label>
-            <input type="text" id="babel-title" placeholder="Enter title...">
-        </div>
-        <div class="form-group">
-            <label for="babel-description">Description</label>
-            <textarea id="babel-description" rows="4" placeholder="Enter description..."></textarea>
-        </div>
-        <div class="form-group">
-            <label>Color</label>
-            <div id="color-palette" class="color-palette"></div>
-        </div>
-        <div class="form-group">
-            <label>Similar Babels</label>
-            <div id="similar-babels" class="babel-chips"></div>
-        </div>
-        <div class="form-actions">
-            <button id="create-babel-btn" class="btn-primary">Create</button>
-            <button id="cancel-create-btn" class="btn-secondary">Cancel</button>
-        </div>
-    </div>
-
-    <!-- Comparison/Edit mode overlay -->
-    <div id="comparison-overlay">
-        <div id="comparison-blur"></div>
-        <div id="comparison-content">
-            <div id="babel-panel-left" class="babel-panel">
-                <div class="babel-sphere"></div>
-                <div class="babel-core">
-                    <input type="text" class="babel-edit-title" placeholder="Title">
-                    <textarea class="babel-edit-description" rows="3" placeholder="Description"></textarea>
-                </div>
-            </div>
-            <div id="edge-indicator">
-                <div class="edge-arrow left-to-right"></div>
-                <div class="edge-arrow right-to-left"></div>
-            </div>
-            <div id="babel-panel-right" class="babel-panel">
-                <div class="babel-sphere"></div>
-                <div class="babel-core">
-                    <input type="text" class="babel-edit-title" placeholder="Title">
-                    <textarea class="babel-edit-description" rows="3" placeholder="Description"></textarea>
-                </div>
-            </div>
-        </div>
-        <button id="comparison-done-btn" class="btn-primary">Done</button>
-    </div>
-
-    <!-- Edit mode overlay (single babel) - Split layout -->
-    <div id="edit-overlay">
-        <div id="edit-split-container">
-            <!-- Left side: Text Editor -->
-            <div id="edit-left-panel">
-                <input type="text" id="edit-title" class="edit-title-input" placeholder="Title...">
-                <div id="edit-editor-container">
-                    <div id="edit-editor"></div>
-                </div>
-                <!-- Help icon for shortcuts -->
-                <button id="edit-help-btn" class="edit-help-btn" title="Keyboard shortcuts">?</button>
-                <div id="edit-shortcuts-popup" class="shortcuts-popup">
-                    <div class="shortcuts-title">Keyboard Shortcuts</div>
-                    <div class="shortcut-row"><span class="shortcut-key">Ctrl+B</span> Bold</div>
-                    <div class="shortcut-row"><span class="shortcut-key">Ctrl+I</span> Italic</div>
-                    <div class="shortcut-row"><span class="shortcut-key">Ctrl+Shift+S</span> Strikethrough</div>
-                    <div class="shortcut-row"><span class="shortcut-key">Ctrl+H</span> Highlight</div>
-                    <div class="shortcut-row"><span class="shortcut-key">Ctrl++</span> Heading up</div>
-                    <div class="shortcut-row"><span class="shortcut-key">Ctrl+-</span> Heading down</div>
-                    <div class="shortcut-row"><span class="shortcut-key">Ctrl+Shift+L</span> Bullet list</div>
-                    <div class="shortcut-row"><span class="shortcut-key">Ctrl+Shift+C</span> Code block</div>
-                    <div class="shortcut-row"><span class="shortcut-key">@</span> Link babel</div>
-                </div>
-            </div>
-            <!-- Right side: 3D Babel View (placeholder for now) -->
-            <div id="edit-right-panel">
-                <div id="edit-babel-3d"></div>
-                <div id="edit-color-palette" class="color-palette"></div>
-            </div>
-        </div>
-        <!-- Footer with Done button -->
-        <div id="edit-footer">
-            <button id="edit-done-btn" class="btn-primary btn-done">Done</button>
-        </div>
-    </div>
-
-    <!-- Save toast -->
-    <div id="save-toast">Saved</div>
-
-    <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
-    <script src="https://unpkg.com/d3@7"></script>
-    <script src="https://unpkg.com/3d-force-graph@1.73.0/dist/3d-force-graph.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.js"></script>
-
-    <script src="js/config.js"></script>
-    <script src="js/state.js"></script>
-    <script src="js/graph-utils.js"></script>
-    <script src="js/rendering.js"></script>
-    <script src="js/level-circles.js"></script>
-    <script src="js/animation.js"></script>
-    <script src="js/persistence.js"></script>
-    <script src="js/editor.js"></script>
-    <script src="js/ui.js"></script>
-    <script src="js/app.js"></script>
-</body>
-</html>
+// Leaving scope releases the owned model.</code></pre>
+<p>In these notes, I find it helpful to sketch the owner separately from the places that merely use the object. An arrow can describe access without implying ownership.</p>
+<h2>Moving the responsibility</h2><p>Passing ownership is different from borrowing access. A move makes the transfer visible; a reference lets another part of the program use something without becoming responsible for destroying it.</p>
+<p>The habit I want to keep: whenever a lifetime becomes hard to explain, draw the ownership first.</p>
+<div class="label">Sources</div><div class="sources"><a class="pill" href="https://en.cppreference.com/w/cpp/memory/unique_ptr" target="_blank" rel="noopener noreferrer">↗ std::unique_ptr reference</a><a class="pill" href="https://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines" target="_blank" rel="noopener noreferrer">↗ C++ Core Guidelines</a></div>
+<section class="next"><div class="label">Articles to read next</div><div class="next-links"><a class="babel-link" href="#article" onclick="notify('This sample next read has no article yet.');return false"><span class="planet"></span>Move semantics<span class="preview"><strong>Move semantics</strong>Following ownership as values move between scopes.<br><br>7 min read · C++</span></a><a class="babel-link" href="#article" onclick="notify('This sample next read has no article yet.');return false"><span class="planet purple"></span>Owning the model runtime<span class="preview"><strong>Owning the model runtime</strong>Applying resource lifetimes to serving infrastructure.<br><br>9 min read · Model serving</span></a></div></section>
+</article>
+<aside class="notes-panel"><header>My notes <button aria-label="Close notes" onclick="toggleNotes()">✕</button></header><p>Private to you · 2 notes on this article</p>
+<div class="note"><div class="handle">Sticky note <span>⠿</span></div><p>Ownership ≠ access.</p><p>Draw the owner, then draw the borrowers.</p><small>Near “A lifetime with a clear ending”</small></div>
+<div class="note"><div class="handle">Text box <span>⠿</span></div><p>Revisit this when working on the model cache.</p><small>My follow-up</small></div>
+<button class="add-note" onclick="notify('Note creation is not available yet.')">＋ Add a note</button><button class="note-recover" onclick="resetNotes()">Return notes to sidebar</button>
+</aside></div></main><div class="toast" role="status"></div>
+<script>
+let timer;
+function showPage(page){document.body.classList.toggle('article-mode',page==='article');document.querySelector('#timeline-nav').classList.toggle('active',page!=='article');window.scrollTo({top:0});}
+function toggleNotes(){document.body.classList.toggle('notes-open')}
+function notify(message){let el=document.querySelector('.toast');el.textContent=message;el.style.display='block';clearTimeout(timer);timer=setTimeout(()=>el.style.display='none',4500)}
+function resetNotes(){document.querySelectorAll('.note').forEach(n=>{n.style.transform='';n.dataset.x='0';n.dataset.y='0'})}
+document.querySelectorAll('.handle').forEach(handle=>{let start;const note=handle.parentElement;handle.addEventListener('pointerdown',e=>{start={px:e.clientX,py:e.clientY,x:Number(note.dataset.x||0),y:Number(note.dataset.y||0)};handle.setPointerCapture(e.pointerId);note.style.zIndex='10'});handle.addEventListener('pointermove',e=>{if(!start)return;let x=start.x+e.clientX-start.px,y=start.y+e.clientY-start.py;note.dataset.x=x;note.dataset.y=y;note.style.transform='translate('+x+'px,'+y+'px)'});handle.addEventListener('pointerup',()=>{start=null});handle.addEventListener('pointercancel',()=>{start=null})});
+</script>
+</body></html>
