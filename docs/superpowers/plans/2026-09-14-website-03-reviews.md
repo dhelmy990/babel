@@ -246,7 +246,7 @@ Modify review models/migration if Digest was not created with R1, settings,
 
 **Interfaces:** `prepare_owner_digest(*, now) -> Digest | None` and
 `deliver_digest(digest_id, *, now, delivery) -> str` (`sent`, `retry`, `skipped`,
-or `unknown`). Delivery adapter exposes `send(payload: dict, idempotency_key: str) -> str`
+`failed`, or `unknown`). Delivery adapter exposes `send(payload: dict, idempotency_key: str) -> str`
 returning the provider message id. Only the configured PublisherIdentity and
 verified `dhelmy990@gmail.com` are eligible, regardless of caller-supplied data.
 
@@ -301,8 +301,10 @@ active review list as the owner's website. R1 may leave the Digest model for R3.
   after that, mark unknown and require inspecting delivery history instead of
   blindly resending. Do not promise exactly-once delivery beyond that boundary.
   Stale leases can be retried only within retry_until. Confirmed sent/skipped
-  states are terminal. Treat malformed/auth-denied requests as failed without
-  a rapid retry loop; expose last_error in command logs without payload secrets.
+  states are terminal. A known permanent rejection (such as malformed data or
+  denied authentication) returns terminal `failed`, distinct from `unknown`
+  delivery outcome. Do not retry these failures automatically; expose last_error
+  in command logs without payload secrets.
 
   A review/archive after first submission can make an already-frozen email
   stale; clicking still checks current article permissions and queue state.
