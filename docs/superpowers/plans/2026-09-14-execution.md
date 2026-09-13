@@ -22,7 +22,7 @@ the task and remain untouched.
 | P5 — Publishing UI | Complete (`ede825c` through `8a8e151`) | Passed | Passed |
 | N1 — Private note storage | Complete (`e91442c`) | Passed | Passed |
 | N2 — Note placement/sidebar | Complete (`e89b992`, `f461feb`, `d30b98b`) | Passed | Passed |
-| R1 — Review schedules | In progress | Pending | Pending |
+| R1 — Review schedules | Implemented (`8c3fac3`) | Passed | In progress |
 | R2 — Read detection/list | Pending | Pending | Pending |
 | R3 — Owner digest | Pending | Pending | Pending |
 | D1 — Packaging/recovery | Pending | Pending | Pending |
