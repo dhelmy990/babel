@@ -176,7 +176,7 @@ and renders outstanding slots with ordinary article links. Navbar counts are
 derived from that response, never a hardcoded 3. Context remains per page instance
 and the server generation remains authoritative across tabs/reloads.
 
-- [ ] **Write end-of-page behavior tests.** Add a `long_article` fixture through
+- [x] **Write end-of-page behavior tests.** Add a `long_article` fixture through
   article_factory using 80 repeated body paragraphs so the marker starts below
   the viewport. In browser tests, inspect the real ReviewSchedule table.
 
@@ -198,7 +198,7 @@ and the server generation remains authoritative across tabs/reloads.
   expired context refresh, hidden-tab suppression, reload no-double-completion,
   review list max-three, and mobile interactions. Run `pytest tests/e2e/test_reviews.py -q` red.
 
-- [ ] **Implement the marker observer and list.** Put the marker on the actual
+- [x] **Implement the marker observer and list.** Put the marker on the actual
   next-articles section even when there are zero successors. Register only for
   signed-in users and published articles, after loading reading context.
   Observe intersection and document visibility; a marker visible in a background
@@ -239,7 +239,7 @@ and the server generation remains authoritative across tabs/reloads.
   completion, remove it from outstanding display and update the count, but do
   not select a replacement; completed/cancelled slots stay in the database.
 
-- [ ] **Verify and commit.** Run R1 tests and `pytest tests/e2e/test_reviews.py -q`.
+- [x] **Verify and commit.** Run R1 tests and `pytest tests/e2e/test_reviews.py -q`.
   Browser-check the real daily count, delayed images above the marker, sidebar
   opening near the end, and single-tap article navigation. Commit
   `feat: detect article completion and display daily reviews`.

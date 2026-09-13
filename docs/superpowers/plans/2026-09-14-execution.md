@@ -23,8 +23,8 @@ the task and remain untouched.
 | N1 — Private note storage | Complete (`e91442c`) | Passed | Passed |
 | N2 — Note placement/sidebar | Complete (`e89b992`, `f461feb`, `d30b98b`) | Passed | Passed |
 | R1 — Review schedules | Complete (`8c3fac3`, `9cf6428`) | Passed | Passed |
-| R2 — Read detection/list | In progress | Pending | Pending |
-| R3 — Owner digest | Pending | Pending | Pending |
+| R2 — Read detection/list | Complete (`16ef07d`) | Passed | Passed |
+| R3 — Owner digest | In progress | Pending | Pending |
 | D1 — Packaging/recovery | Pending | Pending | Pending |
 | D2 — Deployment runbook | Pending | Pending | Pending |
 
