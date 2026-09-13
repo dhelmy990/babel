@@ -289,6 +289,8 @@ active review list as the owner's website. R1 may leave the Digest model for R3.
   runs every five minutes; prepare only at/after 09:00 and before the end of the
   current Singapore day. Catch up that day's digest after downtime; never send
   a backlog of old daily emails. Use the same get_review_day function as the UI.
+  An expired, never-attempted digest becomes skipped; an attempted digest with
+  an unresolved outcome becomes unknown after its retry deadline.
 
   If no outstanding published slots remain, create a skipped daily Digest so
   repeated scheduler runs do not reconsider a finished day. Otherwise store the
@@ -316,7 +318,12 @@ active review list as the owner's website. R1 may leave the Digest model for R3.
 
   A review/archive after first submission can make an already-frozen email
   stale; clicking still checks current article permissions and queue state.
-  Never change the provider payload under a reused idempotency key.
+  Never change the provider payload under a reused idempotency key. Fence each
+  result update against the captured lease and its in-flight state, so a stale
+  worker cannot overwrite a newer claim or terminal outcome. A matching claim
+  may record a confirmed provider acceptance after its lease expires if no
+  replacement or terminal transition occurred; this records known delivery and
+  does not authorize a new provider request outside the retry window.
 
   Resend configuration: `RESEND_API_KEY` and
   `REVIEW_FROM_EMAIL=Study notes <reviews@dhelmy.stream>`; destination is fixed
