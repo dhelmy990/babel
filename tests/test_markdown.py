@@ -111,3 +111,42 @@ def test_prepare_article_rejects_unsafe_links_and_image_paths(markdown):
 
     with pytest.raises(ValueError):
         prepare_article(markdown, {})
+
+
+@pytest.mark.parametrize("definition_before_sources", [True, False])
+def test_reference_links_keep_document_wide_definitions_across_sources(definition_before_sources):
+    from study.markdown import prepare_article
+
+    definition = "[book]: https://example.com/book\n"
+    markdown = (
+        "# References\n\n" + (definition if definition_before_sources else "") +
+        "Read [the book][book].\n\n## Sources\n\n[Book][book]\n\n" +
+        ("" if definition_before_sources else definition)
+    )
+    prepared = prepare_article(markdown, {})
+
+    assert 'href="https://example.com/book"' in prepared.html
+    assert prepared.sources == (("Book", "https://example.com/book"),)
+
+
+def test_reference_image_definition_after_sources_renders_asset_and_still_requires_upload():
+    from io import BytesIO
+    from PIL import Image
+    from study.markdown import prepare_article, render_article
+
+    output = BytesIO()
+    Image.new("RGB", (2, 2), "blue").save(output, "PNG")
+    markdown = "# Image\n\n![diagram][diagram]\n\n## Sources\n\n[Reference](https://example.com)\n\n[diagram]: images/x.png"
+    prepared = prepare_article(markdown, {"images/x.png": output.getvalue()})
+    assert 'src="/assets/diagram"' in render_article(prepared, {"images/x.png": "/assets/diagram"})
+    with pytest.raises(ValueError, match="Missing image"):
+        prepare_article(markdown, {})
+
+
+def test_sources_heading_inside_a_code_fence_remains_body_content():
+    from study.markdown import prepare_article
+
+    prepared = prepare_article("# Code\n\n```markdown\n## Sources\n[Ref](https://example.com)\n```", {})
+
+    assert prepared.sources == ()
+    assert "## Sources" in prepared.html

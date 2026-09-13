@@ -78,28 +78,20 @@ def _validated_image(data: bytes) -> tuple[bytes, str]:
         raise ValueError("Invalid image") from exc
 
 
-def _split_sources(markdown: str) -> tuple[str, tuple[tuple[str, str], ...]]:
-    """Separate only a real final H2 Sources section, using block tokens."""
-    parser = markdown_parser()
-    tokens = parser.parse(markdown)
+def _split_sources(tokens) -> tuple[list, tuple[tuple[str, str], ...]]:
+    """Partition one parsed document, retaining its global reference environment."""
     headings = [
         index for index, token in enumerate(tokens)
         if token.type == "heading_open" and token.level == 0
     ]
     if not headings:
-        return markdown, ()
+        return tokens, ()
     index = headings[-1]
     heading = tokens[index]
     label_token = tokens[index + 1] if index + 1 < len(tokens) else None
     if heading.tag != "h2" or not label_token or label_token.type != "inline" or label_token.content.strip().lower() != "sources":
-        return markdown, ()
-    start_line = heading.map[0] if heading.map else None
-    if start_line is None:
-        return markdown, ()
-    lines = markdown.splitlines(keepends=True)
-    body = "".join(lines[:start_line])
-    tail = "".join(lines[start_line:])
-    source_tokens = parser.parse(tail)
+        return tokens, ()
+    source_tokens = tokens[index:]
     links = []
     for token in source_tokens:
         if token.type != "inline":
@@ -119,7 +111,7 @@ def _split_sources(markdown: str) -> tuple[str, tuple[tuple[str, str], ...]]:
                 url = None
             elif url and child.type in {"text", "code_inline"}:
                 label_parts.append(child.content)
-    return (body, tuple(links)) if links else (markdown, ())
+    return (tokens[:index], tuple(links)) if links else (tokens, ())
 
 
 def _validate_url(url: str) -> None:
@@ -143,15 +135,13 @@ def _reject_unsafe_link_syntax(tokens) -> None:
 
 def referenced_image_names(markdown: str) -> set[str]:
     """Return canonical image names in the article body, excluding Sources."""
-    body, _ = _split_sources(markdown)
+    body, _ = _split_sources(markdown_parser().parse(markdown))
     references = set()
-    for token in markdown_parser().parse(body):
+    for token in body:
         for child in token.children or []:
             if child.type == "image":
                 references.add(normalize_image_name(child.attrGet("src") or ""))
     return references
-    if url.lower().startswith("data:"):
-        raise ValueError("Unsafe link")
 
 
 def _excerpt(tokens) -> str:
@@ -194,7 +184,9 @@ def prepare_article(markdown: str, images: dict[str, bytes]) -> PreparedArticle:
             raise ValueError("Markdown is too large")
     except UnicodeEncodeError as exc:
         raise ValueError("Invalid Markdown") from exc
-    _reject_unsafe_link_syntax(markdown_parser().parse(markdown))
+    parser = markdown_parser()
+    document_tokens = parser.parse(markdown)
+    _reject_unsafe_link_syntax(document_tokens)
     if len(images) > MAX_IMAGES:
         raise ValueError("Too many images")
     normal_images: dict[str, bytes] = {}
@@ -202,9 +194,7 @@ def prepare_article(markdown: str, images: dict[str, bytes]) -> PreparedArticle:
     for name, data in normalize_image_mapping(images).items():
         normal_images[name], media_types[name] = _validated_image(data)
 
-    body, sources = _split_sources(markdown)
-    parser = markdown_parser()
-    tokens = parser.parse(body)
+    tokens, sources = _split_sources(document_tokens)
     for token in tokens:
         for child in token.children or []:
             if child.type == "image":
