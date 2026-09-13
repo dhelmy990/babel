@@ -422,3 +422,73 @@ def test_timezone_form_body_after_csrf_is_rejected_as_private_json(reader):
     csrf.get("/")
     response = csrf.post("/api/timezone", data={"timezone": "UTC"}, HTTP_X_CSRFTOKEN=csrf.cookies["csrftoken"].value)
     assert_private(response, 400)
+
+
+def test_later_review_resolves_carried_slots_before_timezone_reuses_older_day(reader, publisher, article_factory):
+    from study.services.content import archive_article
+    from study.services.reviews import get_review_day, reading_context, set_timezone, today_payload
+
+    first_read_at = datetime(2026, 9, 12, 10, tzinfo=UTC)
+    set_timezone(reader, "Pacific/Kiritimati", now=first_read_at)
+    articles = sorted([article_factory(f"Carried {i}") for i in range(4)], key=lambda article: article.pk)
+    reviewed, cancelled, unfinished, fourth = articles
+    for article in articles:
+        assert finish(reader, article, first_read_at)["next_due_date"] == "2026-09-14"
+
+    older = get_review_day(reader, now=first_read_at + timedelta(days=1))
+    completed_at = first_read_at + timedelta(days=2)
+    active = get_review_day(reader, now=completed_at)
+    assert older.local_date == date(2026, 9, 14)
+    assert active.local_date == date(2026, 9, 15)
+
+    def identities(day):
+        return list(day.slots.order_by("ordinal").values_list("pk", "ordinal", "article_id"))
+
+    before = {day.pk: identities(day) for day in (older, active)}
+    assert [article_id for _, _, article_id in before[older.pk]] == [article.pk for article in articles[:3]]
+    archive_article(publisher, cancelled.pk)
+    cancellation_times = {day.pk: day.slots.get(article=cancelled).cancelled_at for day in (older, active)}
+    result = finish(reader, reviewed, completed_at)
+    assert result["interval_days"] == "2" and result["next_due_date"] == "2026-09-17"
+    assert finish(reader, fourth, completed_at)["status"] == "not_selected"
+
+    set_timezone(reader, "Etc/GMT+12", now=completed_at + timedelta(seconds=1))
+    reused_at = first_read_at + timedelta(days=3)
+    reused = get_review_day(reader, now=reused_at)
+    assert reused.pk == older.pk
+    assert identities(reused) == before[older.pk]
+    payload = today_payload(reader, now=reused_at)
+    assert payload["date"] == "2026-09-14" and payload["timezone"] == "Etc/GMT+12"
+    assert len(payload["slots"]) == 3
+    assert next(slot for slot in payload["slots"] if slot["article_id"] == str(reviewed.pk))["completed"] is True
+    assert str(fourth.pk) not in [slot["article_id"] for slot in payload["slots"]]
+    context = reading_context(reader, reviewed.pk, now=reused_at)
+    assert context["eligible"] is False and context["status"] == "not_due"
+    assert get_review_day(reader, now=reused_at + timedelta(hours=1)).pk == older.pk
+    for day in (older, active):
+        assert day.slots.get(article=reviewed).completed_at == completed_at
+        assert identities(day) == before[day.pk]
+        assert day.slots.get(article=cancelled).cancelled_at == cancellation_times[day.pk]
+        assert day.slots.get(article=cancelled).completed_at is None
+        assert day.slots.get(article=unfinished).completed_at is None
+
+
+def test_carried_completion_preserves_cancelled_slot_for_same_schedule(reader, article_factory):
+    from study.services.reviews import get_review_day, set_timezone
+
+    first_read_at = datetime(2026, 9, 12, 10, tzinfo=UTC)
+    set_timezone(reader, "Pacific/Kiritimati", now=first_read_at)
+    article = article_factory("Cancelled assignment")
+    finish(reader, article, first_read_at)
+    older = get_review_day(reader, now=first_read_at + timedelta(days=1))
+    old_slot = older.slots.get()
+    cancelled_at = first_read_at + timedelta(days=1, hours=1)
+    # Seed a cancelled historical assignment for the same schedule to exercise
+    # the cancellation guard independently of permanent article archival.
+    older.slots.filter(pk=old_slot.pk).update(cancelled_at=cancelled_at)
+    completed_at = first_read_at + timedelta(days=2)
+    active = get_review_day(reader, now=completed_at)
+    assert finish(reader, article, completed_at)["status"] == "reviewed"
+    old_slot.refresh_from_db()
+    assert old_slot.cancelled_at == cancelled_at and old_slot.completed_at is None
+    assert active.slots.get().completed_at == completed_at

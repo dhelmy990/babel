@@ -268,7 +268,9 @@ def complete_article(user, article_id, *, token, now) -> dict:
         schedule.next_due_date = _due_date(completed_date, interval)
         schedule.last_completed_at = now
         schedule.save(update_fields=("interval_days", "generation", "next_due_date", "last_completed_at"))
-        day.slots.filter(schedule=schedule, completed_at__isnull=True, cancelled_at__isnull=True).update(completed_at=now)
+        # This review also resolves carried assignments from previously selected
+        # days, which can become active again after a timezone change.
+        ReviewSlot.objects.filter(schedule=schedule, completed_at__isnull=True, cancelled_at__isnull=True).update(completed_at=now)
         return _result("reviewed", schedule)
 
     return _with_article(user, article_id, now, complete)
