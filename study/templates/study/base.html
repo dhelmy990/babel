@@ -13,6 +13,19 @@
   <nav class="site-nav" aria-label="Main navigation">
     <a class="brand" href="/">dhelmy.stream</a>
     <a class="active" href="/">Timeline</a>
+    {% if request.user.is_authenticated %}
+      <div class="account-controls">
+        {% if can_publish %}
+          <button class="nav-action" type="button" data-mode-toggle data-mode="{% if identity_mode == 'admin' %}reader{% else %}admin{% endif %}">{% if identity_mode == 'admin' %}Reader mode{% else %}Admin mode{% endif %}</button>
+        {% endif %}
+        <form method="post" action="{% url 'account_logout' %}">
+          {% csrf_token %}
+          <button class="nav-action" type="submit">Sign out</button>
+        </form>
+      </div>
+    {% else %}
+      <a class="nav-action" href="{% url 'account_login' %}">Sign in</a>
+    {% endif %}
   </nav>
   <div class="hairline"></div>
   {% block content %}{% endblock %}

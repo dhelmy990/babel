@@ -17,11 +17,16 @@ SECRET_KEY = env("DJANGO_SECRET_KEY", "study-dev-secret-key" if DEBUG else None)
 ALLOWED_HOSTS = ["127.0.0.1", "localhost", "testserver"]
 
 INSTALLED_APPS = [
+    "django.contrib.sites",
     "django.contrib.auth",
     "django.contrib.contenttypes",
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+    "allauth",
+    "allauth.account",
+    "allauth.socialaccount",
+    "allauth.socialaccount.providers.google",
     "study",
 ]
 
@@ -31,6 +36,7 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "allauth.account.middleware.AccountMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
@@ -43,13 +49,14 @@ APPEND_SLASH = False
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [],
+        "DIRS": [BASE_DIR / "templates"],
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [
                 "django.template.context_processors.request",
                 "django.contrib.auth.context_processors.auth",
                 "django.contrib.messages.context_processors.messages",
+                "study.context_processors.identity",
             ],
         },
     },
@@ -85,3 +92,32 @@ STORAGES = {
     }
 }
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+SITE_ID = 1
+AUTHENTICATION_BACKENDS = [
+    "django.contrib.auth.backends.ModelBackend",
+    "allauth.account.auth_backends.AuthenticationBackend",
+]
+ACCOUNT_EMAIL_VERIFICATION = "mandatory"
+ACCOUNT_SIGNUP_FIELDS = ["email*"]
+ACCOUNT_LOGIN_METHODS = {"email"}
+SOCIALACCOUNT_LOGIN_ON_GET = False
+SOCIALACCOUNT_STORE_TOKENS = False
+SOCIALACCOUNT_ADAPTER = "study.adapters.GoogleAccountAdapter"
+SOCIALACCOUNT_PROVIDERS = {
+    "google": {
+        "APPS": [
+            {
+                "name": "dhelmy.stream",
+                "client_id": env("GOOGLE_CLIENT_ID", ""),
+                "secret": env("GOOGLE_CLIENT_SECRET", ""),
+                "settings": {
+                    "scope": ["profile", "email"],
+                    "auth_params": {"access_type": "online"},
+                    "oauth_pkce_enabled": True,
+                },
+            }
+        ]
+    }
+}
+CSRF_FAILURE_VIEW = "study.views.identity.csrf_failure"

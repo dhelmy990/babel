@@ -1,0 +1,14 @@
+{% extends "study/base.html" %}
+
+{% block title %}Continue with Google — dhelmy.stream{% endblock %}
+
+{% block content %}
+<main class="account-page">
+  <h1>Continue with Google</h1>
+  <p>Continue only if you want to sign in with your Google account.</p>
+  <form method="post">
+    {% csrf_token %}
+    <button class="galaxy-button" type="submit">Continue with Google <span aria-hidden="true">↗</span></button>
+  </form>
+</main>
+{% endblock %}

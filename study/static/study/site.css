@@ -62,6 +62,30 @@ svg {
   color: #f2f2f2;
 }
 
+.account-controls {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.account-controls form {
+  margin: 0;
+}
+
+.nav-action {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: #aaa;
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+}
+
+.nav-action:hover {
+  color: #fff;
+}
+
 .hairline {
   border-top: 1px solid #252525;
 }
@@ -198,6 +222,16 @@ svg {
   margin-bottom: 30px;
 }
 
+.account-page {
+  max-width: 520px;
+  margin: auto;
+  padding: 85px 35px;
+}
+
+.account-page p {
+  color: #ababab;
+}
+
 @media (max-width: 850px) {
   h1 {
     font-size: 43px;
@@ -206,6 +240,10 @@ svg {
   .site-nav {
     padding: 0 23px;
     gap: 17px;
+  }
+
+  .account-controls {
+    gap: 12px;
   }
 
   .home,
