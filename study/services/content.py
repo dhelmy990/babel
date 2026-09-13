@@ -202,8 +202,10 @@ def archive_article(user, article_id) -> Article:
     article = Article.objects.select_for_update().get(pk=article_id)
     if article.archived_at is None:
         from study.services.notes import grant_archive_access
+        from study.services.reviews import suspend_article_reviews
 
         grant_archive_access(article)
         article.archived_at = timezone.now()
+        suspend_article_reviews(article, now=article.archived_at)
         article.save(update_fields=['archived_at'])
     return article

@@ -5,6 +5,7 @@ from django.db import models
 class ReaderProfile(models.Model):
     user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     timezone = models.CharField(max_length=63, default="UTC")
+    active_day = models.ForeignKey("study.ReviewDay", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
     pending_timezone = models.CharField(max_length=63, null=True, blank=True)
 
 

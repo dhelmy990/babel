@@ -2,7 +2,7 @@ from allauth.account import views as account_views
 from allauth.socialaccount.providers.google import urls as google_urls
 from django.urls import include, path
 
-from study.views import content, graph, identity, notes, pages
+from study.views import content, graph, identity, notes, pages, reviews
 
 
 urlpatterns = [
@@ -11,6 +11,9 @@ urlpatterns = [
     path("galaxy", graph.galaxy, name="galaxy"),
     path("api/articles/<str:article_id>/notes", notes.article_notes, name="article_notes"),
     path("api/notes/<str:note_id>", notes.note_detail, name="note_detail"),
+    path("api/reviews/today", reviews.today, name="reviews_today"),
+    path("api/articles/<str:article_id>/reading-context", reviews.context, name="reading_context"),
+    path("api/articles/<str:article_id>/complete", reviews.complete, name="article_complete"),
     path("api/graph", graph.graph_data, name="graph_data"),
     path("api/edges", graph.create_edge, name="edge_create"),
     path("api/edges/<uuid:source_id>/<uuid:target_id>", graph.delete_edge, name="edge_delete"),

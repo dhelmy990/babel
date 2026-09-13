@@ -1,7 +1,7 @@
 import json
 from functools import wraps
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from django.utils import timezone as django_timezone
 from django.http import JsonResponse
 from django.core.exceptions import RequestDataTooBig, TooManyFieldsSent, TooManyFilesSent
 from django.http.multipartparser import MultiPartParserError
@@ -11,6 +11,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
 from study.services.identity import is_publisher, profile_for
+from study.services.reviews import set_timezone
 
 
 def error(code, message, status):
@@ -77,6 +78,7 @@ def _session_payload(request):
         "can_publish": can_publish,
         "mode": mode,
         "timezone": profile.timezone,
+        "pending_timezone": profile.pending_timezone,
     }
 
 
@@ -100,18 +102,26 @@ def mode(request):
     return JsonResponse(_session_payload(request))
 
 
+def _private_response(view):
+    @wraps(view)
+    def wrapped(request, *args, **kwargs):
+        response = view(request, *args, **kwargs)
+        response["Cache-Control"] = "private, no-store"
+        return response
+    return wrapped
+
+
+@_private_response
 @require_POST
 @authenticated_json_write
 def timezone(request):
-    payload = _payload(request)
-    value = payload.get("timezone") if payload else None
-    if not isinstance(value, str):
-        return error("invalid_timezone", "Timezone must be an IANA timezone name.", 400)
     try:
-        ZoneInfo(value)
-    except (ValueError, ZoneInfoNotFoundError):
+        if request.content_type != "application/json":
+            raise ValueError
+        payload = _payload(request)
+        if payload is None or set(payload) != {"timezone"}:
+            raise ValueError
+        set_timezone(request.user, payload["timezone"], now=django_timezone.now())
+    except (ValueError, RequestDataTooBig):
         return error("invalid_timezone", "Timezone must be an IANA timezone name.", 400)
-    profile = profile_for(request.user)
-    profile.timezone = value
-    profile.save(update_fields=["timezone"])
     return JsonResponse(_session_payload(request))
