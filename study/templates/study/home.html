@@ -27,6 +27,7 @@
       <p class="empty-state">No articles published yet.</p>
     {% endfor %}
     {% if next_page %}<a class="next-page" href="/?page={{ next_page }}">Older articles</a>{% endif %}
+    {% if request.user.is_authenticated %}{% include "study/review_list.html" %}{% endif %}
   </section>
   <footer class="footer">
     <span>dhelmy.stream</span>

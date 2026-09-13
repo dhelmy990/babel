@@ -404,3 +404,28 @@ svg {
   .note-editor textarea { font-size: 16px; }
   .note-actions button { min-height: 30px; }
 }
+
+/* Review controls follow the approved collapsible section and quiet link pills. */
+.review-navigation { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.review-navigation > a { white-space: nowrap; }
+.review-nav-status { font-size: 11px; color: #999; }
+.review-navigation button { text-decoration: underline; font-size: 11px; }
+.review { margin: 39px 0 0; padding: 23px 0; border-top: 1px solid #282828; }
+.review summary { cursor: pointer; font-size: 13px; list-style: none; display: flex; justify-content: space-between; gap: 15px; }
+.review summary::after { content: "+"; color: #999; }
+.review[open] summary::after { content: "−"; }
+.review summary [data-review-count] { margin-left: auto; }
+.review summary span, .review-day, [data-review-status] { color: #999; font-size: 11px; }
+.review-day { margin: 18px 0 8px; }
+.review-items { display: flex; gap: 12px; margin-top: 20px; flex-wrap: wrap; }
+.review-items a { font-size: 12px; border: 1px solid #333; padding: 10px 13px; }
+.review-items a:hover { border-color: #888; }
+.reading-completion { margin-top: 18px; font-size: 11px; color: #999; }
+.reading-completion p { margin: 0; }
+.reading-completion button { border: 1px solid #555; background: #111; color: #ccc; font: inherit; padding: 6px 10px; margin-top: 8px; cursor: pointer; }
+.reading-completion button:disabled { opacity: .5; cursor: wait; }
+.review-navigation[hidden], .review-navigation [hidden], .review[hidden], .reading-completion[hidden], .reading-completion [hidden] { display: none !important; }
+@media (max-width: 650px) {
+  .site-nav { height: auto; min-height: 86px; flex-wrap: wrap; padding: 18px 23px; gap: 12px 16px; font-size: 12px; }
+  .account-controls { margin-left: auto; gap: 12px; }
+}

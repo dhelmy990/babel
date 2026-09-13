@@ -53,12 +53,41 @@ export async function requestJSON(url, options = {}) {
   return parsed;
 }
 
-async function synchronizeTimezone(session) {
-  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  if (timezone && timezone !== session.timezone) await requestJSON("/api/timezone", {method: "POST", body: {timezone}});
+let readySession = null;
+let sessionController = null;
+let sessionGeneration = 0;
+
+/** Reviews must await the acknowledged timezone before materializing a day. */
+export function sessionReady() {
+  if (readySession) return readySession;
+  const current = sessionGeneration;
+  sessionController = new AbortController();
+  const signal = sessionController.signal;
+  const pending = (async () => {
+    let session = await requestJSON("/api/session", {signal, cache: "no-store"});
+    if (signal.aborted || current !== sessionGeneration) throw new DOMException("Page changed", "AbortError");
+    if (session.authenticated) {
+      const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      if (!timezone) throw new Error("The browser timezone could not be determined.");
+      if (timezone !== session.timezone) {
+        session = await requestJSON("/api/timezone", {method: "POST", body: {timezone}, signal, cache: "no-store"});
+      }
+    }
+    if (signal.aborted || current !== sessionGeneration) throw new DOMException("Page changed", "AbortError");
+    return session; // A successfully staged timezone may differ until tomorrow.
+  })();
+  readySession = pending;
+  void pending.catch(() => { if (readySession === pending) readySession = null; });
+  return pending;
 }
 
-document.addEventListener("DOMContentLoaded", async () => {
+window.addEventListener("pagehide", () => {
+  sessionGeneration += 1;
+  sessionController?.abort();
+  sessionController = readySession = null;
+});
+
+document.addEventListener("DOMContentLoaded", () => {
   const toggle = document.querySelector("[data-mode-toggle]");
   if (toggle) {
     toggle.addEventListener("click", async () => {
@@ -69,11 +98,5 @@ document.addEventListener("DOMContentLoaded", async () => {
         // A failed UI preference update leaves the current page usable.
       }
     });
-  }
-  try {
-    const session = await requestJSON("/api/session");
-    if (session?.authenticated) await synchronizeTimezone(session);
-  } catch (_) {
-    // A page can still be read when the optional session update fails.
   }
 });

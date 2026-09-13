@@ -8,11 +8,17 @@
   <meta name="description" content="A compilation of my various learnings about C++, finance, and model serving and model development.">
   <link rel="stylesheet" href="{% static 'study/site.css' %}">
   <script type="module" src="{% static 'study/site.js' %}"></script>
+  <script type="module" src="{% static 'study/reviews.js' %}"></script>
 </head>
 <body class="split">
   <nav class="site-nav" aria-label="Main navigation">
     <a class="brand" href="/">dhelmy.stream</a>
     <a class="active" href="/">Timeline</a>
+    {% if request.user.is_authenticated %}
+    <span class="review-navigation" data-review-navigation {% if article.archived_at or editor_state %}data-review-passive{% endif %}>
+      <a data-review-link href="/#reviews">Review today</a><span class="review-nav-status" data-review-nav-status role="status" hidden></span><button class="nav-action" type="button" data-review-retry hidden>Retry reviews</button>
+    </span>
+    {% endif %}
     {% if request.user.is_authenticated %}
       <div class="account-controls">
         {% if can_publish %}

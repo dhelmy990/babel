@@ -366,6 +366,8 @@ def test_mid_article_edit_and_recovery_preserve_visible_reading_position(notes_b
 def test_large_sidebar_inventory_does_not_lengthen_article(notes_browser):
     env = notes_browser
     page = open_notes(env)
+    # Measure after the independent review-loading status has settled.
+    expect(page.locator("[data-reading-status]")).to_have_text("")
     before = page.evaluate("document.documentElement.scrollHeight")
     for i in range(8):
         page.get_by_role("button", name="New text box", exact=True).click()
