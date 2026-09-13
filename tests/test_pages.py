@@ -35,6 +35,13 @@ def test_home_has_no_sample_content_or_anonymous_personal_controls(client):
 
 
 @pytest.mark.django_db
+def test_home_explains_when_no_articles_are_published(client):
+    response = client.get("/")
+
+    assert "No articles published yet." in response.content.decode()
+
+
+@pytest.mark.django_db
 def test_healthz_queries_the_database(client, django_assert_num_queries):
     with django_assert_num_queries(1):
         response = client.get("/healthz")

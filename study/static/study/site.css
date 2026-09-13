@@ -123,6 +123,13 @@ svg {
   color: #858585;
 }
 
+.empty-state {
+  border-top: 1px solid #282828;
+  padding-top: 22px;
+  color: #747474;
+  font-size: 13px;
+}
+
 .footer {
   color: #747474;
   font-size: 11px;

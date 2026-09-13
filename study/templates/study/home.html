@@ -23,6 +23,8 @@
     </div>
     {% for article in articles %}
       <article class="entry">{{ article }}</article>
+    {% empty %}
+      <p class="empty-state">No articles published yet.</p>
     {% endfor %}
   </section>
   <footer class="footer">
