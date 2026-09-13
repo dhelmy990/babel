@@ -1,6 +1,6 @@
 # Website Deployment Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Package the completed website, document a single-VM deployment at dhelmy.stream, and verify recovery of articles, images, private notes, and schedules.
 
@@ -32,7 +32,7 @@ availability and returns no secrets. Startup migrations are a separate one-off
 command, not a race between workers. Static collection happens at build time.
 Media directory is `/app/media`, writable by application UID 10001.
 
-- [ ] **Write deployment behavior tests before production configuration.**
+- [x] **Write deployment behavior tests before production configuration.**
 
   ```python
   import pytest
@@ -49,7 +49,7 @@ Media directory is `/app/media`, writable by application UID 10001.
   HTTP integration checks must exercise the built image, not just Django's
   development server. Run new tests red before adding deployment configuration.
 
-- [ ] **Build a minimal image and Compose runtime.** Add WhiteNoise immediately
+- [x] **Build a minimal image and Compose runtime.** Add WhiteNoise immediately
   after Django SecurityMiddleware, use CompressedManifestStaticFilesStorage,
   and serve only collected static files through it. Private media stays behind
   the application. Follow [WhiteNoise's Django setup](https://whitenoise.readthedocs.io/en/stable/django.html).
@@ -95,7 +95,7 @@ Media directory is `/app/media`, writable by application UID 10001.
   `python manage.py check --deploy`.
   [Django deployment checklist](https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/)
 
-- [ ] **Add a scheduler and backup/restore commands.** Deploy under
+- [x] **Add a scheduler and backup/restore commands.** Deploy under
   `/opt/dhelmy-stream`; the host service executes the existing management command
   in the running web container:
 
@@ -143,7 +143,7 @@ Media directory is `/app/media`, writable by application UID 10001.
   schedules. The script refuses to operate on the production Compose project.
   Verify that restored archived images still return 404 anonymously.
 
-- [ ] **Verify and commit packaging.** CI starts PostgreSQL 17, installs locked
+- [x] **Verify and commit packaging.** CI starts PostgreSQL 17, installs locked
   dependencies, runs all Python tests, runs Chromium browser flows, checks
   migrations, vendors assets, and builds the production image. It uses dummy
   OAuth configuration and fake delivery only; no cloud or email secrets.

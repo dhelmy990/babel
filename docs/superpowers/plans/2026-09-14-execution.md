@@ -26,8 +26,8 @@ the task and remain untouched.
 | R2 — Read detection/list | Complete (`16ef07d`) | Passed | Passed |
 | R3 — Owner digest | Complete (`09c25da`) | Passed | Passed |
 | N2/R2 — Integration recovery fixes | Complete (`395b544`, `319530c`) | Passed | Passed |
-| D1 — Packaging/recovery | In progress | Pending | Pending |
-| D2 — Deployment runbook | Pending | Pending | Pending |
+| D1 — Packaging/recovery | Complete (`02e6a90`, `4826196`, `f6c16a2`) | Passed | Passed |
+| D2 — Deployment runbook | In progress | Pending | Pending |
 
 Production account setup, cloud provisioning, DNS changes, and live email are
 separate from local implementation and verification.
@@ -40,3 +40,10 @@ successful note responses. The combined affected suite passed 174 tests; final
 spec and quality reviews independently reran the relevant browser regressions.
 R3 passed independent spec and quality reviews, each rerunning
 115 digest and review tests without live email.
+
+D1's full suite passed 365 tests with the Docker checks run separately. Independent
+review caught and verified fixes for systemd's activating oneshot state and the
+PostgreSQL image's temporary socket-only initialization server. Final independent
+checks passed the held-initialization regression and both real Docker/browser/
+backup/restore tests. Production settings, offline Caddy configuration, isolated
+scheduler units, and shell syntax also passed. No live services were deployed.
