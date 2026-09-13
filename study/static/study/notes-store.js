@@ -50,6 +50,15 @@ export function createNotesStore({articleId, signal, changed, removed, unauthori
     entry.status = "This note changed elsewhere. Compare the server copy, then Retry to save your text.";
   }
 
+  function conflictRefreshFailed(entry, error) {
+    if (disposed) return;
+    if (error.status === 401) {
+      unauthorized();
+      return;
+    }
+    entry.status = "The server copy could not be loaded. Your text is still here; Retry to compare.";
+  }
+
   async function pump(entry) {
     if (disposed || entry.busy || entry.error || (!entry.queued && !entry.deleting)) return;
     entry.busy = true;
@@ -99,7 +108,7 @@ export function createNotesStore({articleId, signal, changed, removed, unauthori
         entry.status = "This note changed elsewhere. Loading the server copy…";
         notify(entry);
         try { await refreshConflict(entry); }
-        catch (_) { entry.status = "The server copy could not be loaded. Your text is still here; Retry to compare."; }
+        catch (error) { conflictRefreshFailed(entry, error); }
       } else {
         entry.status = `The note could not be saved. Your text is still here. ${error.message}`;
       }
@@ -119,7 +128,7 @@ export function createNotesStore({articleId, signal, changed, removed, unauthori
     if (entry.refreshConflict) {
       entry.busy = true;
       try { await refreshConflict(entry); }
-      catch (_) { if (!disposed) entry.status = "The server copy could not be loaded. Your text is still here; Retry to compare."; }
+      catch (error) { conflictRefreshFailed(entry, error); }
       finally { entry.busy = false; notify(entry); }
       return; // The reader must see the server copy before choosing to overwrite it.
     }

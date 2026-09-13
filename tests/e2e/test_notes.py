@@ -459,3 +459,99 @@ def test_delete_can_discard_an_edit_after_save_failure(notes_browser):
     item.get_by_role("button", name="Delete", exact=True).click()
     expect(item).to_have_count(0)
     assert api(page, f"/api/articles/{env.article.pk}/notes")["notes"] == []
+
+
+@pytest.mark.parametrize("retry_refresh", [False, True])
+def test_logout_during_conflict_refresh_clears_all_private_state(notes_browser, retry_refresh):
+    env = notes_browser
+    page = open_notes(env)
+    item = card(page, env.first.pk)
+    item.get_by_role("button", name="Edit", exact=True).click()
+    item.get_by_label("Note text", exact=True).fill("A private conflicting draft")
+    api(page, f"/api/notes/{env.first.pk}", "PATCH", {
+        "version": 1, "text": "A newer server copy", "x": 40, "y": 1600,
+    })
+    endpoint = f"**/api/articles/{env.article.pk}/notes"
+    held = []
+    if retry_refresh:
+        page.route(endpoint, lambda route: route.abort())
+        item.get_by_role("button", name="Save note", exact=True).click()
+        expect(item.get_by_role("status")).to_contain_text("server copy could not be loaded")
+        expect(item.get_by_label("Note text", exact=True)).to_have_value("A private conflicting draft")
+        page.unroute(endpoint)
+    page.route(endpoint, lambda route: held.append(route))
+    with page.expect_request(lambda req: req.method == "GET" and req.url.endswith(f"/api/articles/{env.article.pk}/notes")):
+        item.get_by_role("button", name="Retry" if retry_refresh else "Save note", exact=True).click()
+    # A real logout invalidates the held request's session without navigating this
+    # tab, so only the conflict-refresh 401 can clear its private DOM.
+    api(page, "/accounts/logout/", "POST")
+    assert api(page, "/api/session")["authenticated"] is False
+    assert len(held) == 1
+    held.pop().continue_()
+    expect(page.locator("[data-notes-list]")).to_be_empty()
+    expect(page.locator("[data-note-copy]")).to_have_count(0)
+    expect(page.get_by_label("Note text", exact=True)).to_have_count(0)
+    expect(page.get_by_role("link", name="Sign in with Google to keep private notes", exact=True)).to_be_visible()
+
+
+def test_csrf_failure_during_conflict_refresh_retains_draft_for_comparison(notes_browser):
+    env = notes_browser
+    page = open_notes(env)
+    item = card(page, env.first.pk)
+    item.get_by_role("button", name="Edit", exact=True).click()
+    item.get_by_label("Note text", exact=True).fill("A draft retained after forbidden refresh")
+    api(page, f"/api/notes/{env.first.pk}", "PATCH", {
+        "version": 1, "text": "Newer server copy", "x": 40, "y": 1600,
+    })
+    endpoint = f"**/api/articles/{env.article.pk}/notes"
+    page.route(endpoint, lambda route: route.fulfill(status=403, json={
+        "error": {"code": "csrf_failed", "message": "CSRF validation failed."},
+    }))
+    item.get_by_role("button", name="Save note", exact=True).click()
+    expect(item.get_by_role("status")).to_contain_text("server copy could not be loaded")
+    expect(item.get_by_label("Note text", exact=True)).to_have_value("A draft retained after forbidden refresh")
+    page.unroute(endpoint)
+    item.get_by_role("button", name="Retry", exact=True).click()
+    expect(item.locator("[data-server-copy]")).to_contain_text("Newer server copy")
+    expect(item.get_by_label("Note text", exact=True)).to_have_value("A draft retained after forbidden refresh")
+
+
+@pytest.mark.parametrize("new_text", [None, "Non-drag unsaved text"])
+def test_pointer_cancel_uses_confirmation_received_after_drag_started(notes_browser, new_text):
+    env = notes_browser
+    page = open_notes(env)
+    item = card(page, env.first.pk)
+    copy = page.locator(f'[data-note-copy="{env.first.pk}"]')
+    grip = copy.get_by_role("button", name="Move note", exact=True)
+    copy.scroll_into_view_if_needed()
+    held = []
+    endpoint = f"**/api/notes/{env.first.pk}"
+    page.route(endpoint, lambda route: held.append(route))
+    with page.expect_request(lambda req: req.method == "PATCH"):
+        grip.press("ArrowRight")
+    expect(copy).to_have_css("left", "50px")
+    if new_text is not None:
+        item.get_by_role("button", name="Edit", exact=True).click()
+        item.get_by_label("Note text", exact=True).fill(new_text)
+    assert len(held) == 1
+    pending = held.pop()
+    response = pending.fetch()
+    assert response.json()["note"]["x"] == 50
+    grip.scroll_into_view_if_needed()
+    box = grip.bounding_box()
+    page.mouse.move(box["x"] + 10, box["y"] + 10)
+    page.mouse.down()
+    page.mouse.move(box["x"] + 30, box["y"] + 10)
+    expect(copy).to_have_css("left", "70px")
+    pending.fulfill(response=response)
+    expect(item.get_by_role("status")).to_have_text("Not saved")
+    grip.dispatch_event("pointercancel", {"pointerId": 1})
+    page.mouse.up()
+    expect(copy).to_have_css("left", "50px")
+    if new_text is not None:
+        expect(item.get_by_label("Note text", exact=True)).to_have_value(new_text)
+        expect(item.get_by_role("status")).to_have_text("Not saved")
+    else:
+        saved(item)
+    assert held == []
+    assert api(page, f"/api/articles/{env.article.pk}/notes")["notes"][0]["x"] == 50

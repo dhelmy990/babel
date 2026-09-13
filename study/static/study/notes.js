@@ -130,9 +130,14 @@ export function mountNotes({articleId, surface, sidebar, toggle}) {
 
   function cancelDrag() {
     if (!drag) return;
-    const {entry, grip, pointerId, confirmed} = drag;
+    const {entry, grip, pointerId} = drag;
     drag = null;
-    Object.assign(entry.draft, confirmed);
+    // An earlier queued write may have confirmed while this drag was active.
+    entry.draft.x = entry.confirmed?.x ?? null;
+    entry.draft.y = entry.confirmed?.y ?? null;
+    if (!entry.busy && !entry.error) {
+      entry.status = entry.confirmed?.text === entry.draft.text ? "Saved" : "Not saved";
+    }
     if (grip.hasPointerCapture(pointerId)) grip.releasePointerCapture(pointerId);
     update(entry);
   }
@@ -144,8 +149,7 @@ export function mountNotes({articleId, surface, sidebar, toggle}) {
       const rect = surface.getBoundingClientRect();
       drag = {entry, grip, pointerId: event.pointerId,
         offsetX: event.clientX - rect.left - entry.draft.x,
-        offsetY: event.clientY - rect.top - entry.draft.y,
-        confirmed: {x: entry.confirmed?.x ?? null, y: entry.confirmed?.y ?? null}};
+        offsetY: event.clientY - rect.top - entry.draft.y};
       grip.setPointerCapture(event.pointerId);
       grip.focus({preventScroll: true});
     });
