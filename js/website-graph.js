@@ -10,6 +10,7 @@
     let canonical = null, graph = null, stopAnimation = null;
     let hoveredNode = null, hoveredSphere = null, draggedUntil = 0;
     let unavailable = false, busy = false, holdTimer = null;
+    let pageActive = true, loadController = null;
     const timers = new Set(), frames = new Set();
     let raycaster, mouse;
 
@@ -157,14 +158,20 @@
         } catch (_) { fallback(); }
     }
     async function load() {
+        if (!pageActive) return;
+        loadController?.abort();
+        const controller = new AbortController();
+        loadController = controller;
         retry.hidden = true;
         try {
-            const response = await fetch('/api/graph', {headers: {Accept: 'application/json'}});
+            const response = await fetch('/api/graph', {headers: {Accept: 'application/json'}, signal: controller.signal});
             if (!response.ok) throw new Error();
             const data = await response.json();
             if (!Array.isArray(data.nodes) || !Array.isArray(data.edges)) throw new Error();
+            if (!pageActive || controller.signal.aborted) return;
             display(data);
         } catch (_) {
+            if (!pageActive || controller.signal.aborted) return;
             status.textContent = 'Could not load the galaxy. You can still use the article links below.';
             retry.hidden = false;
         }
@@ -228,7 +235,18 @@
         window.addEventListener('blur', cancelHold);
         document.addEventListener('visibilitychange', () => { if (document.hidden) cancelHold(); });
     }
-    window.addEventListener('pagehide', () => { cancelHold(); disposeGraph(); });
+    window.addEventListener('pagehide', () => {
+        pageActive = false;
+        loadController?.abort();
+        cancelHold();
+        disposeGraph();
+    });
+    window.addEventListener('pageshow', event => {
+        if (!event.persisted) return;
+        pageActive = true;
+        status.textContent = 'Loading galaxy…';
+        load();
+    });
     retry.addEventListener('click', load);
     load();
 })();

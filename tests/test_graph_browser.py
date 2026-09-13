@@ -168,3 +168,75 @@ def test_linked_galaxy_visual_and_shared_resource_cleanup(galaxy_page):
         await new Promise(resolve => requestAnimationFrame(resolve));
         return sceneCalls === 0;
     }""")
+
+
+def test_persisted_page_restore_rebuilds_galaxy_and_refreshes_articles(galaxy_page):
+    page, url, cookie = galaxy_page
+    page.context.add_cookies([{'name': 'sessionid', 'value': cookie, 'url': url}])
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.goto(url + '/galaxy')
+    expect(page.locator('#graph-status')).to_have_text('2 articles · 0 read-before links')
+    page.evaluate("""() => {
+        window.previousGraph = testGraph;
+        window.dispatchEvent(new PageTransitionEvent('pagehide', {persisted: true}));
+    }""")
+    expect(page.locator('#website-graph canvas')).to_have_count(0)
+    assert page.evaluate('LevelCircles.levelCirclesGroup === null')
+    # Content can change while the page is in the browser's back/forward cache.
+    assert page.evaluate("""async () => {
+        const graph = await fetch('/api/graph').then(response => response.json());
+        const id = graph.nodes.find(node => node.slug === 'alpha').id;
+        const token = document.cookie.split('; ').find(cookie => cookie.startsWith('csrftoken=')).slice(10);
+        return (await fetch(`/api/articles/${id}/archive`, {method: 'POST', headers: {'X-CSRFToken': token}})).status;
+    }""") == 200
+    page.evaluate("window.dispatchEvent(new PageTransitionEvent('pageshow', {persisted: true}))")
+    expect(page.locator('#website-graph canvas')).to_be_visible()
+    expect(page.locator('#graph-status')).to_have_text('1 articles · 0 read-before links')
+    assert page.evaluate('testGraph !== previousGraph')
+    expect(page.locator('#graph-articles a')).to_have_count(1)
+    # Repeated restoration must not accumulate renderers or lose its listener.
+    page.evaluate("""() => {
+        window.dispatchEvent(new PageTransitionEvent('pagehide', {persisted: true}));
+        window.dispatchEvent(new PageTransitionEvent('pageshow', {persisted: true}));
+    }""")
+    expect(page.locator('#website-graph canvas')).to_have_count(1)
+    expect(page.locator('#website-graph canvas')).to_be_visible()
+    assert errors == []
+
+
+def test_suspended_page_does_not_rebuild_from_an_in_flight_graph_load(galaxy_page):
+    page, url, cookie = galaxy_page
+    pending = []
+
+    response = page.request.get(url + '/api/graph')
+    page.route('**/api/graph', lambda route: pending.append(route))
+    with page.expect_request('**/api/graph'):
+        page.goto(url + '/galaxy')
+    page.evaluate('document.readyState')
+    assert len(pending) == 1
+    page.evaluate("window.dispatchEvent(new PageTransitionEvent('pagehide', {persisted: true}))")
+    pending[0].fulfill(response=response)
+    page.unroute('**/api/graph')
+    # Drain fetch completion and browser frames while the page is suspended.
+    page.evaluate("""async () => {
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        await new Promise(resolve => requestAnimationFrame(resolve));
+    }""")
+    expect(page.locator('#website-graph canvas')).to_have_count(0)
+    expect(page.locator('#graph-retry')).to_be_hidden()
+    page.evaluate("window.dispatchEvent(new PageTransitionEvent('pageshow', {persisted: true}))")
+    expect(page.locator('#website-graph canvas')).to_be_visible()
+    expect(page.locator('#graph-status')).to_have_text('2 articles · 0 read-before links')
+
+
+def test_browser_back_returns_to_functional_galaxy(galaxy_page):
+    page, url, cookie = galaxy_page
+    page.goto(url + '/galaxy')
+    expect(page.locator('#website-graph canvas')).to_be_visible()
+    page.locator('#graph-articles a').filter(has_text='Alpha').click()
+    expect(page).to_have_url(url + '/alpha')
+    page.go_back()
+    expect(page).to_have_url(url + '/galaxy')
+    expect(page.locator('#website-graph canvas')).to_be_visible()
+    expect(page.locator('#graph-status')).to_have_text('2 articles · 0 read-before links')
