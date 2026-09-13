@@ -1,0 +1,26 @@
+{% extends "study/base.html" %}
+{% load static %}
+{% block title %}{% if article %}Edit {{ article.title }}{% else %}Publish an article{% endif %} — dhelmy.stream{% endblock %}
+{% block content %}
+<main class="publishing-shell">
+  <header><p class="eyebrow">Owner publishing</p><h1>{% if article %}Edit article{% else %}New article{% endif %}</h1><p>Preview the exact Markdown rendering before saving it.</p></header>
+  <form id="publishing-form" enctype="multipart/form-data" novalidate>
+    <label>Title<input name="title" type="text" maxlength="200" required value="{{ article.title|default:'' }}" autocomplete="off"></label>
+    <label>Babel color<input name="color" type="color" value="{{ article.color|default:'#1a5276' }}"></label>
+    <label>Markdown file<input name="markdown_file" type="file" accept="text/markdown,.md,.markdown"></label>
+    <p class="field-note">{% if article %}Leave this empty to retain the current Markdown while changing metadata.{% else %}Choose a UTF-8 Markdown file.{% endif %}</p>
+    <label>Image files<input id="image-files" name="images" type="file" accept="image/*" multiple></label>
+    <div id="image-paths" aria-live="polite"></div>
+    {% if article %}<section class="existing-images" aria-labelledby="existing-images-title"><h2 id="existing-images-title">Existing image paths</h2>{% if editor_state.existingPaths %}<ul>{% for path in editor_state.existingPaths %}<li><code>{{ path }}</code></li>{% endfor %}</ul>{% else %}<p>No stored images.</p>{% endif %}</section>{% endif %}
+    <div class="publish-actions"><button type="button" data-preview>Preview</button><button type="submit">{% if article %}Save{% else %}Publish{% endif %}</button></div>
+    <p id="publish-status" role="status" aria-live="polite"></p>
+  </form>
+  <section class="article-preview" aria-labelledby="preview-title">
+    <h2 id="preview-title">Preview</h2><header data-preview-header hidden><span class="article-dot"></span><p class="article-date"></p><h1></h1></header>
+    <div class="article-body" data-preview-body></div>
+    <section class="sources" data-preview-sources hidden><h2>Sources</h2><div></div></section>
+  </section>
+</main>
+{{ editor_state|json_script:"publishing-state" }}
+<script type="module" src="{% static 'study/publishing.js' %}"></script>
+{% endblock %}

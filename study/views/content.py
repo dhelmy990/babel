@@ -1,5 +1,5 @@
 import base64
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from django.core.exceptions import PermissionDenied
 from django.http import FileResponse, Http404, JsonResponse
@@ -37,6 +37,41 @@ def _preview_html(prepared):
     })
 
 
+@require_GET
+def publishing(request, article_id=None):
+    """Render the owner-only upload form for a new article or a revision."""
+    try:
+        require_publisher(request.user)
+    except PermissionDenied:
+        return error("publisher_required", "Publisher access is required.", 403)
+
+    article = None
+    existing_paths = []
+    if article_id:
+        article = get_object_or_404(Article, pk=article_id)
+        if article.archived_at is not None:
+            raise Http404
+        # Assets are immutable; the latest asset for each logical name is what
+        # an edit can retain or explicitly replace.
+        latest = {}
+        for asset in article.assets.all().order_by("created_at"):
+            latest[asset.logical_name] = asset
+        existing_paths = sorted(latest)
+
+    editor_state = {
+        "id": str(article.pk) if article else None,
+        "revision": article.revision if article else None,
+        "title": article.title if article else "",
+        "color": article.color if article else "#1a5276",
+        "markdown": article.markdown if article else "",
+        "existingPaths": existing_paths,
+        "submissionId": str(uuid4()) if article is None else None,
+    }
+    response = render(request, "study/publishing.html", {"article": article, "editor_state": editor_state})
+    response["Cache-Control"] = "private, no-store"
+    return response
+
+
 @require_POST
 @authenticated_json_write
 def preview(request):
@@ -66,7 +101,10 @@ def preview(request):
         return error("not_found", "Article was not found.", 404)
     except ValueError as exc:
         return error("invalid_article", str(exc), 400)
-    return JsonResponse({"html": _preview_html(prepared), "excerpt": prepared.excerpt, "sources": prepared.sources})
+    title, color = validate_article_metadata(form.cleaned_data["title"], form.cleaned_data["color"], form.cleaned_data["markdown"])
+    response = JsonResponse({"html": _preview_html(prepared), "excerpt": prepared.excerpt, "sources": prepared.sources, "title": title, "color": color})
+    response["Cache-Control"] = "private, no-store"
+    return response
 
 
 @require_POST

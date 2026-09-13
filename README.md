@@ -40,3 +40,17 @@ them with pip-tools-compatible `uv pip compile`:
 uv pip compile --generate-hashes --output-file requirements.txt requirements.in
 uv pip compile --generate-hashes --output-file requirements-dev.txt requirements-dev.in
 ```
+
+## Publishing study notes
+
+The verified publisher can switch to Admin mode, open **New article** from the
+galaxy or timeline, upload a UTF-8 Markdown file, assign logical paths to image
+uploads, preview the exact rendered article, and publish it. Existing articles
+use the same form at their Edit article link. A title, Babel color, stable slug,
+and original publication date remain part of the article; editing changes only
+the current revision. The owner can archive an article from its page, which
+returns it to the timeline and removes it from public reading.
+
+The application serves uploaded images from private storage and does not need a
+live Google account or OAuth configuration to run tests. Browser tests create
+ordinary Django test sessions and use disposable test media.
