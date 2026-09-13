@@ -135,7 +135,7 @@ store `x=null,y=null` for sidebar-only notes using N1's nullable coordinate pair
 This is a placement state,
 not a separate note record.
 
-- [ ] **Write browser tests first.** `reader_page` uses the test session-cookie
+- [x] **Write browser tests first.** `reader_page` uses the test session-cookie
   helper from P5 and a real ReaderProfile. The article fixture is persisted
   through P3's service, and the test database is shared via Django live_server.
 
@@ -160,7 +160,7 @@ not a separate note record.
   isolation; save failure with retained text; stale-update conflict with retained
   attempted text; and a 390-pixel drawer test. Run `pytest tests/e2e/test_notes.py -q` red.
 
-- [ ] **Implement the approved interaction.** Use textContent/textarea values,
+- [x] **Implement the approved interaction.** Use textContent/textarea values,
   never raw innerHTML for note text. Note controls are visible only for signed-in
   readers; anonymous users have a Google sign-in affordance near the notes toggle.
   Toggle aria-expanded, close on Escape, and return focus to the opener. On mobile
@@ -199,7 +199,7 @@ not a separate note record.
   refreshed version. Do not persist private note contents in shared browser
   storage, service workers, or static HTML caches.
 
-- [ ] **Verify and commit.** Run the N1 tests plus
+- [x] **Verify and commit.** Run the N1 tests plus
   `pytest tests/e2e/test_notes.py -q`. Manually compare sidebar borders/black
   backgrounds with the approved article mockup and verify both note kinds,
   pointer and keyboard movement, archive access, and mobile recovery. Commit
