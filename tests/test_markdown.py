@@ -60,6 +60,18 @@ def test_nested_sources_heading_remains_article_body():
     assert "Ref" in prepared.html
 
 
+@pytest.mark.parametrize("markdown", [
+    "# Code\n\n```text\n[example](javascript:alert(1))\n```",
+    "# Code\n\nUse `[example](javascript:alert(1))` literally.",
+])
+def test_literal_code_with_executable_link_syntax_is_not_rejected(markdown):
+    from study.markdown import prepare_article
+
+    prepared = prepare_article(markdown, {})
+
+    assert "javascript:alert(1)" in prepared.html
+
+
 def test_sources_must_be_a_final_heading_and_keep_each_link_label():
     from study.markdown import prepare_article
 

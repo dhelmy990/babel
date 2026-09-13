@@ -105,3 +105,54 @@ def test_oversized_markdown_multipart_is_a_json_validation_error_after_csrf(publ
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "invalid_article"
+
+
+@pytest.mark.django_db
+def test_too_many_multipart_files_returns_json_after_authentication_and_csrf(publisher):
+    from django.core.files.uploadedfile import SimpleUploadedFile
+
+    client = Client(enforce_csrf_checks=True)
+    client.force_login(publisher)
+    client.get("/")
+    files = [SimpleUploadedFile(f"{number}.png", b"x", content_type="image/png") for number in range(101)]
+    response = client.post(
+        "/api/articles/preview",
+        {
+            "title": "Many", "color": "#1a5276", "markdown": "# Many",
+            "images": files,
+            "image_path": [f"images/{number}.png" for number in range(101)],
+        },
+        HTTP_X_CSRFTOKEN=client.cookies["csrftoken"].value,
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+@pytest.mark.django_db
+def test_preview_does_not_load_unreferenced_historical_assets(publisher):
+    from io import BytesIO
+    from PIL import Image
+    from study.models import Asset
+    from study.services.content import publish_article
+
+    image = BytesIO()
+    Image.new("RGB", (2, 2), "blue").save(image, "PNG")
+    article = publish_article(
+        publisher, title="Preview history", color="#1a5276", markdown="# Preview history\n\n![x](images/x.png)",
+        images={"images/x.png": image.getvalue()}, submission_id=uuid4(),
+    )
+    Asset.objects.create(
+        article=article, logical_name="images/obsolete.png", storage_key="assets/missing",
+        media_type="image/png", sha256="0" * 64,
+    )
+    client = Client(enforce_csrf_checks=True)
+    client.force_login(publisher)
+    client.get("/")
+    response = client.post(
+        "/api/articles/preview",
+        {"article_id": str(article.pk), "title": "Preview history", "color": "#1a5276", "markdown": "# Preview history\n\n![x](images/x.png)"},
+        HTTP_X_CSRFTOKEN=client.cookies["csrftoken"].value,
+    )
+
+    assert response.status_code == 200

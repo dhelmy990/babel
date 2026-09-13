@@ -3,7 +3,8 @@ from functools import wraps
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.http import JsonResponse
-from django.core.exceptions import RequestDataTooBig
+from django.core.exceptions import RequestDataTooBig, TooManyFieldsSent, TooManyFilesSent
+from django.http.multipartparser import MultiPartParserError
 from django.shortcuts import render
 from django.middleware.csrf import CsrfViewMiddleware
 from django.views.decorators.csrf import csrf_exempt
@@ -45,6 +46,8 @@ def authenticated_json_write(view):
                 return csrf_response
         except RequestDataTooBig:
             return error("request_too_large", "Request is too large.", 400)
+        except (TooManyFilesSent, TooManyFieldsSent, MultiPartParserError):
+            return error("invalid_request", "Request multipart data is invalid.", 400)
         return view(request, *args, **kwargs)
 
     return wrapped

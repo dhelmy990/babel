@@ -7,7 +7,7 @@ from django.shortcuts import get_object_or_404, render
 from django.views.decorators.http import require_GET, require_POST
 
 from study.forms import ArticleSubmissionForm
-from study.markdown import normalize_image_mapping, prepare_article, render_article
+from study.markdown import normalize_image_mapping, prepare_article, referenced_image_names, render_article
 from study.models import Article, Asset
 from study.services.content import RevisionConflict, SubmissionConflict, can_read_article, publish_article, stored_images_for_article, update_article, validate_article_metadata
 from study.services.identity import require_publisher
@@ -57,7 +57,10 @@ def preview(request):
             article = Article.objects.get(pk=article_id)
             if article.archived_at is not None:
                 raise ValueError("Archived articles cannot be edited")
-            images = {**stored_images_for_article(article), **images}
+            images = {
+                **stored_images_for_article(article, referenced_image_names(form.cleaned_data["markdown"]) - set(images)),
+                **images,
+            }
         prepared = prepare_article(form.cleaned_data["markdown"], images)
     except Article.DoesNotExist:
         return error("not_found", "Article was not found.", 404)

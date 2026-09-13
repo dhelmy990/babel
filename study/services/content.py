@@ -10,7 +10,7 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 from django.utils.text import slugify
 
-from study.markdown import PreparedArticle, normalize_image_mapping, normalize_image_name, prepare_article, render_article
+from study.markdown import PreparedArticle, normalize_image_mapping, normalize_image_name, prepare_article, referenced_image_names, render_article
 from study.models import ArchiveAccess, Article, Asset, GraphState
 from study.services.identity import is_publisher, require_publisher
 from study.storage import path_for, remove_asset, write_asset
@@ -139,14 +139,17 @@ def update_article(user, article_id, *, expected_revision, title, color, markdow
             if article.revision != int(expected_revision):
                 raise RevisionConflict("Article has changed")
             existing = {asset.logical_name: asset for asset in article.assets.all().order_by("created_at")}
-            combined = {}
-            for name, asset in existing.items():
+            uploads = normalize_image_mapping(images)
+            required_existing = referenced_image_names(markdown) - set(uploads)
+            combined = dict(uploads)
+            for name in required_existing:
+                asset = existing.get(name)
+                if asset is None:
+                    continue
                 try:
                     combined[name] = path_for(asset.storage_key).read_bytes()
                 except OSError as exc:
                     raise ValueError("Stored asset is unavailable") from exc
-            uploads = normalize_image_mapping(images)
-            combined.update(uploads)
             prepared = prepare_article(markdown, combined)
             replacements = set(uploads)
             created = _new_assets(article, prepared, replacements, written)
@@ -176,10 +179,14 @@ def can_read_article(user, article: Article) -> bool:
     return bool(getattr(user, "is_authenticated", False) and ArchiveAccess.objects.filter(user=user, article=article).exists())
 
 
-def stored_images_for_article(article: Article) -> dict[str, bytes]:
-    """Read the latest asset for each name, for that article only."""
+def stored_images_for_article(article: Article, names: set[str] | None = None) -> dict[str, bytes]:
+    """Read named latest assets for that article only; leave obsolete revisions cold."""
+    assets = {asset.logical_name: asset for asset in article.assets.all().order_by("created_at")}
     images = {}
-    for asset in article.assets.all().order_by("created_at"):
+    for name in names if names is not None else assets:
+        asset = assets.get(name)
+        if asset is None:
+            continue
         try:
             images[asset.logical_name] = path_for(asset.storage_key).read_bytes()
         except OSError as exc:

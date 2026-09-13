@@ -187,3 +187,30 @@ def test_publish_and_update_normalized_upload_paths_write_and_render_the_replace
     assert newest.logical_name == "images/x.png"
     assert newest.sha256 != original.sha256
     assert str(newest.pk) in revised.rendered_html
+
+
+@pytest.mark.django_db
+def test_update_only_loads_images_referenced_by_the_new_body(publisher):
+    from io import BytesIO
+    from PIL import Image
+    from study.services.content import publish_article, update_article
+
+    output = BytesIO()
+    Image.new("RGB", (2, 2), "blue").save(output, "PNG")
+    data = output.getvalue()
+    article = publish_article(
+        publisher, title="History", color="#1a5276", markdown="# History\n\n![0](images/0.png)",
+        images={"images/0.png": data}, submission_id=uuid4(),
+    )
+    for number in range(1, 21):
+        article = update_article(
+            publisher, article.pk, expected_revision=number, title="History", color="#1a5276",
+            markdown=f"# History\n\n![{number}](images/{number}.png)", images={f"images/{number}.png": data},
+        )
+
+    revised = update_article(
+        publisher, article.pk, expected_revision=21, title="History", color="#1a5276",
+        markdown="# History\n\n![new](images/new.png)", images={"images/new.png": data},
+    )
+    assert revised.revision == 22
+    assert "images/new.png" == revised.assets.order_by("created_at").last().logical_name

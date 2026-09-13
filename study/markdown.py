@@ -126,6 +126,30 @@ def _validate_url(url: str) -> None:
     parsed = urlparse(url)
     if parsed.scheme and parsed.scheme.lower() not in {"http", "https", "mailto"}:
         raise ValueError("Unsafe link")
+
+
+def _reject_unsafe_link_syntax(tokens) -> None:
+    """Catch disabled executable links without inspecting literal code tokens."""
+    for token in tokens:
+        if token.type != "inline":
+            continue
+        for child in token.children or []:
+            if child.type != "text":
+                continue
+            for scheme in re.findall(r"\]\(\s*<?([A-Za-z][A-Za-z0-9+.-]*):", child.content):
+                if scheme.lower() not in {"http", "https", "mailto"}:
+                    raise ValueError("Unsafe link")
+
+
+def referenced_image_names(markdown: str) -> set[str]:
+    """Return canonical image names in the article body, excluding Sources."""
+    body, _ = _split_sources(markdown)
+    references = set()
+    for token in markdown_parser().parse(body):
+        for child in token.children or []:
+            if child.type == "image":
+                references.add(normalize_image_name(child.attrGet("src") or ""))
+    return references
     if url.lower().startswith("data:"):
         raise ValueError("Unsafe link")
 
@@ -170,11 +194,7 @@ def prepare_article(markdown: str, images: dict[str, bytes]) -> PreparedArticle:
             raise ValueError("Markdown is too large")
     except UnicodeEncodeError as exc:
         raise ValueError("Invalid Markdown") from exc
-    # markdown-it renders unsafe destinations as literal text; reject them rather
-    # than silently publishing a malformed link the author cannot later repair.
-    for scheme in re.findall(r"\]\(\s*<?([A-Za-z][A-Za-z0-9+.-]*):", markdown):
-        if scheme.lower() not in {"http", "https", "mailto"}:
-            raise ValueError("Unsafe link")
+    _reject_unsafe_link_syntax(markdown_parser().parse(markdown))
     if len(images) > MAX_IMAGES:
         raise ValueError("Too many images")
     normal_images: dict[str, bytes] = {}
