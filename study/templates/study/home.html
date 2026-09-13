@@ -22,10 +22,11 @@
       <span>Newest first</span>
     </div>
     {% for article in articles %}
-      <article class="entry">{{ article }}</article>
+      <article class="entry"><a href="/{{ article.slug }}"><span class="entry-dot" style="background: {{ article.color }}"></span><time datetime="{{ article.published_at|date:'c' }}">{{ article.published_at|date:"j M Y" }}</time><h3>{{ article.title }}</h3><p>{{ article.excerpt }}</p></a></article>
     {% empty %}
       <p class="empty-state">No articles published yet.</p>
     {% endfor %}
+    {% if next_page %}<a class="next-page" href="/?page={{ next_page }}">Older articles</a>{% endif %}
   </section>
   <footer class="footer">
     <span>dhelmy.stream</span>

@@ -1,0 +1,195 @@
+"""The one Markdown parser used by previews and durable publications."""
+from dataclasses import dataclass
+from html import escape
+from io import BytesIO
+import re
+import warnings
+from pathlib import PurePosixPath
+from urllib.parse import urlparse
+
+from markdown_it import MarkdownIt
+from PIL import Image, ImageFile
+
+
+MAX_MARKDOWN_BYTES = 2 * 1024 * 1024
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_IMAGES = 20
+MAX_IMAGE_PIXELS = 30_000_000
+ImageFile.LOAD_TRUNCATED_IMAGES = False
+
+
+@dataclass(frozen=True)
+class PreparedArticle:
+    html: str
+    excerpt: str
+    sources: tuple[tuple[str, str], ...]
+    images: dict[str, bytes]
+    media_types: dict[str, str]
+    tokens: tuple
+
+
+def markdown_parser():
+    return MarkdownIt("js-default", {"html": False}).enable("table")
+
+
+def normalize_image_name(name: str) -> str:
+    parsed = urlparse(name)
+    if parsed.scheme or parsed.netloc or name.startswith(("/", "\\")):
+        raise ValueError("Invalid image path")
+    path = PurePosixPath(name.replace("\\", "/"))
+    if not name or any(part in {"", ".", ".."} for part in path.parts):
+        raise ValueError("Invalid image path")
+    normalized = path.as_posix()
+    if normalized.lower().endswith((".svg", ".html", ".htm")):
+        raise ValueError("Unsupported image type")
+    return normalized
+
+
+def _validated_image(data: bytes) -> tuple[bytes, str]:
+    if not isinstance(data, bytes) or len(data) > MAX_IMAGE_BYTES:
+        raise ValueError("Invalid image")
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            image = Image.open(BytesIO(data))
+            if image.width * image.height > MAX_IMAGE_PIXELS:
+                raise ValueError("Image is too large")
+            image.load()
+        formats = {"PNG": ("PNG", "image/png"), "JPEG": ("JPEG", "image/jpeg"), "WEBP": ("WEBP", "image/webp")}
+        output_format, media_type = formats[image.format]
+        if output_format == "JPEG" and image.mode not in {"RGB", "L"}:
+            image = image.convert("RGB")
+        output = BytesIO()
+        image.save(output, output_format)
+        return output.getvalue(), media_type
+    except (OSError, KeyError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise ValueError("Invalid image") from exc
+
+
+def _split_sources(markdown: str) -> tuple[str, tuple[tuple[str, str], ...]]:
+    """Separate only a real final H2 Sources section, using block tokens."""
+    parser = markdown_parser()
+    tokens = parser.parse(markdown)
+    headings = [index for index, token in enumerate(tokens) if token.type == "heading_open"]
+    if not headings:
+        return markdown, ()
+    index = headings[-1]
+    heading = tokens[index]
+    label_token = tokens[index + 1] if index + 1 < len(tokens) else None
+    if heading.tag != "h2" or not label_token or label_token.type != "inline" or label_token.content.strip().lower() != "sources":
+        return markdown, ()
+    start_line = heading.map[0] if heading.map else None
+    if start_line is None:
+        return markdown, ()
+    lines = markdown.splitlines(keepends=True)
+    body = "".join(lines[:start_line])
+    tail = "".join(lines[start_line:])
+    source_tokens = parser.parse(tail)
+    links = []
+    for token in source_tokens:
+        if token.type != "inline":
+            continue
+        label_parts, url = [], None
+        for child in token.children or []:
+            if child.type == "link_open":
+                url = child.attrGet("href") or ""
+                parsed = urlparse(url)
+                if parsed.scheme.lower() not in {"http", "https"}:
+                    raise ValueError("Unsafe link")
+                label_parts = []
+            elif child.type == "link_close" and url:
+                label = "".join(label_parts).strip()
+                if label:
+                    links.append((label, url))
+                url = None
+            elif url and child.type in {"text", "code_inline"}:
+                label_parts.append(child.content)
+    return (body, tuple(links)) if links else (markdown, ())
+
+
+def _validate_url(url: str) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme and parsed.scheme.lower() not in {"http", "https", "mailto"}:
+        raise ValueError("Unsafe link")
+    if url.lower().startswith("data:"):
+        raise ValueError("Unsafe link")
+
+
+def _excerpt(tokens) -> str:
+    in_paragraph = False
+    for token in tokens:
+        if token.type == "paragraph_open":
+            in_paragraph = True
+        elif token.type == "paragraph_close":
+            in_paragraph = False
+        elif in_paragraph and token.type == "inline":
+            text = "".join(
+                child.content if child.type in {"text", "code_inline"} else " " if child.type in {"softbreak", "hardbreak"} else ""
+                for child in token.children or []
+            )
+            text = " ".join(text.split())
+            if text:
+                return text[:240]
+    return ""
+
+
+def render_article(prepared: PreparedArticle, image_urls: dict[str, str]) -> str:
+    """Render image tokens through a callback, never by replacing HTML text."""
+    parser = markdown_parser()
+
+    def render_image(tokens, idx, options, env):
+        token = tokens[idx]
+        name = token.attrGet("src") or ""
+        src = image_urls.get(name, "asset:" + name)
+        return f'<img src="{escape(src, quote=True)}" alt="{escape(token.content, quote=True)}">'
+
+    parser.renderer.rules["image"] = render_image
+    return parser.renderer.render(list(prepared.tokens), parser.options, {})
+
+
+def prepare_article(markdown: str, images: dict[str, bytes]) -> PreparedArticle:
+    if not isinstance(markdown, str):
+        raise ValueError("Invalid Markdown")
+    try:
+        if len(markdown.encode("utf-8")) > MAX_MARKDOWN_BYTES:
+            raise ValueError("Markdown is too large")
+    except UnicodeEncodeError as exc:
+        raise ValueError("Invalid Markdown") from exc
+    # markdown-it renders unsafe destinations as literal text; reject them rather
+    # than silently publishing a malformed link the author cannot later repair.
+    for scheme in re.findall(r"\]\(\s*<?([A-Za-z][A-Za-z0-9+.-]*):", markdown):
+        if scheme.lower() not in {"http", "https", "mailto"}:
+            raise ValueError("Unsafe link")
+    if len(images) > MAX_IMAGES:
+        raise ValueError("Too many images")
+    normal_images: dict[str, bytes] = {}
+    media_types: dict[str, str] = {}
+    for supplied_name, data in images.items():
+        name = normalize_image_name(supplied_name)
+        if name in normal_images:
+            raise ValueError("Duplicate image")
+        normal_images[name], media_types[name] = _validated_image(data)
+
+    body, sources = _split_sources(markdown)
+    parser = markdown_parser()
+    tokens = parser.parse(body)
+    for token in tokens:
+        for child in token.children or []:
+            if child.type == "image":
+                source = child.attrGet("src") or ""
+                name = normalize_image_name(source)
+                if name not in normal_images:
+                    raise ValueError("Missing image")
+            elif child.type == "link_open":
+                _validate_url(child.attrGet("href") or "")
+    # Do not duplicate a leading title that the page already renders.
+    if len(tokens) >= 3 and tokens[0].type == "heading_open" and tokens[0].tag == "h1":
+        tokens = tokens[3:]
+    prepared = PreparedArticle(
+        html="", excerpt=_excerpt(tokens), sources=sources, images=normal_images,
+        media_types=media_types, tokens=tuple(tokens),
+    )
+    return PreparedArticle(
+        html=render_article(prepared, {}), excerpt=prepared.excerpt, sources=prepared.sources,
+        images=prepared.images, media_types=prepared.media_types, tokens=prepared.tokens,
+    )

@@ -70,6 +70,7 @@ def test_routes_do_not_append_slashes(client):
 
 
 @override_settings(DEBUG=False)
+@pytest.mark.django_db
 def test_not_found_page_uses_the_site_shell(client):
     response = client.get("/does-not-exist")
 

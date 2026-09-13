@@ -9,6 +9,7 @@ build/
 results/
 private/
 media/
+private-media/
 staticfiles/
 __pycache__/
 *.py[cod]

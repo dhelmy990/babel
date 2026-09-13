@@ -154,6 +154,26 @@ svg {
   font-size: 13px;
 }
 
+.entry { border-top: 1px solid #282828; padding: 20px 0; }
+.entry:hover h3 { color: #fff; }
+.entry time, .entry p, .article-date { color: #858585; font-size: 12px; }
+.entry h3 { font-size: 18px; font-weight: 450; margin: 4px 0; }
+.entry p { margin: 0; line-height: 1.55; font-size: 13px; }
+.entry-dot, .article-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; }
+.next-page { display: inline-block; margin-top: 24px; color: #aaa; font-size: 13px; }
+.article-shell { max-width: 900px; margin: 0 auto; padding: 70px 35px 100px; }
+.article-text { max-width: 680px; }
+.article-text header { border-bottom: 1px solid #282828; margin-bottom: 38px; }
+.article-text h1 { margin: 5px 0 32px; }
+.article-body { color: #d3d3d3; font-size: 16px; }
+.article-body h2 { margin-top: 42px; color: #f0f0f0; }
+.article-body p { margin-bottom: 22px; }
+.article-body a, .sources a { color: #9cbdc5; text-decoration: underline; }
+.article-body img { max-width: 100%; height: auto; border-radius: 4px; }
+.sources, .next, .prereqs { border-top: 1px solid #282828; margin-top: 52px; padding-top: 20px; }
+.sources h2, .next h2 { font-size: 15px; margin-bottom: 12px; }
+.sources a { display: inline-block; border: 1px solid #444; border-radius: 999px; padding: 4px 10px; margin: 0 8px 8px 0; font-size: 12px; text-decoration: none; }
+
 .footer {
   color: #747474;
   font-size: 11px;

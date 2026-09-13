@@ -82,6 +82,9 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
+# Deliberately absent from URL routing: article images are authorized through /assets/<uuid>.
+MEDIA_ROOT = BASE_DIR / "private-media"
+PRIVATE_MEDIA_ROOT = MEDIA_ROOT
 STORAGES = {
     "staticfiles": {
         "BACKEND": (
