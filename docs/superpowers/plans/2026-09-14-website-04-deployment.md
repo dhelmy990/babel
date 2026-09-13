@@ -174,7 +174,7 @@ web client, and a Resend sending-domain credential. These external values are
 runtime inputs; do not guess credentials or reuse keys from the old experiment.
 The runbook uses a new CPU-only VM and a pinned application release.
 
-- [ ] **Write the concrete operator runbook.** Include these ordered actions:
+- [x] **Write the concrete operator runbook.** Include these ordered actions:
 
   1. In the owner's chosen Google Cloud project, create one Ubuntu 24.04 x86_64
      CPU instance, initially 2 vCPU/4 GiB RAM with a 30 GiB persistent disk, and
@@ -236,7 +236,7 @@ The runbook uses a new CPU-only VM and a pinned application release.
   Defaults in checked-in examples must be nonsecret and unsuitable for a public
   deployment. Production settings must fail with a named missing variable.
 
-- [ ] **Implement a read-only smoke script and recovery documentation.**
+- [x] **Implement a read-only smoke script and recovery documentation.**
 
   ```bash
   # Core of deploy/smoke.sh; SITE_BASE is its validated positional argument.
@@ -260,8 +260,8 @@ The runbook uses a new CPU-only VM and a pinned application release.
   otherwise restore the matched database/media backup during maintenance. Do
   not run production database downgrade migrations blindly.
 
-- [ ] **Verify and commit the runbook.** Check links, shell syntax with
-  `bash -n deploy/*.sh`, compose configuration without expanding secrets into
+- [x] **Verify and commit the runbook.** Check links, shell syntax with
+  `for script in deploy/*.sh; do bash -n "$script"; done`, compose configuration without expanding secrets into
   output, timer validation, and smoke behavior on the disposable deployment.
   Capture the verified commands and expected statuses in `docs/deployment.md`.
   Commit `docs: document dhelmy.stream deployment and recovery`.

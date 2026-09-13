@@ -27,7 +27,7 @@ the task and remain untouched.
 | R3 — Owner digest | Complete (`09c25da`) | Passed | Passed |
 | N2/R2 — Integration recovery fixes | Complete (`395b544`, `319530c`) | Passed | Passed |
 | D1 — Packaging/recovery | Complete (`02e6a90`, `4826196`, `f6c16a2`) | Passed | Passed |
-| D2 — Deployment runbook | In progress | Pending | Pending |
+| D2 — Deployment runbook | Complete (`f361b45`, `5d518bd`) | Passed | Passed |
 
 Production account setup, cloud provisioning, DNS changes, and live email are
 separate from local implementation and verification.
@@ -47,3 +47,12 @@ PostgreSQL image's temporary socket-only initialization server. Final independen
 checks passed the held-initialization regression and both real Docker/browser/
 backup/restore tests. Production settings, offline Caddy configuration, isolated
 scheduler units, and shell syntax also passed. No live services were deployed.
+
+D2 passed independent spec and quality reviews, each rerunning 24 real local TLS
+and encrypted recovery checks. These verify certificate rejection, correct
+redirects, endpoint failures, exact application/PostgreSQL image save and load,
+dummy age encryption, and restoration of matched database/media state. All 13
+runbook Bash blocks, deployment scripts and isolated scheduler units validated.
+The operator guide includes ordered provider setup, private runtime configuration,
+off-VM image/data retention and preserving recovery procedures. Cloud operations,
+DNS changes, provider credentials and live email remain future deployment work.
