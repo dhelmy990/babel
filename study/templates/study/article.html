@@ -2,12 +2,12 @@
 {% block title %}{{ article.title }} — dhelmy.stream{% endblock %}
 {% block content %}
 <main class="article-shell">
-  <aside class="prereqs" aria-label="Before you read"></aside>
+  <aside class="prereqs" aria-label="Before you read">{% if prerequisites %}<h2>Before you read</h2>{% for neighbor in prerequisites %}{% include "study/babel_anchor.html" %}{% endfor %}{% endif %}</aside>
   <article class="article-text">
     <header><span class="article-dot" style="background: {{ article.color }}"></span><p class="article-date">{{ article.published_at|date:"j M Y" }}</p><h1>{{ article.title }}</h1></header>
     <div class="article-body">{{ article.rendered_html|safe }}</div>
     {% if article.sources %}<section class="sources" aria-labelledby="sources-title"><h2 id="sources-title">Sources</h2><div>{% for label, url in article.sources %}<a href="{{ url }}" rel="noopener noreferrer" target="_blank">{{ label }}</a>{% endfor %}</div></section>{% endif %}
   </article>
-  <section class="next" aria-labelledby="next-title"><h2 id="next-title">Articles to read next</h2><div class="next-links"></div></section>
+  <section class="next" aria-labelledby="next-title"><h2 id="next-title">Articles to read next</h2><div class="next-links">{% for neighbor in successors %}{% include "study/babel_anchor.html" %}{% endfor %}</div></section>
 </main>
 {% endblock %}

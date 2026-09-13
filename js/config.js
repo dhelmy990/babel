@@ -34,6 +34,7 @@ const Config = {
 
     // Animation settings
     animation: {
+        levelCircleUpdateInterval: 1000,
         edgeFlashDuration: 2000,      // 2 seconds per flash cycle
         edgeFlashLength: 0.3,          // Flash covers 30% of edge
         dragReturnDuration: 500        // 500ms to return after drag

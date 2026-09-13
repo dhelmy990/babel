@@ -83,10 +83,12 @@ const Animation = {
 
     startLoop(graph) {
         let lastCircleUpdate = 0;
+        let frameId, stopped = false;
         const circleInterval = Config.animation.levelCircleUpdateInterval;
 
         const animate = (timestamp) => {
-            requestAnimationFrame(animate);
+            if (stopped) return;
+            frameId = requestAnimationFrame(animate);
 
             const scene = graph.scene();
             if (!scene) return;
@@ -108,6 +110,7 @@ const Animation = {
             }
         };
 
-        requestAnimationFrame(animate);
+        frameId = requestAnimationFrame(animate);
+        return () => { stopped = true; cancelAnimationFrame(frameId); };
     }
 };

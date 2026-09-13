@@ -1,0 +1,27 @@
+{% extends "study/base.html" %}
+{% load static %}
+{% block title %}Babel galaxy — dhelmy.stream{% endblock %}
+{% block content %}
+<main class="galaxy-shell">
+  <header class="galaxy-heading"><div><h1>Babel galaxy</h1><p>Follow each light from an article to what you can read next.</p></div><a href="/">Back to timeline</a></header>
+  <p id="graph-status" role="status" aria-live="polite">Loading galaxy…</p><button id="graph-retry" type="button" hidden>Retry</button>
+  {% if can_publish and identity_mode == 'admin' %}
+  <div id="edge-controls"><a class="nav-action" href="/publish">New article</a><p>Hold R for a new article. Right-click two planets to compare, or choose below.</p>
+    <label>Read this first <select id="edge-source"><option value="">Choose source</option>{% for article in articles %}<option value="{{ article.pk }}">{{ article.title }}</option>{% endfor %}</select></label>
+    <label>Then read this <select id="edge-target"><option value="">Choose target</option>{% for article in articles %}<option value="{{ article.pk }}">{{ article.title }}</option>{% endfor %}</select></label>
+    <button id="edge-add" type="button">Add read-before link</button><button id="edge-remove" type="button">Remove this link</button><button id="edge-clear" type="button">Clear selection</button>
+  </div>{% endif %}
+  <button id="graph-reset" type="button" hidden>Reset camera</button>
+  <div id="website-graph" aria-label="Interactive article galaxy"></div>
+  <section class="galaxy-list" aria-labelledby="galaxy-list-title"><h2 id="galaxy-list-title">Articles in this galaxy</h2><ul id="graph-articles">{% for article in articles %}<li><a href="/{{ article.slug }}">{{ article.title }}</a><p>{{ article.excerpt }}</p></li>{% empty %}<li>No articles yet.</li>{% endfor %}</ul></section>
+</main>
+<script src="{% static 'vendor/three.min.js' %}" defer></script>
+<script src="{% static 'vendor/d3.min.js' %}" defer></script>
+<script src="{% static 'vendor/3d-force-graph.min.js' %}" defer></script>
+<script src="{% static 'js/config.js' %}" defer></script>
+<script src="{% static 'js/website-state.js' %}" defer></script>
+<script src="{% static 'js/rendering.js' %}" defer></script>
+<script src="{% static 'js/level-circles.js' %}" defer></script>
+<script src="{% static 'js/animation.js' %}" defer></script>
+<script src="{% static 'js/website-graph.js' %}" defer></script>
+{% endblock %}

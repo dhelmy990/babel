@@ -5,6 +5,26 @@
 const LevelCircles = {
     levelCirclesGroup: null,
 
+    returnFrame: null,
+
+    dispose(graph) {
+        cancelAnimationFrame(this.returnFrame);
+        this.returnFrame = null;
+        this.dragState.isDragging = false;
+        this.dragState.node = null;
+        this._removeCircles(graph?.scene());
+    },
+
+    _removeCircles(scene) {
+        if (!this.levelCirclesGroup) return;
+        scene?.remove(this.levelCirclesGroup);
+        this.levelCirclesGroup.traverse(object => {
+            object.geometry?.dispose();
+            if (object.material) object.material.dispose();
+        });
+        this.levelCirclesGroup = null;
+    },
+
     dragState: {
         isDragging: false,
         node: null,
@@ -20,9 +40,7 @@ const LevelCircles = {
         const scene = graph.scene();
         const cfg = Config.levelCircle;
 
-        if (this.levelCirclesGroup) {
-            scene.remove(this.levelCirclesGroup);
-        }
+        this._removeCircles(scene);
 
         this.levelCirclesGroup = new THREE.Group();
         this.levelCirclesGroup.name = 'levelCircles';
@@ -84,9 +102,7 @@ const LevelCircles = {
         const cfg = Config.levelCircle;
         const { levelY, levelNodes } = this.dragState;
 
-        if (this.levelCirclesGroup) {
-            scene.remove(this.levelCirclesGroup);
-        }
+        this._removeCircles(scene);
 
         this.levelCirclesGroup = new THREE.Group();
         this.levelCirclesGroup.name = 'levelCircles';
@@ -200,6 +216,7 @@ const LevelCircles = {
     },
 
     startDrag(node, graph) {
+        cancelAnimationFrame(this.returnFrame);
         const cfg = Config.levelCircle;
         const graphData = graph.graphData();
 
@@ -259,7 +276,7 @@ const LevelCircles = {
             this.updateDraggedLevelCircle(graph, currentX, currentZ);
 
             if (progress < 1) {
-                requestAnimationFrame(animateCircleReturn);
+                this.returnFrame = requestAnimationFrame(animateCircleReturn);
             } else {
                 this.dragState.isDragging = false;
                 this.dragState.node = null;
@@ -267,6 +284,6 @@ const LevelCircles = {
             }
         };
 
-        requestAnimationFrame(animateCircleReturn);
+        this.returnFrame = requestAnimationFrame(animateCircleReturn);
     }
 };

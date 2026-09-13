@@ -136,7 +136,11 @@ def article_detail(request, slug):
     article = get_object_or_404(Article, slug=slug)
     if not can_read_article(request.user, article):
         raise Http404
-    response = render(request, "study/article.html", {"article": article})
+    response = render(request, "study/article.html", {
+        "article": article,
+        "prerequisites": Article.objects.filter(outgoing_edges__target=article, archived_at__isnull=True),
+        "successors": Article.objects.filter(incoming_edges__source=article, archived_at__isnull=True),
+    })
     if article.archived_at is not None:
         response["Cache-Control"] = "private, no-store"
     return response

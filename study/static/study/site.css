@@ -289,3 +289,32 @@ svg {
     padding-bottom: 40px;
   }
 }
+
+/* Babel links keep navigation immediate; previews also work on keyboard focus. */
+.babel-anchor { display: inline-flex; align-items: center; gap: 9px; position: relative; margin: 6px 22px 6px 0; font-size: 14px; }
+.babel-dot { width: 14px; height: 14px; border-radius: 50%; background: radial-gradient(circle at 30% 25%, #ffffff50, transparent 55%), var(--planet-color); box-shadow: 0 0 10px var(--planet-color); }
+.babel-preview { display: none; position: absolute; bottom: calc(100% + 8px); left: 0; z-index: 5; width: 240px; max-width: 70vw; padding: 15px; border: 1px solid #444; border-radius: 6px; background: #151515; color: #ccc; box-shadow: 0 8px 25px #0008; pointer-events: none; }
+.babel-preview strong, .babel-preview span { display: block; }
+.babel-preview span { margin-top: 6px; line-height: 1.5; font-size: 12px; }
+.babel-anchor:hover .babel-preview, .babel-anchor:focus-visible .babel-preview { display: block; }
+.prereqs:empty { display: none; }
+.prereqs h2 { font-size: 15px; }
+.galaxy-shell { max-width: 1300px; margin: auto; padding: 35px; }
+.galaxy-heading { display: flex; justify-content: space-between; align-items: center; gap: 25px; }
+.galaxy-heading h1 { font-size: 34px; margin-bottom: 12px; }
+.galaxy-heading p, #graph-status, #edge-controls p, .galaxy-list p { color: #999; font-size: 13px; line-height: 1.6; }
+.galaxy-heading a { white-space: nowrap; font-size: 13px; }
+#website-graph { height: 580px; overflow: hidden; border: 1px solid #262626; border-radius: 8px; margin-top: 20px; }
+#website-graph[hidden] { display: none; }
+.galaxy-shell button, .galaxy-shell select { background: #171717; border: 1px solid #555; color: #ddd; border-radius: 4px; padding: 9px 12px; font: inherit; font-size: 13px; }
+.galaxy-shell button { cursor: pointer; }
+.galaxy-shell button:disabled { opacity: .5; cursor: wait; }
+#edge-controls { padding: 20px 0; border-top: 1px solid #333; }
+#edge-controls label { display: inline-flex; flex-direction: column; gap: 8px; font-size: 13px; margin: 0 15px 15px 0; }
+.galaxy-list { border-top: 1px solid #333; margin-top: 30px; padding-top: 20px; }
+.galaxy-list h2 { font-size: 16px; }
+.galaxy-list ul { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 25px; padding: 0; list-style: none; }
+.galaxy-list a { font-size: 15px; }
+.graph-preview { max-width: 240px; padding: 12px; color: #ddd; background: #151515; border: 1px solid #444; border-radius: 5px; text-align: left; }
+.graph-preview p { white-space: normal; font-size: 12px; }
+@media (max-width: 650px) { .galaxy-shell { padding: 25px; } .galaxy-heading { display: block; } }

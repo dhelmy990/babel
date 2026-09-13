@@ -16,7 +16,7 @@ from study.services.identity import is_publisher, require_publisher
 from study.storage import path_for, remove_asset, write_asset
 
 
-RESERVED_SLUGS = {"galaxy", "api", "accounts", "assets", "static", "healthz", "robots.txt"}
+RESERVED_SLUGS = {"galaxy", "publish", "api", "accounts", "assets", "static", "healthz", "robots.txt"}
 COLOR_RE = re.compile(r"#[0-9a-fA-F]{6}\Z")
 
 
@@ -192,3 +192,15 @@ def stored_images_for_article(article: Article, names: set[str] | None = None) -
         except OSError as exc:
             raise ValueError("Stored asset is unavailable") from exc
     return images
+
+
+@transaction.atomic
+def archive_article(user, article_id) -> Article:
+    """Central archive transaction; future note grants/review suspension belong here."""
+    require_publisher(user)
+    GraphState.objects.select_for_update().get(pk=1)
+    article = Article.objects.select_for_update().get(pk=article_id)
+    if article.archived_at is None:
+        article.archived_at = timezone.now()
+        article.save(update_fields=['archived_at'])
+    return article

@@ -2,13 +2,17 @@ from allauth.account import views as account_views
 from allauth.socialaccount.providers.google import urls as google_urls
 from django.urls import include, path
 
-from study.views import content, identity, pages
+from study.views import content, graph, identity, pages
 
 
 urlpatterns = [
     path("", pages.home, name="home"),
     path("healthz", pages.healthz, name="healthz"),
-    path("galaxy", pages.not_found, name="galaxy"),
+    path("galaxy", graph.galaxy, name="galaxy"),
+    path("api/graph", graph.graph_data, name="graph_data"),
+    path("api/edges", graph.create_edge, name="edge_create"),
+    path("api/edges/<uuid:source_id>/<uuid:target_id>", graph.delete_edge, name="edge_delete"),
+    path("api/articles/<uuid:article_id>/archive", graph.archive, name="article_archive"),
     path("robots.txt", pages.not_found, name="robots"),
     path("assets/<uuid:asset_id>", content.asset_response, name="asset"),
     path("api/articles/preview", content.preview, name="article_preview"),

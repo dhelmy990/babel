@@ -82,6 +82,10 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
+STATICFILES_FINDERS = [
+    "django.contrib.staticfiles.finders.AppDirectoriesFinder",
+    "study.staticfiles.WebsiteModuleFinder",
+]
 # Deliberately absent from URL routing: article images are authorized through /assets/<uuid>.
 MEDIA_ROOT = BASE_DIR / "private-media"
 PRIVATE_MEDIA_ROOT = MEDIA_ROOT

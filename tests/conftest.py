@@ -37,3 +37,21 @@ def publisher(db):
     PublisherIdentity.objects.create(user=user, google_subject="publisher-subject")
     ReaderProfile.objects.create(user=user, timezone="Asia/Singapore")
     return user
+
+
+@pytest.fixture(autouse=True)
+def graph_singleton(request):
+    if request.node.get_closest_marker("django_db") or "live_server" in request.fixturenames:
+        request.getfixturevalue("db")
+        from study.models import GraphState
+        GraphState.objects.get_or_create(pk=1)
+
+
+@pytest.fixture
+def article_factory(publisher):
+    from uuid import uuid4
+    from study.services.content import publish_article
+
+    def create(title):
+        return publish_article(publisher, title=title, color="#1a5276", markdown=f"# {title}\n\n{title} excerpt.", images={}, submission_id=uuid4())
+    return create
