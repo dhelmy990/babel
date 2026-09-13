@@ -196,11 +196,14 @@ def stored_images_for_article(article: Article, names: set[str] | None = None) -
 
 @transaction.atomic
 def archive_article(user, article_id) -> Article:
-    """Central archive transaction; future note grants/review suspension belong here."""
+    """Central archive transaction; grant note owners access before hiding content."""
     require_publisher(user)
     GraphState.objects.select_for_update().get(pk=1)
     article = Article.objects.select_for_update().get(pk=article_id)
     if article.archived_at is None:
+        from study.services.notes import grant_archive_access
+
+        grant_archive_access(article)
         article.archived_at = timezone.now()
         article.save(update_fields=['archived_at'])
     return article

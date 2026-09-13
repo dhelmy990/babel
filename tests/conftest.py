@@ -55,3 +55,17 @@ def article_factory(publisher):
     def create(title):
         return publish_article(publisher, title=title, color="#1a5276", markdown=f"# {title}\n\n{title} excerpt.", images={}, submission_id=uuid4())
     return create
+
+
+@pytest.fixture
+def reader(db):
+    user = get_user_model().objects.create_user(username="note-reader")
+    ReaderProfile.objects.create(user=user, timezone="Asia/Singapore")
+    return user
+
+
+@pytest.fixture
+def other_reader(db):
+    user = get_user_model().objects.create_user(username="other-note-reader")
+    ReaderProfile.objects.create(user=user, timezone="UTC")
+    return user
