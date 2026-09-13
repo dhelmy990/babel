@@ -156,6 +156,7 @@ def test_stale_edit_keeps_typed_title_and_selected_files(editable_owner_page, li
     assert page.get_by_label("Title", exact=True).input_value() == "My conflicting edit"
     assert page.get_by_label("Markdown file", exact=True).evaluate("input => input.files.length") == 1
     assert page.get_by_label("Image files", exact=True).evaluate("input => input.files.length") == 1
+    newer.reload()
     expect(newer.get_by_role("heading", name="Newer server content", exact=True)).to_be_visible()
     expect(newer.locator(".article-body")).to_contain_text("Original body.")
     newer_context.close()
