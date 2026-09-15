@@ -1,0 +1,11 @@
+[Unit]
+Description=Check for verified website releases every minute
+
+[Timer]
+OnBootSec=1min
+OnUnitInactiveSec=1min
+AccuracySec=10s
+Unit=website-update.service
+
+[Install]
+WantedBy=timers.target

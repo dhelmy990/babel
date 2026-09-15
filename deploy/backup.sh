@@ -4,6 +4,17 @@ umask 077
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 project=${STUDY_PROJECT:-dhelmy-stream}
 [[ $project =~ ^[a-z0-9][a-z0-9_-]*$ ]] || exit 2
+# Share the updater's lifecycle lock. Its backup subprocess inherits the locked
+# descriptor; standalone backups acquire it themselves before stopping services.
+lifecycle_lock=${STUDY_LIFECYCLE_LOCK:-${TMPDIR:-/tmp}/study-lifecycle-$project.lock}
+if [[ -n ${STUDY_LIFECYCLE_FD:-} ]]; then
+    [[ $STUDY_LIFECYCLE_FD =~ ^[0-9]+$ ]] || exit 2
+    [[ $(readlink -- "/proc/$$/fd/$STUDY_LIFECYCLE_FD") == "$lifecycle_lock" ]] || exit 2
+    flock -n "$STUDY_LIFECYCLE_FD" || { echo 'Website lifecycle operation is active.' >&2; exit 1; }
+else
+    exec 8>"$lifecycle_lock"
+    flock -n 8 || { echo 'Website lifecycle operation is active.' >&2; exit 1; }
+fi
 compose=(docker compose --env-file "${STUDY_ENV_FILE:-$root/.env.production}" -f "${STUDY_COMPOSE_FILE:-$root/compose.prod.yaml}" -p "$project")
 if [[ -n ${STUDY_COMPOSE_OVERRIDE:-} ]]; then compose+=(-f "$STUDY_COMPOSE_OVERRIDE"); fi
 systemctl=${STUDY_SYSTEMCTL:-systemctl}

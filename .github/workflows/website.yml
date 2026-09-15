@@ -50,10 +50,10 @@ jobs:
       - name: Validate scheduler units without starting host services
         run: |
           unit_dir=$(mktemp -d)
-          cp deploy/review-digest.service deploy/review-digest.timer "$unit_dir/"
+          cp deploy/review-digest.service deploy/review-digest.timer deploy/website-update.service deploy/website-update.timer "$unit_dir/"
           printf '[Service]\nType=oneshot\nExecStart=/usr/bin/true\n' > "$unit_dir/docker.service"
           printf '[Unit]\nDescription=Verification target\n' > "$unit_dir/sysinit.target"
-          SYSTEMD_UNIT_PATH="$unit_dir" systemd-analyze verify "$unit_dir/review-digest.service" "$unit_dir/review-digest.timer"
+          SYSTEMD_UNIT_PATH="$unit_dir" systemd-analyze verify "$unit_dir/review-digest.service" "$unit_dir/review-digest.timer" "$unit_dir/website-update.service" "$unit_dir/website-update.timer"
           rm -r "$unit_dir"
       - run: docker build --build-arg STUDY_RELEASE="$GITHUB_SHA" --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" -t study-d1:verification .
       - run: docker run --rm -i --network none caddy:2.11.4@sha256:13ba145cba2f3e28fa801994876e4c086d1b95d5aa2a520a734765ffb6b12017 caddy validate --config /dev/stdin --adapter caddyfile < deploy/Caddyfile
@@ -64,7 +64,7 @@ jobs:
           printf '%s  %s\n' cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10 "$age_dir/age.tar.gz" | sha256sum --check
           tar -xzf "$age_dir/age.tar.gz" -C "$age_dir"
           echo "STUDY_AGE_BINARY=$age_dir/age/age" >> "$GITHUB_ENV"
-      - run: python -m pytest tests/test_deployment.py tests/test_smoke.py tests/test_recovery_bundle.py -q
+      - run: python -m pytest tests/test_deployment.py tests/test_smoke.py tests/test_recovery_bundle.py tests/test_updater_integration.py -q
         env:
           STUDY_DEPLOYMENT_IMAGE: study-d1:verification
       - name: Package the verified deployment image
@@ -128,6 +128,8 @@ jobs:
           digest=${image##*@sha256:}
           [[ $digest =~ ^[a-f0-9]{64}$ ]]
           export RELEASE_IMAGE="$image"
+          RELEASE_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$IMAGE_TAG")
+          export RELEASE_IMAGE_ID
           mkdir -p "$RUNNER_TEMP/website-release"
           cp "$RUNNER_TEMP/website-image/source.tar.gz" "$RUNNER_TEMP/website-release/source.tar.gz"
           python3 - <<'PY'
@@ -136,6 +138,7 @@ jobs:
           release = {
               "commit": os.environ["GITHUB_SHA"],
               "image": os.environ["RELEASE_IMAGE"],
+              "image_id": os.environ["RELEASE_IMAGE_ID"],
               "tag": os.environ["IMAGE_TAG"],
               "repository": os.environ["GITHUB_REPOSITORY"],
               "run_id": os.environ["GITHUB_RUN_ID"],
@@ -151,8 +154,8 @@ jobs:
             printf '\nImage: `%s`\n' "$image"
             echo
             echo 'Download the website-release artifact for matching source and release.json.'
-            echo 'Publication does not install the release on the Debian server.'
-            echo 'Follow docs/deployment-debian.md from this commit for server setup and installation.'
+            echo 'The public release job prepares the download used by the home server updater.'
+            echo 'Production activation requires completed server configuration; see docs/deployment-debian.md.'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Save the deployment record and matching source
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -164,3 +167,81 @@ jobs:
       - name: Remove registry credentials
         if: always()
         run: docker logout ghcr.io
+
+  release:
+    name: Publish home server download
+    needs: [verify, publish]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/personal_website_deploy' && github.repository == 'dhelmy990/babel'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Download the tested image archive
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: verified-website-${{ github.sha }}
+          path: ${{ runner.temp }}/website-image/
+      - name: Download the published image record
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: website-release-${{ github.sha }}
+          path: ${{ runner.temp }}/website-release/
+      - name: Prepare public download and manifest
+        run: |
+          cd "$RUNNER_TEMP/website-image"
+          sha256sum --check SHA256SUMS
+          cd "$RUNNER_TEMP/website-release"
+          sha256sum --check SHA256SUMS
+          cmp source.tar.gz "$RUNNER_TEMP/website-image/source.tar.gz"
+          gzip -n -1 -c "$RUNNER_TEMP/website-image/image.tar" > image.tar.gz
+          mkdir "$RUNNER_TEMP/release-source"
+          tar -xzf source.tar.gz -C "$RUNNER_TEMP/release-source"
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, sys
+          sys.path.insert(0, str(pathlib.Path(os.environ['RUNNER_TEMP']) / 'release-source' / 'deploy'))
+          from release_updater import validate_manifest
+          record = json.loads(pathlib.Path('release.json').read_text())
+          assert record['commit'] == os.environ['GITHUB_SHA']
+          assert record['repository'] == os.environ['GITHUB_REPOSITORY']
+          data = {
+              'schema': 1, 'repository': record['repository'], 'commit': record['commit'],
+              'image': record['image'], 'image_id': record['image_id'],
+              'run_number': int(os.environ['GITHUB_RUN_NUMBER']),
+              'run_id': os.environ['GITHUB_RUN_ID'], 'run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+          }
+          data['tag'] = f"website-{data['commit']}-{data['run_id']}-{data['run_attempt']}"
+          for kind in ('image', 'source'):
+              with open(f'{kind}.tar.gz', 'rb') as stream:
+                  data[f'{kind}_sha256'] = hashlib.file_digest(stream, 'sha256').hexdigest()
+          validate_manifest(data)
+          pathlib.Path('website-release.json').write_text(json.dumps(data, indent=2) + '\n')
+          PY
+      - name: Publish the complete release if this is still the deployment branch head
+        run: |
+          branch_head=$(gh api "repos/$GH_REPO/git/ref/heads/personal_website_deploy" --jq '.object.sha')
+          if [[ $branch_head != "$GITHUB_SHA" ]]; then
+            echo 'A newer deployment commit exists; leaving this image unpublished as a server release.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          cd "$RUNNER_TEMP/website-release"
+          tag=$(python3 -c 'import json; print(json.load(open("website-release.json"))["tag"])')
+          printf 'Verified website commit `%s`. The home server checks this release automatically.\n\nProduction credentials are not included.\n' "$GITHUB_SHA" > notes.md
+          gh release create "$tag" --draft --target "$GITHUB_SHA" \
+            --title "Website $GITHUB_SHA" --notes-file notes.md \
+            image.tar.gz source.tar.gz website-release.json
+          branch_head=$(gh api "repos/$GH_REPO/git/ref/heads/personal_website_deploy" --jq '.object.sha')
+          if [[ $branch_head != "$GITHUB_SHA" ]]; then
+            echo 'A newer deployment commit arrived during upload; retaining this release as a draft.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          gh release edit "$tag" --draft=false --latest
+          {
+            echo '### Public home server release published'
+            printf '\nRelease: https://github.com/%s/releases/tag/%s\n' "$GH_REPO" "$tag"
+            echo
+            echo 'The server updater will fetch it on its next check. It stages only until production is enabled locally.'
+          } >> "$GITHUB_STEP_SUMMARY"

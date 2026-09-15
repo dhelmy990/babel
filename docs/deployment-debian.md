@@ -22,12 +22,18 @@ image handoff artifact is temporary (one day). Images live in GHCR; there is no
 automatic package deletion policy in this workflow. A rerun may update a SHA tag,
 so **install by the digest in that run's release record**, not by a moving tag.
 
-**Publishing an image does not install it on the server.** The server connection
-has not been supplied. This guide prepares manual installation; automatic rollout
-needs either a reachable SSH endpoint (direct or through an explicitly configured
-private network), or a separate server-side pull mechanism. No runner, tunnel,
-router rule, SSH key, or production credential is installed by this workflow.
-The bot's repository, workflow and services are independent.
+After GHCR publication, the workflow attaches the verified image as `image.tar.gz`,
+matching `source.tar.gz`, and `website-release.json` to a draft GitHub release. It
+publishes the complete release as **latest** only while that commit remains the
+head of `personal_website_deploy`. These public downloads contain no production
+credentials. The separate release job has `contents: write`; pull requests cannot
+enter that job. See [automatic server updates](deployment-updater.md) for the
+installed outbound-only updater, activation and recovery instructions.
+
+**Initially the server only stages releases.** Website startup requires real
+provider configuration, a working public domain and an explicit enabled file on
+the server. A GitHub push cannot create that file. No GitHub token, VPN, inbound
+SSH or self-hosted Actions runner is needed for downloads. The bot remains separate.
 
 ## GitHub setup and releasing
 
@@ -49,10 +55,12 @@ git merge personal-website
 git push origin personal_website_deploy
 ```
 
-Open that commit's `Website` Actions run. Both `verify` and `Publish website image`
-must pass. Download `website-release-FULL_COMMIT_SHA` from that run's Artifacts
-section. Its source archive supplies the matching deployment files; never pair an
-old Compose configuration with an arbitrary new image. Save the run URL too.
+Open that commit's `Website` Actions run. `verify`, `Publish website image`, and
+`Publish home server download` must pass. A superseded commit can have its public
+release skipped or left in draft; the job summary explains this. The public
+release and the `website-release-FULL_COMMIT_SHA` Actions artifact both carry
+matching source. Never pair an old Compose configuration with an arbitrary new
+image. Save the run URL too.
 
 ## One-time Debian preparation
 
@@ -106,9 +114,10 @@ personal access token (classic) with `read:packages` for this use. Supply it thr
 standard input, not as a command argument, and keep it out of shell history. If
 you deliberately make the package public, an anonymous pull is possible.
 
-## Install the first published release
+## Alternative: install the first image manually without the updater
 
-Copy the downloaded release artifact's three files (`source.tar.gz`,
+This alternative uses the Actions artifact and GHCR. Do not mix it with an
+updater-managed installation. Copy the downloaded release artifact's three files (`source.tar.gz`,
 `release.json`, `SHA256SUMS`) into a new root-owned directory on the server, for
 example `/root/website-releases/FULL_COMMIT_SHA`. Verify that this is the intended
 successful Actions run. Run the following in one root shell, replacing the one
@@ -171,5 +180,5 @@ only after deployment checks pass, and run the HTTPS smoke check.
 Do not apply the first-install extraction commands over a running installation,
 run `docker compose down -v`, prune shared Docker resources, or restart the bot.
 If a migration has run, changing back to an older image alone may be unsafe;
-follow the runbook's paired recovery procedure. An automated rollout must enforce
-these same backup, migration and health-check steps once server access is chosen.
+follow the runbook's paired recovery procedure. The automatic updater enforces
+these backup, migration and health-check steps; see its dedicated guide above.
