@@ -58,6 +58,7 @@ jobs:
           rm -r "$unit_dir"
       - run: docker build --build-arg STUDY_RELEASE="$GITHUB_SHA" --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" -t study-d1:verification .
       - run: docker run --rm -i --network none caddy:2.11.4@sha256:13ba145cba2f3e28fa801994876e4c086d1b95d5aa2a520a734765ffb6b12017 caddy validate --config /dev/stdin --adapter caddyfile < deploy/Caddyfile
+      - run: docker run --rm -i --network none caddy:2.11.4@sha256:13ba145cba2f3e28fa801994876e4c086d1b95d5aa2a520a734765ffb6b12017 caddy validate --config /dev/stdin --adapter caddyfile < deploy/Caddyfile.tunnel
       - name: Install pinned age into a disposable verification directory
         run: |
           age_dir=$(mktemp -d "$HOME/study-age-XXXXXX")
@@ -65,7 +66,7 @@ jobs:
           printf '%s  %s\n' cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10 "$age_dir/age.tar.gz" | sha256sum --check
           tar -xzf "$age_dir/age.tar.gz" -C "$age_dir"
           echo "STUDY_AGE_BINARY=$age_dir/age/age" >> "$GITHUB_ENV"
-      - run: python -m pytest tests/test_deployment.py tests/test_smoke.py tests/test_recovery_bundle.py tests/test_updater_integration.py -q
+      - run: python -m pytest tests/test_deployment.py tests/test_smoke.py tests/test_recovery_bundle.py tests/test_updater_integration.py tests/test_tunnel.py -q
         env:
           STUDY_DEPLOYMENT_IMAGE: study-d1:verification
       - name: Package the verified deployment image

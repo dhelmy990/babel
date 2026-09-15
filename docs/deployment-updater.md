@@ -45,6 +45,9 @@ GitHub token is required. The bot is unaffected.
 
 ## Enable production after credentials and DNS are ready
 
+For the home server, use [Cloudflare Tunnel setup](deployment-tunnel.md) to publish
+the site without router port forwarding. Complete that route before activation.
+
 Complete Google OAuth and domain reachability as described in
 [the Debian guide](deployment-debian.md). Then run:
 
