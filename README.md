@@ -1,5 +1,8 @@
 # dhelmy.stream
 
+For the Debian 13 home server and image releases triggered by
+`personal_website_deploy`, see [the Debian release guide](docs/deployment-debian.md).
+
 For production deployment, recovery, DNS, OAuth, email, and encrypted off-VM backup procedures, see [the operator runbook](docs/deployment.md).
 
 The public website is a Django study log with an integrated Babel galaxy at

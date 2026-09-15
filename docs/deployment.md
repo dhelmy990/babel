@@ -1,5 +1,9 @@
 # Deployment and recovery runbook
 
+For Debian 13 on the owner's home server and GitHub Actions image publication,
+start with [the Debian release guide](deployment-debian.md). The GCP/Ubuntu
+provisioning instructions below are an alternative hosting setup.
+
 This guide is for a future operator deployment of `dhelmy.stream`. Cloud creation,
 DNS changes, OAuth setup, mail delivery, host service installation and off-VM uploads
 have **not** been executed by repository verification. The local verification at the
