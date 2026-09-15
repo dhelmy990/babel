@@ -19,7 +19,7 @@ jobs:
         options: --health-cmd "pg_isready -h 127.0.0.1 -U study_dev -d study_dev" --health-interval 2s --health-timeout 3s --health-retries 30
     env:
       DJANGO_DEBUG: 'true'
-      DJANGO_SECRET_KEY: ci-only-secret-key-not-for-deployment-0123456789
+      DJANGO_SECRET_KEY: ci-only-secret-key-not-for-deployment-0123456789-abcdefghijklmnopqrstuvwxyz
       GOOGLE_CLIENT_ID: ci-dummy
       GOOGLE_CLIENT_SECRET: ci-dummy
       REVIEW_EMAIL_DELIVERY: console
