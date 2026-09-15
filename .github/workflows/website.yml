@@ -46,6 +46,7 @@ jobs:
         env:
           DJANGO_SETTINGS_MODULE: website.production_settings
           DJANGO_DEBUG: 'false'
+          REVIEW_EMAIL_DELIVERY: disabled
       - run: for script in deploy/*.sh; do bash -n "$script"; done
       - name: Validate scheduler units without starting host services
         run: |

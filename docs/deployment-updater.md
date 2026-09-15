@@ -28,7 +28,8 @@ cat /run/dhelmy-stream/status.json
 The installer copies the updater to `/usr/local/lib/dhelmy-stream`, installs the
 systemd service/timer, and creates root-owned mode-0600
 `/etc/dhelmy-stream/production.env`. It generates Django and database secrets
-locally, without displaying them. OAuth and Resend remain explicit placeholders.
+locally, without displaying them. OAuth remains an explicit placeholder. Review
+email defaults to `disabled`; no Resend account, key or email DNS records are needed.
 Re-running it preserves existing environment values and the activation choice.
 The updater implementation changes only when this reviewed installer is run again;
 ordinary application releases do not replace the installed controller.
@@ -44,7 +45,7 @@ GitHub token is required. The bot is unaffected.
 
 ## Enable production after credentials and DNS are ready
 
-Complete Google OAuth, Resend and domain reachability as described in
+Complete Google OAuth and domain reachability as described in
 [the Debian guide](deployment-debian.md). Then run:
 
 ```bash
@@ -62,9 +63,13 @@ source. The fixed `dhelmy-stream` Compose project and database, media and Caddy
 volumes persist across upgrades. Database-image upgrades remain manual;
 application updates retain the existing database container.
 
-The initial digest service/timer is installed but left disabled. Use the main
-[operator runbook](deployment.md) for owner acceptance, encrypted backup/restore
-verification and deliberate activation of live digest delivery.
+The digest service/timer stays disabled. On-site reviews work independently of
+email. For an environment created before email became optional, set
+`REVIEW_EMAIL_DELIVERY=disabled`, remove the `RESEND_API_KEY` placeholder (or leave
+its value empty), and run `sudo systemctl disable --now review-digest.timer`.
+The disabled digest command exits without database access or provider calls.
+Use the main [operator runbook](deployment.md) for owner acceptance and encrypted
+backup/restore verification; its optional email activation section can be skipped.
 
 ## Upgrade and failure behavior
 

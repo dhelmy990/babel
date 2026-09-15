@@ -89,8 +89,10 @@ class ConsoleDelivery:
 
 
 def get_delivery():
+    if settings.REVIEW_EMAIL_DELIVERY == "disabled":
+        raise ImproperlyConfigured("Review email is disabled")
     if settings.REVIEW_EMAIL_DELIVERY == "console":
         return ConsoleDelivery()
     if settings.REVIEW_EMAIL_DELIVERY == "resend":
         return ResendDelivery(settings.RESEND_API_KEY)
-    raise ImproperlyConfigured("REVIEW_EMAIL_DELIVERY must be console or resend")
+    raise ImproperlyConfigured("REVIEW_EMAIL_DELIVERY must be disabled, console or resend")

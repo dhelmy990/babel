@@ -135,13 +135,13 @@ SOCIALACCOUNT_PROVIDERS = {
 }
 CSRF_FAILURE_VIEW = "study.views.identity.csrf_failure"
 
-# Console is local-only by default. A production console override must be explicit.
-REVIEW_EMAIL_DELIVERY = env("REVIEW_EMAIL_DELIVERY", "console" if DEBUG else "resend")
+# Email is optional; production needs no mail provider unless explicitly enabled.
+REVIEW_EMAIL_DELIVERY = env("REVIEW_EMAIL_DELIVERY", "console" if DEBUG else "disabled")
 RESEND_API_KEY = env("RESEND_API_KEY", "")
 REVIEW_FROM_EMAIL = env("REVIEW_FROM_EMAIL", "Study notes <reviews@dhelmy.stream>")
 PUBLIC_BASE_URL = env("PUBLIC_BASE_URL", "http://127.0.0.1:8000" if DEBUG else "https://dhelmy.stream")
-if REVIEW_EMAIL_DELIVERY not in {"console", "resend"}:
-    raise RuntimeError("REVIEW_EMAIL_DELIVERY must be console or resend")
+if REVIEW_EMAIL_DELIVERY not in {"disabled", "console", "resend"}:
+    raise RuntimeError("REVIEW_EMAIL_DELIVERY must be disabled, console or resend")
 if not REVIEW_FROM_EMAIL.strip() or not PUBLIC_BASE_URL.strip():
     raise RuntimeError("REVIEW_FROM_EMAIL and PUBLIC_BASE_URL must not be empty")
 if not DEBUG and REVIEW_EMAIL_DELIVERY == "resend" and not RESEND_API_KEY.strip():

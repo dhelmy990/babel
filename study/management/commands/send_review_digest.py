@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
@@ -13,6 +14,9 @@ class Command(BaseCommand):
         parser.add_argument("--dry-run", action="store_true", help="Show the selection without creating a Digest or contacting a provider.")
 
     def handle(self, *args, **options):
+        if settings.REVIEW_EMAIL_DELIVERY == "disabled":
+            self.stdout.write("Review email is disabled.")
+            return
         now = timezone.now()
         try:
             if options["dry_run"]:

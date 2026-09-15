@@ -281,7 +281,7 @@ def test_resend_network_error_is_uncertain_without_sensitive_details():
     assert "SECRET" not in str(caught.value)
 
 
-@pytest.mark.parametrize("backend,key,valid", [(None, "", False), (None, "fake-key", True), ("console", "", True), ("invalid", "", False)])
+@pytest.mark.parametrize("backend,key,valid", [(None, "", True), (None, "fake-key", True), ("disabled", "", True), ("resend", "", False), ("resend", "fake-key", True), ("console", "", True), ("invalid", "", False)])
 def test_production_delivery_defaults_and_explicit_console(backend, key, valid):
     environment = {"DJANGO_DEBUG": "false", "DJANGO_SECRET_KEY": "test-only-secret", "DB_NAME": "unused", "DB_USER": "unused", "DB_PASSWORD": "unused", "DB_HOST": "localhost", "DB_PORT": "5433", "RESEND_API_KEY": key}
     if backend is not None:
@@ -291,7 +291,7 @@ def test_production_delivery_defaults_and_explicit_console(backend, key, valid):
     if not valid:
         assert "AttributeError" not in result.stderr
     if valid:
-        assert result.stdout.strip() == (backend or "resend")
+        assert result.stdout.strip() == (backend or "disabled")
 
 
 def test_uncertain_provider_result_after_retry_deadline_becomes_unknown(publisher, digest_articles, monkeypatch):
@@ -375,6 +375,7 @@ def test_digest_clocks_must_be_explicit_and_aware():
 @pytest.mark.parametrize("field", ["RESEND_API_KEY", "REVIEW_FROM_EMAIL", "PUBLIC_BASE_URL"])
 def test_production_rejects_empty_required_delivery_configuration(field):
     environment = {"DJANGO_DEBUG": "false", "DJANGO_SECRET_KEY": "test-only-secret", "DB_NAME": "unused", "DB_USER": "unused", "DB_PASSWORD": "unused", "DB_HOST": "localhost", "DB_PORT": "5433", "RESEND_API_KEY": "fake-key", field: " "}
+    environment["REVIEW_EMAIL_DELIVERY"] = "resend"
     result = subprocess.run([sys.executable, "-c", "import website.settings"], env=environment, capture_output=True, text=True)
     assert result.returncode != 0 and field in result.stderr
 

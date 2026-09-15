@@ -145,7 +145,7 @@ Expected ownership is `root:root 600`. The selected commit must already be
 available in the approved repository; this guide does not publish or push source.
 There is no `git pull` in the release procedure.
 
-## 4. Configure DNS, Google identity and Resend before starting the site
+## 4. Configure DNS and Google identity before starting the site
 
 At the authoritative DNS provider set `@` **A → the reserved IPv4**, TTL **300
 seconds** during cutover. Add AAAA only after routing and inbound IPv6 80/443 work;
@@ -178,6 +178,11 @@ local development, not an alternate public production origin.
 [allauth Google setup](https://docs.allauth.org/en/latest/socialaccount/providers/google.html),
 [Google web OAuth](https://developers.google.com/identity/protocols/oauth2/web-server).
 
+Email reminders are optional and disabled by default. The on-site review list
+works without them. Skip Resend setup and the email scheduler section while
+`REVIEW_EMAIL_DELIVERY=disabled`; no sending key or email DNS records are required.
+
+Only if deliberately enabling email, set `REVIEW_EMAIL_DELIVERY=resend`.
 In Resend, add the sending domain and publish exactly its supplied SPF/DKIM DNS
 records (and any requested return-path records); wait for **Verified**. Use the
 verified sender `Study notes <reviews@dhelmy.stream>` or an explicitly verified
@@ -211,7 +216,7 @@ printing its value. Never print expanded `docker compose config`; use `--quiet`.
 | `STUDY_IMAGE` | Set versioned image tag `dhelmy-stream:FULL_COMMIT`; Compose otherwise defaults to `dhelmy-stream:local`, unsuitable for release tracking |
 | `STUDY_RELEASE` | **Build argument**, exact commit SHA, sets OCI revision label; not a runtime secret; default `unknown` is rejected by backup |
 | `STUDY_RUNTIME_ENV_FILE` | Compose runtime env-file path override; default `.env.production`; use only a deliberate trusted alternative |
-| `REVIEW_EMAIL_DELIVERY` | Production default `resend`; explicit `console` only for disposable verification/isolated restore; never silently substitute it for missing production mail configuration |
+| `REVIEW_EMAIL_DELIVERY` | Production default `disabled`; on-site reviews remain available. Explicit `resend` requires a real key; `console` is for disposable verification/isolated restore. |
 
 ## 6. Build, migrate once, then start HTTPS
 

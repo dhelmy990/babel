@@ -103,10 +103,12 @@ will not work; a separately configured ingress solution is needed. The existing
 Caddy configuration expects public HTTPS for `dhelmy.stream`. Do not expose
 PostgreSQL or the bot's browser desktop to make the website reachable.
 
-Configure Google OAuth, Resend, and `.env.production` using sections 4–5 of the
+Configure Google OAuth and `.env.production` using sections 4–5 of the
 [operator runbook](deployment.md). Its GCP provisioning and Ubuntu installation
 sections do not apply to this Debian computer. Production secrets stay on the
 server in a root-owned mode-0600 file; do not put them in an image or source archive.
+Review email is disabled by default. Skip Resend setup and leave the digest timer
+disabled; the on-site review list needs no email provider.
 
 For a private GHCR package, authenticate **on the server as root** with a dedicated
 read-only registry credential before pulling. GitHub currently documents a
