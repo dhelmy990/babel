@@ -39,7 +39,7 @@ def _preview_html(prepared):
 
 @require_GET
 def publishing(request, article_id=None):
-    """Render the owner-only upload form for a new article or a revision."""
+    """Render the owner-only editor for a new article or a revision."""
     try:
         require_publisher(request.user)
     except PermissionDenied:
@@ -47,6 +47,7 @@ def publishing(request, article_id=None):
 
     article = None
     existing_paths = []
+    image_urls = {}
     if article_id:
         article = get_object_or_404(Article, pk=article_id)
         if article.archived_at is not None:
@@ -57,6 +58,7 @@ def publishing(request, article_id=None):
         for asset in article.assets.all().order_by("created_at"):
             latest[asset.logical_name] = asset
         existing_paths = sorted(latest)
+        image_urls = {name: f"/assets/{asset.pk}" for name, asset in latest.items()}
 
     editor_state = {
         "id": str(article.pk) if article else None,
@@ -65,6 +67,7 @@ def publishing(request, article_id=None):
         "color": article.color if article else "#1a5276",
         "markdown": article.markdown if article else "",
         "existingPaths": existing_paths,
+        "imageUrls": image_urls,
         "submissionId": str(uuid4()) if article is None else None,
     }
     response = render(request, "study/publishing.html", {"article": article, "editor_state": editor_state})

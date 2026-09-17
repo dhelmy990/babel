@@ -59,10 +59,18 @@ uv pip compile --generate-hashes --output-file requirements-dev.txt requirements
 ## Publishing study notes
 
 The verified publisher can switch to Admin mode, open **New article** from the
-galaxy or timeline, upload a UTF-8 Markdown file, assign logical paths to image
-uploads, preview the exact rendered article, and publish it. Existing articles
-use the same form at their Edit article link; an edit can retain its current
-Markdown and images, while a replacement image wins at the same logical path.
+galaxy or timeline, and write directly in the visual article editor. The pill
+toolbar formats headings, emphasis, lists, quotes, code, and links. Switch to
+**Markdown** to edit the source. Paste PNG, JPEG, or WebP images into the text,
+drop them at the cursor, or choose **+ Image**; images appear immediately and
+upload when the article is saved (10 MB per image, up to 20 images per article).
+Use **Preview** to see the exact server rendering before publishing.
+
+Existing articles open with their current text and images at **Edit article**.
+UTF-8 Markdown file import and image uploads with logical paths remain available;
+after importing, edit the text directly above. A replacement image wins at the
+same logical path. Save explicitly to publish edits; failed saves retain the
+draft and images in the open tab, and leaving with unsaved changes shows a warning.
 Titles can change without changing the stable slug or original publication date.
 The owner can archive an article from its page, which returns to the timeline
 and removes the article from public reading and the galaxy.

@@ -199,7 +199,7 @@ EventTarget.prototype.addEventListener = function(type, ...args) {
         assert any(re.search(r"publishing\.[a-f0-9]+\.js$", url) for url in requests)
         assert any(re.search(r"notes\.[a-f0-9]+\.js$", url) for url in requests)
         assert any(re.search(r"reviews\.[a-f0-9]+\.js$", url) for url in requests)
-        with page.expect_response(lambda response: response.url.endswith("/api/mode")) as changed:
+        with page.expect_response(lambda response: response.url.endswith("/api/mode")) as changed, page.expect_navigation(wait_until="networkidle"):
             page.get_by_role("button", name="Reader mode", exact=True).click()
         assert changed.value.status == 200
         session_cookie = upstream_cookies["session"]
@@ -208,6 +208,21 @@ EventTarget.prototype.addEventListener = function(type, ...args) {
         csrf = response.headers.get("set-cookie", "")
         # Cookies are asserted without weakening production transport settings.
         assert "Secure" in csrf and "HttpOnly" not in csrf.split("csrftoken=")[-1].split("\n")[0]
+        # The owner editor also loads through hashed dynamic imports in the
+        # production image, and saved Markdown survives the real HTTP path.
+        page.goto("https://dhelmy.stream/publish/" + data["public"])
+        editor = page.get_by_role("textbox", name="Article body", exact=True)
+        editor.wait_for()
+        assert editor.locator("img[data-image-path]").get_attribute("src").startswith("/assets/")
+        editor.click()
+        page.keyboard.press("Control+End")
+        page.keyboard.press("Enter")
+        page.keyboard.type("Edited through the production bundle.")
+        page.get_by_role("button", name="Save", exact=True).click()
+        page.wait_for_url("https://dhelmy.stream/" + data["slug"])
+        assert "Edited through the production bundle." in page.locator(".article-body").inner_text()
+        assert any(re.search(r"/vendor/article-editor\.[a-f0-9]+\.js$", url) for url in requests)
+        assert not errors
         browser.close()
     compose("exec", "-T", "web", "python", "manage.py", "check", "--deploy", "--fail-level", "WARNING")
 

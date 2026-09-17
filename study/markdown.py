@@ -166,11 +166,21 @@ def render_article(prepared: PreparedArticle, image_urls: dict[str, str]) -> str
     """Render image tokens through a callback, never by replacing HTML text."""
     parser = markdown_parser()
 
+    def image_alt_text(tokens):
+        return "".join(
+            token.content if token.type in {"text", "text_special", "code_inline"}
+            else " " if token.type in {"softbreak", "hardbreak"}
+            else image_alt_text(token.children or []) if token.type == "image"
+            else ""
+            for token in tokens
+        )
+
     def render_image(tokens, idx, options, env):
         token = tokens[idx]
         name = token.attrGet("src") or ""
         src = image_urls.get(name, "asset:" + name)
-        return f'<img src="{escape(src, quote=True)}" alt="{escape(token.content, quote=True)}">'
+        alt = image_alt_text(token.children or [])
+        return f'<img src="{escape(src, quote=True)}" alt="{escape(alt, quote=True)}">'
 
     parser.renderer.rules["image"] = render_image
     return parser.renderer.render(list(prepared.tokens), parser.options, {})

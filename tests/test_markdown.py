@@ -1,6 +1,17 @@
 import pytest
 
 
+def test_image_alt_text_uses_parsed_text_instead_of_markdown_escapes():
+    from io import BytesIO
+    from PIL import Image
+    from study.markdown import prepare_article
+
+    image = BytesIO()
+    Image.new("RGB", (1, 1)).save(image, "PNG")
+    prepared = prepare_article(r"![A \[caption\]](image.png)", {"image.png": image.getvalue()})
+    assert 'alt="A [caption]"' in prepared.html
+
+
 def test_prepare_article_rejects_a_missing_image_without_parsing_html():
     from study.markdown import prepare_article
 

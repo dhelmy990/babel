@@ -1,0 +1,9 @@
+export { Editor } from '@tiptap/core';
+export { StarterKit } from '@tiptap/starter-kit';
+export { Image } from '@tiptap/extension-image';
+export { TableKit } from '@tiptap/extension-table';
+export { Markdown } from '@tiptap/markdown';
+export { TaskList, TaskItem } from '@tiptap/extension-list';
+export { Link } from '@tiptap/extension-link';
+export { Paragraph } from '@tiptap/extension-paragraph';
+export { marked } from 'marked';
