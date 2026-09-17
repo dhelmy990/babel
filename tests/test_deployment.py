@@ -14,7 +14,7 @@ import time
 from uuid import uuid4
 
 import pytest
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import expect, sync_playwright
 
 from tests.test_production_settings import production_env
 
@@ -214,13 +214,21 @@ EventTarget.prototype.addEventListener = function(type, ...args) {
         editor = page.get_by_role("textbox", name="Article body", exact=True)
         editor.wait_for()
         assert editor.locator("img[data-image-path]").get_attribute("src").startswith("/assets/")
-        editor.click()
-        page.keyboard.press("Control+End")
-        page.keyboard.press("Enter")
-        page.keyboard.type("Edited through the production bundle.")
+        # Click actual text, then create a body paragraph after the heading.
+        # Verify the paragraph before saving: native cursor updates after a
+        # padding click and Ctrl+End can lag behind zero-delay keystrokes.
+        editor.get_by_role("heading", name="Recovery public", exact=True).click()
+        expect(editor).to_be_focused()
+        editor.press("End")
+        editor.press("Enter")
+        editor.press_sequentially("Edited through the production bundle.")
+        expect(editor.locator("p").filter(has_text="Edited through the production bundle.")).to_be_visible()
+        assert not errors
         page.get_by_role("button", name="Save", exact=True).click()
         page.wait_for_url("https://dhelmy.stream/" + data["slug"])
-        assert "Edited through the production bundle." in page.locator(".article-body").inner_text()
+        expect(page.locator(".article-body")).to_contain_text("Edited through the production bundle.")
+        expect(page.locator(".article-body img")).to_have_attribute("src", re.compile("/assets/"))
+        page.wait_for_load_state("networkidle")
         assert any(re.search(r"/vendor/article-editor\.[a-f0-9]+\.js$", url) for url in requests)
         assert not errors
         browser.close()
