@@ -177,6 +177,21 @@ def test_mode_switch_and_metadata_save_preserve_exact_markdown(editable_owner_pa
     assert page.get_by_role("textbox", name="Markdown source", exact=True).input_value() == original
 
 
+def test_switching_modes_does_not_steal_focus_from_title(publisher_page, live_server):
+    page = publisher_page
+    page.goto(live_server.url + "/publish")
+    page.get_by_role("button", name="Markdown", exact=True).click()
+    # Simulate moving straight from the mode switch to another field, before
+    # the next animation frame. A delayed editor focus must not take it back.
+    assert page.evaluate("""async () => {
+      document.querySelector('[data-editor-mode="write"]').click();
+      const title = document.querySelector('input[name="title"]');
+      title.focus();
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      return document.activeElement === title;
+    }""")
+
+
 def test_editor_layout_on_mobile_and_desktop(publisher_page, live_server):
     page = publisher_page
     errors = []

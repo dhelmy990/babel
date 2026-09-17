@@ -111,6 +111,13 @@ export function createArticleEditor(root, state, {onChange, onMessage}) {
     onTransaction: updateToolbar,
   });
 
+  function focusedChain() {
+    // Tiptap's focus command defers to requestAnimationFrame for React. This
+    // vanilla editor must focus immediately so it cannot steal a later click.
+    editor.view.focus();
+    return editor.chain();
+  }
+
   function updateToolbar() {
     // Tiptap may dispatch an initialization transaction before construction ends.
     if (!visual.querySelector(".tiptap")) return;
@@ -154,7 +161,7 @@ export function createArticleEditor(root, state, {onChange, onMessage}) {
       source.focus();
       onChange();
     } else {
-      editor.chain().focus().insertContent(images).run();
+      focusedChain().insertContent(images).run();
     }
     onMessage("Image added. It will be uploaded when you save.");
   }
@@ -177,7 +184,7 @@ export function createArticleEditor(root, state, {onChange, onMessage}) {
     source.hidden = mode !== "markdown";
     toolbar.querySelectorAll("[data-editor-command]").forEach(button => { button.disabled = mode !== "write"; });
     root.querySelectorAll("[data-editor-mode]").forEach(button => button.setAttribute("aria-pressed", String(button.dataset.editorMode === mode)));
-    if (mode === "write") editor.commands.focus();
+    if (mode === "write") editor.view.focus();
     else source.focus();
     updateToolbar();
   }
@@ -192,15 +199,15 @@ export function createArticleEditor(root, state, {onChange, onMessage}) {
     if (event.target.closest("button")) event.preventDefault();
   });
   const commands = {
-    bold: () => editor.chain().focus().toggleBold().run(),
-    italic: () => editor.chain().focus().toggleItalic().run(),
-    heading: () => editor.chain().focus().toggleHeading({level: 2}).run(),
-    bulletList: () => editor.chain().focus().toggleBulletList().run(),
-    orderedList: () => editor.chain().focus().toggleOrderedList().run(),
-    blockquote: () => editor.chain().focus().toggleBlockquote().run(),
-    codeBlock: () => editor.chain().focus().toggleCodeBlock().run(),
-    undo: () => editor.chain().focus().undo().run(),
-    redo: () => editor.chain().focus().redo().run(),
+    bold: () => focusedChain().toggleBold().run(),
+    italic: () => focusedChain().toggleItalic().run(),
+    heading: () => focusedChain().toggleHeading({level: 2}).run(),
+    bulletList: () => focusedChain().toggleBulletList().run(),
+    orderedList: () => focusedChain().toggleOrderedList().run(),
+    blockquote: () => focusedChain().toggleBlockquote().run(),
+    codeBlock: () => focusedChain().toggleCodeBlock().run(),
+    undo: () => focusedChain().undo().run(),
+    redo: () => focusedChain().redo().run(),
     link: () => {
       linkPanel.hidden = false;
       linkInput.value = editor.getAttributes("link").href || "";
@@ -214,15 +221,15 @@ export function createArticleEditor(root, state, {onChange, onMessage}) {
   function applyLink() {
     const url = linkInput.value.trim();
     if (!/^(https?:\/\/|mailto:)/i.test(url)) { onMessage("Use an https://, http://, or mailto: link."); return; }
-    editor.chain().focus().extendMarkRange("link").setLink({href: url}).run();
+    focusedChain().extendMarkRange("link").setLink({href: url}).run();
     linkPanel.hidden = true;
   }
   root.querySelector("[data-apply-link]").addEventListener("click", applyLink);
-  root.querySelector("[data-remove-link]").addEventListener("click", () => { editor.chain().focus().extendMarkRange("link").unsetLink().run(); linkPanel.hidden = true; });
-  root.querySelector("[data-cancel-link]").addEventListener("click", () => { linkPanel.hidden = true; editor.commands.focus(); });
+  root.querySelector("[data-remove-link]").addEventListener("click", () => { focusedChain().extendMarkRange("link").unsetLink().run(); linkPanel.hidden = true; });
+  root.querySelector("[data-cancel-link]").addEventListener("click", () => { linkPanel.hidden = true; editor.view.focus(); });
   linkInput.addEventListener("keydown", event => {
     if (event.key === "Enter") { event.preventDefault(); applyLink(); }
-    if (event.key === "Escape") { event.preventDefault(); linkPanel.hidden = true; editor.commands.focus(); }
+    if (event.key === "Escape") { event.preventDefault(); linkPanel.hidden = true; editor.view.focus(); }
   });
   root.querySelector("[data-insert-image]").addEventListener("click", () => imageInput.click());
   imageInput.addEventListener("change", () => { insertImages([...imageInput.files]); imageInput.value = ""; });
