@@ -13,7 +13,7 @@
 - [x] Build `study/static/study/article-editor.js` to own editor state, mode switching, image previews, and pending image files. Integrate with `publishing.js`, keeping preview/save and import compatibility.
 - [x] Add accessible toolbar/editor markup and responsive styles. Supply existing image URL mappings through `study/views/content.py`.
 - [x] Run publishing/browser regressions, the full suite, Django checks, and production static collection. Inspect desktop/mobile screenshots and review the final diff.
-- [ ] Update publishing documentation, commit only task files, and push to the confirmed deployment branch. Verify the resulting remote commit and available deployment checks.
+- [x] Update publishing documentation, commit only task files, and push to the confirmed deployment branch. Verify the resulting remote commit and available deployment checks.
 
 ## Verification cases
 
@@ -39,3 +39,5 @@ CI exposed a delayed-focus race when moving from Write mode to the title field. 
 - Django system checks and migration check passed; no migration required.
 - Desktop (1280 px) and mobile (390 px) screenshots reviewed; no horizontal overflow.
 - Production npm dependency audit: zero vulnerabilities.
+
+Deployment-branch CI passed 442 tests (14 opt-in skips), followed by all 30 production/container checks. The release was published from `personal_website_deploy`. Native caret movement in browser tests uses a short key-hold interval so Enter follows the browser selection update.
