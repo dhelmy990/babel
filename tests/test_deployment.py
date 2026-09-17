@@ -219,7 +219,7 @@ EventTarget.prototype.addEventListener = function(type, ...args) {
         # padding click and Ctrl+End can lag behind zero-delay keystrokes.
         editor.get_by_role("heading", name="Recovery public", exact=True).click()
         expect(editor).to_be_focused()
-        editor.press("End")
+        editor.press("End", delay=50)
         editor.press("Enter")
         editor.press_sequentially("Edited through the production bundle.")
         expect(editor.locator("p").filter(has_text="Edited through the production bundle.")).to_be_visible()
