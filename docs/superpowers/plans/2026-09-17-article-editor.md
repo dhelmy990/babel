@@ -30,6 +30,8 @@ The independent review identified Markdown compatibility issues in the library d
 
 The image parser extracts plain alt text before serialization, and image-only paragraphs retain their paragraph wrapper for the inline image schema. File selections made during module loading are reconciled when initialization completes.
 
+CI exposed a delayed-focus race when moving from Write mode to the title field. The adapter now uses synchronous ProseMirror focus instead of Tiptap's animation-frame focus command. A deterministic regression moves focus to the title within the same frame and confirms that the editor does not take it back.
+
 ## Verification
 
 - Full suite: 396 passed, 12 opt-in tests skipped.
