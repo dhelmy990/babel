@@ -20,6 +20,7 @@
 !js/website-graph.js
 !scripts/
 !scripts/vendor.mjs
+!scripts/editor-vendor.js
 !deploy/
 !deploy/entrypoint.sh
 !deploy/recovery.py

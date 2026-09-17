@@ -2,6 +2,7 @@ FROM node:24.21.0-bookworm-slim@sha256:2fe369e969550cde8e867afc3fe370b260140cab4
 WORKDIR /vendor
 COPY package.json package-lock.json ./
 COPY scripts/vendor.mjs scripts/vendor.mjs
+COPY scripts/editor-vendor.js scripts/editor-vendor.js
 RUN npm ci --omit=dev && npm run vendor
 
 FROM python:3.13.15-slim-trixie@sha256:9d2e5553305c7c7b0097999bb17187c69b921ccd6bc9d40e4bb5ebe652c00285
