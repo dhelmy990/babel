@@ -71,6 +71,7 @@ export function createArticleEditor(root, state, {onChange, onMessage}) {
     parseMarkdown(token, helpers) {
       // The default parser unwraps lone images as block nodes. Our images are
       // inline, so even an image-only paragraph must retain its paragraph.
+      // This wrapper also provides a place to position the text cursor.
       if (token.tokens?.length === 1 && token.tokens[0].type === "image") {
         return helpers.createNode("paragraph", undefined, helpers.parseInline(token.tokens));
       }
