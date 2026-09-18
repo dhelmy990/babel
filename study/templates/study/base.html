@@ -7,6 +7,7 @@
   <title>{% block title %}dhelmy.stream — Diego Helmy's study notes{% endblock %}</title>
   <meta name="description" content="A compilation of my various learnings about C++, finance, and model serving and model development.">
   <link rel="stylesheet" href="{% static 'study/site.css' %}">
+  {% block extra_head %}{% endblock %}
   <script type="module" src="{% static 'study/site.js' %}"></script>
   <script type="module" src="{% static 'study/reviews.js' %}"></script>
 </head>
@@ -15,9 +16,10 @@
     <a class="brand" href="/">dhelmy.stream</a>
     <a class="active" href="/">Timeline</a>
     {% if request.user.is_authenticated %}
-    <span class="review-navigation" data-review-navigation {% if article.archived_at or editor_state %}data-review-passive{% endif %}>
+    <span class="review-navigation" data-review-navigation {% if article.archived_at or editor_state or review_passive %}data-review-passive{% endif %}>
       <a data-review-link href="/#reviews">Review today</a><span class="review-nav-status" data-review-nav-status role="status" hidden></span><button class="nav-action" type="button" data-review-retry hidden>Retry reviews</button>
     </span>
+    <a href="{% url 'reviews_calendar' %}">Study calendar</a>
     {% endif %}
     {% if request.user.is_authenticated %}
       <div class="account-controls">

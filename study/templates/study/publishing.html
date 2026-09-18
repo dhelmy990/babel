@@ -13,7 +13,9 @@
       <div class="editor-toolbar" role="toolbar" aria-label="Text formatting">
         <button type="button" data-editor-command="bold" aria-label="Bold" title="Bold (Ctrl/⌘ B)"><strong>B</strong></button>
         <button type="button" data-editor-command="italic" aria-label="Italic" title="Italic (Ctrl/⌘ I)"><em>I</em></button>
-        <button type="button" data-editor-command="heading" aria-label="Heading" title="Heading">H2</button>
+        <button type="button" data-editor-command="heading" data-heading-level="1" aria-label="Heading 1" title="Heading 1">H1</button>
+        <button type="button" data-editor-command="heading" data-heading-level="2" aria-label="Heading 2" title="Heading 2">H2</button>
+        <button type="button" data-editor-command="heading" data-heading-level="3" aria-label="Heading 3" title="Heading 3">H3</button>
         <span class="toolbar-divider" aria-hidden="true"></span>
         <button type="button" data-editor-command="bulletList" aria-label="Bullet list" title="Bullet list">• List</button>
         <button type="button" data-editor-command="orderedList" aria-label="Numbered list" title="Numbered list">1. List</button>
@@ -21,26 +23,18 @@
         <button type="button" data-editor-command="codeBlock" aria-label="Code block" title="Code block">&lt;/&gt;</button>
         <button type="button" data-editor-command="link" aria-label="Link" title="Link">↗</button>
         <span class="toolbar-divider" aria-hidden="true"></span>
-        <button type="button" data-insert-image title="Insert an image">+ Image</button>
         <button type="button" data-editor-command="undo" aria-label="Undo" title="Undo">↶</button>
         <button type="button" data-editor-command="redo" aria-label="Redo" title="Redo">↷</button>
       </div>
       <div class="editor-link" hidden><label>Link URL<input type="url" data-link-url placeholder="https://…"></label><button type="button" data-apply-link>Apply</button><button type="button" data-remove-link>Remove</button><button type="button" data-cancel-link>Cancel</button></div>
       <div data-visual-editor></div>
       <textarea data-markdown-source aria-label="Markdown source" spellcheck="false" hidden></textarea>
-      <input type="file" data-inline-images accept="image/png,image/jpeg,image/webp" multiple hidden>
-      <p class="editor-hint">Paste images right into your text. Markdown shortcuts work here, too.</p>
+      <p class="editor-hint">Paste images right into your text. Ctrl + grows headings; Ctrl − shrinks them.</p>
     </section>
-    <div class="editor-imports">
-    <p class="eyebrow">Import from a file <span>· optional</span></p>
-    <label>Markdown file<input name="markdown_file" type="file" accept="text/markdown,.md,.markdown"></label>
-    <p class="field-note">Import UTF-8 Markdown into the editor, then keep writing above.</p>
-    <label>Image files<input id="image-files" name="images" type="file" accept="image/*" multiple></label>
-    <div id="image-paths" aria-live="polite"></div>
-    {% if article %}<section class="existing-images" aria-labelledby="existing-images-title"><h2 id="existing-images-title">Existing image paths</h2>{% if editor_state.existingPaths %}<ul>{% for path in editor_state.existingPaths %}<li><code>{{ path }}</code></li>{% endfor %}</ul>{% else %}<p>No stored images.</p>{% endif %}</section>{% endif %}
-    </div>
+    <div class="publishing-action-bar" aria-label="Publishing actions">
     <div class="publish-actions"><button type="button" data-preview>Preview</button><button type="submit">{% if article %}Save{% else %}Publish{% endif %}</button></div>
     <p id="publish-status" role="status" aria-live="polite"></p>
+    </div>
     </fieldset>
   </form>
   <noscript><p>Enable JavaScript to edit and save articles.</p></noscript>

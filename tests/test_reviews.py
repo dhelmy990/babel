@@ -44,18 +44,28 @@ def test_first_completion_then_selected_review_doubles_from_completion_date(read
     assert context["eligible"] and context["status"] == "first_read"
     assert not ReviewSchedule.objects.exists()
     first = complete_article(reader, article.pk, token=context["token"], now=NOW)
-    assert first == {"status": "first_read", "interval_days": "1", "generation": 1, "next_due_date": "2026-09-15"}
+    assert first == {"status": "first_read", "interval_days": "1", "generation": 1, "next_due_date": "2026-09-15", "days_until_due": 1}
     assert get_review_day(reader, now=NOW).slots.count() == 0
     tomorrow = NOW + timedelta(days=1)
     assert get_review_day(reader, now=tomorrow).slots.count() == 1
     context = reading_context(reader, article.pk, now=tomorrow)
     assert context["eligible"] and context["status"] == "review_due"
     reviewed = complete_article(reader, article.pk, token=context["token"], now=tomorrow)
-    assert reviewed == {"status": "reviewed", "interval_days": "2", "generation": 2, "next_due_date": "2026-09-17"}
+    assert reviewed == {"status": "reviewed", "interval_days": "2", "generation": 2, "next_due_date": "2026-09-17", "days_until_due": 2}
     assert get_review_day(reader, now=tomorrow).slots.get().completed_at == tomorrow
     assert complete_article(reader, article.pk, token=context["token"], now=tomorrow)["status"] == "already_processed"
     assert finish(reader, article, tomorrow)["status"] == "not_due"
     assert ReviewSchedule.objects.get().generation == 2
+
+
+def test_retry_after_midnight_reports_remaining_days_not_original_interval(reader, article_factory):
+    from study.services.reviews import complete_article, reading_context
+    article = article_factory("Remaining days")
+    context = reading_context(reader, article.pk, now=NOW)
+    complete_article(reader, article.pk, token=context["token"], now=NOW)
+    result = complete_article(reader, article.pk, token=context["token"], now=NOW + timedelta(hours=23))
+    assert result["status"] == "already_processed"
+    assert result["days_until_due"] == 0
 
 
 @pytest.mark.parametrize("count", [0, 1, 2, 5])

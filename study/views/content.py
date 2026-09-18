@@ -9,7 +9,7 @@ from django.views.decorators.http import require_GET, require_POST
 from study.forms import ArticleSubmissionForm
 from study.markdown import normalize_image_mapping, prepare_article, referenced_image_names, render_article
 from study.models import Article, Asset
-from study.services.content import RevisionConflict, SubmissionConflict, can_read_article, publish_article, stored_images_for_article, update_article, validate_article_metadata
+from study.services.content import RevisionConflict, SubmissionConflict, can_read_article, publish_article, rendering_titles, stored_images_for_article, update_article, validate_article_metadata
 from study.services.identity import require_publisher
 from study.storage import path_for
 from study.views.identity import authenticated_json_write, error
@@ -88,9 +88,10 @@ def preview(request):
     if not form.is_valid():
         return _form_error(form)
     try:
-        validate_article_metadata(form.cleaned_data["title"], form.cleaned_data["color"], form.cleaned_data["markdown"])
+        title, color = validate_article_metadata(form.cleaned_data["title"], form.cleaned_data["color"], form.cleaned_data["markdown"])
         images = normalize_image_mapping(form.cleaned_data["images"])
         article_id = form.cleaned_data.get("article_id")
+        article = None
         if article_id:
             article = Article.objects.get(pk=article_id)
             if article.archived_at is not None:
@@ -99,12 +100,11 @@ def preview(request):
                 **stored_images_for_article(article, referenced_image_names(form.cleaned_data["markdown"]) - set(images)),
                 **images,
             }
-        prepared = prepare_article(form.cleaned_data["markdown"], images)
+        prepared = prepare_article(form.cleaned_data["markdown"], images, titles=rendering_titles(title, article))
     except Article.DoesNotExist:
         return error("not_found", "Article was not found.", 404)
     except ValueError as exc:
         return error("invalid_article", str(exc), 400)
-    title, color = validate_article_metadata(form.cleaned_data["title"], form.cleaned_data["color"], form.cleaned_data["markdown"])
     response = JsonResponse({"html": _preview_html(prepared), "excerpt": prepared.excerpt, "sources": prepared.sources, "title": title, "color": color})
     response["Cache-Control"] = "private, no-store"
     return response

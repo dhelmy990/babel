@@ -13,11 +13,9 @@ export function createArticleEditor(root, state, {onChange, onMessage}) {
   const visual = root.querySelector("[data-visual-editor]");
   const source = root.querySelector("[data-markdown-source]");
   const toolbar = root.querySelector(".editor-toolbar");
-  const imageInput = root.querySelector("[data-inline-images]");
   const linkPanel = root.querySelector(".editor-link");
   const linkInput = root.querySelector("[data-link-url]");
   const pendingImages = new Map();
-  const importedImages = new Map();
   const objectURLs = new Set();
   let markdown = state.markdown || "";
   let mode = "write";
@@ -26,7 +24,7 @@ export function createArticleEditor(root, state, {onChange, onMessage}) {
   function imageURL(path) {
     let name = path;
     try { name = decodeURIComponent(path).replaceAll("\\", "/").replace(/^\.\//, ""); } catch { /* Invalid paths are rejected on save. */ }
-    return pendingImages.get(name)?.url || importedImages.get(name)?.url || state.imageUrls?.[name];
+    return pendingImages.get(name)?.url || state.imageUrls?.[name];
   }
 
   const ArticleImage = Image.extend({
@@ -89,6 +87,16 @@ export function createArticleEditor(root, state, {onChange, onMessage}) {
     contentType: "markdown",
     editorProps: {
       attributes: {role: "textbox", "aria-label": "Article body", "aria-multiline": "true", "data-placeholder": "Start writing…"},
+      handleKeyDown(_view, event) {
+        if (busy || !event.ctrlKey || event.altKey || event.metaKey || !["+", "=", "-", "_"].includes(event.key)) return false;
+        const grow = event.key === "+" || event.key === "=";
+        const current = editor.isActive("heading") ? editor.getAttributes("heading").level : 4;
+        const next = grow ? Math.max(1, Math.min(current, 4) - 1) : Math.min(4, current + 1);
+        if (next === 4) editor.commands.setParagraph();
+        else editor.commands.setHeading({level: next});
+        event.preventDefault();
+        return true;
+      },
       handlePaste(_view, event) {
         const files = [...(event.clipboardData?.files || [])];
         if (!files.length) return false;
@@ -128,7 +136,7 @@ export function createArticleEditor(root, state, {onChange, onMessage}) {
         if (command === "undo" || command === "redo") {
           button.disabled = busy || mode !== "write" || !editor.can()[command]();
         } else {
-          button.setAttribute("aria-pressed", String(editor.isActive(command, command === "heading" ? {level: 2} : {})));
+          button.setAttribute("aria-pressed", String(editor.isActive(command, command === "heading" ? {level: Number(button.dataset.headingLevel)} : {})));
         }
       });
     });
@@ -202,7 +210,7 @@ export function createArticleEditor(root, state, {onChange, onMessage}) {
   const commands = {
     bold: () => focusedChain().toggleBold().run(),
     italic: () => focusedChain().toggleItalic().run(),
-    heading: () => focusedChain().toggleHeading({level: 2}).run(),
+    heading: button => focusedChain().toggleHeading({level: Number(button.dataset.headingLevel)}).run(),
     bulletList: () => focusedChain().toggleBulletList().run(),
     orderedList: () => focusedChain().toggleOrderedList().run(),
     blockquote: () => focusedChain().toggleBlockquote().run(),
@@ -216,8 +224,9 @@ export function createArticleEditor(root, state, {onChange, onMessage}) {
     },
   };
   toolbar.addEventListener("click", event => {
-    const command = event.target.closest("[data-editor-command]")?.dataset.editorCommand;
-    if (command && !busy && mode === "write") commands[command]();
+    const button = event.target.closest("[data-editor-command]");
+    const command = button?.dataset.editorCommand;
+    if (command && !busy && mode === "write") commands[command](button);
   });
   function applyLink() {
     const url = linkInput.value.trim();
@@ -232,12 +241,9 @@ export function createArticleEditor(root, state, {onChange, onMessage}) {
     if (event.key === "Enter") { event.preventDefault(); applyLink(); }
     if (event.key === "Escape") { event.preventDefault(); linkPanel.hidden = true; editor.view.focus(); }
   });
-  root.querySelector("[data-insert-image]").addEventListener("click", () => imageInput.click());
-  imageInput.addEventListener("change", () => { insertImages([...imageInput.files]); imageInput.value = ""; });
 
   return {
     getMarkdown: () => markdown,
-    setMarkdown,
     appendImages(data) {
       for (const [path, {file}] of pendingImages) {
         // Removed images remain available to Undo, but are not uploaded.
@@ -245,16 +251,6 @@ export function createArticleEditor(root, state, {onChange, onMessage}) {
         data.append("images", file, path.split("/").pop());
         data.append("image_path", path);
       }
-    },
-    setImportedImages(images) {
-      for (const {url} of importedImages.values()) { URL.revokeObjectURL(url); objectURLs.delete(url); }
-      importedImages.clear();
-      for (const [path, file] of images) importedImages.set(path, {file, url: objectURL(file)});
-      visual.querySelectorAll("img[data-image-path]").forEach(image => {
-        const url = imageURL(image.dataset.imagePath);
-        if (url) image.src = url;
-        else image.removeAttribute("src");
-      });
     },
     setBusy(value) {
       busy = value;

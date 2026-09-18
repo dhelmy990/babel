@@ -1,9 +1,15 @@
 {% extends "study/base.html" %}
 {% load static %}
 {% block title %}{{ article.title }} — dhelmy.stream{% endblock %}
+{% block extra_head %}<link rel="stylesheet" href="{% static 'study/reading-reveal.css' %}"><link rel="stylesheet" href="{% static 'study/article-outline.css' %}">{% endblock %}
 {% block content %}
 <main class="article-shell" data-notes-article="{{ article.pk }}">
   <div class="notes-toolbar"><button class="note-toggle" type="button" data-notes-toggle aria-expanded="false" aria-controls="notes-sidebar" hidden>My notes</button><a data-notes-signin href="{% url 'account_login' %}">Sign in with Google to keep private notes</a></div>
+  <aside class="article-outline" data-article-outline hidden>
+    <p class="outline-label">On this page</p>
+    <button type="button" data-outline-toggle aria-expanded="false" aria-controls="article-outline-links">On this page <span aria-hidden="true">⌄</span></button>
+    <nav id="article-outline-links" aria-label="On this page"><ol></ol></nav>
+  </aside>
   <div class="annotation-surface" data-annotation-surface>
     <aside class="prereqs" aria-label="Before you read">{% if prerequisites %}<h2>Before you read</h2>{% for neighbor in prerequisites %}{% include "study/babel_anchor.html" %}{% endfor %}{% endif %}</aside>
     <article class="article-text">
@@ -12,7 +18,19 @@
       {% if article.sources %}<section class="sources" aria-labelledby="sources-title"><h2 id="sources-title">Sources</h2><div>{% for label, url in article.sources %}<a href="{{ url }}" rel="noopener noreferrer" target="_blank">{{ label }}</a>{% endfor %}</div></section>{% endif %}
       {% if can_publish and identity_mode == 'admin' and not article.archived_at %}<section class="owner-actions" aria-label="Article owner actions"><a class="owner-link" href="{% url 'article_edit' article.pk %}">Edit article</a><button type="button" data-archive-article="{{ article.pk }}">Archive</button><p role="status" aria-live="polite"></p></section>{% endif %}
     </article>
-    <section class="next" aria-labelledby="next-title" {% if not article.archived_at %}data-reading-article="{{ article.pk }}"{% endif %}><h2 id="next-title">Articles to read next</h2><div class="next-links">{% for neighbor in successors %}{% include "study/babel_anchor.html" %}{% endfor %}</div>{% if not article.archived_at %}<div class="reading-completion" data-reading-controls hidden><p data-reading-status role="status" aria-live="polite"></p><button type="button" data-reading-retry hidden>Retry reading completion</button></div>{% endif %}</section>
+    {% if request.user.is_authenticated and not article.archived_at %}
+    <section class="reading-reveal" data-reading-article="{{ article.pk }}" style="--babel-color: {{ article.color }}" aria-label="Finish this reading">
+      <button class="reading-pull" data-reading-pull type="button" aria-label="Pull down to complete review" disabled><span>Keep scrolling to complete your review</span><svg viewBox="0 0 240 48" aria-hidden="true"><path d="M8 5 L120 23 L232 5 M8 23 L120 41 L232 23"/></svg></button>
+      <div class="reading-panel" data-reading-controls hidden>
+        <p class="eyebrow" data-reading-prompt>One more pull. A little more understood.</p>
+        <h2 data-reading-heading>Ready for your next read?</h2>
+        <p class="reading-status" data-reading-status role="status" aria-live="polite"></p>
+        <button type="button" data-reading-retry hidden>Retry reading completion</button>
+        <a class="reading-calendar" href="{% url 'reviews_calendar' %}">See your study calendar <span aria-hidden="true">↗</span></a>
+      </div>
+    </section>
+    {% endif %}
+    <section class="next" aria-labelledby="next-title"><h2 id="next-title">Articles to read next</h2><div class="next-links">{% for neighbor in successors %}{% include "study/babel_anchor.html" %}{% endfor %}</div></section>
     <div class="notes-overlay" data-notes-overlay></div>
   </div>
   <aside id="notes-sidebar" class="notes-panel" data-notes-sidebar aria-label="My notes" hidden>
@@ -25,5 +43,6 @@
   </aside>
 </main>
 <script type="module" src="{% static 'study/notes.js' %}"></script>
+<script type="module" src="{% static 'study/article-outline.js' %}"></script>
 {% if can_publish and identity_mode == 'admin' and not article.archived_at %}<script type="module" src="{% static 'study/publishing.js' %}"></script>{% endif %}
 {% endblock %}

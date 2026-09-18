@@ -3,11 +3,14 @@ import json
 import logging
 from functools import wraps
 
+from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied, RequestDataTooBig
 from django.http import Http404, JsonResponse
+from django.shortcuts import render
 from django.utils import timezone
 
 from study.services.reviews import ReadingTokenError, complete_article, reading_context, today_payload
+from study.services.calendar import calendar_payload
 from study.views.identity import authenticated_json_write, error
 
 logger = logging.getLogger(__name__)
@@ -75,3 +78,18 @@ def complete(request, article_id):
         return _wrong_method("POST")
     data = _payload(request, ("token",))
     return JsonResponse(complete_article(request.user, article_id, token=data["token"], now=timezone.now()))
+
+
+@login_required
+def calendar_page(request):
+    response = render(request, "study/review_calendar.html", {"review_passive": True})
+    response["Cache-Control"] = "private, no-store"
+    return response
+
+
+@_private_api
+@authenticated_json_write
+def calendar_data(request):
+    if request.method != "GET":
+        return _wrong_method("GET")
+    return JsonResponse(calendar_payload(request.user, request.GET.get("month"), now=timezone.now()))

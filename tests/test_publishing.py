@@ -4,6 +4,28 @@ import pytest
 
 
 @pytest.mark.django_db
+def test_authored_first_heading_with_image_survives_repeated_saves(publisher):
+    from io import BytesIO
+    from PIL import Image
+    from study.services.content import publish_article, update_article
+
+    image = BytesIO()
+    Image.new("RGB", (1, 1)).save(image, "PNG")
+    article = publish_article(
+        publisher, title="Illustrated notes", color="#1a5276", submission_id=uuid4(),
+        markdown="# A diagram ![A & B](images/diagram.png)\n\nExplanation.",
+        images={"images/diagram.png": image.getvalue()},
+    )
+    for revision in (1, 2):
+        article = update_article(
+            publisher, article.pk, expected_revision=revision, title="Renamed notes", color=article.color,
+            markdown=article.markdown, images={},
+        )
+        assert '<h1>A diagram <img src="/assets/' in article.rendered_html
+        assert 'alt="A &amp; B"' in article.rendered_html
+
+
+@pytest.mark.django_db
 def test_failed_image_reference_does_not_publish(publisher):
     from study.models import Article
     from study.services.content import publish_article

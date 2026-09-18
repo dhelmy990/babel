@@ -228,10 +228,11 @@ def _token_generation(user, article_id, token, now):
     return data["generation"]
 
 
-def _result(status, schedule):
+def _result(status, schedule, completed_date):
     return {
         "status": status, "interval_days": str(int(schedule.interval_days)),
         "next_due_date": schedule.next_due_date.isoformat() if schedule.next_due_date else None,
+        "days_until_due": max(0, (schedule.next_due_date - completed_date).days) if schedule.next_due_date else None,
         "generation": schedule.generation,
     }
 
@@ -251,7 +252,7 @@ def complete_article(user, article_id, *, token, now) -> dict:
     def complete(profile, day, article, schedule):
         completed_date = local_date_for(now, profile.timezone)
         if schedule is not None and generation != schedule.generation:
-            return _result("already_processed", schedule)
+            return _result("already_processed", schedule, completed_date)
         if schedule is None:
             if generation != 0:
                 raise ReadingTokenError("Invalid reading token generation")
@@ -259,10 +260,10 @@ def complete_article(user, article_id, *, token, now) -> dict:
                 user=user, article=article, interval_days=1, generation=1,
                 next_due_date=_due_date(completed_date, 1), last_completed_at=now,
             )
-            return _result("first_read", schedule)
+            return _result("first_read", schedule, completed_date)
         status = _eligibility(schedule, day, completed_date)
         if status != "review_due":
-            return _result(status, schedule)
+            return _result(status, schedule, completed_date)
         interval = int(schedule.interval_days) * 2
         if interval >= 10**100:
             raise ValueError("Review interval exceeds the 100-digit storage limit")
@@ -276,7 +277,7 @@ def complete_article(user, article_id, *, token, now) -> dict:
         # This review also resolves carried assignments from previously selected
         # days, which can become active again after a timezone change.
         ReviewSlot.objects.filter(schedule=schedule, completed_at__isnull=True, cancelled_at__isnull=True).update(completed_at=now)
-        return _result("reviewed", schedule)
+        return _result("reviewed", schedule, completed_date)
 
     return _with_article(user, article_id, now, complete)
 

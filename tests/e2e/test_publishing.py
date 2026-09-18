@@ -3,8 +3,15 @@ import re
 import pytest
 from playwright.sync_api import expect
 
+from tests.e2e.test_article_editor import paste_image
+
 
 pytestmark = pytest.mark.django_db(transaction=True)
+
+
+def enter_markdown(page, markdown):
+    page.get_by_role("button", name="Markdown", exact=True).click()
+    page.get_by_role("textbox", name="Markdown source", exact=True).fill(markdown)
 
 
 def test_owner_publishes_previewed_markdown_and_returns_to_real_article(publisher_page, live_server):
@@ -18,17 +25,11 @@ def test_owner_publishes_previewed_markdown_and_returns_to_real_article(publishe
     page.screenshot(path="/tmp/babel-p5-owner-form-desktop.png", full_page=True)
     expect(page.locator("[data-preview-sources]")).to_be_hidden()
     page.get_by_label("Title", exact=True).fill("Ownership")
-    page.get_by_label("Markdown file", exact=True).set_input_files({
-        "name": "source-free.md", "mimeType": "text/markdown",
-        "buffer": b"# Ownership\n\nA clear lifetime.",
-    })
+    enter_markdown(page, "# Ownership\n\nA clear lifetime.")
     page.get_by_role("button", name="Preview", exact=True).click()
     expect(page.locator("[data-preview-body]")).to_contain_text("A clear lifetime.")
     expect(page.locator("[data-preview-sources]")).to_be_hidden()
-    page.get_by_label("Markdown file", exact=True).set_input_files({
-        "name": "ownership.md", "mimeType": "text/markdown",
-        "buffer": b"# Ownership\n\nA clear lifetime.\n\n## Sources\n\n[The source](https://example.com/source)",
-    })
+    enter_markdown(page, "# Ownership\n\nA clear lifetime.\n\n## Sources\n\n[The source](https://example.com/source)")
     page.get_by_role("button", name="Preview", exact=True).click()
     expect(page.locator("[data-preview-sources]")).to_contain_text("The source")
     expect(page.locator("[data-preview-sources]")).to_be_visible()
@@ -48,32 +49,26 @@ def test_owner_publishes_previewed_markdown_and_returns_to_real_article(publishe
     assert errors == []
 
 
-def test_owner_form_keeps_text_and_files_when_save_fails(publisher_page, live_server):
+def test_owner_form_keeps_source_when_save_fails(publisher_page, live_server):
     page = publisher_page
     page.goto(live_server.url + "/publish")
     page.get_by_label("Title", exact=True).fill("Retry article")
-    page.get_by_label("Markdown file", exact=True).set_input_files({
-        "name": "retry.md", "mimeType": "text/markdown", "buffer": b"# Retry article\n\nStill here.",
-    })
+    enter_markdown(page, "# Retry article\n\nStill here.")
     page.route("**/api/articles", lambda route: route.abort())
     page.get_by_role("button", name="Publish", exact=True).click()
     expect(page.get_by_role("status")).to_contain_text("could not")
     assert page.get_by_label("Title", exact=True).input_value() == "Retry article"
-    assert page.get_by_label("Markdown file", exact=True).evaluate("input => input.files.length") == 1
+    expect(page.get_by_role("textbox", name="Markdown source", exact=True)).to_have_value("# Retry article\n\nStill here.")
 
 
-def test_owner_uploads_an_image_at_an_editable_logical_path(publisher_page, live_server):
+def test_owner_pastes_an_image_in_markdown_mode(publisher_page, live_server):
     page = publisher_page
     page.goto(live_server.url + "/publish")
     page.get_by_label("Title", exact=True).fill("Diagram")
-    page.get_by_label("Markdown file", exact=True).set_input_files({
-        "name": "diagram.md", "mimeType": "text/markdown", "buffer": b"# Diagram\n\n![A diagram](images/diagram.png)",
-    })
-    page.get_by_label("Image files", exact=True).set_input_files({
-        "name": "diagram.png", "mimeType": "image/png",
-        "buffer": b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDAT\x08\xd7c\xf8\xcf\xc0\x00\x00\x03\x01\x01\x00\x18\xdd\x8d\xb1\x00\x00\x00\x00IEND\xaeB`\x82",
-    })
-    page.get_by_label("Logical path for diagram.png", exact=True).fill("images/diagram.png")
+    enter_markdown(page, "# Diagram\n\n")
+    source = page.get_by_role("textbox", name="Markdown source", exact=True)
+    source.press("Control+End")
+    paste_image(source)
     page.get_by_role("button", name="Preview", exact=True).click()
     expect(page.locator("[data-preview-body] img")).to_have_attribute("src", re.compile(r"data:image/png;base64,"))
     page.get_by_role("button", name="Publish", exact=True).click()
@@ -141,7 +136,7 @@ def test_owner_edits_metadata_while_retaining_existing_markdown_and_image(editab
     expect(page.locator(".article-body")).to_contain_text("Original body.")
 
 
-def test_stale_edit_keeps_typed_title_and_selected_files(editable_owner_page, live_server):
+def test_stale_edit_keeps_typed_title_and_pasted_images(editable_owner_page, live_server):
     page, article = editable_owner_page
     page.goto(f"{live_server.url}/publish/{article.pk}")
     newer_context = page.context.browser.new_context()
@@ -152,18 +147,15 @@ def test_stale_edit_keeps_typed_title_and_selected_files(editable_owner_page, li
     newer.get_by_role("button", name="Save", exact=True).click()
     newer.wait_for_url("**/editable")
     page.get_by_label("Title", exact=True).fill("My conflicting edit")
-    page.get_by_label("Markdown file", exact=True).set_input_files({
-        "name": "edit.md", "mimeType": "text/markdown", "buffer": b"# My conflicting edit\n\nKept.",
-    })
-    page.get_by_label("Image files", exact=True).set_input_files({
-        "name": "new.png", "mimeType": "image/png", "buffer": b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDAT\x08\xd7c\xf8\xcf\xc0\x00\x00\x03\x01\x01\x00\x18\xdd\x8d\xb1\x00\x00\x00\x00IEND\xaeB`\x82",
-    })
-    page.get_by_label("Logical path for new.png", exact=True).fill("images/new.png")
+    editor = page.get_by_role("textbox", name="Article body", exact=True)
+    editor.fill("My conflicting edit. Kept.")
+    editor.press("Control+End")
+    paste_image(editor)
     page.get_by_role("button", name="Save", exact=True).click()
     expect(page.get_by_role("status")).to_contain_text("changed elsewhere")
     assert page.get_by_label("Title", exact=True).input_value() == "My conflicting edit"
-    assert page.get_by_label("Markdown file", exact=True).evaluate("input => input.files.length") == 1
-    assert page.get_by_label("Image files", exact=True).evaluate("input => input.files.length") == 1
+    expect(editor).to_contain_text("My conflicting edit. Kept.")
+    expect(editor.locator("img[data-image-path]")).to_have_attribute("src", re.compile("blob:"))
     newer.reload()
     expect(newer.get_by_role("heading", name="Newer server content", exact=True)).to_be_visible()
     expect(newer.locator(".article-body")).to_contain_text("Original body.")
@@ -174,9 +166,7 @@ def test_lost_publish_response_retries_the_same_submission_without_duplicate(ret
     page = retry_publish_page
     page.goto(live_server.url + "/publish")
     page.get_by_label("Title", exact=True).fill("Retry on lost response")
-    page.get_by_label("Markdown file", exact=True).set_input_files({
-        "name": "retry.md", "mimeType": "text/markdown", "buffer": b"# Retry on lost response\n\nOnly once.",
-    })
+    enter_markdown(page, "# Retry on lost response\n\nOnly once.")
 
     def lose_response(route):
         route.fetch()

@@ -2,6 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
+import re
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -114,7 +115,108 @@ def open_article(env, article=None):
 
 
 def reach_end(page):
-    page.get_by_role("heading", name="Articles to read next", exact=True).scroll_into_view_if_needed()
+    expect(page.locator("[data-reading-pull]")).to_be_enabled()
+    page.locator("[data-reading-article]").evaluate("el => window.scrollTo(0, Math.max(0, el.getBoundingClientRect().top + scrollY - innerHeight + 90))")
+    page.evaluate("document.activeElement.blur()")
+    page.keyboard.press("End")
+
+
+def test_article_end_and_partial_pull_do_not_schedule(review_browser):
+    env = review_browser
+    page = open_article(env)
+    page.locator(".article-body").evaluate("el => window.scrollTo(0, el.getBoundingClientRect().bottom + scrollY - innerHeight + 60)")
+    page.wait_for_timeout(150)
+    assert schedules(env, env.long) == []
+    expect(page.locator("[data-reading-pull]")).to_be_visible()
+    page.mouse.wheel(0, 180)
+    page.wait_for_timeout(150)
+    assert schedules(env, env.long) == []
+    page.mouse.wheel(0, -180)
+    page.wait_for_timeout(150)
+    assert schedules(env, env.long) == []
+    page.keyboard.press("End")
+    expect(page.locator("[data-reading-status]")).to_have_text("Review complete, number of days till the next read: 1")
+    expect(page.locator("[data-reading-article]")).to_have_class(re.compile(".*is-complete.*"))
+    assert schedules(env, env.long)[0]["generation"] == 1
+
+
+def test_short_article_needs_explicit_pull_and_supports_reduced_motion(review_browser):
+    env = review_browser
+    page = env.page
+    page.emulate_media(reduced_motion="reduce")
+    page.goto(f"{env.url}/{env.short.slug}")
+    expect(page.locator("[data-reading-status]")).to_have_text("")
+    assert schedules(env, env.short) == []
+    page.get_by_role("button", name="Pull down to complete review", exact=True).focus()
+    page.keyboard.press("Enter")
+    expect(page.locator("[data-reading-status]")).to_have_text("Review complete, number of days till the next read: 1")
+    assert schedules(env, env.short)[0]["generation"] == 1
+
+
+def test_restored_bottom_and_resize_need_fresh_completion_intent(review_browser):
+    env = review_browser
+    page = open_article(env)
+    page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight)")
+    page.wait_for_timeout(150)
+    assert schedules(env, env.long) == []
+    page.evaluate("window.dispatchEvent(new PageTransitionEvent('pagehide', {persisted: true})); window.dispatchEvent(new PageTransitionEvent('pageshow', {persisted: true}))")
+    expect(page.locator("[data-reading-pull]")).to_be_enabled()
+    page.set_viewport_size({"width": 1000, "height": 800})
+    page.wait_for_timeout(150)
+    assert schedules(env, env.long) == []
+    reach_end(page)
+    expect(page.locator("[data-reading-status]")).to_have_text("Review complete, number of days till the next read: 1")
+
+
+def test_resizing_during_partial_pull_cannot_finish_review(review_browser):
+    env = review_browser
+    page = open_article(env)
+    page.locator("[data-reading-article]").evaluate("el => window.scrollTo(0, el.getBoundingClientRect().top + scrollY - innerHeight + 90)")
+    page.mouse.wheel(0, 200)
+    page.wait_for_timeout(150)
+    assert schedules(env, env.long) == []
+    page.set_viewport_size({"width": 1280, "height": 6000})
+    page.wait_for_timeout(150)
+    assert schedules(env, env.long) == []
+
+
+def test_full_pull_waits_for_acknowledgement_before_glowing(review_browser):
+    env = review_browser
+    page = open_article(env)
+    held = []
+    page.route("**/complete", lambda route: held.append(route))
+    reach_end(page)
+    expect(page.locator("[data-reading-status]")).to_have_text("Recording reading…")
+    expect(page.locator("[data-reading-article]")).not_to_have_class(re.compile(".*is-complete.*"))
+    assert schedules(env, env.long) == []
+    assert len(held) == 1
+    held.pop().continue_()
+    expect(page.locator("[data-reading-status]")).to_have_text("Review complete, number of days till the next read: 1")
+    page.screenshot(path="/tmp/babel-pull-complete-desktop.png")
+    page.set_viewport_size({"width": 390, "height": 844})
+    page.locator("[data-reading-status]").scroll_into_view_if_needed()
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    page.screenshot(path="/tmp/babel-pull-complete-mobile.png")
+
+
+def test_mobile_native_touch_pull_completes_once(review_browser):
+    env = review_browser
+    context = env.browser.new_context(viewport={"width": 390, "height": 844}, has_touch=True,
+                                      is_mobile=True, timezone_id="Asia/Singapore")
+    context.add_cookies([env.cookies["reader"]])
+    page = context.new_page()
+    page.goto(f"{env.url}/{env.short.slug}")
+    expect(page.locator("[data-reading-pull]")).to_be_enabled()
+    assert schedules(env, env.short) == []
+    cdp = context.new_cdp_session(page)
+    cdp.send("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [{"x": 190, "y": 720}]})
+    for y in [680, 600, 500, 400, 300, 200, 100]:
+        cdp.send("Input.dispatchTouchEvent", {"type": "touchMove", "touchPoints": [{"x": 190, "y": y}]})
+        page.wait_for_timeout(30)
+    cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+    expect(page.locator("[data-reading-status]")).to_have_text("Review complete, number of days till the next read: 1")
+    assert schedules(env, env.short)[0]["generation"] == 1
+    context.close()
 
 
 def test_opening_long_article_does_not_schedule_until_real_empty_successor_end(review_browser):
@@ -123,7 +225,7 @@ def test_opening_long_article_does_not_schedule_until_real_empty_successor_end(r
     assert schedules(env, env.long) == []
     expect(page.locator(".next-links a")).to_have_count(0)
     reach_end(page)
-    expect(page.locator("[data-reading-status]")).to_have_text("Added to your study reviews")
+    expect(page.locator("[data-reading-status]")).to_have_text("Review complete, number of days till the next read: 1")
     assert schedules(env, env.long)[0]["interval_days"] == 1
     page.reload()
     reach_end(page)
@@ -139,7 +241,8 @@ def test_short_article_and_failed_image_legitimately_complete(review_browser, im
     if image_error:
         page.route("**/assets/**", lambda route: route.abort())
     page.goto(f"{env.url}/{article.slug}")
-    expect(page.locator("[data-reading-status]")).to_have_text("Added to your study reviews")
+    reach_end(page)
+    expect(page.locator("[data-reading-status]")).to_have_text("Review complete, number of days till the next read: 1")
     assert schedules(env, article)[0]["interval_days"] == 1
 
 
@@ -158,7 +261,7 @@ def test_delayed_tall_image_cannot_count_an_early_end_intersection(review_browse
     assert page.locator(".next").bounding_box()["y"] > 900
     assert schedules(env, env.illustrated) == []
     reach_end(page)
-    expect(page.locator("[data-reading-status]")).to_have_text("Added to your study reviews")
+    expect(page.locator("[data-reading-status]")).to_have_text("Review complete, number of days till the next read: 1")
 
 
 def test_timezone_acknowledgement_precedes_first_day_materialization(review_browser):
@@ -186,13 +289,14 @@ def test_timezone_failure_has_retry_without_freezing_utc_or_blocking_notes(revie
     page.route("**/api/timezone", lambda route: route.abort())
     page.goto(f"{env.url}/{env.long.slug}")
     expect(page.locator("[data-reading-status]")).to_contain_text("could not")
+    expect(page.locator(".reading-panel")).to_have_css("opacity", "1")
     assert read_db(lambda: ReviewDay.objects.filter(user=env.reader).count()) == 0
     page.get_by_role("button", name="My notes", exact=True).click()
     expect(page.locator("[data-notes-list]")).to_contain_text("A separate private note")
     page.unroute("**/api/timezone")
     page.get_by_role("button", name="Retry reading completion", exact=True).click()
     reach_end(page)
-    expect(page.locator("[data-reading-status]")).to_have_text("Added to your study reviews")
+    expect(page.locator("[data-reading-status]")).to_have_text("Review complete, number of days till the next read: 1")
     assert read_db(lambda: ReviewDay.objects.get(user=env.reader).timezone) == "Asia/Singapore"
 
 
@@ -215,7 +319,7 @@ def test_lost_completion_response_retries_same_token_without_new_context(review_
     page.unroute(endpoint)
     page.on("request", lambda req: tokens.append(req.post_data_json["token"]) if req.url.endswith("/complete") else None)
     page.get_by_role("button", name="Retry reading completion", exact=True).click()
-    expect(page.locator("[data-reading-status]")).to_have_text("This reading was already recorded.")
+    expect(page.locator("[data-reading-status]")).to_have_text("Review complete, number of days till the next read: 1")
     assert tokens[0] == tokens[1] and contexts == []
     assert schedules(env, env.long)[0]["generation"] == 1
 
@@ -235,7 +339,7 @@ def test_only_expired_tokens_refresh_context(review_browser, invalid):
         expect(page.locator("[data-reading-status]")).to_contain_text("could not")
         assert contexts == [] and schedules(env, env.long) == []
     else:
-        expect(page.locator("[data-reading-status]")).to_have_text("Added to your study reviews")
+        expect(page.locator("[data-reading-status]")).to_have_text("Review complete, number of days till the next read: 1")
         assert len(contexts) == 1
         assert schedules(env, env.long)[0]["interval_days"] == 1
 
@@ -248,7 +352,7 @@ def test_hidden_document_waits_and_sidebar_opening_does_not_duplicate(review_bro
     page.wait_for_timeout(100)
     assert schedules(env, env.long) == []
     page.evaluate("delete document.visibilityState; document.dispatchEvent(new Event('visibilitychange'))")
-    expect(page.locator("[data-reading-status]")).to_have_text("Added to your study reviews")
+    expect(page.locator("[data-reading-status]")).to_have_text("Review complete, number of days till the next read: 1")
     page.get_by_role("button", name="My notes", exact=True).click()
     reach_end(page)
     assert schedules(env, env.long)[0]["generation"] == 1
@@ -275,7 +379,8 @@ def test_daily_list_max_three_updates_without_refill_after_completion_and_archiv
     expect(page.locator("[data-review-link]")).to_have_text("Review today · 3")
     selected_ids = read_db(lambda: list(ReviewSlot.objects.filter(day__user=env.reader).values_list("pk", flat=True)))
     links.first.click()
-    expect(page.locator("[data-reading-status]")).to_have_text("Review recorded")
+    reach_end(page)
+    expect(page.locator("[data-reading-status]")).to_have_text("Review complete, number of days till the next read: 2")
     expect(page.locator("[data-review-link]")).to_have_text("Review today · 2")
     assert schedules(env, env.due[0])[0]["interval_days"] == 2
     page.screenshot(path="/tmp/babel-r2-completion-desktop.png")
@@ -303,9 +408,11 @@ def test_cross_tab_stale_context_cannot_double_review(review_browser):
     other.goto(f"{env.url}/{env.due[0].slug}")
     expect(other.locator("[data-reading-status]")).to_have_text("")
     page.evaluate("delete document.visibilityState; document.dispatchEvent(new Event('visibilitychange'))")
-    expect(page.locator("[data-reading-status]")).to_have_text("Review recorded")
+    reach_end(page)
+    expect(page.locator("[data-reading-status]")).to_have_text("Review complete, number of days till the next read: 2")
     other.evaluate("delete document.visibilityState; document.dispatchEvent(new Event('visibilitychange'))")
-    expect(other.locator("[data-reading-status]")).to_have_text("This reading was already recorded.")
+    reach_end(other)
+    expect(other.locator("[data-reading-status]")).to_have_text("Review complete, number of days till the next read: 2")
     assert schedules(env, env.due[0])[0]["generation"] == 2
 
 
@@ -322,7 +429,8 @@ def test_excluded_pages_make_no_review_api_requests(review_browser, kind):
     page.goto(env.url + path)
     if kind == "preview":
         page.get_by_label("Title", exact=True).fill("A preview")
-        page.get_by_label("Markdown file", exact=True).set_input_files({"name": "preview.md", "mimeType": "text/markdown", "buffer": b"# Preview\n\nA short preview."})
+        page.get_by_role("button", name="Markdown", exact=True).click()
+        page.get_by_label("Markdown source", exact=True).fill("# Preview\n\nA short preview.")
         page.get_by_role("button", name="Preview", exact=True).click()
         expect(page.locator("[data-preview-body]")).to_contain_text("A short preview")
     page.wait_for_timeout(100)
@@ -373,7 +481,8 @@ def test_mobile_navbar_and_single_tap_review_links(review_browser, identity):
         page.locator("[data-review-link]").tap()
         page.locator("[data-review-items] a").first.tap()
         expect(page).to_have_url(f"{env.url}/{env.due[0].slug}")
-        expect(page.locator("[data-reading-status]")).to_have_text("Review recorded")
+        reach_end(page)
+        expect(page.locator("[data-reading-status]")).to_have_text("Review complete, number of days till the next read: 2")
     context.close()
 
 
@@ -389,7 +498,8 @@ def test_repeated_readiness_failure_keeps_retry_usable(review_browser):
     expect(retry).to_be_enabled()
     page.unroute("**/api/timezone")
     retry.click()
-    expect(page.locator("[data-reading-status]")).to_have_text("Added to your study reviews")
+    reach_end(page)
+    expect(page.locator("[data-reading-status]")).to_have_text("Review complete, number of days till the next read: 1")
 
 
 def test_completion_body_disconnect_retries_original_token(review_browser):
@@ -412,7 +522,7 @@ def test_completion_body_disconnect_retries_original_token(review_browser):
     reach_end(page)
     expect(page.locator("[data-reading-status]")).to_contain_text("could not")
     page.get_by_role("button", name="Retry reading completion", exact=True).click()
-    expect(page.locator("[data-reading-status]")).to_have_text("This reading was already recorded.")
+    expect(page.locator("[data-reading-status]")).to_have_text("Review complete, number of days till the next read: 1")
     assert len(tokens) == 2 and tokens[0] == tokens[1]
     assert schedules(env, env.long)[0]["generation"] == 1
 
@@ -466,7 +576,7 @@ def test_completion_retry_outside_end_view_remains_usable(review_browser):
     assert schedules(env, env.long) == []
     reach_end(page)
     page.get_by_role("button", name="Retry reading completion", exact=True).click()
-    expect(page.locator("[data-reading-status]")).to_have_text("Added to your study reviews")
+    expect(page.locator("[data-reading-status]")).to_have_text("Review complete, number of days till the next read: 1")
 
 
 @pytest.mark.parametrize("review_browser", [{"frozen_day": True}], indirect=True)
@@ -507,6 +617,7 @@ def test_unselected_due_article_does_not_advance_its_schedule(review_browser):
     completions = []
     page.on("request", lambda req: completions.append(req) if req.url.endswith("/complete") else None)
     page.goto(f"{env.url}/{env.due[4].slug}")
+    reach_end(page)
     expect(page.locator("[data-reading-status]")).to_have_text("This article is not in today's review selection.")
     assert len(completions) == 1
     assert schedules(env, env.due[4])[0]["generation"] == 1
@@ -547,7 +658,7 @@ def test_initially_not_due_context_records_current_eligibility_after_midnight(re
     assert schedules(env, env.long)[0]["generation"] == 1
     env.clock.now += timedelta(minutes=2)
     reach_end(page)
-    expect(page.locator("[data-reading-status]")).to_have_text("Review recorded")
+    expect(page.locator("[data-reading-status]")).to_have_text("Review complete, number of days till the next read: 2")
     assert completions == [{"token": original["token"]}]
     assert len(contexts) == 1
     schedule = schedules(env, env.long)[0]
@@ -579,6 +690,7 @@ def test_expiry_refresh_still_requires_completion_and_is_bounded(review_browser,
         page.route("**/complete", lambda route: route.fulfill(status=400,
             json={"error": {"code": "token_expired", "message": "Expired token"}}))
     page.evaluate("Object.defineProperty(document, 'visibilityState', {configurable: true, get: () => 'visible'}); document.dispatchEvent(new Event('visibilitychange'));")
+    reach_end(page)
     if repeated_expiry:
         expect(page.locator("[data-reading-status]")).to_contain_text("could not")
         expect(page.locator("[data-reading-retry]")).to_be_enabled()
