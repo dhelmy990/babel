@@ -1,4 +1,5 @@
 import {requestJSON, sessionReady} from "./site.js";
+import {createReadingReveal} from "./reading-reveal.js";
 
 /** Start before eager images finish; restored pages always get a fresh lifecycle. */
 function lifecycle(load, clear) {
@@ -56,6 +57,8 @@ export function mountReadingCompletion({articleId, marker}) {
   const controls = marker.querySelector("[data-reading-controls]");
   const status = controls.querySelector("[data-reading-status]");
   const retry = controls.querySelector("[data-reading-retry]");
+  const heading = controls.querySelector("[data-reading-heading]");
+  const prompt = controls.querySelector("[data-reading-prompt]");
   let generation = 0;
   let controller = null;
   let context = null;
@@ -64,6 +67,7 @@ export function mountReadingCompletion({articleId, marker}) {
   let acknowledged = false;
   let blocked = false;
   let layoutReady = false;
+  const reveal = createReadingReveal({marker, onComplete: reached});
 
   function clear() {
     generation += 1;
@@ -75,6 +79,10 @@ export function mountReadingCompletion({articleId, marker}) {
     context = null;
     busy = acknowledged = blocked = layoutReady = false;
     status.textContent = "";
+    heading.textContent = "Ready for your next read?";
+    prompt.hidden = false;
+    marker.classList.remove("has-error");
+    reveal.reset();
     retry.hidden = controls.hidden = true;
     retry.disabled = false;
   }
@@ -86,6 +94,8 @@ export function mountReadingCompletion({articleId, marker}) {
       return;
     }
     blocked = true;
+    marker.classList.add("has-error");
+    heading.textContent = "Let's try that again.";
     status.textContent = `Reading completion could not be recorded. ${error.message}`;
     retry.hidden = false;
   }
@@ -104,12 +114,13 @@ export function mountReadingCompletion({articleId, marker}) {
   }
 
   async function record(allowExpiryRefresh = true) {
-    if (busy || acknowledged || !context || !layoutReady || !endIsVisible(marker)) return;
+    if (busy || acknowledged || !context || !layoutReady || !reveal.ready() || !endIsVisible(marker)) return;
     const current = generation;
     const signal = controller.signal;
     busy = true;
     retry.disabled = true;
     blocked = false;
+    marker.classList.remove("has-error");
     retry.hidden = true;
     status.textContent = "Recording reading…";
     let retryFreshContext = false;
@@ -119,7 +130,17 @@ export function mountReadingCompletion({articleId, marker}) {
       });
       if (current !== generation) return;
       acknowledged = true;
-      status.textContent = messages[result.status] || "No review was recorded.";
+      if (["first_read", "reviewed", "already_processed"].includes(result.status)) {
+        heading.textContent = "Until next time.";
+        prompt.hidden = true;
+        status.textContent = result.next_due_date
+          ? `Review complete, number of days till the next read: ${result.days_until_due ?? result.interval_days}`
+          : "Review complete. No further read is scheduled.";
+        reveal.confirm();
+      } else {
+        heading.textContent = result.status === "not_selected" ? "Not in today's review list." : "You're up to date.";
+        status.textContent = messages[result.status] || "No review was recorded.";
+      }
       stopObserving();
       window.dispatchEvent(new Event("review-updated"));
     } catch (error) {
@@ -161,6 +182,7 @@ export function mountReadingCompletion({articleId, marker}) {
       if (current !== generation) return;
       layoutReady = true;
       status.textContent = "";
+      reveal.enable();
       observer = new IntersectionObserver(reached);
       observer.observe(marker);
       document.addEventListener("visibilitychange", reached);

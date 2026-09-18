@@ -57,16 +57,21 @@ uv pip compile --generate-hashes --output-file requirements-dev.txt requirements
 
 The verified publisher can switch to Admin mode, open **New article** from the
 galaxy or timeline, and write directly in the visual article editor. The pill
-toolbar formats headings, emphasis, lists, quotes, code, and links. Switch to
-**Markdown** to edit the source. Paste PNG, JPEG, or WebP images into the text,
-drop them at the cursor, or choose **+ Image**; images appear immediately and
+toolbar formats headings, emphasis, lists, quotes, code, and links. Select
+H1, H2, or H3 with the heading buttons. While typing in the visual body,
+**Ctrl +** grows a paragraph through H3 → H2 → H1; **Ctrl −** shrinks it back.
+Switch to **Markdown** to edit or paste the source. Paste PNG, JPEG, or WebP images into the text,
+or drop them at the cursor; images appear immediately and
 upload when the article is saved (10 MB per image, up to 20 images per article).
-Use **Preview** to see the exact server rendering before publishing.
+Use **Preview** to see the exact server rendering before publishing. Preview,
+Save/Publish, and status stay in the bottom action bar while you scroll.
+Tables have bordered cells and scroll horizontally inside previews and articles.
+On the reading page, **On this page** lists body sections in a sticky left outline,
+highlights the current section, and jumps to headings. On small screens, open the
+compact outline above the article. The editor and preview do not show this outline.
 
 Existing articles open with their current text and images at **Edit article**.
-UTF-8 Markdown file import and image uploads with logical paths remain available;
-after importing, edit the text directly above. A replacement image wins at the
-same logical path. Save explicitly to publish edits; failed saves retain the
+Save explicitly to publish edits; failed saves retain the
 draft and images in the open tab, and leaving with unsaved changes shows a warning.
 Titles can change without changing the stable slug or original publication date.
 The owner can archive an article from its page, which returns to the timeline
@@ -75,6 +80,20 @@ and removes the article from public reading and the galaxy.
 The application serves uploaded images from private storage and does not need a
 live Google account or OAuth configuration to run tests. Browser tests create
 ordinary Django test sessions and use disposable test media.
+
+## Reading and study calendar
+
+Signed-in readers complete a review by continuing to scroll beyond the article's
+end. A wide double chevron leads into a rising panel; only the full pull records
+the reading. You can also focus the chevron button and press Enter. Confirmation
+glows in the article's Babel colour and shows the days until the next scheduled
+read. Reduced-motion preferences suppress movement and glow animation. Failed
+requests show a Retry button and do not claim a completed review.
+
+**Study calendar** shows your scheduled article due dates by month, with a list
+for each selected day and a separate overdue list. It uses your stored scheduling
+timezone and does not create or advance review days. **Review today** still
+selects up to three articles; calendar due dates are not a promise of selection.
 
 ## Owner review digest
 

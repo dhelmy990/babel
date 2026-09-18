@@ -1,0 +1,25 @@
+.has-article-outline { display: grid; grid-template-columns: 180px minmax(0, 1fr); column-gap: 32px; }
+.has-article-outline .notes-toolbar { grid-column: 2; width: 100%; }
+.has-article-outline .annotation-surface { grid-column: 2; grid-row: 2; width: 100%; min-width: 0; }
+.article-outline { grid-column: 1; grid-row: 2; position: sticky; top: 24px; align-self: start; max-height: calc(100dvh - 48px); overflow-y: auto; font-size: 12px; line-height: 1.5; }
+.article-outline[hidden], .article-outline nav[hidden] { display: none; }
+.outline-label { color: #8b9790; text-transform: uppercase; letter-spacing: 1.5px; font-size: 10px; margin: 0 0 14px; }
+.article-outline ol { list-style: none; padding: 0; margin: 0; }
+.article-outline li[data-level="2"] { padding-left: 12px; }
+.article-outline li[data-level="3"] { padding-left: 24px; }
+.article-outline a { display: block; padding: 7px 9px; border-left: 2px solid transparent; color: #929d97; overflow-wrap: anywhere; }
+.article-outline a:hover { color: #e0e9e3; }
+.article-outline a[aria-current] { border-left-color: #aac8b7; color: #d3e5da; background: #18211c; }
+.article-outline a:focus-visible, [data-outline-toggle]:focus-visible { outline: 2px solid #aac8b7; outline-offset: -2px; }
+[data-outline-toggle] { display: none; }
+.article-body :is(h1, h2, h3) { scroll-margin-top: 32px; }
+.compact-outline { display: block; }
+.compact-outline .article-outline { z-index: 8; top: 0; max-width: 690px; margin: 0 auto 24px; padding: 10px 0; background: #090909; border-bottom: 1px solid #303a34; }
+.compact-outline .outline-label { display: none; }
+.compact-outline [data-outline-toggle] { display: flex; justify-content: space-between; width: 100%; padding: 7px 0; border: 0; background: none; color: #c0ccc5; font: inherit; cursor: pointer; }
+.compact-outline .article-outline nav { max-height: 45dvh; overflow-y: auto; padding-top: 8px; }
+.compact-outline .article-body :is(h1, h2, h3) { scroll-margin-top: 80px; }
+.has-article-outline.notes-open .annotation-surface, .has-article-outline.notes-open .notes-toolbar { width: auto; }
+@media (min-width: 851px) {
+  .has-article-outline.notes-open .article-outline { max-width: calc(100% - 340px); margin-left: 0; margin-right: 340px; }
+}

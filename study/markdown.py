@@ -1,6 +1,7 @@
 """The one Markdown parser used by previews and durable publications."""
 from dataclasses import dataclass
 from html import escape
+from html.parser import HTMLParser
 from io import BytesIO
 import re
 import warnings
@@ -186,7 +187,35 @@ def render_article(prepared: PreparedArticle, image_urls: dict[str, str]) -> str
     return parser.renderer.render(list(prepared.tokens), parser.options, {})
 
 
-def prepare_article(markdown: str, images: dict[str, bytes]) -> PreparedArticle:
+def _heading_text(token) -> str:
+    return "".join(child.content for child in token.children or [] if child.type in {"text", "code_inline", "image"}).strip()
+
+
+class _H1Counter(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.count = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "h1":
+            self.count += 1
+
+
+def suppressed_title(markdown: str, rendered_html: str) -> str | None:
+    """Retain legacy title suppression across repeated metadata-only renames."""
+    tokens, _ = _split_sources(markdown_parser().parse(markdown))
+    if len(tokens) >= 3 and tokens[0].type == "heading_open" and tokens[0].tag == "h1":
+        # Image URLs and escaped alt text differ between parsed source and
+        # durable HTML. Compare heading counts, not their rendered contents.
+        rendered = _H1Counter()
+        rendered.feed(rendered_html)
+        source_count = sum(token.type == "heading_open" and token.tag == "h1" for token in tokens)
+        if rendered.count < source_count:
+            return _heading_text(tokens[1])
+    return None
+
+
+def prepare_article(markdown: str, images: dict[str, bytes], *, titles: tuple[str, ...] | None = None) -> PreparedArticle:
     if not isinstance(markdown, str):
         raise ValueError("Invalid Markdown")
     try:
@@ -215,9 +244,11 @@ def prepare_article(markdown: str, images: dict[str, bytes]) -> PreparedArticle:
                 child.attrSet("src", name)
             elif child.type == "link_open":
                 _validate_url(child.attrGet("href") or "")
-    # Do not duplicate a leading title that the page already renders.
+    # Legacy direct callers omit title context. Publishing explicitly supplies
+    # it so an unrelated first H1 remains a real article section.
     if len(tokens) >= 3 and tokens[0].type == "heading_open" and tokens[0].tag == "h1":
-        tokens = tokens[3:]
+        if titles is None or _heading_text(tokens[1]) in titles:
+            tokens = tokens[3:]
     prepared = PreparedArticle(
         html="", excerpt=_excerpt(tokens), sources=sources, images=normal_images,
         media_types=media_types, tokens=tuple(tokens),

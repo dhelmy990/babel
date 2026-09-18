@@ -6,6 +6,38 @@ from django.test import Client
 
 
 @pytest.mark.django_db
+def test_preview_and_save_retain_distinct_body_h1_and_suppress_legacy_title_on_rename(publisher, client):
+    from study.services.content import publish_article, update_article
+
+    client.force_login(publisher)
+    for first_heading in ("Opening section", "Original title"):
+        article = publish_article(
+            publisher, title="Original title" if first_heading == "Original title" else "Structured notes",
+            color="#1a5276", markdown=f"# {first_heading}\n\nBody.", images={}, submission_id=uuid4(),
+        )
+        expected = "<h1>Opening section</h1>" if first_heading == "Opening section" else "<p>Body.</p>"
+        assert expected in article.rendered_html
+        preview = client.post("/api/articles/preview", {
+            "article_id": str(article.pk), "title": "Renamed notes", "color": article.color, "markdown": article.markdown,
+        })
+        assert preview.status_code == 200
+        assert expected in preview.json()["html"]
+        assert "<h1>Original title</h1>" not in preview.json()["html"]
+        revised = update_article(
+            publisher, article.pk, expected_revision=article.revision, title="Renamed notes", color=article.color,
+            markdown=article.markdown, images={},
+        )
+        assert expected in revised.rendered_html
+        assert "<h1>Original title</h1>" not in revised.rendered_html
+        revised_again = update_article(
+            publisher, article.pk, expected_revision=revised.revision, title="Renamed once more", color=article.color,
+            markdown=article.markdown, images={},
+        )
+        assert expected in revised_again.rendered_html
+        assert "<h1>Original title</h1>" not in revised_again.rendered_html
+
+
+@pytest.mark.django_db
 def test_article_write_api_requires_authentication_csrf_and_publisher(publisher):
     client = Client(enforce_csrf_checks=True)
     payload = {"title": "HTTP", "color": "#1a5276", "markdown": "# HTTP", "submission_id": str(uuid4())}

@@ -96,9 +96,8 @@ def test_return_to_sidebar_and_recover_after_real_article_shortening(notes_brows
     owner_context.add_cookies([env.cookies["owner"]])
     owner = owner_context.new_page()
     owner.goto(f"{env.url}/publish/{env.article.pk}")
-    owner.get_by_label("Markdown file", exact=True).set_input_files({
-        "name": "short.md", "mimeType": "text/markdown", "buffer": b"# Private reading\n\nShortened author body.",
-    })
+    owner.get_by_role("button", name="Markdown", exact=True).click()
+    owner.get_by_label("Markdown source", exact=True).fill("# Private reading\n\nShortened author body.")
     owner.get_by_role("button", name="Save", exact=True).click()
     owner.wait_for_url("**/private-reading")
     page.reload()

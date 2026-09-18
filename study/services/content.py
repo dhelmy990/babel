@@ -10,7 +10,7 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 from django.utils.text import slugify
 
-from study.markdown import PreparedArticle, normalize_image_mapping, normalize_image_name, prepare_article, referenced_image_names, render_article
+from study.markdown import PreparedArticle, normalize_image_mapping, normalize_image_name, prepare_article, referenced_image_names, render_article, suppressed_title
 from study.models import ArchiveAccess, Article, Asset, GraphState
 from study.services.identity import is_publisher, require_publisher
 from study.storage import path_for, remove_asset, write_asset
@@ -42,6 +42,13 @@ def validate_article_metadata(title: str, color: str, markdown: str) -> tuple[st
     if not isinstance(color, str) or not COLOR_RE.fullmatch(color):
         raise ValueError("Color must be a #RRGGBB value")
     return title, color.lower()
+
+
+def rendering_titles(title: str, article: Article | None = None) -> tuple[str, ...]:
+    if article is None:
+        return (title,)
+    legacy = suppressed_title(article.markdown, article.rendered_html)
+    return (title, article.title, legacy) if legacy else (title, article.title)
 
 
 def _submission_digest(title: str, color: str, markdown: str, images: dict[str, bytes]) -> str:
@@ -95,7 +102,7 @@ def publish_article(user, *, title, color, markdown, images, submission_id) -> A
             raise ValueError("Invalid submission id") from exc
     title, color = validate_article_metadata(title, color, markdown)
     uploads = normalize_image_mapping(images)
-    prepared = prepare_article(markdown, uploads)
+    prepared = prepare_article(markdown, uploads, titles=rendering_titles(title))
     digest = _submission_digest(title, color, markdown, uploads)
     written: list[str] = []
     try:
@@ -150,7 +157,7 @@ def update_article(user, article_id, *, expected_revision, title, color, markdow
                     combined[name] = path_for(asset.storage_key).read_bytes()
                 except OSError as exc:
                     raise ValueError("Stored asset is unavailable") from exc
-            prepared = prepare_article(markdown, combined)
+            prepared = prepare_article(markdown, combined, titles=rendering_titles(title, article))
             replacements = set(uploads)
             created = _new_assets(article, prepared, replacements, written)
             resolved = {**existing, **created}

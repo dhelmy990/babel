@@ -1,6 +1,30 @@
 import pytest
 
 
+def test_title_context_preserves_a_distinct_first_body_heading():
+    from study.markdown import prepare_article
+
+    prepared = prepare_article("# First section\n\nBody.", {}, titles=("Article title",))
+    assert "<h1>First section</h1>" in prepared.html
+
+
+def test_sources_heading_does_not_look_like_a_suppressed_body_title():
+    from study.markdown import prepare_article, suppressed_title
+
+    markdown = "# Opening\n\nBody.\n\n## Sources\n\n> # Quoted title\n\n[Reference](https://example.com)"
+    prepared = prepare_article(markdown, {}, titles=("Article title",))
+    assert suppressed_title(markdown, prepared.html) is None
+
+
+@pytest.mark.parametrize("title", ["Article title", "Previous title"])
+def test_title_context_suppresses_only_matching_legacy_titles(title):
+    from study.markdown import prepare_article
+
+    prepared = prepare_article(f"# {title}\n\n# First section\n\nBody.", {}, titles=("Article title", "Previous title"))
+    assert f"<h1>{title}</h1>" not in prepared.html
+    assert "<h1>First section</h1>" in prepared.html
+
+
 def test_image_alt_text_uses_parsed_text_instead_of_markdown_escapes():
     from io import BytesIO
     from PIL import Image

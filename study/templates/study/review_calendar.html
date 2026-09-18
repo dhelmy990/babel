@@ -1,0 +1,22 @@
+{% extends "study/base.html" %}
+{% load static %}
+{% block title %}Study calendar — dhelmy.stream{% endblock %}
+{% block extra_head %}<link rel="stylesheet" href="{% static 'study/review-calendar.css' %}">{% endblock %}
+{% block content %}
+<main class="study-calendar" data-study-calendar>
+  <header><p class="eyebrow">A little every day</p><h1>Study calendar</h1><p>Your next reads, at a glance.</p></header>
+  <p class="calendar-explanation">These are your scheduled due dates. <a href="/#reviews">Review today</a> selects up to three articles; unfinished reads remain overdue.</p>
+  <p data-calendar-status role="status" aria-live="polite">Loading your schedule…</p>
+  <button type="button" data-calendar-retry hidden>Retry calendar</button>
+  <div data-calendar-content hidden>
+    <div class="calendar-heading"><h2 data-calendar-month></h2><div class="calendar-controls"><button type="button" data-calendar-previous aria-label="Previous month">←</button><button type="button" data-calendar-today>This month</button><button type="button" data-calendar-next aria-label="Next month">→</button></div></div>
+    <p class="calendar-timezone" data-calendar-timezone></p>
+    <div class="calendar-weekdays" aria-hidden="true"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span></div>
+    <div class="calendar-days" data-calendar-days role="group" aria-label="Choose a study date"></div>
+    <section class="calendar-agenda" aria-labelledby="calendar-selected-title"><h2 id="calendar-selected-title" data-calendar-selected-title></h2><p data-calendar-empty>No reads scheduled for this date.</p><ul data-calendar-items></ul></section>
+    <section class="calendar-overdue" aria-labelledby="calendar-overdue-title"><h2 id="calendar-overdue-title">Overdue <span data-calendar-overdue-count></span></h2><p data-calendar-overdue-empty>You're all caught up.</p><ul data-calendar-overdue></ul></section>
+  </div>
+  <noscript><p>Enable JavaScript to see your private study schedule.</p></noscript>
+</main>
+<script type="module" src="{% static 'study/review-calendar.js' %}"></script>
+{% endblock %}
