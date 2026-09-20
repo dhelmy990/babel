@@ -1,0 +1,12 @@
+{% extends "study/base.html" %}
+{% load socialaccount %}
+
+{% block title %}Sign in — dhelmy.stream{% endblock %}
+
+{% block content %}
+<main class="account-page">
+  <h1>Sign in</h1>
+  <p>Use Google to save private notes and review progress.</p>
+  <a class="galaxy-button" href="{% provider_login_url 'google' %}">Continue with Google <span aria-hidden="true">↗</span></a>
+</main>
+{% endblock %}

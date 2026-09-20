@@ -1,0 +1,9 @@
+[Unit]
+Description=Prepare and deliver the owner study review digest
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/dhelmy-stream
+ExecStart=/usr/bin/env docker compose --env-file .env.production -f compose.prod.yaml exec -T web python manage.py send_review_digest

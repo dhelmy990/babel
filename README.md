@@ -12,6 +12,15 @@ creator profiles. Profiles exist after migration even when they have no Babels.
 There is no end-user authentication in this local release. The backend alone
 uses a private-dataset read token for dashboard seeding.
 
+## Personal website
+
+This repository also contains [dhelmy.stream](https://dhelmy.stream), a Django study log
+with a Babel galaxy, Markdown and LaTeX publishing, and private study tools.
+See [website setup and usage](docs/website.md) and the [deployment runbook](docs/deployment.md).
+Use `npm run start:website` for the website; `npm start` and `just start` continue to launch Electron.
+The website uses `compose.website.yaml`, `Dockerfile.website`, and `pytest.website.ini`.
+Production website releases continue from `personal_website_deploy`.
+
 ## Prerequisites
 
 - Linux with a C++20 compiler

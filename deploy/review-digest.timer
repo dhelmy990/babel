@@ -1,0 +1,10 @@
+[Unit]
+Description=Check study digest eligibility every five minutes
+
+[Timer]
+OnCalendar=*:0/5
+Persistent=true
+Unit=review-digest.service
+
+[Install]
+WantedBy=timers.target

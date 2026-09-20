@@ -1,0 +1,7 @@
+{% autoescape off %}Your study reviews for {{ review_date }} ({{ timezone }}).
+{% for article in articles %}
+{{ forloop.counter }}. {{ article.title }}
+{{ article.url }}
+{% endfor %}
+Open an article to finish its review.
+{% endautoescape %}
