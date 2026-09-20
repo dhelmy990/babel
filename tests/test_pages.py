@@ -13,10 +13,12 @@ def test_home_is_public_and_contains_the_approved_shell(client):
     content = response.content.decode()
     assert "Diego Helmy's study notes" in content
     assert "dhelmy.stream" in content
+    assert "<title>Diego Helmy</title>" in content
+    assert "<h1>dhelmy</h1>" in content
+    assert 'rel="icon" type="image/svg+xml" href="/static/study/favicon.svg"' in content
     assert 'href="/galaxy"' in content
     assert (
-        "A compilation of my various learnings about C++, finance, and model "
-        "serving and model development."
+        "I'm Diego Helmy, an NTU TAISP scholar interested in low latency trading systems."
     ) in content
     assert 'href="https://github.com/dhelmy990"' in content
     assert 'href="https://www.linkedin.com/in/dhelmy990/"' in content
