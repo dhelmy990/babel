@@ -487,3 +487,14 @@ svg {
   .site-nav { height: auto; min-height: 86px; flex-wrap: wrap; padding: 18px 23px; gap: 12px 16px; font-size: 12px; }
   .account-controls { margin-left: auto; gap: 12px; }
 }
+
+/* Math keeps its own typography; wide display equations scroll within the page. */
+[data-type="block-math"] { display: block; margin: 24px 0; max-width: 100%; overflow-x: auto; overflow-y: hidden; text-align: center; padding: 8px 0; }
+[data-type="block-math"] .katex-display { margin: 0; }
+.katex { overflow-wrap: normal; text-indent: 0; }
+.article-editor .tiptap-mathematics-render--editable { cursor: pointer; }
+.article-editor .tiptap-mathematics-render.ProseMirror-selectednode { outline: 2px solid #a3c6b2; }
+.editor-equation { padding: 12px 20px; font-size: 12px; border-bottom: 1px solid #303b34; }
+.editor-equation textarea { width: 100%; font: 14px/1.6 ui-monospace, monospace; }
+.editor-equation button { border: 1px solid #455149; border-radius: 99px; padding: 6px 12px; background: #202624; color: #e1ebe6; cursor: pointer; }
+.markdown-import { font-size: 12px; color: #aeb7b4; }

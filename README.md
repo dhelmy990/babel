@@ -66,6 +66,34 @@ upload when the article is saved (10 MB per image, up to 20 images per article).
 Use **Preview** to see the exact server rendering before publishing. Preview,
 Save/Publish, and status stay in the bottom action bar while you scroll.
 Tables have bordered cells and scroll horizontally inside previews and articles.
+Use **Import Markdown** to load a UTF-8 `.md` file (up to 2 MB); replacing a
+nonempty body asks for confirmation. Import preserves the title and other metadata.
+
+LaTeX math renders in Write mode, Preview, and published articles. Use `$...$`
+or `\(...\)` inline, and `$$...$$` or `\[...\]` at the start of a line for a
+centered equation block. Paste math into Write mode, type `$x^2$` or `$$x^2$$`,
+or use **∑ Insert equation**. Click an equation (or select it and press Enter)
+to edit its LaTeX. Wide blocks scroll horizontally on small screens. Invalid
+formulas remain visible for correction. Code spans and fenced code stay literal.
+Existing articles containing math need to be opened and saved to update their rendering.
+
+For AI-generated Markdown, request: “Return a UTF-8 Markdown document. Use
+`$...$` for inline math and `$$` on separate lines around display equations.
+Use KaTeX-supported LaTeX, with `aligned` inside a display block for derivations.
+Do not wrap equations or the whole document in code fences. Escape literal
+dollar signs as `\$`. Use ordinary Markdown headings, lists, and tables.” For example:
+
+```markdown
+The energy relationship is $E = mc^2$.
+
+$$
+\begin{aligned}
+2x + 3 &= 11 \\
+x &= 4
+\end{aligned}
+$$
+```
+
 On the reading page, **On this page** lists body sections in a sticky left outline,
 highlights the current section, and jumps to headings. On small screens, open the
 compact outline above the article. The editor and preview do not show this outline.

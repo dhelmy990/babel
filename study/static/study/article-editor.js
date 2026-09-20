@@ -1,4 +1,5 @@
-import {Editor, StarterKit, Image, TableKit, Markdown, TaskList, TaskItem, Link, Paragraph, marked} from "../vendor/article-editor.js";
+import {Editor, StarterKit, Image, TableKit, Markdown, TaskList, TaskItem, Link, Paragraph, marked, BlockMath, InlineMath} from "../vendor/article-editor.js";
+import {mathOptions} from './math.js';
 
 // Match the server's html=False: angle-bracket text and comments are prose.
 marked.use({tokenizer: {html() {}, tag() {}}});
@@ -15,6 +16,9 @@ export function createArticleEditor(root, state, {onChange, onMessage}) {
   const toolbar = root.querySelector(".editor-toolbar");
   const linkPanel = root.querySelector(".editor-link");
   const linkInput = root.querySelector("[data-link-url]");
+  const equationPanel = root.querySelector('.editor-equation');
+  const equationSource = root.querySelector('[data-equation-source]');
+  let equationTarget = null;
   const pendingImages = new Map();
   const objectURLs = new Set();
   let markdown = state.markdown || "";
@@ -77,17 +81,89 @@ export function createArticleEditor(root, state, {onChange, onMessage}) {
     },
   });
 
+  function editEquation(node, pos) {
+    if (busy) return;
+    equationTarget = node ? {type: node.type.name, pos} : {type: 'blockMath', range: {from: editor.state.selection.from, to: editor.state.selection.to}};
+    equationSource.value = node?.attrs.latex || '';
+    equationPanel.querySelector('[data-equation-status]').textContent = '';
+    linkPanel.hidden = true;
+    equationPanel.hidden = false;
+    equationSource.focus();
+  }
+
+  const ArticleBlockMath = BlockMath.extend({
+    addInputRules() {
+      const rules = this.parent();
+      rules[0].find = /^\$\$(?!\$)(.+?)\$\$$/;
+      return rules;
+    },
+    markdownTokenizer: {
+      name: 'blockMath', level: 'block',
+      start: src => src.search(/^ {0,3}(?:\$\$|\\\[)/m),
+      tokenize(src) {
+        const match = src.match(/^ {0,3}(?:\$\$((?:\\[\s\S]|(?!\$\$)[^\\])+?)\$\$|\\\[((?:(?!\\\])[\s\S])+?)\\\])[ \t]*(?=\n|$)/);
+        if (match) return {type: 'blockMath', raw: match[0], latex: (match[1] ?? match[2]).trim()};
+      },
+    },
+  }).configure({katexOptions: {...mathOptions, displayMode: true}, onClick: editEquation});
+
+  const ArticleInlineMath = InlineMath.extend({
+    // Brackets remain unambiguous next to digits and other inline equations.
+    renderMarkdown: node => `\\(${node.attrs.latex}\\)`,
+    addInputRules() {
+      const rules = this.parent();
+      rules[0].find = /(?<![\\$\d])(\$(?![\s$])((?:\\.|[^\\$\n])+?\S|[^\s$])\$)$/;
+      return rules;
+    },
+    markdownTokenizer: {
+      name: 'inlineMath', level: 'inline',
+      start: src => src.search(/\$|\\\(/),
+      tokenize(src, tokens) {
+        const bracket = src.match(/^\\\(([\s\S]+?)\\\)/);
+        if (bracket) return {type: 'inlineMath', raw: bracket[0], latex: bracket[1].trim()};
+        // Match the server's dollar rules: escaped dollars and prices stay prose.
+        if (/\d$/.test(tokens.at(-1)?.raw || '')) return;
+        const match = src.match(/^\$(?![\s$])((?:\\[\s\S]|[^\\$])+?)\$(?!\d)/);
+        if (match && !/\s$/.test(match[1])) return {type: 'inlineMath', raw: match[0], latex: match[1].trim()};
+      },
+    },
+  }).configure({katexOptions: mathOptions, onClick: editEquation});
+
+  const containsMath = nodes => nodes.some(node => ['blockMath', 'inlineMath'].includes(node.type) || containsMath(node.content || []));
+
+  function serializeMarkdown() {
+    // Tiptap 3.31 escapes Markdown punctuation except $. Protect literal text
+    // during serialization so a later reload cannot turn prose into equations.
+    const dollar = `DOLLAR${crypto.randomUUID()}DOLLAR`;
+    function protect(node) {
+      if (node.type === 'codeBlock' || node.marks?.some(mark => mark.type === 'code')) return;
+      if (node.text) node.text = node.text.replaceAll('$', dollar);
+      node.content?.forEach(protect);
+    }
+    const document = editor.getJSON();
+    protect(document);
+    return editor.markdown.serialize(document).replaceAll(dollar, '\\$');
+  }
+
   const editor = new Editor({
     element: visual,
     extensions: [
       StarterKit.configure({underline: false, link: false, paragraph: false}),
       ArticleParagraph, ArticleImage, ArticleLink, TableKit, TaskList, TaskItem.configure({nested: true}), Markdown,
+      ArticleBlockMath, ArticleInlineMath,
     ],
     content: markdown,
     contentType: "markdown",
     editorProps: {
       attributes: {role: "textbox", "aria-label": "Article body", "aria-multiline": "true", "data-placeholder": "Start writing…"},
       handleKeyDown(_view, event) {
+        if (!busy && event.key === 'Enter') {
+          const {node, from} = editor.state.selection;
+          if (node && ['blockMath', 'inlineMath'].includes(node.type.name)) {
+            editEquation(node, from);
+            return true;
+          }
+        }
         if (busy || !event.ctrlKey || event.altKey || event.metaKey || !["+", "=", "-", "_"].includes(event.key)) return false;
         const grow = event.key === "+" || event.key === "=";
         const current = editor.isActive("heading") ? editor.getAttributes("heading").level : 4;
@@ -98,9 +174,15 @@ export function createArticleEditor(root, state, {onChange, onMessage}) {
         return true;
       },
       handlePaste(_view, event) {
+        if (busy) return true;
         const files = [...(event.clipboardData?.files || [])];
-        if (!files.length) return false;
-        insertImages(files);
+        if (files.length) { insertImages(files); return true; }
+        if (editor.isActive('codeBlock') || editor.isActive('code')) return false;
+        const text = event.clipboardData?.getData('text/plain');
+        if (!text || !/\$|\\[([]/.test(text)) return false;
+        const document = editor.markdown.parse(text);
+        if (!containsMath(document.content || [])) return false;
+        editor.commands.insertContent(document.content);
         return true;
       },
       handleDrop(view, event, _slice, moved) {
@@ -113,7 +195,9 @@ export function createArticleEditor(root, state, {onChange, onMessage}) {
       },
     },
     onUpdate() {
-      markdown = editor.getMarkdown();
+      equationPanel.hidden = true;
+      equationTarget = null;
+      markdown = serializeMarkdown();
       onChange();
     },
     onSelectionUpdate: updateToolbar,
@@ -186,6 +270,8 @@ export function createArticleEditor(root, state, {onChange, onMessage}) {
   function switchMode(next) {
     if (busy || next === mode) return;
     linkPanel.hidden = true;
+    equationPanel.hidden = true;
+    equationTarget = null;
     if (next === "write") setMarkdown(source.value);
     else source.value = markdown;
     mode = next;
@@ -217,6 +303,7 @@ export function createArticleEditor(root, state, {onChange, onMessage}) {
     codeBlock: () => focusedChain().toggleCodeBlock().run(),
     undo: () => focusedChain().undo().run(),
     redo: () => focusedChain().redo().run(),
+    equation: () => editEquation(),
     link: () => {
       linkPanel.hidden = false;
       linkInput.value = editor.getAttributes("link").href || "";
@@ -242,8 +329,30 @@ export function createArticleEditor(root, state, {onChange, onMessage}) {
     if (event.key === "Escape") { event.preventDefault(); linkPanel.hidden = true; editor.view.focus(); }
   });
 
+  root.querySelector('[data-apply-equation]').addEventListener('click', () => {
+    const latex = equationSource.value.trim();
+    if (!latex || !equationTarget || busy) {
+      equationPanel.querySelector('[data-equation-status]').textContent = 'Enter a LaTeX equation.';
+      return;
+    }
+    const {type, pos, range} = equationTarget;
+    if (pos !== undefined) {
+      const command = type === 'blockMath' ? 'updateBlockMath' : 'updateInlineMath';
+      focusedChain()[command]({latex, pos}).run();
+    } else {
+      focusedChain().insertContentAt(range, {type, attrs: {latex}}).run();
+    }
+    equationPanel.hidden = true;
+  });
+  function cancelEquation() { equationPanel.hidden = true; equationTarget = null; editor.view.focus(); }
+  root.querySelector('[data-cancel-equation]').addEventListener('click', cancelEquation);
+  equationSource.addEventListener('keydown', event => {
+    if (event.key === 'Escape') { event.preventDefault(); cancelEquation(); }
+  });
+
   return {
     getMarkdown: () => markdown,
+    setMarkdown,
     appendImages(data) {
       for (const [path, {file}] of pendingImages) {
         // Removed images remain available to Undo, but are not uploaded.
@@ -256,6 +365,7 @@ export function createArticleEditor(root, state, {onChange, onMessage}) {
       busy = value;
       editor.setEditable(!value, false);
       source.disabled = value;
+      equationSource.disabled = value;
       root.querySelectorAll("button").forEach(button => { button.disabled = value || (mode !== "write" && Boolean(button.dataset.editorCommand)); });
       updateToolbar();
     },
