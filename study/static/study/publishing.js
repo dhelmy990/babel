@@ -1,4 +1,5 @@
 import {requestJSON, RequestError} from "./site.js";
+import {renderMath} from "./math.js";
 
 const form = document.querySelector("#publishing-form");
 const stateNode = document.querySelector("#publishing-state");
@@ -59,6 +60,7 @@ if (form && stateNode) {
 
   function renderPreview(result) {
     previewBody.innerHTML = result.html;
+    renderMath(previewBody);
     previewHeader.hidden = false;
     previewHeader.querySelector(".article-dot").style.background = result.color;
     previewHeader.querySelector(".article-date").textContent = "Preview";
@@ -91,6 +93,29 @@ if (form && stateNode) {
   }
 
   previewButton.addEventListener("click", preview);
+  const markdownFile = form.querySelector('[data-markdown-file]');
+  markdownFile.addEventListener('change', async () => {
+    const file = markdownFile.files[0];
+    if (!file || inFlight) return;
+    if (file.size > 2 * 1024 * 1024) { say('Markdown must be 2 MB or smaller.'); markdownFile.value = ''; return; }
+    if (editor.getMarkdown().trim() && !window.confirm('Replace the article body with this Markdown file?')) {
+      markdownFile.value = '';
+      return;
+    }
+    setBusy(true);
+    try {
+      const markdown = new TextDecoder('utf-8', {fatal: true}).decode(await file.arrayBuffer());
+      if (!markdown.trim()) throw new Error('The file is empty.');
+      editor.setMarkdown(markdown);
+      dirty = true;
+      say('Markdown imported. Preview it before saving.');
+    } catch (error) {
+      say(`Could not import Markdown: ${error.message}`);
+    } finally {
+      markdownFile.value = '';
+      setBusy(false);
+    }
+  });
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (inFlight) return;

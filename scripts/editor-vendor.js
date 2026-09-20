@@ -7,3 +7,4 @@ export { TaskList, TaskItem } from '@tiptap/extension-list';
 export { Link } from '@tiptap/extension-link';
 export { Paragraph } from '@tiptap/extension-paragraph';
 export { marked } from 'marked';
+export { BlockMath, InlineMath } from '@tiptap/extension-mathematics';

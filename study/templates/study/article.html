@@ -1,7 +1,7 @@
 {% extends "study/base.html" %}
 {% load static %}
 {% block title %}{{ article.title }} — dhelmy.stream{% endblock %}
-{% block extra_head %}<link rel="stylesheet" href="{% static 'study/reading-reveal.css' %}"><link rel="stylesheet" href="{% static 'study/article-outline.css' %}">{% endblock %}
+{% block extra_head %}<link rel="stylesheet" href="{% static 'study/reading-reveal.css' %}"><link rel="stylesheet" href="{% static 'study/article-outline.css' %}"><link rel="stylesheet" href="{% static 'vendor/katex.min.css' %}">{% endblock %}
 {% block content %}
 <main class="article-shell" data-notes-article="{{ article.pk }}">
   <div class="notes-toolbar"><button class="note-toggle" type="button" data-notes-toggle aria-expanded="false" aria-controls="notes-sidebar" hidden>My notes</button><a data-notes-signin href="{% url 'account_login' %}">Sign in with Google to keep private notes</a></div>
@@ -44,5 +44,6 @@
 </main>
 <script type="module" src="{% static 'study/notes.js' %}"></script>
 <script type="module" src="{% static 'study/article-outline.js' %}"></script>
+<script type="module" src="{% static 'study/math.js' %}"></script>
 {% if can_publish and identity_mode == 'admin' and not article.archived_at %}<script type="module" src="{% static 'study/publishing.js' %}"></script>{% endif %}
 {% endblock %}

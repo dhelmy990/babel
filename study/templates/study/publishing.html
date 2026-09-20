@@ -1,6 +1,7 @@
 {% extends "study/base.html" %}
 {% load static %}
 {% block title %}{% if article %}Edit {{ article.title }}{% else %}Publish an article{% endif %} — dhelmy.stream{% endblock %}
+{% block extra_head %}<link rel="stylesheet" href="{% static 'vendor/katex.min.css' %}">{% endblock %}
 {% block content %}
 <main class="publishing-shell">
   <header><p class="eyebrow">Your writing desk</p><h1>{% if article %}Edit article{% else %}New article{% endif %}</h1><p>A little space to think, write, and refine.</p></header>
@@ -8,6 +9,7 @@
     <fieldset data-publishing-fields disabled>
     <label>Title<input name="title" type="text" maxlength="200" required value="{{ article.title|default:'' }}" autocomplete="off"></label>
     <label>Babel color<input name="color" type="color" value="{{ article.color|default:'#1a5276' }}"></label>
+    <label class="markdown-import">Import Markdown<input type="file" data-markdown-file accept=".md,.markdown,text/markdown,text/plain"></label>
     <section class="article-editor" aria-label="Article editor">
       <div class="editor-heading"><span>Article</span><div class="editor-modes" role="group" aria-label="Editing mode"><button type="button" data-editor-mode="write" aria-pressed="true">Write</button><button type="button" data-editor-mode="markdown" aria-pressed="false">Markdown</button></div></div>
       <div class="editor-toolbar" role="toolbar" aria-label="Text formatting">
@@ -22,14 +24,16 @@
         <button type="button" data-editor-command="blockquote" aria-label="Quote" title="Quote">“ ”</button>
         <button type="button" data-editor-command="codeBlock" aria-label="Code block" title="Code block">&lt;/&gt;</button>
         <button type="button" data-editor-command="link" aria-label="Link" title="Link">↗</button>
+        <button type="button" data-editor-command="equation" aria-label="Insert equation" title="Insert centered equation">∑</button>
         <span class="toolbar-divider" aria-hidden="true"></span>
         <button type="button" data-editor-command="undo" aria-label="Undo" title="Undo">↶</button>
         <button type="button" data-editor-command="redo" aria-label="Redo" title="Redo">↷</button>
       </div>
       <div class="editor-link" hidden><label>Link URL<input type="url" data-link-url placeholder="https://…"></label><button type="button" data-apply-link>Apply</button><button type="button" data-remove-link>Remove</button><button type="button" data-cancel-link>Cancel</button></div>
+      <div class="editor-equation" hidden><label>LaTeX equation<textarea data-equation-source rows="3" spellcheck="false"></textarea></label><button type="button" data-apply-equation>Apply equation</button><button type="button" data-cancel-equation>Cancel</button><p data-equation-status role="status"></p></div>
       <div data-visual-editor></div>
       <textarea data-markdown-source aria-label="Markdown source" spellcheck="false" hidden></textarea>
-      <p class="editor-hint">Paste images right into your text. Ctrl + grows headings; Ctrl − shrinks them.</p>
+      <p class="editor-hint">Paste images or LaTeX into your text. Use $$…$$ for centered equations; select an equation to edit it. Ctrl + grows headings; Ctrl − shrinks them.</p>
     </section>
     <div class="publishing-action-bar" aria-label="Publishing actions">
     <div class="publish-actions"><button type="button" data-preview>Preview</button><button type="submit">{% if article %}Save{% else %}Publish{% endif %}</button></div>

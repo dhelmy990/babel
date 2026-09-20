@@ -9,6 +9,8 @@ from pathlib import PurePosixPath
 from urllib.parse import unquote, urlparse
 
 from markdown_it import MarkdownIt
+from mdit_py_plugins.dollarmath import dollarmath_plugin
+from mdit_py_plugins.texmath.index import make_inline_func, rules as texmath_rules
 from PIL import Image, ImageFile
 
 
@@ -17,6 +19,42 @@ MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_IMAGES = 20
 MAX_IMAGE_PIXELS = 30_000_000
 ImageFile.LOAD_TRUNCATED_IMAGES = False
+
+# Require a complete closing line. The stock bracket block rule consumes and
+# discards trailing prose, and the dollar rule cannot interrupt a paragraph.
+_DISPLAY_MATH = re.compile(r"(?:\$\$((?:\\[\s\S]|(?!\$\$)[^\\])+?)\$\$|\\\[((?:(?!\\\])[\s\S])+?)\\\])[ \t]*(?=\n|$)")
+
+
+def _math_block(state, start_line, end_line, silent):
+    if state.sCount[start_line] - state.blkIndent >= 4:
+        return False
+    begin = state.bMarks[start_line] + state.tShift[start_line]
+    opening = state.src[begin:begin + 2]
+    if opening not in ("$$", r"\["):
+        return False
+    closing = "$$" if opening == "$$" else r"\]"
+    match = None
+    for line in range(start_line, end_line):
+        # A list item must not consume a following, dedented paragraph.
+        if line > start_line and not state.isEmpty(line) and state.sCount[line] < state.blkIndent:
+            break
+        if not state.src[state.bMarks[line]:state.eMarks[line]].rstrip().endswith(closing):
+            continue
+        # MarkdownIt removes quote/list prefixes through its logical line offsets.
+        source = state.getLines(start_line, line + 1, state.blkIndent, False).lstrip(" \t")
+        match = _DISPLAY_MATH.match(source)
+        if match:
+            break
+    if match is None:
+        return False
+    if silent:
+        return True
+    state.line = start_line + match[0].count("\n") + 1
+    token = state.push("math_block", "math", 0)
+    token.block = True
+    token.content = match[1] if match[1] is not None else match[2]
+    token.map = [start_line, state.line]
+    return True
 
 
 @dataclass(frozen=True)
@@ -30,7 +68,20 @@ class PreparedArticle:
 
 
 def markdown_parser():
-    return MarkdownIt("js-default", {"html": False}).enable("table")
+    parser = MarkdownIt("js-default", {"html": False}).enable("table")
+    parser.use(dollarmath_plugin, allow_labels=False, allow_space=False, allow_digits=False)
+    parser.inline.ruler.before("escape", "math_inline_brackets", make_inline_func(texmath_rules["brackets"]["inline"][0]))
+    parser.block.ruler.at("math_block", _math_block, {"alt": ["paragraph", "reference", "blockquote", "list"]})
+
+    def render_math(tokens, idx, options, env):
+        block = tokens[idx].block
+        tag, kind = ("div", "block") if block else ("span", "inline")
+        # Store escaped source; the same KaTeX renderer typesets preview and reading.
+        return f'<{tag} data-type="{kind}-math">{escape(tokens[idx].content.strip())}</{tag}>' + ("\n" if block else "")
+
+    for name in ("math_inline", "math_block"):
+        parser.renderer.rules[name] = render_math
+    return parser
 
 
 def normalize_image_name(name: str) -> str:

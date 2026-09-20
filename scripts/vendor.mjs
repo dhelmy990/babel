@@ -1,5 +1,5 @@
 // Reproduce browser assets from npm ci's exact package-lock.json versions.
-import { copyFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { copyFile, cp, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { build } from 'esbuild';
@@ -12,7 +12,15 @@ await build({
   outfile: path.join(destination, 'article-editor.js'),
   bundle: true, minify: true, format: 'esm', target: ['es2022'],
   legalComments: 'inline',
+  // Both the editor and article renderer load this one local KaTeX module.
+  plugins: [{name: 'shared-katex', setup(builder) {
+    builder.onResolve({filter: /^katex$/}, () => ({path: './katex.mjs', external: true}));
+  }}],
 });
+for (const file of ['katex.mjs', 'katex.min.css']) {
+  await copyFile(path.join(root, 'node_modules/katex/dist', file), path.join(destination, file));
+}
+await cp(path.join(root, 'node_modules/katex/dist/fonts'), path.join(destination, 'fonts'), {recursive: true});
 const packages = [
   ['three', '0.160.0', 'build/three.min.js', 'three.min.js'],
   ['d3', '7.9.0', 'dist/d3.min.js', 'd3.min.js'],
